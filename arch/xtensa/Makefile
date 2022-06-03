@@ -24,6 +24,38 @@ ifneq ($(VARIANT),)
   endif
 endif
 
+# The Espressif "xtensa-esp-elf" toolchain is built for several core
+# configurations at once and uses none of them unless XTENSA_GNU_CONFIG points
+# at one. Without it the assembler rejects core-specific registers and opcodes
+# (ATOMCTL, RER/WER, the PIE and HWLP TIE, ...), and the Kconfig compiler
+# probes describe the wrong core: the fallback configuration is big endian, so
+# CONFIG_CPU_BIG_ENDIAN ends up disagreeing with the code the compiler emits.
+# Toolchains built for a single core configuration have it compiled in and need
+# nothing here.
+#
+# *config targets run before CONFIG_XTENSA_VARIANT_NAME is known, so the
+# variant then has to come from the configuration that is about to be used.
+
+xtensa-variant := $(VARIANT)
+
+ifeq ($(xtensa-variant),)
+  xtensa-config := $(firstword $(wildcard \
+	$(addprefix $(srctree)/arch/xtensa/configs/,$(filter %_defconfig,$(MAKECMDGOALS))) \
+	$(objtree)/.config))
+  ifneq ($(xtensa-config),)
+    xtensa-variant := $(shell sed -n \
+	's/^CONFIG_XTENSA_VARIANT_CUSTOM_NAME="\(.*\)"$$/\1/p' $(xtensa-config))
+  endif
+endif
+
+ifneq ($(xtensa-variant),)
+  xtensa-libgcc-dir := $(dir $(shell $(CC) -print-libgcc-file-name))
+  xtensa-gnu-config := $(firstword $(wildcard $(xtensa-libgcc-dir)../../../xtensa_$(xtensa-variant).so))
+  ifneq ($(xtensa-gnu-config),)
+    export XTENSA_GNU_CONFIG := $(xtensa-gnu-config)
+  endif
+endif
+
 # Platform configuration
 
 platform-$(CONFIG_XTENSA_PLATFORM_XT2000)	:= xt2000
