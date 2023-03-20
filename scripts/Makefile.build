@@ -49,6 +49,11 @@ KBUILD_RUSTFLAGS += $(subdir-rustflags-y)
 # only build the compiled-in version
 obj-m := $(filter-out $(obj-y),$(obj-m))
 
+ifeq ($(CONFIG_INTEGRATE_MODULES),y)
+# Add obj-m targets except for modules.order to obj-y
+obj-y += $(filter-out %/modules.order, $(obj-m))
+endif
+
 # Libraries are always collected in one lib file.
 # Filter out objects already built-in
 lib-y := $(filter-out $(obj-y), $(sort $(lib-y) $(lib-m)))
@@ -85,13 +90,23 @@ multi-search = $(sort $(foreach m, $1, $(if $(call suffix-search, $m, $2, $3 -),
 real-search = $(foreach m, $1, $(if $(call suffix-search, $m, $2, $3 -), $(call suffix-search, $m, $2, $3), $m))
 
 # If $(foo-objs), $(foo-y), $(foo-m), or $(foo-) exists, foo.o is a composite object
+ifeq ($(CONFIG_INTEGRATE_MODULES),y)
+# Include -m composite objects
+multi-obj-y := $(call multi-search, $(obj-y), .o, -objs -y -m)
+else
 multi-obj-y := $(call multi-search, $(obj-y), .o, -objs -y)
+endif
 multi-obj-m := $(call multi-search, $(obj-m), .o, -objs -y -m)
 multi-obj-ym := $(multi-obj-y) $(multi-obj-m)
 
 # Replace multi-part objects by their individual parts,
 # including built-in.a from subdirectories
+ifeq ($(CONFIG_INTEGRATE_MODULES),y)
+# Include -m real objects
+real-obj-y := $(call real-search, $(obj-y), .o, -objs -y -m)
+else
 real-obj-y := $(call real-search, $(obj-y), .o, -objs -y)
+endif
 real-obj-m := $(call real-search, $(obj-m), .o, -objs -y -m)
 
 always-y += $(always-m)

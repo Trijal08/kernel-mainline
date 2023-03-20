@@ -42,12 +42,20 @@
 
 /* These are for everybody (although not all archs will actually
    discard it in modules) */
+#if defined(MODULE) && defined(CONFIG_INTEGRATE_MODULES)
+#define __init		__cold
+#define __initdata
+#define __initconst
+#define __exitdata	__always_unused
+#define __exit_call	__always_unused
+#else /* !MODULE || !CONFIG_INTEGRATE_MODULES */
 #define __init		__section(".init.text") __cold __latent_entropy	\
 						__no_kstack_erase
 #define __initdata	__section(".init.data")
 #define __initconst	__section(".init.rodata")
 #define __exitdata	__section(".exit.data")
 #define __exit_call	__used __section(".exitcall.exit")
+#endif /* MODULE && CONFIG_INTEGRATE_MODULES */
 
 /*
  * modpost check for section mismatches during the kernel build.
@@ -169,7 +177,7 @@ extern void (*late_time_init)(void);
 
 extern bool initcall_debug;
 
-#ifdef MODULE
+#if defined(MODULE) && !defined(CONFIG_INTEGRATE_MODULES)
 extern struct module __this_module;
 #define THIS_MODULE (&__this_module)
 #else
@@ -178,7 +186,7 @@ extern struct module __this_module;
 
 #endif
   
-#ifndef MODULE
+#if !defined(MODULE) || defined(CONFIG_INTEGRATE_MODULES)
 
 #ifndef __ASSEMBLY__
 
@@ -261,7 +269,7 @@ extern struct module __this_module;
 	static_assert(__same_type(initcall_t, &fn));
 #else
 #define ____define_initcall(fn, __unused, __name, __sec)	\
-	static initcall_t __name __used 			\
+	static const initcall_t __name __used 			\
 		__attribute__((__section__(__sec))) = fn;
 #endif
 
@@ -276,6 +284,7 @@ extern struct module __this_module;
 
 #define __define_initcall(fn, id) ___define_initcall(fn, id, .initcall##id)
 
+#ifndef MODULE
 /*
  * Early initcalls run before initializing SMP.
  *
@@ -309,10 +318,12 @@ extern struct module __this_module;
 #define late_initcall_sync(fn)		__define_initcall(fn, 7s)
 
 #define __initcall(fn) device_initcall(fn)
+#endif /* !MODULE */
 
 #define __exitcall(fn)						\
 	static exitcall_t __exitcall_##fn __exit_call = fn
 
+#ifndef MODULE
 #define console_initcall(fn)	___define_initcall(fn, con, .con_initcall)
 
 struct obs_kernel_param {
@@ -375,10 +386,12 @@ extern const struct obs_kernel_param __setup_start[], __setup_end[];
 /* Relies on boot_command_line being set */
 void __init parse_early_param(void);
 void __init parse_early_options(char *cmdline);
+#endif /* !MODULE */
 #endif /* __ASSEMBLY__ */
 
-#else /* MODULE */
+#endif /* !MODULE || CONFIG_INTEGRATE_MODULES */
 
+#ifdef MODULE
 #define __setup_param(str, unique_id, fn)	/* nothing */
 #define __setup(str, func) 			/* nothing */
 #endif

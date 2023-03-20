@@ -818,6 +818,10 @@ endif
 export CC_FLAGS_DIALECT
 KBUILD_CFLAGS += $(CC_FLAGS_DIALECT)
 
+ifdef CONFIG_INTEGRATE_MODULES
+KBUILD_CFLAGS_MODULE += -include $(srctree)/include/linux/integrated_module.h
+endif
+
 ifeq ($(KBUILD_EXTMOD),)
 # Objects we will link into vmlinux / subdirs we need to visit
 core-y		:=
