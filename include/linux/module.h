@@ -77,7 +77,7 @@ extern const struct module_attribute module_uevent;
 extern int init_module(void);
 extern void cleanup_module(void);
 
-#ifndef MODULE
+#if !defined(MODULE) || defined(CONFIG_INTEGRATE_MODULES)
 /**
  * module_init() - driver initialization entry point
  * @x: function to be run at kernel boot time or module insertion
@@ -86,7 +86,20 @@ extern void cleanup_module(void);
  * builtin) or at module insertion time (if a module).  There can only
  * be one per module.
  */
+#ifdef MODULE
+/*
+ * Place integrated module initcall entries into the .rodata section. Integrated
+ * modules intentionally lack unique initcall names so that name collisions will
+ * produce linker errors.
+ */
+#define module_init(x) \
+	____define_initcall(x,						\
+		__initcall_stub(x, __KBUILD_MODNAME,),			\
+		__PASTE(__initcall__kmod_, __PASTE(__KBUILD_MODNAME, __)),	\
+		".rodata")
+#else
 #define module_init(x)	__initcall(x);
+#endif
 
 /**
  * module_exit() - driver exit entry point
@@ -100,8 +113,9 @@ extern void cleanup_module(void);
  */
 #define module_exit(x)	__exitcall(x);
 
-#else /* MODULE */
+#endif /* !MODULE || CONFIG_INTEGRATE_MODULES */
 
+#ifdef MODULE
 /*
  * In most cases loadable modules do not need custom
  * initcall levels. There are still some valid cases where
@@ -127,6 +141,7 @@ extern void cleanup_module(void);
 
 #define console_initcall(fn)		module_init(fn)
 
+#ifndef CONFIG_INTEGRATE_MODULES
 /* Each module must use one module_init(). */
 #define module_init(initfn)					\
 	static inline initcall_t __maybe_unused __inittest(void)		\
@@ -143,11 +158,12 @@ extern void cleanup_module(void);
 		__attribute__((alias(#exitfn)));		\
 	___ADDRESSABLE(cleanup_module, __exitdata);
 
-#endif
+#endif /* !CONFIG_INTEGRATE_MODULES */
+#endif /* MODULE */
 
 /* This means "can be init if no module support, otherwise module load
    may call it." */
-#ifdef CONFIG_MODULES
+#if defined(CONFIG_MODULES) || defined(CONFIG_INTEGRATE_MODULES)
 #define __init_or_module
 #define __initdata_or_module
 #define __initconst_or_module
@@ -238,6 +254,10 @@ struct module_kobject *lookup_or_create_module_kobject(const char *name);
 /* What your module does. */
 #define MODULE_DESCRIPTION(_description) MODULE_INFO(description, _description)
 
+#if defined(MODULE) && defined(CONFIG_INTEGRATE_MODULES)
+/* Integrated modules are loaded by name; no modalias device table needed. */
+#define MODULE_DEVICE_TABLE(type, name)
+#else
 /*
  * Format: __mod_device_table__kmod_<modname>__<type>__<name>
  * Parts of the string `__kmod_` and `__` are used as delimiters when parsing
@@ -255,6 +275,7 @@ struct module_kobject *lookup_or_create_module_kobject(const char *name);
 #define MODULE_DEVICE_TABLE(type, name)					\
 static typeof(name) __mod_device_table(type, name)			\
   __attribute__ ((used, alias(__stringify(name))))
+#endif
 
 /* Version of form [<epoch>:]<version>[-<extra-version>].
  * Or for CVS/RCS ID version, everything but the number is stripped.
