@@ -1767,7 +1767,7 @@ void evsel__config(struct evsel *evsel, const struct record_opts *opts,
 	    !opts->target.initial_delay)
 		attr->enable_on_exec = 1;
 
-	if (evsel->immediate) {
+	if (1 || evsel->immediate) {
 		attr->disabled = 0;
 		attr->enable_on_exec = 0;
 	}
