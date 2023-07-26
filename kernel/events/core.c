@@ -7428,6 +7428,33 @@ static int perf_mmap_aux(struct vm_area_struct *vma, struct perf_event *event,
 	return 0;
 }
 
+/*
+ * On noMMU the ring buffer is allocated and attached by
+ * perf_get_unmapped_area(), which runs before ->mmap() and hands the mapping
+ * the kernel address of the buffer. Nothing is left to allocate or to insert
+ * into a page table here, so only the locked memory accounting remains.
+ */
+static int perf_mmap_nommu(struct vm_area_struct *vma, struct perf_event *event,
+			   unsigned long nr_pages)
+{
+	long extra = 0, user_extra = nr_pages;
+
+	if (!event->rb)
+		return -EINVAL;
+
+	if (!perf_mmap_calc_limits(vma, &user_extra, &extra))
+		return -EPERM;
+
+	perf_mmap_account(vma, user_extra, extra);
+
+	if (refcount_read(&event->mmap_count))
+		refcount_inc(&event->mmap_count);
+	else
+		refcount_set(&event->mmap_count, 1);
+
+	return 0;
+}
+
 static int perf_mmap(struct file *file, struct vm_area_struct *vma)
 {
 	struct perf_event *event = file->private_data;
@@ -7468,7 +7495,9 @@ static int perf_mmap(struct file *file, struct vm_area_struct *vma)
 		if (event->state <= PERF_EVENT_STATE_REVOKED)
 			return -ENODEV;
 
-		if (!vma_start_pgoff(vma))
+		if (!IS_ENABLED(CONFIG_MMU))
+			ret = perf_mmap_nommu(vma, event, nr_pages);
+		else if (!vma_start_pgoff(vma))
 			ret = perf_mmap_rb(vma, event, nr_pages);
 		else
 			ret = perf_mmap_aux(vma, event, nr_pages);
@@ -7485,6 +7514,13 @@ static int perf_mmap(struct file *file, struct vm_area_struct *vma)
 		mapped = get_mapped(event, event_mapped);
 		if (mapped)
 			mapped(event, vma->vm_mm);
+
+		/*
+		 * On noMMU there is no page table to fill in: the mapping was
+		 * placed directly onto the buffer by perf_get_unmapped_area().
+		 */
+		if (!IS_ENABLED(CONFIG_MMU))
+			return 0;
 
 		/*
 		 * Try to map it into the page table. On fail undo the above,
@@ -7537,6 +7573,74 @@ static int perf_mmap(struct file *file, struct vm_area_struct *vma)
 	perf_mmap_close(vma);
 	return ret;
 }
+
+#ifndef CONFIG_MMU
+/*
+ * On noMMU the mapping has to be placed directly onto the ring buffer, so the
+ * buffer must already exist by the time ->mmap() runs. Allocate it here and
+ * hand out its address for the mapping to be built on.
+ */
+static unsigned long perf_get_unmapped_area(struct file *file,
+					    unsigned long addr, unsigned long len,
+					    unsigned long pgoff, unsigned long flags)
+{
+	unsigned long ret = -EINVAL;
+	struct perf_event *event = file->private_data;
+	unsigned long nr_pages = len / PAGE_SIZE;
+
+	pr_debug("%s: addr = 0x%lx, len = 0x%lx, pgoff = 0x%lx, flags = 0x%lx, event = %p, event->rb = %p\n",
+		 __func__, addr, len, pgoff, flags, event, event->rb);
+
+	if (!event->rb) {
+		int flags = RING_BUFFER_WRITABLE;
+		struct perf_buffer *rb = NULL;
+
+		if (pgoff != 0) {
+			ret = -EINVAL;
+			goto unlock;
+		}
+		--nr_pages;
+		rb = rb_alloc(nr_pages,
+			      event->attr.watermark ? event->attr.wakeup_watermark : 0,
+			      event->cpu, flags);
+
+		if (!rb) {
+			ret = -ENOMEM;
+			goto unlock;
+		}
+		refcount_set(&rb->mmap_count, 1);
+		rb->mmap_user = get_current_user();
+		rb->mmap_locked = 0;
+
+		ring_buffer_attach(event, rb);
+
+		perf_event_update_time(event);
+		perf_event_init_userpage(event);
+		perf_event_update_userpage(event);
+	}
+	if (event->rb) {
+		struct perf_buffer *rb = event->rb;
+
+		if (!pgoff) {
+			ret = (unsigned long)rb->user_page;
+		} else {
+			ret = rb_alloc_aux(rb, event, pgoff, nr_pages,
+					   event->attr.aux_watermark, flags);
+			if (ret < 0)
+				goto unlock;
+			ret = (unsigned long)rb->data_pages[pgoff - 1];
+		}
+	}
+unlock:
+	pr_debug("%s: ret = 0x%lx\n", __func__, ret);
+	return ret;
+}
+
+static unsigned perf_mmap_capabilities(struct file *file)
+{
+	return NOMMU_MAP_DIRECT | NOMMU_MAP_READ | NOMMU_MAP_WRITE;
+}
+#endif
 
 static int perf_fasync(int fd, struct file *filp, int on)
 {
@@ -7591,6 +7695,10 @@ static const struct file_operations perf_fops = {
 	.unlocked_ioctl		= perf_ioctl,
 	.compat_ioctl		= perf_compat_ioctl,
 	.mmap			= perf_mmap,
+#ifndef CONFIG_MMU
+	.get_unmapped_area	= perf_get_unmapped_area,
+	.mmap_capabilities	= perf_mmap_capabilities,
+#endif
 	.fasync			= perf_fasync,
 	.show_fdinfo		= perf_show_fdinfo,
 };
