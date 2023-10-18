@@ -167,6 +167,7 @@ struct file *bprm_open_interpreter(struct linux_binprm *bprm, const char *path);
 void bprm_drop_loader(struct linux_binprm *bprm);
 
 extern int suid_dumpable;
+extern unsigned long default_stack_size;
 
 /* Stack area protections */
 #define EXSTACK_DEFAULT   0	/* Whatever the arch defaults to */

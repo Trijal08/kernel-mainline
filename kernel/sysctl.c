@@ -16,6 +16,7 @@
 #include <linux/limits.h>
 #include <linux/syscalls.h>
 #include <linux/capability.h>
+#include <linux/binfmts.h>
 
 #include "../lib/kstrtox.h"
 
@@ -1439,6 +1440,15 @@ static const struct ctl_table sysctl_subsys_table[] = {
 		.maxlen		= sizeof (int),
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec,
+	},
+#endif
+#ifdef CONFIG_BINFMT_ELF_FDPIC
+	{
+		.procname	= "default_stack_size",
+		.data		= &default_stack_size,
+		.maxlen		= sizeof(unsigned long),
+		.mode		= 0644,
+		.proc_handler	= proc_doulongvec_minmax,
 	},
 #endif
 };
