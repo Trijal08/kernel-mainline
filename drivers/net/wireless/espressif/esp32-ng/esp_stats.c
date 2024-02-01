@@ -7,11 +7,11 @@
  */
 
 #include "utils.h"
+#include "esp_api.h"
 #include "esp_stats.h"
 
 #if TEST_RAW_TP
 
-#include "esp_api.h"
 #include <linux/timer.h>
 
 static struct task_struct *raw_tp_tx_thread;
