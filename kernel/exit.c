@@ -899,6 +899,10 @@ void __noreturn do_exit(long code)
 	struct kthread *kthread;
 	int group_dead;
 
+	/* Trigger probing of device drivers when, e.g., modprobe exits */
+	if (IS_ENABLED(CONFIG_INTEGRATE_MODULES))
+		integrated_module_load_end();
+
 	WARN_ON(irqs_disabled());
 	WARN_ON(tsk->plug);
 
