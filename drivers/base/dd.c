@@ -941,6 +941,10 @@ __setup("driver_async_probe=", save_async_options);
 
 static bool driver_allows_async_probing(const struct device_driver *drv)
 {
+	/* Force modules to probe deterministically when integrated */
+	if (IS_ENABLED(CONFIG_INTEGRATE_MODULES))
+		return false;
+
 	switch (drv->probe_type) {
 	case PROBE_PREFER_ASYNCHRONOUS:
 		return true;
