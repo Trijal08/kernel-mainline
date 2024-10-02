@@ -19,6 +19,7 @@
 #define CLKS_NR_TOP			(GOUT_CLKCMU_PERIS_BUS + 1)
 #define CLKS_NR_BUSMC			(CLK_GOUT_BUSMC_SPDMA_PCLK + 1)
 #define CLKS_NR_CORE			(CLK_GOUT_CORE_CMU_CORE_PCLK + 1)
+#define CLKS_NR_DPTX			(CLK_MOUT_DPTX_DPGTC_USER + 1)
 #define CLKS_NR_DPUM			(CLK_GOUT_DPUM_SYSMMU_D3_CLK + 1)
 #define CLKS_NR_FSYS0			(CLK_GOUT_FSYS0_PCIE_GEN3B_4L_CLK + 1)
 #define CLKS_NR_FSYS1			(CLK_GOUT_FSYS1_USB30_1_ACLK + 1)
@@ -1074,6 +1075,37 @@ static const struct samsung_cmu_info core_cmu_info __initconst = {
 	.clk_regs		= core_clk_regs,
 	.nr_clk_regs		= ARRAY_SIZE(core_clk_regs),
 	.clk_name		= "dout_clkcmu_core_bus",
+};
+
+/* ---- CMU_DPTX ---------------------------------------------------------- */
+
+/* Register Offset definitions for CMU_DPTX (0x18a00000) */
+#define PLL_CON0_MUX_CLKCMU_DPTX_BUS_USER	0x0600
+#define PLL_CON0_MUX_CLKCMU_DPTX_DPGTC_USER	0x0610
+
+static const unsigned long dptx_clk_regs[] __initconst = {
+	PLL_CON0_MUX_CLKCMU_DPTX_BUS_USER,
+	PLL_CON0_MUX_CLKCMU_DPTX_DPGTC_USER
+};
+
+PNAME(mout_dptx_bus_user_p) = { "oscclk", "dout_clkcmu_dptx_bus" };
+PNAME(mout_dptx_dpgtc_user_p) = { "oscclk", "dout_clkcmu_dptx_dpgtc" };
+
+
+static const struct samsung_mux_clock dptx_mux_clks[] __initconst = {
+	MUX(CLK_MOUT_DPTX_BUS_USER, "mout_dptx_bus_user",
+	    mout_dptx_bus_user_p, PLL_CON0_MUX_CLKCMU_DPTX_BUS_USER, 4, 1),
+	MUX(CLK_MOUT_DPTX_DPGTC_USER, "mout_dptx_dpgtc_user",
+	    mout_dptx_dpgtc_user_p, PLL_CON0_MUX_CLKCMU_DPTX_DPGTC_USER, 4, 1),
+};
+
+static const struct samsung_cmu_info dptx_cmu_info __initconst = {
+	.mux_clks		= dptx_mux_clks,
+	.nr_mux_clks		= ARRAY_SIZE(dptx_mux_clks),
+	.nr_clk_ids		= CLKS_NR_DPTX,
+	.clk_regs		= dptx_clk_regs,
+	.nr_clk_regs		= ARRAY_SIZE(dptx_clk_regs),
+	.clk_name		= "dout_clkcmu_dptx_bus",
 };
 
 /* ---- CMU_DPUM ---------------------------------------------------------- */
@@ -2164,6 +2196,9 @@ static const struct of_device_id exynosautov9_cmu_of_match[] = {
 	}, {
 		.compatible = "samsung,exynosautov9-cmu-core",
 		.data = &core_cmu_info,
+	}, {
+		.compatible = "samsung,exynosautov9-cmu-dptx",
+		.data = &dptx_cmu_info,
 	}, {
 		.compatible = "samsung,exynosautov9-cmu-dpum",
 		.data = &dpum_cmu_info,
