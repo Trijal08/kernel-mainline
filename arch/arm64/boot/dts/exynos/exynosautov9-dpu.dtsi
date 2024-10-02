@@ -1,0 +1,110 @@
+// SPDX-License-Identifier: GPL-2.0
+/* Baremetal linux display configure */
+
+#define DECON_SHD_OFFSET			0x2000
+#define DPUM_DMA_GF0				0x18C65000
+#define DPUM_DMA_COMMON				0x18C60000
+#define DPUM_DPP_GF0				0x18C21000
+#define DPUM_WIN0				0x18C30000
+#define DECON0_WIN_CTRL_OFFSET			0x20000
+#define DECON1_WIN_CTRL_OFFSET			0x28000
+#define DPUM_DECON0				0x18C38000
+#define DPUM_DECON0_GLOBAL			0x18C4A000
+#define DPUM_CON_CONTROL			0x18C3C000
+#define DPUM_SUB0_DQE0				0x18C40000
+#define DPUM_SUB0_DSC0				0x18C42000
+#define DPTX_LINK_TOP0				0x18A80000
+#define USBDP_PHY0				0x18AA0000
+
+//c3_0000 - c3_f000
+&soc {
+
+	/************** DECON **************/
+	/* sysMMU  DMA    DPP   DECON_WIN
+	====================================
+	   MMU_0   GF0    GF0     WIN0 <= To support HV sysmmu location
+	   MMU_0   G0     GF1     WIN1
+	   MMU_1   G1     GF2     WIN2
+	   MMU_1   GF1    GF3     WIN3 <= Reserved for telltale
+	   MMU_2   VG0    VG0     WIN4 <= To support HV sysmmu location
+	   MMU_2   G2     GF4     WIN5
+	   MMU_3   G3     GF5     WIN6
+	   MMU_3   VG1    VG1     WIN7
+	 */
+
+	/************** DECON **************/
+	dpum_decon0: decon@18c30000 {
+		compatible = "samsung,exynos910-decon";
+		reg = <0x18c30000 0xf004>,
+		      <0x18c40000 0xb038>,
+			  <0x18c50000 0xf018>;
+
+		reg-names = "main", "sub0", "sub1";
+
+		cell-index = <0>;
+
+		interrupts = <0 116 IRQ_TYPE_LEVEL_HIGH>; //fd
+
+		/* clock */
+		clock-names = "aclk";
+		clocks = <&cmu_dpum CLK_GOUT_DPUM_ACLK_DECON>;
+
+		port {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			dpum_decon0_output1: endpoint@1 {
+				reg = <1>;
+				remote-endpoint = <&dp0_sst1_input>;
+			};
+		};
+	};
+
+	/*** DisplayPort ***/
+	exynos_dp0: dp_tx@0x18a80000 {
+		compatible = "samsung,exynos910-dp";
+		reg = <DPTX_LINK_TOP0 0xA000>, <USBDP_PHY0 0xA000>;
+
+		reg-names = "link_base", "phy_base";
+
+		interrupts = <0 111 IRQ_TYPE_LEVEL_HIGH>;
+		// interrupts = <0 INTREQ__DPTX_TOP0_DPTX IRQ_TYPE_LEVEL_HIGH>;
+		//power-domains = <&pd_dptx>;
+
+		/* index(0-base) from &default_timings */
+		samsung,native-mode,idx = <1>;
+		/* set config BPC, Default 8 if not set */
+		samsung,native-mode,bpc = <8>;
+		/* samsung,native-only; */
+
+		phys = <&dp_phy 0>;
+		phy-names = "dp_phy";
+
+		clock-names = "aclk", "pclk";
+		clocks = <&cmu_dptx CLK_MOUT_DPTX_BUS_USER>, <&cmu_dptx CLK_MOUT_DPTX_DPGTC_USER>;
+
+		pinctrl-names = "default";
+		pinctrl-0 = <&dp0_hpd>;
+		samsung,hpd-gpio = <&gpa1 0 0x2>;
+		/* samsung,force-dsc-dis; */
+		/* samsung,mst-dsc-en; */
+
+		port {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			/* SST index is started at '1' */
+			dp0_sst1_input: endpoint@1 {
+				reg = <1>;
+				remote-endpoint = <&dpum_decon0_output1>;
+				samsung,native-mode,idx = <1>;
+				samsung,native-mode,bpc = <8>;
+			};
+		};
+	};
+
+	dp_phy: dp-phy {
+		compatible = "samsung,exynosautov9-dp-video-phy";
+		samsung,pmu-syscon = <&pmu_system_controller>;
+		#phy-cells = <1>;
+	};
+};
