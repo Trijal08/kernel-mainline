@@ -58,6 +58,10 @@ static const struct exynos_dp_video_phy_drvdata exynos5420_dp_video_phy = {
 	.phy_ctrl_offset	= EXYNOS5420_DPTX_PHY_CONTROL,
 };
 
+static const struct exynos_dp_video_phy_drvdata exynosautov9_dp_video_phy = {
+	.phy_ctrl_offset	= 0x073c,
+};
+
 static const struct of_device_id exynos_dp_video_phy_of_match[] = {
 	{
 		.compatible = "samsung,exynos5250-dp-video-phy",
@@ -65,8 +69,11 @@ static const struct of_device_id exynos_dp_video_phy_of_match[] = {
 	}, {
 		.compatible = "samsung,exynos5420-dp-video-phy",
 		.data = &exynos5420_dp_video_phy,
+	}, {
+		.compatible = "samsung,exynosautov9-dp-video-phy",
+		.data = &exynosautov9_dp_video_phy,
 	},
-	{ },
+	{ }
 };
 MODULE_DEVICE_TABLE(of, exynos_dp_video_phy_of_match);
 
