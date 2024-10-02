@@ -159,6 +159,15 @@ struct exynos_drm_driver_info {
  */
 static struct exynos_drm_driver_info exynos_drm_drivers[] = {
 	{
+		DRV_PTR(dpp_driver, CONFIG_DRM_EXYNOS9_DECON),
+		DRM_COMPONENT_DRIVER
+	}, {
+		DRV_PTR(dpu_dma_driver, CONFIG_DRM_EXYNOS9_DECON),
+		DRM_COMPONENT_DRIVER
+	}, {
+		DRV_PTR(decon_driver, CONFIG_DRM_EXYNOS9_DECON),
+		DRM_COMPONENT_DRIVER
+	}, {
 		DRV_PTR(fimd_driver, CONFIG_DRM_EXYNOS_FIMD),
 		DRM_COMPONENT_DRIVER
 	}, {
@@ -171,7 +180,7 @@ static struct exynos_drm_driver_info exynos_drm_drivers[] = {
 		DRV_PTR(mixer_driver, CONFIG_DRM_EXYNOS_MIXER),
 		DRM_COMPONENT_DRIVER
 	}, {
-		DRV_PTR(dp_driver, CONFIG_DRM_EXYNOS_DP),
+		DRV_PTR(dp_driver, CONFIG_DRM_EXYNOS9_DP),
 		DRM_COMPONENT_DRIVER
 	}, {
 		DRV_PTR(dsi_driver, CONFIG_DRM_EXYNOS_DSI),
