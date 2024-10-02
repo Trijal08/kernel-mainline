@@ -18,6 +18,23 @@ if DRM_EXYNOS
 
 comment "CRTCs"
 
+config DRM_EXYNOS9_DECON
+	bool "DECON on Exynos9"
+	default DRM_EXYNOS
+	select EXYNOS_IOMMU
+	help
+	  Choose this option if you want to use Exynos DECON for DRM.
+
+config DRM_EXYNOS9_DP
+	bool "DisplayPort TX on Exynos"
+	depends on DRM_EXYNOS9_DECON
+	select DRM_PANEL
+	select DRM_DISPLAY_HELPER
+	select DRM_DISPLAY_DP_HELPER
+	default DRM_EXYNOS
+	help
+	  This enables support for Exynos DisplayPort device.
+
 config DRM_EXYNOS_FIMD
 	bool "FIMD"
 	depends on !FB_S3C
