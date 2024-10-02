@@ -6,6 +6,9 @@
 exynosdrm-y := exynos_drm_drv.o exynos_drm_crtc.o exynos_drm_fb.o \
 		exynos_drm_gem.o exynos_drm_plane.o exynos_drm_dma.o
 
+exynosdrm-$(CONFIG_DRM_EXYNOS9_DECON)	+= exynos9_decon.o exynos_dpp.o exynos_dpu_dma.o
+exynosdrm-$(CONFIG_DRM_EXYNOS9_DP)	+= exynos_drm_dp.o exynos_drm_dp_link_training.o
+
 exynosdrm-$(CONFIG_DRM_FBDEV_EMULATION) += exynos_drm_fbdev.o
 exynosdrm-$(CONFIG_DRM_EXYNOS_FIMD)	+= exynos_drm_fimd.o
 exynosdrm-$(CONFIG_DRM_EXYNOS5433_DECON)	+= exynos5433_drm_decon.o
