@@ -198,6 +198,8 @@ struct drm_exynos_file_private {
 struct exynos_drm_private {
 	struct device *g2d_dev;
 	struct device *vidi_dev;
+	struct device *dma_dev;
+	struct device *dpp_dev;
 	void *mapping;
 
 	/* for atomic commit */
@@ -246,6 +248,8 @@ static inline int exynos_drm_check_fimc_device(struct device *dev)
 }
 #endif
 
+extern struct platform_driver dpp_driver;
+extern struct platform_driver dpu_dma_driver;
 extern struct platform_driver fimd_driver;
 extern struct platform_driver exynos5433_decon_driver;
 extern struct platform_driver decon_driver;
