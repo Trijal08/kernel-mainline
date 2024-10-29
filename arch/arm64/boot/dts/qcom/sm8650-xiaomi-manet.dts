@@ -19,8 +19,6 @@
 /delete-node/ &hwfence_shbuf;
 /delete-node/ &rmtfs_mem;
 
-#define ENABLE_SIMPLEFB
-
 / {
         model = "Xiaomi Redmi K70 Pro";
         compatible = "xiaomi,manet", "qcom,sm8650";
@@ -30,16 +28,7 @@
                 #size-cells = <2>;
                 ranges;
 
-                bootargs = "console=tty0 clk_ignore_unused";
-
-                simplefb: framebuffer@fc400000 {
-                        compatible = "simple-framebuffer";
-                        reg = <0x0 0xfc400000 0x0 0x2b00000>;
-                        width = <1440>;
-                        height = <3200>;
-                        stride = <(1440 * 4)>;
-                        format = "a8r8g8b8";
-                };
+                bootargs = "console=ttyGS0,115200 clk_ignore_unused";
         };
 
 	pmic-glink {
@@ -80,56 +69,11 @@
 		};
 	};
 
-
         reserved-memory {
-                chipinfo_region@81cf4000 {
-			reg = <0x0 0x81cf4000 0x0 0x1000>;
-			no-map;
-                };
-
-                mpss_dsm_region@86b00000 {
-                    reg = <0x0 0x86b00000 0x0 0x4900000>;
-                    no-map;
-                };
-
-                xbl_ramdump_region@84800000 {
-                    reg = <0x0 0x84800000 0x0 0x200000>;
-                    no-map;
-                };
-
-                mpss_dsm_region_2@8b400000 {
-                    reg = <0x0 0x8b400000 0x0 0x800000>;
-                    no-map;
-                };
-
-                mpss_region@8bc00000 {
-                    reg = <0x0 0x8bc00000 0x0 0xf400000>;
-                    no-map;
-                };
-
-                adspslpi_region@9df00000 {
-                    reg = <0x0 0x9df00000 0x0 0x4080000>;
-                    no-map;
-                };
-
-                hwfence-shmem {
-                    reg = <0x0 0xff100000 0x0 0x2dd000>;
-                    no-map;
-                };
-
-                /* Hack for simplefb */
+		/* Hack for simplefb */
                 splash_region {
                     reg = <0x0 0xfc400000 0x0 0x2b00000>;
                     no-map;
-                };
-
-                rmtfs_mem: rmtfs@ea100000 {
-                    compatible = "qcom,rmtfs-mem";
-                    reg = <0x0 0xea100000 0x0 0x400000>;
-                    no-map;
-
-                    qcom,client-id = <1>;
-                    qcom,vmid = <QCOM_SCM_VMID_MSS_MSA>;
                 };
         };
 };
@@ -577,17 +521,66 @@
 	status = "okay";
 };
 
-&dispcc {
+&mdss {
+	status = "disabled";
+};
+
+&mdss_dsi0 {
+	vdda-supply = <&vreg_l3i_1p2>;
+
+	status = "okay";
+	panel@0 {
+		compatible = "mdss,n11u-42-02-0a-dsc";
+		reg = <0>;
+		status = "disabled";
+		reset-gpios = <&tlmm 133 GPIO_ACTIVE_LOW>;
+
+		port {
+			panel_in: endpoint {
+				remote-endpoint = <&mdss_dsi0_out>;
+			};
+		};
+	};
+};
+
+&mdss_dsi0_out {
+	remote-endpoint = <&panel_in>;
+	data-lanes = <0 1 2 3>;
+};
+
+&mdss_dsi0_phy {
+	vdds-supply = <&vreg_l1i_0p88>;
+
 	status = "okay";
 };
 
-&mdss {
+&mdss_dp0 {
+	status = "okay";
+};
+
+&mdss_dp0_out {
+	data-lanes = <0 1>;
+};
+
+&crypto {
 	status = "disabled";
+};
+
+&gpi_dma1 {
+	status = "okay";
 };
 
 &pm8550b_eusb2_repeater {
 	vdd18-supply = <&vreg_l15b_1p8>;
 	vdd3-supply = <&vreg_l5b_3p1>;
+};
+
+&gpu {
+	status = "okay";
+
+	zap-shader {
+		firmware-name = "qcom/sm8650/xiaomi-manet/gen70900_zap.mbn";
+	};
 };
 
 &ufs_mem_hc {
