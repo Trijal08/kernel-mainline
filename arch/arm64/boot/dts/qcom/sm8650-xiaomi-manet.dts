@@ -522,7 +522,7 @@
 };
 
 &mdss {
-	status = "disabled";
+	status = "okay";
 };
 
 &mdss_dsi0 {
