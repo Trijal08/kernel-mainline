@@ -4,6 +4,7 @@
  * Author: Chaotian.Jing <chaotian.jing@mediatek.com>
  */
 
+#define DEBUG 1
 #include <linux/module.h>
 #include <linux/bitfield.h>
 #include <linux/bitops.h>
@@ -503,7 +504,7 @@ struct msdc_host {
 	u32 mclk;		/* mmc subsystem clock frequency */
 	u32 src_clk_freq;	/* source clock frequency */
 	unsigned char timing;
-	bool vqmmc_enabled;
+	//bool vqmmc_enabled;
 	u32 latch_ck;
 	u32 hs400_ds_delay;
 	u32 hs400_ds_dly3;
@@ -995,6 +996,9 @@ static void msdc_set_mclk(struct msdc_host *host, unsigned char timing, u32 hz)
 	u32 val;
 	bool timing_changed;
 
+	dev_dbg(host->dev, "request mclk %d timing %d\n", hz, timing);
+	dev_dbg(host->dev, "host->src_clk_freq %d\n", host->src_clk_freq);
+
 	if (!hz) {
 		dev_dbg(host->dev, "set mclk to 0\n");
 		host->mclk = 0;
@@ -1007,6 +1011,13 @@ static void msdc_set_mclk(struct msdc_host *host, unsigned char timing, u32 hz)
 		timing_changed = true;
 	else
 		timing_changed = false;
+
+	/*
+	 * Select the best clock rate for src_clk: this is done in order
+	 * to save power and/or achieve an accurate rate for DDR52/SDR104.
+	 */
+	//clk_set_rate(host->src_clk, hz);
+	//host->src_clk_freq = hz;
 
 	flags = readl(host->base + MSDC_INTEN);
 	sdr_clr_bits(host->base + MSDC_INTEN, flags);
@@ -1643,26 +1654,26 @@ static int msdc_ops_switch_volt(struct mmc_host *mmc, struct mmc_ios *ios)
 	struct msdc_host *host = mmc_priv(mmc);
 	int ret;
 
-	if (!IS_ERR(mmc->supply.vqmmc)) {
-		if (ios->signal_voltage != MMC_SIGNAL_VOLTAGE_330 &&
-		    ios->signal_voltage != MMC_SIGNAL_VOLTAGE_180) {
-			dev_err(host->dev, "Unsupported signal voltage!\n");
-			return -EINVAL;
-		}
+	//if (!IS_ERR(mmc->supply.vqmmc)) {
+	//	if (ios->signal_voltage != MMC_SIGNAL_VOLTAGE_330 &&
+	//	    ios->signal_voltage != MMC_SIGNAL_VOLTAGE_180) {
+	//		dev_err(host->dev, "Unsupported signal voltage!\n");
+	//		return -EINVAL;
+	//	}
 
-		ret = mmc_regulator_set_vqmmc(mmc, ios);
-		if (ret < 0) {
-			dev_dbg(host->dev, "Regulator set error %d (%d)\n",
-				ret, ios->signal_voltage);
-			return ret;
-		}
+	//	ret = mmc_regulator_set_vqmmc(mmc, ios);
+	//	if (ret < 0) {
+	//		dev_dbg(host->dev, "Regulator set error %d (%d)\n",
+	//			ret, ios->signal_voltage);
+	//		return ret;
+	//	}
 
-		/* Apply different pinctrl settings for different signal voltage */
-		if (ios->signal_voltage == MMC_SIGNAL_VOLTAGE_180)
-			pinctrl_select_state(host->pinctrl, host->pins_uhs);
-		else
-			pinctrl_select_state(host->pinctrl, host->pins_default);
-	}
+	//	/* Apply different pinctrl settings for different signal voltage */
+	//	if (ios->signal_voltage == MMC_SIGNAL_VOLTAGE_180)
+	//		pinctrl_select_state(host->pinctrl, host->pins_uhs);
+	//	else
+	//		pinctrl_select_state(host->pinctrl, host->pins_default);
+	//}
 	return 0;
 }
 
@@ -2123,6 +2134,9 @@ static void msdc_ops_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 
 	msdc_set_buswidth(host, ios->bus_width);
 
+	dev_err(host->dev, "ios bus width %d\n", ios->bus_width);
+	dev_err(host->dev, "ios power mode %d\n", ios->power_mode);
+
 	/* Suspend/Resume will do power off/on */
 	switch (ios->power_mode) {
 	case MMC_POWER_UP:
@@ -2137,29 +2151,31 @@ static void msdc_ops_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 		}
 		break;
 	case MMC_POWER_ON:
-		if (!IS_ERR(mmc->supply.vqmmc) && !host->vqmmc_enabled) {
-			ret = regulator_enable(mmc->supply.vqmmc);
-			if (ret)
-				dev_err(host->dev, "Failed to set vqmmc power!\n");
-			else
-				host->vqmmc_enabled = true;
-		}
+		//if (!IS_ERR(mmc->supply.vqmmc) && !host->vqmmc_enabled) {
+		//	ret = regulator_enable(mmc->supply.vqmmc);
+		//	if (ret)
+		//		dev_err(host->dev, "Failed to set vqmmc power!\n");
+		//	else
+		//		host->vqmmc_enabled = true;
+		//}
 		break;
 	case MMC_POWER_OFF:
 		if (!IS_ERR(mmc->supply.vmmc))
 			mmc_regulator_set_ocr(mmc, mmc->supply.vmmc, 0);
 
-		if (!IS_ERR(mmc->supply.vqmmc) && host->vqmmc_enabled) {
-			regulator_disable(mmc->supply.vqmmc);
-			host->vqmmc_enabled = false;
-		}
+		//if (!IS_ERR(mmc->supply.vqmmc) && host->vqmmc_enabled) {
+		//	regulator_disable(mmc->supply.vqmmc);
+		//	host->vqmmc_enabled = false;
+		//}
 		break;
 	default:
 		break;
 	}
 
-	if (host->mclk != ios->clock || host->timing != ios->timing)
+	if (host->mclk != ios->clock || host->timing != ios->timing) {
+		dev_err(host->dev, "host mclk = %d, host timing = %d, ios clock = %d, ios timing = %d\n", host->mclk, host->timing, ios->clock, ios->timing);
 		msdc_set_mclk(host, ios->timing, ios->clock);
+	}
 }
 
 static u64 test_delay_bit(u64 delay, u32 bit)
@@ -2909,6 +2925,8 @@ static int msdc_of_clock_parse(struct platform_device *pdev,
 {
 	int ret;
 
+	dev_err(&pdev->dev, "Parsing mmc clocks\n");
+
 	host->src_clk = devm_clk_get(&pdev->dev, "source");
 	if (IS_ERR(host->src_clk))
 		return PTR_ERR(host->src_clk);
@@ -2963,40 +2981,57 @@ static int msdc_drv_probe(struct platform_device *pdev)
 	struct msdc_host *host;
 	int ret;
 
+	dev_err(&pdev->dev, "Setting up mmc 1\n");
+
 	if (!pdev->dev.of_node) {
 		dev_err(&pdev->dev, "No DT found\n");
 		return -EINVAL;
 	}
+
+	dev_err(&pdev->dev, "Setting up mmc 2\n");
 
 	/* Allocate MMC host for this device */
 	mmc = devm_mmc_alloc_host(&pdev->dev, sizeof(struct msdc_host));
 	if (!mmc)
 		return -ENOMEM;
 
+	dev_err(&pdev->dev, "Setting up mmc 3\n");
+
 	host = mmc_priv(mmc);
 	ret = mmc_of_parse(mmc);
 	if (ret)
 		return ret;
 
+	dev_err(&pdev->dev, "Setting up mmc 4\n");
+
 	host->base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(host->base))
 		return PTR_ERR(host->base);
 
+	dev_err(&pdev->dev, "Setting up mmc 5\n");
+
 	host->dev_comp = of_device_get_match_data(&pdev->dev);
 
 	if (host->dev_comp->needs_top_base) {
+		dev_err(&pdev->dev, "Got top base (reg2)\n");
 		host->top_base = devm_platform_ioremap_resource(pdev, 1);
 		if (IS_ERR(host->top_base))
 			return PTR_ERR(host->top_base);
 	}
 
+	dev_err(&pdev->dev, "Setting up mmc 6\n");
+
 	ret = mmc_regulator_get_supply(mmc);
 	if (ret)
 		return ret;
 
+	dev_err(&pdev->dev, "Setting up mmc 7\n");
+
 	ret = msdc_of_clock_parse(pdev, host);
 	if (ret)
 		return ret;
+
+	dev_err(&pdev->dev, "Setting up mmc 8\n");
 
 	host->reset = devm_reset_control_get_optional_exclusive(&pdev->dev,
 								"hrst");
@@ -3160,6 +3195,8 @@ static int msdc_drv_probe(struct platform_device *pdev)
 
 	if (ret)
 		goto end;
+
+	dev_err(&pdev->dev, "Setting up mmc 100: probe success\n");
 
 	return 0;
 end:
