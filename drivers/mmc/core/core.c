@@ -7,6 +7,7 @@
  *  Copyright (C) 2005-2008 Pierre Ossman, All Rights Reserved.
  *  MMCv4 support Copyright (C) 2006 Philip Langdale, All Rights Reserved.
  */
+#define DEBUG 1
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
@@ -924,6 +925,7 @@ void mmc_set_clock(struct mmc_host *host, unsigned int hz)
 		hz = host->f_max;
 
 	host->ios.clock = hz;
+	dev_err(mmc_dev(host), "mmc_set_clock %d\n", hz);
 	mmc_set_ios(host);
 }
 
@@ -966,6 +968,7 @@ int mmc_execute_tuning(struct mmc_card *card)
  */
 void mmc_set_bus_mode(struct mmc_host *host, unsigned int mode)
 {
+	dev_err(mmc_dev(host), "mmc_set_bus_mode %d\n", mode);
 	host->ios.bus_mode = mode;
 	mmc_set_ios(host);
 }
@@ -975,6 +978,7 @@ void mmc_set_bus_mode(struct mmc_host *host, unsigned int mode)
  */
 void mmc_set_bus_width(struct mmc_host *host, unsigned int width)
 {
+	dev_err(mmc_dev(host), "mmc_set_bus_width %d\n", width);
 	host->ios.bus_width = width;
 	mmc_set_ios(host);
 }
@@ -1007,6 +1011,7 @@ void mmc_set_initial_state(struct mmc_host *host)
 	     host->ops->hs400_enhanced_strobe)
 		host->ops->hs400_enhanced_strobe(host, &host->ios);
 
+	dev_err(mmc_dev(host), "mmc_set_initial_state\n");
 	mmc_set_ios(host);
 
 	mmc_crypto_set_initial_state(host);
@@ -1194,6 +1199,7 @@ int mmc_host_set_uhs_voltage(struct mmc_host *host)
 	 */
 	clock = host->ios.clock;
 	host->ios.clock = 0;
+	dev_err(mmc_dev(host), "mmc_set_uhs_voltage clock=%d\n", clock);
 	mmc_set_ios(host);
 
 	if (mmc_set_signal_voltage(host, MMC_SIGNAL_VOLTAGE_180))
@@ -1202,6 +1208,7 @@ int mmc_host_set_uhs_voltage(struct mmc_host *host)
 	/* Keep clock gated for at least 10 ms, though spec only says 5 ms */
 	mmc_delay(10);
 	host->ios.clock = clock;
+	dev_err(mmc_dev(host), "mmc_set_uhs_voltage clock2=%d\n", clock);
 	mmc_set_ios(host);
 
 	return 0;
@@ -1278,6 +1285,7 @@ power_cycle:
 void mmc_set_timing(struct mmc_host *host, unsigned int timing)
 {
 	host->ios.timing = timing;
+	dev_err(mmc_dev(host), "mmc_set_timing %d\n", timing);
 	mmc_set_ios(host);
 }
 
@@ -1287,6 +1295,7 @@ void mmc_set_timing(struct mmc_host *host, unsigned int timing)
 void mmc_set_driver_type(struct mmc_host *host, unsigned int drv_type)
 {
 	host->ios.drv_type = drv_type;
+	dev_err(mmc_dev(host), "mmc_set_driver_type %d\n", drv_type);
 	mmc_set_ios(host);
 }
 
@@ -1336,10 +1345,15 @@ int mmc_select_drive_strength(struct mmc_card *card, unsigned int max_dtr,
  */
 void mmc_power_up(struct mmc_host *host, u32 ocr)
 {
+	dev_err(mmc_dev(host), "mmc_power_up 1\n");
 	if (host->ios.power_mode == MMC_POWER_ON)
 		return;
 
+	dev_err(mmc_dev(host), "mmc_power_up 2\n");
+
 	mmc_pwrseq_pre_power_on(host);
+
+	dev_err(mmc_dev(host), "mmc_power_up 3\n");
 
 	host->ios.vdd = fls(ocr) - 1;
 	host->ios.power_mode = MMC_POWER_UP;
@@ -1366,6 +1380,7 @@ void mmc_power_up(struct mmc_host *host, u32 ocr)
 	 * time required to reach a stable voltage.
 	 */
 	mmc_delay(host->ios.power_delay_ms);
+	dev_err(mmc_dev(host), "mmc_power_up FIN\n");
 }
 
 void mmc_power_off(struct mmc_host *host)

@@ -1,0 +1,450 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+
+/dts-v1/;
+
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/usb/pd.h>
+
+#include <dt-bindings/iio/adc/mediatek,mt6370_adc.h>
+
+#include "mt6761.dtsi" // SoC
+#include "mt6357.dtsi" // Power Management IC
+//#include "mt6370.dtsi" // Power Management IC (MT6371)
+
+/ {
+	chassis-type = "handset";
+	compatible = "duoqin,f21pro", "mediatek,mt6761";
+	model = "Duoqin F21 Pro";
+
+	chosen {
+		stdout-path = &framebuffer0;
+
+		framebuffer0: framebuffer@7faa0000 {
+			compatible = "simple-framebuffer";
+			reg = <0 0x7faa0000 0 (480 * 640 * 4)>;
+			status = "okay";
+			width = <480>;
+			height = <640>;
+			stride = <(480 * 4)>;
+			format = "a8r8g8b8";
+		};
+	};
+
+	// Allow of the below is to get LK to boot our dts (and not actually used by the Linux kernel)
+	reserved-memory {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+	};
+
+	// Not sure if really needed
+	emi@10219000 {
+		compatible = "mediatek,emi";
+		reg = <0 0x10219000 0 0x1000>, // CEN EMI
+		      <0 0x10226000 0 0x1000>, // EMI MPU
+		      <0 0x1022d000 0 0x1000>, // CHA EMI
+		      <0 0x10235000 0 0x1000>; // CHB EMI
+
+		interrupts = <GIC_SPI 88 IRQ_TYPE_LEVEL_LOW>; // MPU
+	};
+
+	// Not sure if really needed
+	dramc@1022a000 {
+		compatible = "mediatek,dramc";
+		reg = <0 0x1022a000 0 0x2000>, // DRAMC AO CHA
+		      <0 0x10232000 0 0x2000>, // DRAMC AO CHB
+		      <0 0x1022c000 0 0x1000>, // DRAMC NAO CHA
+		      <0 0x10234000 0 0x1000>, // DRAMC NAO CHB
+		      <0 0x10228000 0 0x2000>, // DDRPHY AO CHA
+		      <0 0x10230000 0 0x2000>, // DDRPHY AO CHB
+		      <0 0x1022e000 0 0x1000>, // DDRPHY NAO CHA
+		      <0 0x10236000 0 0x1000>; // DDRPHY NAO CHB
+
+	};
+
+	// needed for platform_fdt_scp() call
+	scp@10500000 {
+		compatible = "mediatek,scp";
+	};
+
+	gpio@10005000 {
+		linux,phandle = <0xdead>;
+		phandle = <0xdead>;
+	};
+
+	__symbols__ {
+		gpio = "/gpio@10005000";
+	};
+};
+
+&cpu0 {
+	//proc-supply = <&mt6357_vproc_reg>;
+	//sram-supply = <&mt6357_vsram_proc_reg>;
+};
+
+&cpu1 {
+	//proc-supply = <&mt6357_vproc_reg>;
+	//sram-supply = <&mt6357_vsram_proc_reg>;
+};
+
+&cpu2 {
+	//proc-supply = <&mt6357_vproc_reg>;
+	//sram-supply = <&mt6357_vsram_proc_reg>;
+};
+
+&cpu3 {
+	//proc-supply = <&mt6357_vproc_reg>;
+	//sram-supply = <&mt6357_vsram_proc_reg>;
+};
+
+&mt6357_pmic {
+	interrupt-controller;
+	#interrupt-cells = <2>;
+	interrupt-parent = <&pio>;
+
+	// Original is INT 144 (hwirq 127)
+	interrupts = <144 IRQ_TYPE_LEVEL_HIGH>;
+};
+
+// Without this, the system reboots before/upon reaching initramfs shell
+&mt6357_vdram_reg {
+	regulator-always-on;
+};
+
+//&mt6357_vcama_reg {
+//	regulator-boot-on;
+//};
+//
+//&mt6357_vcamd_reg {
+//	regulator-boot-on;
+//};
+//
+//&mt6357_vcamio_reg {
+//	regulator-boot-on;
+//};
+//
+
+&mt6357_vldo28_reg {
+	//regulator-boot-on;
+
+	// Required to keep display on, otherwise it is disabled after 30s
+	regulator-always-on;
+	//Needed for LCM (https://wiki.postmarketos.org/wiki/MTK_LCM_Decoder) see expdb.txt grep for vldo28
+};
+
+//
+//&mt6357_vsim1_reg {
+//	regulator-boot-on;
+//};
+//
+//&mt6357_vsim2_reg {
+//	regulator-boot-on;
+//};
+
+&keypad {
+	keypad,num-rows = <4>;
+	keypad,num-columns = <9>;
+	linux,keymap = <
+		// Row 1
+		MATRIX_KEY(0, 0, KEY_2)
+		MATRIX_KEY(0, 1, KEY_OK)
+		MATRIX_KEY(0, 3, KEY_LEFT)
+		MATRIX_KEY(0, 4, KEY_UP)
+		MATRIX_KEY(0, 5, KEY_DOWN)
+
+		// Row 2
+		MATRIX_KEY(1, 0, KEY_7)
+		MATRIX_KEY(1, 1, KEY_NUMERIC_POUND)
+		MATRIX_KEY(1, 3, KEY_4)
+		MATRIX_KEY(1, 4, KEY_SEND)
+		MATRIX_KEY(1, 5, KEY_1)
+
+		// Row 3
+		MATRIX_KEY(2, 0, KEY_BACK)
+		MATRIX_KEY(2, 1, KEY_0)
+		MATRIX_KEY(2, 3, KEY_SWITCHVIDEOMODE)
+		MATRIX_KEY(2, 4, KEY_9)
+		MATRIX_KEY(2, 5, KEY_8)
+
+		// Row 4
+		MATRIX_KEY(3, 0, KEY_5)
+		MATRIX_KEY(3, 1, KEY_RIGHT)
+		MATRIX_KEY(3, 3, KEY_6)
+		MATRIX_KEY(3, 4, KEY_3)
+	>;
+};
+
+&uart0 {
+	status = "okay";
+};
+
+&i2c0 {
+	clock-frequency = <300000>;
+        /*
+         * The gsl1680 is rated at 400KHz and it will not work reliable at
+         * 100KHz, this has been confirmed on multiple different q8 tablets.
+         */
+        //clock-frequency = <400000>;
+
+	status = "okay";
+
+	// TODO goodix,gt1151 (this is probably not right)
+	touchscreen@14 {
+		compatible = "goodix,gt1151";
+		reg = <0x14>;
+
+		interrupt-parent = <&pio>;
+		//interrupts = <0 2 0 0>;
+		interrupts = <0 2 0 0>;
+
+		irq-gpios = <&pio 0 0>;
+		reset-gpios = <&pio 174 0>;
+
+		AVDD28-supply = <&mt6357_vldo28_reg>;
+		VDDIO-supply = <&mt6357_vldo28_reg>;
+
+		touchscreen-size-x = <480>;
+		touchscreen-size-y = <640>;
+	};
+
+	// TODO mediatek,cap_touch (Silead GSL3680) (this is probably not right)
+	touchscreen@62 {
+		compatible = "silead,gsl3680",
+			     "silead,gsl3675";
+		reg = <0x62>;
+
+		interrupt-parent = <&pio>;
+		interrupts = <&pio 1 1 IRQ_TYPE_EDGE_FALLING>;
+		power-gpios = <&pio 0 GPIO_ACTIVE_HIGH>;
+		//interrupt-parent = <&gio>;
+		//interrupts = <>;
+
+		//firmware-name = "gsl3675-gt90h.fw";
+
+		touchscreen-size-x = <480>;
+		touchscreen-size-y = <640>;
+	};
+};
+
+&i2c1 {
+	//clock-frequency = <400000>;
+};
+
+&i2c2 {
+	clock-frequency = <400000>;
+
+	status = "okay";
+
+	// TODO mediatek,mtk-usb
+	// TODO mediatek,camera_main
+	// TODO mediatek,camera_main_eeprom
+	// TODO mediatek,camera_main_af
+};
+
+&i2c3 {
+	//clock-frequency = <400000>;
+
+	// TODO richtek,rt9465
+	// TODO awinic,aw87xxx_pa_59
+
+	// TODO mediatek,speaker_amp
+	// TOOD mediatek,slave_charger
+	// TODO mediatek,nfc
+	// TODO mediatek,ext_buck_lp4
+	// TODO mediatek,ext_buck_lp4x
+
+	//ext_buck_lp4@57 {
+	//	regulator-name = "ext_buck_vdd2";
+	//	regulator-min-microvolt = <300000>;
+	//	regulator-max-microvolt = <1300000>;
+	//	vsel_pin = <0>;
+	//};
+
+	//ext_buck_lp4x@50 {
+	//	regulator-name = "ext_buck_vddq";
+	//	regulator-min-microvolt = <300000>;
+	//	regulator-max-microvolt = <1300000>;
+	//	vsel_pin = <1>;
+	//};
+};
+
+&i2c4 {
+	//clock-frequency = <400000>;
+
+	// TODO mediatek,camera_sub
+	// TODO mediatek,camera_sub_eeprom
+};
+
+&i2c5 {
+	clock-frequency = <3400000>;
+	mediatek,use-push-pull;
+
+	status = "okay";
+
+	// TODO mediatek,subpmic_pmu
+	//subpmic_pmu: pmic@34 {
+	//	compatible = "mediatek,mt6370";
+	//	reg = <0x34>;
+
+	//	wakeup-source;
+	//	interrupt-controller;
+	//	#interrupt-cells = <1>;
+	//	interrupts-extended = <&pio 11 IRQ_TYPE_LEVEL_LOW>;
+	//	//interrupt-parent = <&pio>;
+	//	//interrupts = <11 IRQ_TYPE_LEVEL_LOW 11 0>;
+
+	//	mt6370_adc: adc {
+	//		compatible = "mediatek,mt6370-adc";
+	//		#io-channel-cells = <1>;
+	//	};
+
+	//	mt6370_backlight: backlight {
+	//		compatible = "mediatek,mt6370-backlight";
+
+	//		status = "disabled";
+
+	//		mediatek,bled-channel-use = /bits/ 8 <15>;
+
+	//		//max-brightness = <255>;
+	//		//default-brightness = <255>;
+	//	};
+
+	//	mt6370_charger: charger {
+	//		compatible = "mediatek,mt6370-charger";
+
+	//		interrupts = <68>, <48>, <6>;
+	//		interrupt-names = "uvp_d_evt", "attach_i", "mivr";
+
+	//		io-channels = <&mt6370_adc MT6370_CHAN_IBUS>;
+
+	//		//status = "disabled";
+
+	//		mt6370_otg_vbus: usb-otg-vbus-regulator {
+	//			regulator-name = "mt6370-usb-otg-vbus";
+	//			regulator-min-microvolt = <4350000>;
+	//			regulator-max-microvolt = <5800000>;
+	//			regulator-min-microamp = <500000>;
+	//			regulator-max-microamp = <3000000>;
+	//		};
+	//	};
+
+	//	mt6370_flashlight: flashlight {
+	//		compatible = "mediatek,mt6370-flashlight";
+	//		#address-cells = <1>;
+	//		#size-cells = <0>;
+
+	//		status = "disabled";
+	//	};
+
+	//	mt6370_indicator: indicator {
+	//		compatible = "mediatek,mt6370-indicator";
+	//		#address-cells = <1>;
+	//		#size-cells = <0>;
+
+	//		status = "disabled";
+	//	};
+
+	//	// TODO Type-C port
+	//	mt6370_typec: tcpc {
+	//		compatible = "mediatek,mt6370-tcpc";
+	//		interrupts-extended = <&pio 41 IRQ_TYPE_LEVEL_LOW>;
+
+	//		status = "okay";
+
+	//		connector {
+	//			compatible = "usb-c-connector";
+	//			label = "USB-C";
+	//			vbus-supply = <&mt6370_otg_vbus>;
+	//			data-role = "dual";
+	//			power-role = "dual";
+	//			try-power-role = "sink";
+
+	//			// TODO no roles?
+	//			source-pdos = <PDO_FIXED(5000, 1500, PDO_FIXED_DUAL_ROLE | PDO_FIXED_DATA_SWAP)>;
+	//			sink-pdos = <PDO_FIXED(5000, 2000, PDO_FIXED_DUAL_ROLE | PDO_FIXED_DATA_SWAP)>;
+	//			op-sink-microwatt = <10000000>;
+	//		};
+	//	};
+
+	//	regulators {
+	//		mt6370_dsvbst_reg: dsvbst {
+	//			regulator-name = "mt6370-dsv-vbst";
+	//			regulator-min-microvolt = <4000000>;
+	//			regulator-max-microvolt = <6200000>;
+	//		};
+
+	//		mt6370_dsvpos_reg: dsvpos {
+	//			regulator-name = "mt6370-dsv-vpos";
+	//			regulator-min-microvolt = <4000000>;
+	//			regulator-max-microvolt = <6000000>;
+	//			regulator-boot-on;
+	//		};
+
+	//		mt6370_dsvneg_reg: dsvneg {
+	//			regulator-name = "mt6370-dsv-vneg";
+	//			regulator-min-microvolt = <4000000>;
+	//			regulator-max-microvolt = <6000000>;
+	//			regulator-boot-on;
+	//		};
+
+	//		mt6370_vibldo_reg: vibldo {
+	//			regulator-name = "mt6370-vib-ldo";
+	//			regulator-min-microvolt = <1600000>;
+	//			regulator-max-microvolt = <4000000>;
+	//		};
+	//	};
+	//};
+
+	// TODO mediatek,usb_type_c
+};
+
+&i2c6 {
+	//clock-frequency = <400000>;
+
+	// TODO mediatek,camera_main_two
+	// TODO mediatek,camera_main_two_eeprom
+	// TODO mediatek,camera_main_two_af
+	// TODO mediatek,ext_buck_vgpu
+	// TODO ext_buck_vgpu
+};
+
+&spi3 {
+	// TODO ge,achc (ir blaster?)
+};
+
+&usb2 {
+	dr_mode = "otg";
+	//dr_mode = "peripheral";
+	//role-switch-default-mode = "peripheral";
+	//usb-role-switch;
+
+	//pinctrl-0: <&usb_pins>;
+	//pinctrl-names = "default";
+
+	status = "okay";
+
+	//connector {
+	//	compatible = "usb-c-connector";
+	//	label = "USB-C";
+	//	// FIXME: Not sure about this
+	//	//id-gpios = <&pio 41 GPIO_ACTIVE_HIGH>;
+	//	//vbus-supply = <&mt6370_otg_vbus>;
+	//};
+};
+
+&mmc0 {
+	status = "okay";
+
+	pinctrl-0 = <&mmc0_pins_default>;
+	pinctrl-1 = <&mmc0_pins_uhs>;
+	pinctrl-names = "default", "state_uhs";
+
+	vmmc-supply = <&mt6357_vemc_reg>;
+	//vqmmc-supply = <&mt6357_vmc_reg>;
+	assigned-clocks = <&topckgen CLK_TOP_MSDC50_0_SEL>;
+	assigned-clock-parents = <&topckgen CLK_TOP_MSDCPLL>;
+};
+
+&u2phy {
+	status = "okay";
+};

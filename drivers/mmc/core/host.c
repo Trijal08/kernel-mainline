@@ -9,6 +9,7 @@
  *  MMC host class device management
  */
 
+#define DEBUG 1
 #include <linux/device.h>
 #include <linux/err.h>
 #include <linux/idr.h>

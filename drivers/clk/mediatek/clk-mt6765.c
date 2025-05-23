@@ -4,6 +4,8 @@
  * Author: Owen Chen <owen.chen@mediatek.com>
  */
 
+#define DEBUG 1
+
 #include <linux/clk-provider.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
@@ -96,7 +98,6 @@ static const struct mtk_fixed_factor top_divs[] = {
 	FACTOR(CLK_TOP_SYSPLL_D7, "syspll_d7", "mainpll", 1, 7),
 	FACTOR(CLK_TOP_SYSPLL4_D2, "syspll4_d2", "syspll_d7", 1, 2),
 	FACTOR(CLK_TOP_SYSPLL4_D4, "syspll4_d4", "syspll_d7", 1, 4),
-	FACTOR(CLK_TOP_UNIVPLL, "univpll", "univ2pll", 1, 2),
 	FACTOR(CLK_TOP_USB20_192M, "usb20_192m_ck", "univpll", 2, 13),
 	FACTOR(CLK_TOP_USB20_192M_D4, "usb20_192m_d4", "usb20_192m_ck", 1, 4),
 	FACTOR(CLK_TOP_USB20_192M_D8, "usb20_192m_d8", "usb20_192m_ck", 1, 8),
@@ -104,6 +105,7 @@ static const struct mtk_fixed_factor top_divs[] = {
 	       "usb20_192m_d16", "usb20_192m_ck", 1, 16),
 	FACTOR(CLK_TOP_USB20_192M_D32,
 	       "usb20_192m_d32", "usb20_192m_ck", 1, 32),
+	FACTOR(CLK_TOP_UNIVPLL, "univpll", "univ2pll", 1, 2),
 	FACTOR(CLK_TOP_UNIVPLL_D2, "univpll_d2", "univpll", 1, 2),
 	FACTOR(CLK_TOP_UNIVPLL1_D2, "univpll1_d2", "univpll_d2", 1, 2),
 	FACTOR(CLK_TOP_UNIVPLL1_D4, "univpll1_d4", "univpll_d2", 1, 4),
@@ -559,6 +561,7 @@ static const struct mtk_gate ifr_clks[] = {
 	/* INFRA_TOPAXI */
 	/* INFRA PERI */
 	/* INFRA mode 0 */
+	GATE_IFR2(CLK_IFR_PMIC_AP, "ifr_pmic_ap", "axi_ck", 1),
 	GATE_IFR2(CLK_IFR_ICUSB, "ifr_icusb", "axi_ck", 8),
 	GATE_IFR2(CLK_IFR_GCE, "ifr_gce", "axi_ck", 9),
 	GATE_IFR2(CLK_IFR_THERM, "ifr_therm", "axi_ck", 10),
@@ -756,6 +759,8 @@ static int clk_mt6765_apmixed_probe(struct platform_device *pdev)
 	writel(readl(PLLON_CON0) & 0x01041041, PLLON_CON0);
 	writel(readl(PLLON_CON1) & 0x01041041, PLLON_CON1);
 
+	pr_err("registered apmixed\n");
+
 	return r;
 }
 
@@ -796,6 +801,8 @@ static int clk_mt6765_top_probe(struct platform_device *pdev)
 	/*[1,2,3,8]: no need*/
 	writel(readl(CLK_SCP_CFG_1) | 0x1, CLK_SCP_CFG_1);
 
+	pr_err("registered top\n");
+
 	return r;
 }
 
@@ -822,6 +829,8 @@ static int clk_mt6765_ifr_probe(struct platform_device *pdev)
 		pr_err("%s(): could not register clock provider: %d\n",
 		       __func__, r);
 
+	pr_err("registered ifr\n");
+
 	return r;
 }
 
@@ -846,6 +855,8 @@ static int clk_mt6765_probe(struct platform_device *pdev)
 	int (*clk_probe)(struct platform_device *d);
 	int r;
 
+	pr_err("probing clocks...\n");
+
 	clk_probe = of_device_get_match_data(&pdev->dev);
 	if (!clk_probe)
 		return -EINVAL;
@@ -855,6 +866,8 @@ static int clk_mt6765_probe(struct platform_device *pdev)
 		dev_err(&pdev->dev,
 			"could not register clock provider: %s: %d\n",
 			pdev->name, r);
+
+	pr_err("probing clocks success...\n");
 
 	return r;
 }
@@ -869,6 +882,7 @@ static struct platform_driver clk_mt6765_drv = {
 
 static int __init clk_mt6765_init(void)
 {
+	pr_err("registring\n");
 	return platform_driver_register(&clk_mt6765_drv);
 }
 
