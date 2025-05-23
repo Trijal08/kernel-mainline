@@ -6,6 +6,7 @@
  * Fixed rate clock implementation
  */
 
+#define DEBUG 1
 #include <linux/clk-provider.h>
 #include <linux/module.h>
 #include <linux/slab.h>
@@ -165,6 +166,8 @@ static struct clk_hw *_of_fixed_clk_setup(struct device_node *node)
 	u32 accuracy = 0;
 	int ret;
 
+	pr_err("Setting up new fixed clock %s\n", clk_name);
+
 	if (of_property_read_u32(node, "clock-frequency", &rate))
 		return ERR_PTR(-EIO);
 
@@ -177,11 +180,15 @@ static struct clk_hw *_of_fixed_clk_setup(struct device_node *node)
 	if (IS_ERR(hw))
 		return hw;
 
+	pr_err("pre New fixed clock %s\n", clk_name);
+
 	ret = of_clk_add_hw_provider(node, of_clk_hw_simple_get, hw);
 	if (ret) {
 		clk_hw_unregister_fixed_rate(hw);
 		return ERR_PTR(ret);
 	}
+
+	pr_err("New fixed clock %s\n", clk_name);
 
 	return hw;
 }

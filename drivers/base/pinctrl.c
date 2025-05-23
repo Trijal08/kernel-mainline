@@ -9,6 +9,8 @@
  * Author: Linus Walleij <linus.walleij@linaro.org>
  */
 
+#define DEBUG 1
+
 #include <linux/device.h>
 #include <linux/pinctrl/devinfo.h>
 #include <linux/pinctrl/consumer.h>

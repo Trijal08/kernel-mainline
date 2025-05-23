@@ -10,6 +10,7 @@
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_platform.h>
+#define DEBUG 1
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
 #include <linux/reset.h>
@@ -2284,7 +2285,7 @@ static const struct pmic_wrapper_type pwrap_mt6765 = {
 	.int_en_all = 0xffffffff,
 	.spi_w = PWRAP_MAN_CMD_SPI_WRITE,
 	.wdt_src = PWRAP_WDT_SRC_MASK_ALL,
-	.caps = PWRAP_CAP_RESET | PWRAP_CAP_DCM,
+	.caps = PWRAP_CAP_DCM,
 	.init_reg_clock = pwrap_common_init_reg_clock,
 	.init_soc_specific = NULL,
 };
@@ -2472,27 +2473,46 @@ static int pwrap_probe(struct platform_device *pdev)
 	struct device_node *np = pdev->dev.of_node;
 	const struct of_device_id *of_slave_id = NULL;
 
+	dev_dbg(&pdev->dev, "probingggg\n");
+
 	if (np->child)
 		of_slave_id = of_match_node(of_slave_match_tbl, np->child);
+
+	dev_dbg(&pdev->dev, "probingggg2\n");
 
 	if (!of_slave_id) {
 		dev_dbg(&pdev->dev, "slave pmic should be defined in dts\n");
 		return -EINVAL;
 	}
 
+	dev_dbg(&pdev->dev, "probingggg3\n");
+
 	wrp = devm_kzalloc(&pdev->dev, sizeof(*wrp), GFP_KERNEL);
 	if (!wrp)
 		return -ENOMEM;
 
+	dev_dbg(&pdev->dev, "probingggg4\n");
+
 	platform_set_drvdata(pdev, wrp);
 
+	dev_dbg(&pdev->dev, "probingggg5\n");
+
 	wrp->master = of_device_get_match_data(&pdev->dev);
+	dev_dbg(&pdev->dev, "probingggg6\n");
 	wrp->slave = of_slave_id->data;
+	dev_dbg(&pdev->dev, "probingggg7\n");
 	wrp->dev = &pdev->dev;
+	dev_dbg(&pdev->dev, "probingggg8\n");
+
+	dev_dbg(&pdev->dev, "pdev name: %s with %u resource\n", pdev->name, pdev->num_resources);
+	for (u32 i = 0; i < pdev->num_resources; i++) {
+		dev_dbg(&pdev->dev, "resource %s\n", pdev->resource->name);
+	}
 
 	wrp->base = devm_platform_ioremap_resource_byname(pdev, "pwrap");
 	if (IS_ERR(wrp->base))
 		return PTR_ERR(wrp->base);
+	dev_dbg(&pdev->dev, "probingggg9\n");
 
 	if (HAS_CAP(wrp->master->caps, PWRAP_CAP_RESET)) {
 		wrp->rstc = devm_reset_control_get(wrp->dev, "pwrap");
@@ -2503,10 +2523,13 @@ static int pwrap_probe(struct platform_device *pdev)
 		}
 	}
 
+	dev_dbg(&pdev->dev, "probingggg10\n");
+
 	if (HAS_CAP(wrp->master->caps, PWRAP_CAP_BRIDGE)) {
 		wrp->bridge_base = devm_platform_ioremap_resource_byname(pdev, "pwrap-bridge");
 		if (IS_ERR(wrp->bridge_base))
 			return PTR_ERR(wrp->bridge_base);
+		dev_dbg(&pdev->dev, "probingggg11\n");
 
 		wrp->rstc_bridge = devm_reset_control_get(wrp->dev,
 							  "pwrap-bridge");
@@ -2516,30 +2539,38 @@ static int pwrap_probe(struct platform_device *pdev)
 				"cannot get pwrap-bridge reset: %d\n", ret);
 			return ret;
 		}
+		dev_dbg(&pdev->dev, "probingggg12\n");
 	}
+
+	dev_dbg(&pdev->dev, "probingggg13\n");
 
 	ret = devm_clk_bulk_get_all_enabled(wrp->dev, &clk);
 	if (ret < 0)
 		return dev_err_probe(wrp->dev, ret,
 				     "failed to get clocks\n");
+	dev_dbg(&pdev->dev, "probingggg14\n");
 
 	/* Enable internal dynamic clock */
 	if (HAS_CAP(wrp->master->caps, PWRAP_CAP_DCM)) {
 		pwrap_writel(wrp, 1, PWRAP_DCM_EN);
 		pwrap_writel(wrp, 0, PWRAP_DCM_DBC_PRD);
 	}
+	dev_dbg(&pdev->dev, "probingggg15\n");
 
 	/*
 	 * The PMIC could already be initialized by the bootloader.
 	 * Skip initialization here in this case.
 	 */
 	if (!pwrap_readl(wrp, PWRAP_INIT_DONE2)) {
+		dev_dbg(&pdev->dev, "probingggg16\n");
 		ret = pwrap_init(wrp);
+		dev_dbg(&pdev->dev, "probingggg17\n");
 		if (ret) {
 			dev_dbg(wrp->dev, "init failed with %d\n", ret);
 			return ret;
 		}
 	}
+	dev_dbg(&pdev->dev, "probingggg18\n");
 
 	if (HAS_CAP(wrp->master->caps, PWRAP_CAP_ARB))
 		mask_done = PWRAP_STATE_INIT_DONE1;
@@ -2547,15 +2578,18 @@ static int pwrap_probe(struct platform_device *pdev)
 		mask_done = PWRAP_STATE_INIT_DONE0_MT8186;
 	else
 		mask_done = PWRAP_STATE_INIT_DONE0;
+	dev_dbg(&pdev->dev, "probingggg19\n");
 
 	if (!(pwrap_readl(wrp, PWRAP_WACS2_RDATA) & mask_done)) {
 		dev_dbg(wrp->dev, "initialization isn't finished\n");
 		return -ENODEV;
 	}
+	dev_dbg(&pdev->dev, "probingggg20\n");
 
 	/* Initialize watchdog, may not be done by the bootloader */
 	if (!HAS_CAP(wrp->master->caps, PWRAP_CAP_ARB))
 		pwrap_writel(wrp, 0xf, PWRAP_WDT_UNIT);
+	dev_dbg(&pdev->dev, "probingggg21\n");
 
 	/*
 	 * Since STAUPD was not used on mt8173 platform,
@@ -2565,10 +2599,14 @@ static int pwrap_probe(struct platform_device *pdev)
 	if (HAS_CAP(wrp->master->caps, PWRAP_CAP_WDT_SRC1))
 		pwrap_writel(wrp, wrp->master->wdt_src, PWRAP_WDT_SRC_EN_1);
 
+	dev_dbg(&pdev->dev, "probingggg22\n");
+
 	if (HAS_CAP(wrp->master->caps, PWRAP_CAP_ARB))
 		pwrap_writel(wrp, 0x3, PWRAP_TIMER_EN);
 	else
 		pwrap_writel(wrp, 0x1, PWRAP_TIMER_EN);
+
+	dev_dbg(&pdev->dev, "probingggg23\n");
 
 	pwrap_writel(wrp, wrp->master->int_en_all, PWRAP_INT_EN);
 	/*
@@ -2578,9 +2616,13 @@ static int pwrap_probe(struct platform_device *pdev)
 	if (HAS_CAP(wrp->master->caps, PWRAP_CAP_INT1_EN))
 		pwrap_writel(wrp, wrp->master->int1_en_all, PWRAP_INT1_EN);
 
+	dev_dbg(&pdev->dev, "probingggg24\n");
+
 	irq = platform_get_irq(pdev, 0);
 	if (irq < 0)
 		return irq;
+
+	dev_dbg(&pdev->dev, "probingggg25\n");
 
 	ret = devm_request_irq(wrp->dev, irq, pwrap_interrupt,
 			       IRQF_TRIGGER_HIGH,
@@ -2588,9 +2630,13 @@ static int pwrap_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
+	dev_dbg(&pdev->dev, "probingggg26\n");
+
 	wrp->regmap = devm_regmap_init(wrp->dev, NULL, wrp, wrp->slave->regops->regmap);
 	if (IS_ERR(wrp->regmap))
 		return PTR_ERR(wrp->regmap);
+
+	dev_dbg(&pdev->dev, "probingggg27\n");
 
 	ret = of_platform_populate(np, NULL, NULL, wrp->dev);
 	if (ret) {
@@ -2598,6 +2644,8 @@ static int pwrap_probe(struct platform_device *pdev)
 				np);
 		return ret;
 	}
+
+	dev_dbg(&pdev->dev, "probingggg28\n");
 
 	return 0;
 }
