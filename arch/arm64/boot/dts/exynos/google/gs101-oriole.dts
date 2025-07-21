@@ -49,3 +49,10 @@
 	format = "a8r8g8b8";
 	status = "okay";
 };
+
+&spitouch {
+	st,dchip_id = /bits/ 8 <0x36 0x48>;
+	st,max-coords = <1079 2399>;
+	st,udfps-coords = <540 1769>;
+	st,touch_offload_id = /bits/ 8 <'0' '0' 'o' '6'>;
+};
