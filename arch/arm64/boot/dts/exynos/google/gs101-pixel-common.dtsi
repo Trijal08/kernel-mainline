@@ -190,7 +190,7 @@
 				samsung,ext-control = <S2MPG10_EXTCTRL_CPUCL2_EN2>;
 			};
 
-			buck7m {
+			buck7m_reg: buck7m {
 				/* GPU */
 				regulator-name = "vdd_int_m";
 				regulator-min-microvolt = <450000>;
@@ -450,7 +450,8 @@
 				samsung,ext-control = <S2MPG11_EXTCTRL_PWREN_MIF>;
 			};
 
-			buck2s {
+			buck2s_reg: buck2s {
+				/* GPU */
 				regulator-name = "vdd_g3d";
 				regulator-min-microvolt = <450000>;
 				regulator-max-microvolt = <1300000>;
@@ -499,7 +500,8 @@
 				regulator-ramp-delay = <6250>;
 			};
 
-			buck8s {
+			buck8s_reg: buck8s {
+				/* GPU */
 				regulator-name = "vdd_g3d_l2";
 				regulator-min-microvolt = <450000>;
 				regulator-max-microvolt = <1300000>;
@@ -549,7 +551,8 @@
 				regulator-max-microvolt = <3600000>;
 			};
 
-			ldo1s {
+			ldo1s_reg: ldo1s {
+				/* GPU */
 				regulator-name = "vdd_g3d_m";
 				regulator-min-microvolt = <450000>;
 				regulator-max-microvolt = <950000>;
@@ -638,6 +641,13 @@
 		compatible = "atmel,24c08";
 		reg = <0x50>;
 	};
+};
+
+&gpu {
+     mali-supply = <&buck2s_reg>;
+     buck8s-supply = <&buck8s_reg>;
+     ldo1s-supply = <&ldo1s_reg>;
+     buck7m-supply = <&buck7m_reg>;
 };
 
 &hsi2c_12 {
