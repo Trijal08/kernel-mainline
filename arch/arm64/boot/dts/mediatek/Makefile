@@ -3,6 +3,7 @@ dtb-$(CONFIG_ARCH_MEDIATEK) += mt2712-evb.dtb
 dtb-$(CONFIG_ARCH_MEDIATEK) += mt6755-evb.dtb
 dtb-$(CONFIG_ARCH_MEDIATEK) += mt6761-duoqin-f21-pro.dtb
 dtb-$(CONFIG_ARCH_MEDIATEK) += mt6761-infinix-x6512.dtb
+dtb-$(CONFIG_ARCH_MEDIATEK) += mt6761-infinix-x6512-minimal-dtbo.dtb
 dtb-$(CONFIG_ARCH_MEDIATEK) += mt6779-evb.dtb
 dtb-$(CONFIG_ARCH_MEDIATEK) += mt6795-evb.dtb
 dtb-$(CONFIG_ARCH_MEDIATEK) += mt6795-sony-xperia-m5.dtb
