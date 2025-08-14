@@ -20,7 +20,7 @@
 		// simple-framebuffer
 		stdout-path = &framebuffer0;
 		// stdout-path = "serial1:115200n8";
-		bootargs = "earlycon=tty0 console=tty0";
+		bootargs = "earlycon=tty0 console=tty0 clk_ignore_unused regulator_ignore_unused pd_ignore_unused";
 
 		// simple-framebuffer
 		framebuffer0: framebuffer@7c4c0000 {
