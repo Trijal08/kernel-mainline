@@ -477,19 +477,6 @@
 			clock-names = "spi", "wrap";
 		};
 
-		keypad: keyboard@10010000 {
-			compatible = "mediatek,mt6761-keypad",
-				     "mediatek,mt6779-keypad";
-			reg = <0 0x10010000 0 0x1000>;
-
-			interrupts = <GIC_SPI 124 IRQ_TYPE_EDGE_FALLING>;
-
-			clocks = <&clk26m>;
-			clock-names = "kpd";
-
-			// TODO
-		};
-
 		systimer: timer@10017000 {
 			compatible = "mediatek,mt6761-timer",
 				     "mediatek,mt6765-timer";
