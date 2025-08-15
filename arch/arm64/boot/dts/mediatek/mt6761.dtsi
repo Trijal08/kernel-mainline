@@ -817,26 +817,6 @@
 			status = "disabled";
 		};
 
-		usb2: usb@11200000 {
-			compatible = "mediatek,mt6761-musb",
-				     "mediatek,mtk-musb";
-			reg = <0 0x11200000 0 0x1000>;
-
-			interrupts = <GIC_SPI 17 IRQ_TYPE_LEVEL_LOW>;
-			interrupt-names = "mc";
-
-			clocks = <&infracfg CLK_IFR_ICUSB>,       // Main clock
-				 <&topckgen CLK_TOP_USB_TOP_SEL>, // System bus clock
-				 <&topckgen CLK_TOP_UNIVPLL3_D4>; // 48Mhz clock
-			clock-names = "main", "mcu", "univpll";
-
-			phys = <&u2port0 PHY_TYPE_USB2>;
-
-			dr_mode = "peripheral";
-
-			status = "disabled";
-		};
-
 		mmc0: mmc@11230000 {
 			compatible = "mediatek,mt6761-mmc",
 				     "mediatek,mt8183-mmc";
@@ -912,35 +892,6 @@
 
 			u2_phy_data: u2_phy_data@1ac {
 				reg = <0x1ac 4>;
-			};
-		};
-
-		//u2phy: t-phy@11210000 {
-		u2phy: t-phy@11cc0000 {
-			compatible = "mediatek,mt6761-tphy",
-				     "mediatek,generic-tphy-v1";
-			reg = <0 0x11cc0000 0 0x800>;
-
-			#address-cells = <2>;
-			#size-cells = <2>;
-			ranges;
-
-			status = "disabled";
-
-			//u2port0: usb-phy@11210000 {
-			u2port0: usb-phy@11cc0800 {
-				reg = <0 0x11cc0800 0 0x100>;
-
-				clocks = <&infracfg CLK_IFR_ICUSB>;
-				clock-names = "ref";
-				//clocks = <&topckgen CLK_TOP_USB20_48M_EN>,
-				//	 <&topckgen CLK_TOP_DA_USB20_48M_DIV>;
-				//clock-names = "ref", "da_ref";
-				#phy-cells = <1>;
-
-				//nvmem-cells = <&u2_phy_data>;
-				//nvmem-cell-names = "intr";
-				//nvmem-cell-masks = <0x1f>;
 			};
 		};
 
