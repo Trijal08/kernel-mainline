@@ -1,13 +1,12 @@
 // SPDX-License-Identifier: (GPL-2.0 OR MIT)
 
+#include <dt-bindings/gpio/gpio.h>
 #include <dt-bindings/interrupt-controller/arm-gic.h>
 #include <dt-bindings/interrupt-controller/irq.h>
+#include <dt-bindings/phy/phy.h>
 
 #include <dt-bindings/clock/mt6765-clk.h>
 #include <dt-bindings/pinctrl/mediatek,mt6765-pinfunc.h>
-
-#include <dt-bindings/gpio/gpio.h>
-#include <dt-bindings/phy/phy.h>
 
 // TODO verify that everything works
 
@@ -18,7 +17,11 @@
 	#size-cells = <2>;
 
 	chosen {
-		bootargs = "clk_ignore_unused regulator_ignore_unused pd_ignore_unused maxcpus=4";
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
+		bootargs = "clk_ignore_unused";
 	};
 
 
@@ -84,31 +87,14 @@
 		};
 	};
 
-	pmu {
-		compatible = "arm,armv8-pmuv3";
-
-		interrupt-parent = <&gic>;
-		interrupts = <GIC_PPI 7 IRQ_TYPE_LEVEL_LOW>;
-
-		interrupt-affinity = <&cpu0>, <&cpu1>, <&cpu2>, <&cpu3>;
-	};
-
 	// preferred name: clock-26m
-	clk26m: oscillator-26m {
+	clk26m: oscillator {
 		compatible = "fixed-clock";
 
 		#clock-cells = <0>;
 		clock-frequency = <26000000>;
+		//clock-accuracy = <100>;
 		clock-output-names = "clk26m";
-	};
-
-	// preferred name: clock-32k
-	clk32k: oscillator-32k {
-		compatible = "fixed-clock";
-
-		#clock-cells = <0>;
-		clock-frequency = <32768>;
-		clock-output-names = "clk32k";
 	};
 
 	// TODO: Is this really used?
@@ -123,17 +109,47 @@
 		clock-output-names = "clk13m";
 	};
 
+	// preferred name: clock-32k
+	clk32k: oscillator1 {
+		compatible = "fixed-clock";
+
+		#clock-cells = <0>;
+		clock-frequency = <32000>;
+		clock-output-names = "clk32k";
+	};
+
+	pmu {
+		compatible = "arm,armv8-pmuv3";
+
+		interrupt-parent = <&gic>;
+		interrupts = <GIC_PPI 7 IRQ_TYPE_LEVEL_LOW>;
+	};
+
+
 	timer {
 		compatible = "arm,armv8-timer";
+
 		interrupt-parent = <&gic>;
-		interrupts = <GIC_PPI 13
-			     (GIC_CPU_MASK_SIMPLE(8) | IRQ_TYPE_LEVEL_LOW)>,
-			     <GIC_PPI 14
-			     (GIC_CPU_MASK_SIMPLE(8) | IRQ_TYPE_LEVEL_LOW)>,
-			     <GIC_PPI 11
-			     (GIC_CPU_MASK_SIMPLE(8) | IRQ_TYPE_LEVEL_LOW)>,
-			     <GIC_PPI 10
-			     (GIC_CPU_MASK_SIMPLE(8) | IRQ_TYPE_LEVEL_LOW)>;
+		interrupts = <GIC_PPI 13 IRQ_TYPE_LEVEL_LOW>,
+			     <GIC_PPI 14 IRQ_TYPE_LEVEL_LOW>,
+			     <GIC_PPI 11 IRQ_TYPE_LEVEL_LOW>,
+			     <GIC_PPI 10 IRQ_TYPE_LEVEL_LOW>;
+
+		clock-frequency = <13000000>;
+	};
+
+	memory {
+		device_type = "memory";
+		reg = <0 0x40000000 0 0x20000000>;
+	};
+
+	reserved-memory {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+		//pstore: ramoops@47c90000 {
+		//	compatible = "ramoops";
+		//};
 	};
 
 	soc {
@@ -145,7 +161,6 @@
 
 		gic: interrupt-controller@0c000000 {
 			compatible = "arm,gic-v3";
-
 			reg = <0 0x0c000000 0 0x40000>,  // GICD (Distributor)
 			      <0 0x0c080000 0 0x200000>, // GICR (Redistributor)
 			      <0 0x0c400000 0 0x2000>,   // GICC (CPU)
@@ -158,22 +173,10 @@
 			interrupts = <GIC_PPI 9 IRQ_TYPE_LEVEL_HIGH>;
 		};
 
-		sysirq: intpol-controller@10200a80 {
-			compatible = "mediatek,mt6761-sysirq",
-				     "mediatek,mt6577-sysirq";
-
-			reg = <0 0x10200a80 0 0x50>;
-
-			interrupt-controller;
-			#interrupt-cells = <3>;
-			interrupt-parent = <&gic>;
-		};
-
 		topckgen: clock-controller@10000000 {
 			compatible = "mediatek,mt6761-topckgen",
 				     "mediatek,mt6765-topckgen",
 				     "syscon";
-
 			reg = <0 0x10000000 0 0x1000>;
 
 			#clock-cells = <1>;
@@ -187,7 +190,6 @@
 
 			interrupts = <GIC_SPI 91 IRQ_TYPE_EDGE_RISING>;
 			#clock-cells = <1>;
-			#reset-cells = <1>;
 		};
 
 		// TODO setup driver
@@ -196,18 +198,7 @@
 			reg = <0 0x10003000 0 0x1000>;
 
 			#clock-cells = <1>;
-			#reset-cells = <1>;
 		};
-
-		// TODO scpsys setup driver
-		// scpsys: syscon@10001000 {
-		// 	compatible = "mediatek,mt6761-scpsys", "syscon";
-		// 	reg = <0x00 0x10001000 0x00 0x1000 0x00 0x10006000 0x00 0x1000 0x00 0x14002000 0x00 0x1000 0x00 0x1020e000 0x00 0x1000 0x00 0x18004000 0x00 0x1000>;
-		// 	clocks = <0x0f 0x6b 0x0f 0x6d 0x10 0x15 0x10 0x16 0x10 0x13 0x10 0x14 0x11 0x00 0x11 0x01 0x10 0x19 0x10 0x18>;
-		// 	clock-names = "mm", "mfg", "mm-0", "mm-1", "mm-2", "mm-3", "cam-0", "cam-1", "cam-2", "cam-3";
-		// 	#clock-cells = <0x01>;
-		// 	phandle = <0x34>;
-		// };
 
 		pio: pin-controller@10005000 {
 			compatible = "mediatek,mt6761-pinctrl",
@@ -455,7 +446,6 @@
 		watchdog: reset-controller@10007000 {
 			compatible = "mediatek,mt6761-wdt",
 				     "mediatek,mt6589-wdt";
-
 			reg = <0 0x10007000 0 0x1000>;
 
 			interrupts = <GIC_SPI 83 IRQ_TYPE_LEVEL_LOW>;
@@ -465,7 +455,6 @@
 			compatible = "mediatek,mt6761-apmixedsys",
 				     "mediatek,mt6765-apmixedsys",
 				     "syscon";
-
 			reg = <0 0x1000c000 0 0x1000>;
 
 			#clock-cells = <1>;
@@ -488,7 +477,7 @@
 			clock-names = "spi", "wrap";
 		};
 
-		timer: timer@10017000 {
+		systimer: timer@10017000 {
 			compatible = "mediatek,mt6761-timer",
 				     "mediatek,mt6765-timer";
 			reg = <0 0x10017000 0 0x1000>;
@@ -497,17 +486,15 @@
 			clocks = <&clk13m>;
 		};
 
-		// TODO iommu setup driver
-		// iommu: iommu@10205000 {
-		// 	compatible = "mediatek,mt6761-m4u";
-		// 	reg = <0 0x10205000 0 0x1000>;
-		// 	clocks = <&infracfg CLK_INFRA_M4U>;
-		// 	clock-names = "bclk";
-		// 	interrupts = <GIC_SPI 146 IRQ_TYPE_LEVEL_LOW>;
-		// 	mediatek,larbs = <&larb0 &larb1 &larb2 &larb3>;
-		// 	power-domains = <&spm MT6795_POWER_DOMAIN_MM>;
-		// 	#iommu-cells = <1>;
-		// };
+		sysirq: intpol-controller@10200a80 {
+			compatible = "mediatek,mt6761-sysirq",
+				     "mediatek,mt6577-sysirq";
+			reg = <0 0x10200a80 0 0x50>;
+
+			interrupt-controller;
+			#interrupt-cells = <3>;
+			interrupt-parent = <&gic>;
+		};
 
 		gce: mailbox@10238000 {
 			compatible = "mediatek,mt6761-gce",
