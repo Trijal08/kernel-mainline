@@ -1,0 +1,48 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/* zumapro-komodo - minimal board using Zumapro SoC */
+
+/dts-v1/;
+
+#include "zumapro.dtsi"
+
+/ {
+	model = "Google Pixel 9 Pro XL";
+	compatible = "google,zumapro", "google,komodo";
+
+	chosen {
+		#address-cells = <2>;
+		#size-cells    = <2>;
+		ranges;
+
+		stdout-path = &framebuffer0;
+		bootargs = "earlycon=tty0 console=tty0 ignore_loglevel printk.devkmsg=on pstore.enabled=1 pstore.backend=ramoops ramoops.mem_address=0xFD3FF000 ramoops.mem_size=0x00400000 panic=-1 panic_on_oops=1 panic_on_warn=1 panic_print=0x1f clk_ignore_unused regulator_ignore_unused pd_ignore_unused";
+
+		framebuffer0: framebuffer@b1000000 {
+			compatible = "simple-framebuffer";
+			reg     = <0 0xb1000000 0 (1344 * 2992 * 4)>;
+			width   = <1344>;
+			height  = <2992>;
+			stride  = <(1344 * 4)>;
+			format  = "x8r8g8b8";
+			no-map;
+		};
+	};
+
+	reserved-memory {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
+		framebuffer@b1000000 {
+			// reg = <0 0xb1000000 0 (1344 * 2992 * 4)>;
+			reg = <0 0xb1000000 0 0x02000000>;
+			no-map;
+		};
+	};
+
+	memory@80000000 {
+		device_type = "memory";
+		reg = <0x0 0x80000000  0x0 0x80000000>,  /* 2 GiB */
+		      <0x1 0x00000000  0x3 0x80000000>; /* 14 GiB */
+	};
+};

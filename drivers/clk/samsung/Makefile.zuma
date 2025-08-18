@@ -1,0 +1,2 @@
+\
+obj-$(CONFIG_CLK_ZUMA)		+= clk-zuma.o
