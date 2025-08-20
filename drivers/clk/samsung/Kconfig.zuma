@@ -1,8 +1,0 @@
-\
-config CLK_ZUMA
-	tristate "Google Zuma CMU_TOP clock controller (minimal)"
-	depends on OF
-	select COMMON_CLK
-	help
-	  Minimal, safe CMU_TOP provider for Google Tensor G3 (Zuma).
-	  Exposes a single index (OSCCLK) to satisfy early bring-up.
