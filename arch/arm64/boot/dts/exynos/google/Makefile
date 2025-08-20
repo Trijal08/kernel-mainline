@@ -3,4 +3,9 @@
 dtb-$(CONFIG_ARCH_EXYNOS) += \
 	gs101-oriole.dtb \
 	gs101-raven.dtb \
-	gs101-bluejay.dtb
+	gs101-bluejay.dtb \
+	zumapro-tegu.dtb \
+	zumapro-tokay.dtb \
+	zumapro-caiman.dtb \
+	zumapro-comet.dtb \
+	zumapro-komodo.dtb
