@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Device Tree nodes common for all GS101-based Pixel
+ * Device Tree nodes common for all zumapro-based Pixel phones
  *
  * Copyright 2021-2023 Google LLC
  * Copyright 2023 Linaro Ltd - <peter.griffin@linaro.org>
@@ -12,8 +12,8 @@
 #include <dt-bindings/input/input.h>
 #include <dt-bindings/regulator/samsung,s2mpg10-regulator.h>
 #include <dt-bindings/usb/pd.h>
-#include "gs101-pinctrl.h"
-#include "gs101.dtsi"
+#include "zumapro-pinctrl.h"
+#include "zumapro.dtsi"
 
 / {
 	aliases {
@@ -29,8 +29,6 @@
 		framebuffer0: framebuffer-0 {
 			compatible = "simple-framebuffer";
 			memory-region = <&cont_splash_mem>;
-			vci-supply = <&s2mpg10_ldo22m>;
-			vddi-supply = <&s2mpg11_bucka>;
 			/* format properties to be added by actual board */
 
 			status = "disabled";
@@ -633,7 +631,15 @@
 	clock-frequency = <200000000>;
 };
 
-&hsi2c_8 {
+&ext_26m {
+	clock-frequency = <26000000>;
+};
+
+&ext_1m {
+	clock-frequency = <1000000>;
+};
+
+&hsi2c_10 {
 	status = "okay";
 
 	eeprom: eeprom@50 {
@@ -914,11 +920,10 @@
 	status = "okay";
 };
 
-&usi8 {
-	samsung,mode = <USI_MODE_I2C>;
-
-	status = "okay";
-};
+// &usi8 {
+// 	samsung,mode = <USI_MODE_I2C>;
+// 	status = "okay";
+// };
 
 &usi12 {
 	samsung,mode = <USI_MODE_I2C>;

@@ -1,52 +1,32 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Oriole Device Tree
+ * Pixel 9 Pro XL (komodo) Device Tree
  *
- * Copyright 2021-2023 Google LLC
- * Copyright 2023 Linaro Ltd - <peter.griffin@linaro.org>
+ * Copyright 2025 Trijal Saha - <trijalsaha2012@gmail.com>
  */
 
 /dts-v1/;
 
-#include <dt-bindings/regulator/samsung,s2mpg10-regulator.h>
-#include "gs101-pixel-common.dtsi"
+#include "zumapro-pixel-common.dtsi"
 
 / {
-	model = "Oriole";
-	compatible = "google,gs101-oriole", "google,gs101";
-};
-
-&acpm_ipc {
-	pmic-1 {
-		regulators {
-			ldo14m {
-				/* PLL */
-				regulator-name = "avdd18_tcxo";
-				regulator-min-microvolt = <1600000>;
-				regulator-max-microvolt = <1950000>;
-				regulator-always-on;
-				samsung,ext-control = <S2MPG10_EXTCTRL_TCXO_ON>;
-			};
-
-			ldo31m {
-				regulator-name = "nfc";
-				regulator-min-microvolt = <1600000>;
-				regulator-max-microvolt = <1950000>;
-			};
-		};
-	};
+	model = "Pixel 9 Pro XL";
+	compatible = "google,komodo", "google,zumapro-komodo", "google,zumapro";
 };
 
 &cont_splash_mem {
-	reg = <0x0 0xfac00000 (1080 * 2400 * 4)>;
-
+	// reg = <0x0 0xfac00000 (1440 * 3120 * 4)>;
+	reg = <0x0 0xfac00000 (1344 * 2992 * 4)>;
 	status = "okay";
 };
 
 &framebuffer0 {
-	width = <1080>;
-	height = <2400>;
-	stride = <(1080 * 4)>;
+	// width = <1440>;
+	// height = <3120>;
+	// stride = <(1440 * 4)>;
+	width = <1344>;
+	height = <2992>;
+	stride = <(1344 * 4)>;
 	format = "a8r8g8b8";
 
 	status = "okay";
