@@ -40,6 +40,14 @@ properties:
               - google,gs101-oriole
               - google,gs101-raven
           - const: google,gs101
+      - description: Google Pixel 9, 9 Pro, 9 Pro XL, 9 Pro Fold (tokay, caiman, komodo, and comet)
+        items:
+          - enum:
+              - google,zumapro-tokay
+              - google,zumapro-caiman
+              - google,zumapro-komodo
+          - const:
+              - google,zumapro
 
   # Bootloader requires empty ect node to be present
   ect:
