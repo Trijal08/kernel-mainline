@@ -1,16 +1,15 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (C) 2023 Linaro Ltd.
- * Author: Peter Griffin <peter.griffin@linaro.org>
+ * Common Clock Framework support for zuma.
  *
- * Common Clock Framework support for GS101.
+ * Copyright (C) 2025, GamerBoy1234294 (trijalsaha2012@gmail.com)
  */
 
 #include <linux/clk-provider.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
 
-#include <dt-bindings/clock/google,gs101.h>
+#include <dt-bindings/clock/google,zuma.h>
 
 #include "clk.h"
 #include "clk-exynos-arm64.h"
@@ -1442,14 +1441,14 @@ static const struct samsung_cmu_info top_cmu_info __initconst = {
 	.option_offset		= CMU_CMU_TOP_CONTROLLER_OPTION,
 };
 
-static void __init gs101_cmu_top_init(struct device_node *np)
+static void __init zuma_cmu_top_init(struct device_node *np)
 {
 	exynos_arm64_register_cmu(NULL, np, &top_cmu_info);
 }
 
 /* Register CMU_TOP early, as it's a dependency for other early domains */
-CLK_OF_DECLARE(gs101_cmu_top, "google,gs101-cmu-top",
-	       gs101_cmu_top_init);
+CLK_OF_DECLARE(zuma_cmu_top, "google,zuma-cmu-top",
+	       zuma_cmu_top_init);
 
 /* ---- CMU_APM ------------------------------------------------------------- */
 
@@ -3744,14 +3743,14 @@ static const struct samsung_cmu_info misc_cmu_info __initconst = {
 	.memclk_offset		= GS101_MEMCLK_OFFSET,
 };
 
-static void __init gs101_cmu_misc_init(struct device_node *np)
+static void __init zuma_cmu_misc_init(struct device_node *np)
 {
 	exynos_arm64_register_cmu(NULL, np, &misc_cmu_info);
 }
 
 /* Register CMU_MISC early, as it's needed for MCT timer */
-CLK_OF_DECLARE(gs101_cmu_misc, "google,gs101-cmu-misc",
-	       gs101_cmu_misc_init);
+CLK_OF_DECLARE(zuma_cmu_misc, "google,zuma-cmu-misc",
+	       zuma_cmu_misc_init);
 
 /* ---- CMU_PERIC0 ---------------------------------------------------------- */
 
@@ -4707,7 +4706,7 @@ static const struct samsung_cmu_info peric1_cmu_info __initconst = {
 
 /* ---- platform_driver ----------------------------------------------------- */
 
-static int __init gs101_cmu_probe(struct platform_device *pdev)
+static int __init zuma_cmu_probe(struct platform_device *pdev)
 {
 	const struct samsung_cmu_info *info;
 	struct device *dev = &pdev->dev;
@@ -4718,40 +4717,40 @@ static int __init gs101_cmu_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static const struct of_device_id gs101_cmu_of_match[] = {
+static const struct of_device_id zuma_cmu_of_match[] = {
 	{
-		.compatible = "google,gs101-cmu-apm",
+		.compatible = "google,zuma-cmu-apm",
 		.data = &apm_cmu_info,
 	}, {
-		.compatible = "google,gs101-cmu-dpu",
+		.compatible = "google,zuma-cmu-dpu",
 		.data = &dpu_cmu_info,
 	}, {
-		.compatible = "google,gs101-cmu-hsi0",
+		.compatible = "google,zuma-cmu-hsi0",
 		.data = &hsi0_cmu_info,
 	}, {
-		.compatible = "google,gs101-cmu-hsi2",
+		.compatible = "google,zuma-cmu-hsi2",
 		.data = &hsi2_cmu_info,
 	}, {
-		.compatible = "google,gs101-cmu-peric0",
+		.compatible = "google,zuma-cmu-peric0",
 		.data = &peric0_cmu_info,
 	}, {
-		.compatible = "google,gs101-cmu-peric1",
+		.compatible = "google,zuma-cmu-peric1",
 		.data = &peric1_cmu_info,
 	}, {
 	},
 };
 
-static struct platform_driver gs101_cmu_driver __refdata = {
+static struct platform_driver zuma_cmu_driver __refdata = {
 	.driver	= {
-		.name = "gs101-cmu",
-		.of_match_table = gs101_cmu_of_match,
+		.name = "zuma-cmu",
+		.of_match_table = zuma_cmu_of_match,
 		.suppress_bind_attrs = true,
 	},
-	.probe = gs101_cmu_probe,
+	.probe = zuma_cmu_probe,
 };
 
-static int __init gs101_cmu_init(void)
+static int __init zuma_cmu_init(void)
 {
-	return platform_driver_register(&gs101_cmu_driver);
+	return platform_driver_register(&zuma_cmu_driver);
 }
-core_initcall(gs101_cmu_init);
+core_initcall(zuma_cmu_init);
