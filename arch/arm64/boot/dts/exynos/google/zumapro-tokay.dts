@@ -1,0 +1,33 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * Pixel 9 (tokay) Device Tree
+ *
+ * Copyright 2025 Trijal Saha - <trijalsaha2012@gmail.com>
+ */
+
+/dts-v1/;
+
+#include "zumapro-pixel-common.dtsi"
+
+/ {
+	model = "Pixel 9";
+	compatible = "google,tokay", "google,zumapro-tokay", "google,zumapro";
+};
+
+&cont_splash_mem {
+	// reg = <0x0 0xfac00000 (1440 * 3120 * 4)>;
+	reg = <0x0 0x9c000000 (1080 * 2424 * 4)>;
+	status = "okay";
+};
+
+&framebuffer0 {
+	// width = <1440>;
+	// height = <3120>;
+	// stride = <(1440 * 4)>;
+	width = <1080>;
+	height = <2424>;
+	stride = <(1080 * 4)>;
+	// format = "a8r8g8b8";
+	format = "x8r8g8b8";
+	status = "okay";
+};

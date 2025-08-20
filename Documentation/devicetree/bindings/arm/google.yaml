@@ -39,7 +39,12 @@ properties:
           - enum:
               - google,gs101-oriole
               - google,gs101-raven
-          - const: google,gs101
+              - google,zumapro-tokay
+              - google,zumapro-caiman
+              - google,zumapro-komodo
+          - const:
+              - google,gs101
+              - google,zumapro
 
   # Bootloader requires empty ect node to be present
   ect:
