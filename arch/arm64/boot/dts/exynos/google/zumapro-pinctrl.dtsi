@@ -6,7 +6,7 @@
  * Copyright 2023 Linaro Ltd - <peter.griffin@linaro.org>
  */
 
-#include "gs101-pinctrl.h"
+#include "zumapro-pinctrl.h"
 
 &pinctrl_gpio_alive {
 	gpa0: gpa0-gpio-bank {
@@ -204,21 +204,25 @@
 	};
 };
 
-&pinctrl_gsacore {
+&pinctrl_gsacore0 {
 	gps0: gps0-gpio-bank {
 		gpio-controller;
 		#gpio-cells = <2>;
 		interrupt-controller;
 		#interrupt-cells = <2>;
 	};
+};
 
+&pinctrl_gsacore1 {
 	gps1: gps1-gpio-bank {
 		gpio-controller;
 		#gpio-cells = <2>;
 		interrupt-controller;
 		#interrupt-cells = <2>;
 	};
+};
 
+&pinctrl_gsacore2 {
 	gps2: gps2-gpio-bank {
 		gpio-controller;
 		#gpio-cells = <2>;
@@ -227,8 +231,17 @@
 	};
 };
 
-&pinctrl_gsactrl {
+&pinctrl_gsacore3 {
 	gps3: gps3-gpio-bank {
+		gpio-controller;
+		#gpio-cells = <2>;
+		interrupt-controller;
+		#interrupt-cells = <2>;
+	};
+};
+
+&pinctrl_gsactrl {
+	gps4: gps4-gpio-bank {
 		gpio-controller;
 		#gpio-cells = <2>;
 		interrupt-controller;
