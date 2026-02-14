@@ -35,6 +35,12 @@
 		};
 	};
 
+	decon_autorefresh_bit: mmio-init@19470030 {
+		compatible = "linux,mmio-init-helper";
+		reg = <0 0x19470030 0x4>;
+		value = <0x3061>;
+	};
+
 	gpio-keys {
 		compatible = "gpio-keys";
 		pinctrl-0 = <&key_voldown>, <&key_volup>, <&key_power>;
