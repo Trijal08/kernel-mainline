@@ -3,11 +3,11 @@
  * Copyright (C) 2023 Linaro Ltd.
  * Author: Peter Griffin <peter.griffin@linaro.org>
  *
- * Device Tree binding constants for Google gs101 clock controller.
+ * Device Tree binding constants for Google zuma clock controller.
  */
 
-#ifndef _DT_BINDINGS_CLOCK_GOOGLE_GS101_H
-#define _DT_BINDINGS_CLOCK_GOOGLE_GS101_H
+#ifndef _DT_BINDINGS_CLOCK_GOOGLE_ZUMA_H
+#define _DT_BINDINGS_CLOCK_GOOGLE_ZUMA_H
 
 /* CMU_TOP PLL */
 #define CLK_FOUT_SHARED0_PLL		1
@@ -670,4 +670,4 @@
 #define CLK_GOUT_PERIC1_CLK_PERIC1_USI9_USI_CLK		45
 #define CLK_GOUT_PERIC1_SYSREG_PERIC1_PCLK		46
 
-#endif /* _DT_BINDINGS_CLOCK_GOOGLE_GS101_H */
+#endif /* _DT_BINDINGS_CLOCK_GOOGLE_ZUMA_H */
