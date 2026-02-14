@@ -2,11 +2,11 @@
 /*
  * Copyright 2025 Linaro Ltd.
  *
- * Device Tree binding constants for Google gs101 ACPM clock controller.
+ * Device Tree binding constants for Google zuma ACPM clock controller.
  */
 
-#ifndef _DT_BINDINGS_CLOCK_GOOGLE_GS101_ACPM_H
-#define _DT_BINDINGS_CLOCK_GOOGLE_GS101_ACPM_H
+#ifndef _DT_BINDINGS_CLOCK_GOOGLE_ZUMA_ACPM_H
+#define _DT_BINDINGS_CLOCK_GOOGLE_ZUMA_ACPM_H
 
 #define GS101_CLK_ACPM_DVFS_MIF				0
 #define GS101_CLK_ACPM_DVFS_INT				1
@@ -23,4 +23,4 @@
 #define GS101_CLK_ACPM_DVFS_DISP			12
 #define GS101_CLK_ACPM_DVFS_BO				13
 
-#endif /* _DT_BINDINGS_CLOCK_GOOGLE_GS101_ACPM_H */
+#endif /* _DT_BINDINGS_CLOCK_GOOGLE_ZUMA_ACPM_H */
