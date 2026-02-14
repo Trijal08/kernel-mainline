@@ -57,6 +57,14 @@ config DUMMY_IRQ
 	  The sole purpose of this module is to help with debugging of systems on
 	  which spurious IRQs would happen on disabled IRQ vector.
 
+config MMIO_INIT_HELPER
+	bool "Generic early MMIO init helper"
+	depends on OF && HAS_IOMEM
+	help
+	  Add a tiny DT-driven helper for one-shot MMIO writes early
+	  during boot. Intended for temporary bring-up quirks when a register
+	  write must be performed before a dedicated driver exists.
+
 config IBMVMC
 	tristate "IBM Virtual Management Channel support"
 	depends on PPC_PSERIES
