@@ -6,7 +6,7 @@
  */
 
 #include <dt-bindings/clock/google,zuma.h>
-#include <dt-bindings/clock/google,gs101-acpm.h>
+#include <dt-bindings/clock/google,zuma-acpm.h>
 #include <dt-bindings/gpio/gpio.h>
 #include <dt-bindings/interrupt-controller/arm-gic.h>
 #include <dt-bindings/soc/samsung,exynos-usi.h>
@@ -84,7 +84,7 @@
 			reg = <0x0000>;
 			clocks = <&acpm_ipc GS101_CLK_ACPM_DVFS_CPUCL0>;
 			enable-method = "psci";
-			cpu-idle-states = <&hayes_cpu_sleep>;
+			// cpu-idle-states = <&hayes_cpu_sleep>;
 			capacity-dmips-mhz = <449>;
 			dynamic-power-coefficient = <176>;
 			operating-points-v2 = <&cpucl0_opp_table>;
@@ -97,7 +97,7 @@
 			reg = <0x0100>;
 			clocks = <&acpm_ipc GS101_CLK_ACPM_DVFS_CPUCL0>;
 			enable-method = "psci";
-			cpu-idle-states = <&hayes_cpu_sleep>;
+			// cpu-idle-states = <&hayes_cpu_sleep>;
 			capacity-dmips-mhz = <449>;
 			dynamic-power-coefficient = <176>;
 			operating-points-v2 = <&cpucl0_opp_table>;
@@ -110,7 +110,7 @@
 			reg = <0x0200>;
 			clocks = <&acpm_ipc GS101_CLK_ACPM_DVFS_CPUCL0>;
 			enable-method = "psci";
-			cpu-idle-states = <&hayes_cpu_sleep>;
+			// cpu-idle-states = <&hayes_cpu_sleep>;
 			capacity-dmips-mhz = <449>;
 			dynamic-power-coefficient = <176>;
 			operating-points-v2 = <&cpucl0_opp_table>;
@@ -123,7 +123,7 @@
 			reg = <0x0300>;
 			clocks = <&acpm_ipc GS101_CLK_ACPM_DVFS_CPUCL0>;
 			enable-method = "psci";
-			cpu-idle-states = <&hayes_cpu_sleep>;
+			// cpu-idle-states = <&hayes_cpu_sleep>;
 			capacity-dmips-mhz = <449>;
 			dynamic-power-coefficient = <176>;
 			operating-points-v2 = <&cpucl0_opp_table>;
@@ -136,7 +136,7 @@
 			reg = <0x0400>;
 			clocks = <&acpm_ipc GS101_CLK_ACPM_DVFS_CPUCL1>;
 			enable-method = "psci";
-			cpu-idle-states = <&hunter_cpu_sleep>;
+			// cpu-idle-states = <&hunter_cpu_sleep>;
 			capacity-dmips-mhz = <850>;
 			dynamic-power-coefficient = <325>;
 			operating-points-v2 = <&cpucl1_opp_table>;
@@ -149,7 +149,7 @@
 			reg = <0x0500>;
 			clocks = <&acpm_ipc GS101_CLK_ACPM_DVFS_CPUCL1>;
 			enable-method = "psci";
-			cpu-idle-states = <&hunter_cpu_sleep>;
+			// cpu-idle-states = <&hunter_cpu_sleep>;
 			capacity-dmips-mhz = <850>;
 			dynamic-power-coefficient = <325>;
 			operating-points-v2 = <&cpucl1_opp_table>;
@@ -162,7 +162,7 @@
 			reg = <0x0600>;
 			clocks = <&acpm_ipc GS101_CLK_ACPM_DVFS_CPUCL2>;
 			enable-method = "psci";
-			cpu-idle-states = <&hunter_cpu_sleep>;
+			// cpu-idle-states = <&hunter_cpu_sleep>;
 			capacity-dmips-mhz = <850>;
 			dynamic-power-coefficient = <325>;
 			operating-points-v2 = <&cpucl1_opp_table>;
@@ -175,7 +175,7 @@
 			reg = <0x0700>;
 			clocks = <&acpm_ipc GS101_CLK_ACPM_DVFS_CPUCL2>;
 			enable-method = "psci";
-			cpu-idle-states = <&hunterelp_cpu_sleep>;
+			// cpu-idle-states = <&hunterelp_cpu_sleep>;
 			capacity-dmips-mhz = <1024>;
 			dynamic-power-coefficient = <748>;
 			operating-points-v2 = <&cpucl2_opp_table>;
@@ -500,22 +500,16 @@
 		clock-output-names = "ext-200m";
 	};
 
-	// TODO
 	ext_26m: clock-3 {
 		compatible = "fixed-clock";
 		#clock-cells = <0>;
 		clock-output-names = "ext-26m";
-
-		status = "disabled";
 	};
 
-	// TODO
 	ext_1m: clock-4 {
 		compatible = "fixed-clock";
 		#clock-cells = <0>;
 		clock-output-names = "ext-1m";
-
-		status = "disabled";
 	};
 
 	firmware {
@@ -676,7 +670,7 @@
 		};
 
 		cmu_misc: clock-controller@10010000 {
-			compatible = "google,gs101-cmu-misc";
+			compatible = "google,zuma-cmu-misc";
 			reg = <0x10010000 0x10000>;
 			#clock-cells = <1>;
 			clocks = <&cmu_top CLK_DOUT_CMU_MISC_BUS>,
@@ -770,7 +764,7 @@
 		};
 
 		cmu_peric0: clock-controller@10800000 {
-			compatible = "google,gs101-cmu-peric0";
+			compatible = "google,zuma-cmu-peric0";
 			reg = <0x10800000 0x10000>;
 			#clock-cells = <1>;
 			clocks = <&ext_24_5m>,
@@ -1356,7 +1350,7 @@
 		};
 
 		cmu_peric1: clock-controller@10c00000 {
-			compatible = "google,gs101-cmu-peric1";
+			compatible = "google,zuma-cmu-peric1";
 			reg = <0x10c00000 0x10000>;
 			#clock-cells = <1>;
 			clocks = <&ext_24_5m>,
@@ -1735,7 +1729,7 @@
 		};
 
 		cmu_hsi0: clock-controller@11000000 {
-			compatible = "google,gs101-cmu-hsi0";
+			compatible = "google,zuma-cmu-hsi0";
 			reg = <0x11000000 0x10000>;
 			#clock-cells = <1>;
 
@@ -1812,7 +1806,7 @@
 		};
 
 		cmu_hsi2: clock-controller@13000000 {
-			compatible = "google,gs101-cmu-hsi2";
+			compatible = "google,zuma-cmu-hsi2";
 			reg = <0x13000000 0x10000>;
 			#clock-cells = <1>;
 			clocks = <&ext_24_5m>,
@@ -1824,9 +1818,9 @@
 			samsung,sysreg = <&sysreg_hsi2>;
 		};
 
-		sysreg_hsi2: syscon@14420000 {
+		sysreg_hsi2: syscon@13020000 {
 			compatible = "google,gs101-hsi2-sysreg", "syscon";
-			reg = <0x14420000 0x10000>;
+			reg = <0x13020000 0x10000>;
 			clocks = <&cmu_hsi2 CLK_GOUT_HSI2_SYSREG_HSI2_PCLK>;
 		};
 
@@ -1886,7 +1880,7 @@
 		};
 
 		cmu_apm: clock-controller@15400000 {
-			compatible = "google,zuma-cmu-apm", "google,gs101-cmu-apm";
+			compatible = "google,zuma-cmu-apm";
 			reg = <0x15400000 0x10000>;
 			#clock-cells = <1>;
 
