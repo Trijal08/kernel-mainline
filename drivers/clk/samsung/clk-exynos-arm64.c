@@ -115,9 +115,6 @@ static void __init exynos_arm64_init_clocks(struct device_node *np,
 		void __iomem *reg = reg_base + reg_offs[i];
 		u32 val;
 
-		pr_info("exynos-cmu-init: %pOF i=%zu off=0x%lx\n",
-			np, i, reg_offs[i]);
-
 		if (cmu->manual_plls && is_pll_con1_reg(reg_offs[i])) {
 			writel(PLL_CON1_MANUAL, reg);
 		} else if (is_gate_reg(reg_offs[i]) && !init_auto) {
