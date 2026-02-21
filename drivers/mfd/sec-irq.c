@@ -457,6 +457,16 @@ static struct regmap_irq_chip_data *sec_irq_init_s2mpg1x(struct sec_pmic_dev *se
 		chained_irq_chip = &s2mpg11_irq_chip_pmic;
 		chained_pirq = S2MPG11_COMMON_IRQ_PMIC;
 		break;
+	case S2MPG14:
+		irq_chip = &s2mpg10_irq_chip;
+		chained_irq_chip = &s2mpg10_irq_chip_pmic;
+		chained_pirq = S2MPG10_COMMON_IRQ_PMIC;
+		break;
+	case S2MPG15:
+		irq_chip = &s2mpg11_irq_chip;
+		chained_irq_chip = &s2mpg11_irq_chip_pmic;
+		chained_pirq = S2MPG11_COMMON_IRQ_PMIC;
+		break;
 	default:
 		return dev_err_ptr_probe(sec_pmic->dev, -EINVAL, "Unsupported device type %d\n",
 					 sec_pmic->device_type);
@@ -493,6 +503,8 @@ struct regmap_irq_chip_data *sec_irq_init(struct sec_pmic_dev *sec_pmic)
 		break;
 	case S2MPG10:
 	case S2MPG11:
+	case S2MPG14:
+	case S2MPG15:
 		return sec_irq_init_s2mpg1x(sec_pmic);
 	case S2MPS11X:
 		sec_irq_chip = &s2mps11_irq_chip;
