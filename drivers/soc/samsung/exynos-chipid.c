@@ -74,6 +74,12 @@ static const struct exynos_soc_id {
 	{ "EXYNOSAUTOV920", 0x0A920000 },
 	/* Compatible with: google,gs101-otp */
 	{ "GS101", 0x9845000 },
+	/* Compatible with: google,gs201-otp */
+	{ "GS201", 0x9855000 },
+	/* Compatible with: google,zuma-otp */
+	{ "ZUMA", 0x9865000 },
+	/* Compatible with: google,zumapro-otp */
+	{ "ZUMAPRO", 0x9875000 },
 };
 
 static const char *exynos_product_id_to_name(unsigned int product_id)
@@ -240,6 +246,15 @@ static const struct exynos_chipid_variant gs101_chipid_drv_data = {
 static const struct of_device_id exynos_chipid_of_device_ids[] = {
 	{
 		.compatible	= "google,gs101-otp",
+		.data		= &gs101_chipid_drv_data,
+	}, {
+		.compatible	= "google,gs201-otp",
+		.data		= &gs101_chipid_drv_data,
+	}, {
+		.compatible	= "google,zuma-otp",
+		.data		= &gs101_chipid_drv_data,
+	}, {
+		.compatible	= "google,zumapro-otp",
 		.data		= &gs101_chipid_drv_data,
 	}, {
 		.compatible	= "samsung,exynos4210-chipid",
