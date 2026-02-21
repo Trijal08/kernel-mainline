@@ -314,5 +314,9 @@ const struct samsung_ufs_phy_drvdata tensor_zuma_ufs_phy = {
 	.clk_list = tensor_gs101_ufs_phy_clks,
 	.num_clks = ARRAY_SIZE(tensor_gs101_ufs_phy_clks),
 	.wait_for_cal = zuma_phy_wait_for_calibration,
-	.wait_for_cdr = gs101_phy_wait_for_cdr_lock,
+	/*
+	 * Downstream Zuma bring-up does not use the GS101 post-HS CDR wait
+	 * sequence. Keep it disabled for Zuma to avoid false CDR lock errors.
+	 */
+	.wait_for_cdr = NULL,
 };
