@@ -2105,6 +2105,18 @@
 			clocks = <&ext_24_5m>;
 			clock-names = "oscclk";
 		};
+		
+		gpu: gpu@1f000000 {
+			compatible = "google,zuma-mali", "arm,mali-valhall-csf";
+			reg = <0x1f000000 0x480000>;
+			clocks = <&ext_24_5m>;
+			clock-names = "core";
+			interrupt-names = "job", "mmu", "gpu";
+			interrupts = <GIC_SPI 420 IRQ_TYPE_LEVEL_HIGH 0>,
+				     <GIC_SPI 421 IRQ_TYPE_LEVEL_HIGH 0>,
+				     <GIC_SPI 419 IRQ_TYPE_LEVEL_HIGH 0>;
+
+		};
 	};
 
 	apm_sram: sram@15700000 {
