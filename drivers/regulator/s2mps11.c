@@ -1784,6 +1784,9 @@ static const struct regulator_desc s2mps15_regulators[] = {
 /* voltage range for s2mpg14 BUCK 7 */
 S2MPG10_VOLTAGE_RANGE(s2mpg14_buck, 1, 200000, 450000, 1300000, STEP_6_25_MV);
 
+/* voltage range for s2mpg14 LDO 5 */
+S2MPG10_VOLTAGE_RANGE(s2mpg14_ldo, 5, 700000, 1600000, 1950000, STEP_25_MV);
+
 /* voltage range for s2mpg15 BUCK 2, 8, 11 */
 S2MPG10_VOLTAGE_RANGE(s2mpg15_buck, 1, 200000, 450000, 1300000, STEP_6_25_MV);
 
@@ -1807,6 +1810,24 @@ S2MPG10_VOLTAGE_RANGE(s2mpg15_ldo, 1, 300000, 700000, 1300000, STEP_12_5_MV);
 	.enable_reg	= S2MPG14_PMIC_B##_num##M_CTRL,			\
 	.enable_mask	= GENMASK(7, 6),				\
 	.ramp_delay	= 12500,					\
+}
+
+#define regulator_desc_s2mpg14_ldo(_num, _supply, _range) {		\
+	.name		= "ldo"#_num"m",				\
+	.supply_name	= _supply,					\
+	.of_match	= of_match_ptr("ldo"#_num"m"),			\
+	.regulators_node = of_match_ptr("regulators"),			\
+	.id		= S2MPG14_LDO##_num,				\
+	.ops		= &s2mps15_reg_ldo_ops,				\
+	.type		= REGULATOR_VOLTAGE,				\
+	.owner		= THIS_MODULE,					\
+	.linear_ranges	= _range,					\
+	.n_linear_ranges = ARRAY_SIZE(_range),				\
+	.n_voltages	= _range##_count,				\
+	.vsel_reg	= S2MPG14_PMIC_L##_num##M_CTRL,			\
+	.vsel_mask	= GENMASK(5, 0),				\
+	.enable_reg	= S2MPG14_PMIC_L##_num##M_CTRL,			\
+	.enable_mask	= GENMASK(7, 6),				\
 }
 
 #define regulator_desc_s2mpg15_buck(_num, _supply, _range) {		\
@@ -1848,6 +1869,7 @@ S2MPG10_VOLTAGE_RANGE(s2mpg15_ldo, 1, 300000, 700000, 1300000, STEP_12_5_MV);
 
 static const struct regulator_desc s2mpg14_regulators[] = {
 	regulator_desc_s2mpg14_buck(7, "vinb7m", s2mpg14_buck_vranges1),
+	regulator_desc_s2mpg14_ldo(5, "vinl5m", s2mpg14_ldo_vranges5),
 };
 
 static const struct regulator_desc s2mpg15_regulators[] = {
@@ -1855,6 +1877,7 @@ static const struct regulator_desc s2mpg15_regulators[] = {
 	regulator_desc_s2mpg15_buck(8, "vinb8s", s2mpg15_buck_vranges1),
 	regulator_desc_s2mpg15_buck(11, "vinb11s", s2mpg15_buck_vranges1),
 	regulator_desc_s2mpg15_ldo(1, "vinl1s", s2mpg15_ldo_vranges1),
+	regulator_desc_s2mpg15_ldo(2, "vinl2s", s2mpg15_ldo_vranges1),
 };
 
 static int s2mps14_pmic_enable_ext_control(struct s2mps11_info *s2mps11,
