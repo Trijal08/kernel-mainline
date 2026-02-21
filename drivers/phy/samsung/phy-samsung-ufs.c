@@ -355,6 +355,9 @@ out:
 
 static const struct of_device_id samsung_ufs_phy_match[] = {
 	{
+		.compatible = "google,zuma-ufs-phy",
+		.data = &tensor_zuma_ufs_phy,
+	}, {
 		.compatible = "google,gs101-ufs-phy",
 		.data = &tensor_gs101_ufs_phy,
 	}, {
