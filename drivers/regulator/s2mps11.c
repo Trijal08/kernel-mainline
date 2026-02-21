@@ -19,6 +19,8 @@
 #include <linux/mfd/samsung/core.h>
 #include <linux/mfd/samsung/s2mpg10.h>
 #include <linux/mfd/samsung/s2mpg11.h>
+#include <linux/mfd/samsung/s2mpg14.h>
+#include <linux/mfd/samsung/s2mpg15.h>
 #include <linux/mfd/samsung/s2mps11.h>
 #include <linux/mfd/samsung/s2mps13.h>
 #include <linux/mfd/samsung/s2mps14.h>
@@ -1779,6 +1781,82 @@ static const struct regulator_desc s2mps15_regulators[] = {
 	regulator_desc_s2mps15_buck(10, s2mps15_buck_voltage_ranges2),
 };
 
+/* voltage range for s2mpg14 BUCK 7 */
+S2MPG10_VOLTAGE_RANGE(s2mpg14_buck, 1, 200000, 450000, 1300000, STEP_6_25_MV);
+
+/* voltage range for s2mpg15 BUCK 2, 8, 11 */
+S2MPG10_VOLTAGE_RANGE(s2mpg15_buck, 1, 200000, 450000, 1300000, STEP_6_25_MV);
+
+/* voltage range for s2mpg15 LDO 1 */
+S2MPG10_VOLTAGE_RANGE(s2mpg15_ldo, 1, 300000, 700000, 1300000, STEP_12_5_MV);
+
+#define regulator_desc_s2mpg14_buck(_num, _supply, _range) {		\
+	.name		= "buck"#_num"m",				\
+	.supply_name	= _supply,					\
+	.of_match	= of_match_ptr("buck"#_num"m"),			\
+	.regulators_node = of_match_ptr("regulators"),			\
+	.id		= S2MPG14_BUCK##_num,				\
+	.ops		= &s2mps15_reg_buck_ops,			\
+	.type		= REGULATOR_VOLTAGE,				\
+	.owner		= THIS_MODULE,					\
+	.linear_ranges	= _range,					\
+	.n_linear_ranges = ARRAY_SIZE(_range),				\
+	.n_voltages	= _range##_count,				\
+	.vsel_reg	= S2MPG14_PMIC_B##_num##M_OUT1,			\
+	.vsel_mask	= GENMASK(7, 0),				\
+	.enable_reg	= S2MPG14_PMIC_B##_num##M_CTRL,			\
+	.enable_mask	= GENMASK(7, 6),				\
+	.ramp_delay	= 12500,					\
+}
+
+#define regulator_desc_s2mpg15_buck(_num, _supply, _range) {		\
+	.name		= "buck"#_num"s",				\
+	.supply_name	= _supply,					\
+	.of_match	= of_match_ptr("buck"#_num"s"),			\
+	.regulators_node = of_match_ptr("regulators"),			\
+	.id		= S2MPG15_BUCK##_num,				\
+	.ops		= &s2mps15_reg_buck_ops,			\
+	.type		= REGULATOR_VOLTAGE,				\
+	.owner		= THIS_MODULE,					\
+	.linear_ranges	= _range,					\
+	.n_linear_ranges = ARRAY_SIZE(_range),				\
+	.n_voltages	= _range##_count,				\
+	.vsel_reg	= S2MPG15_PMIC_B##_num##S_OUT1,			\
+	.vsel_mask	= GENMASK(7, 0),				\
+	.enable_reg	= S2MPG15_PMIC_B##_num##S_CTRL,			\
+	.enable_mask	= GENMASK(7, 6),				\
+	.ramp_delay	= 12500,					\
+}
+
+#define regulator_desc_s2mpg15_ldo(_num, _supply, _range) {		\
+	.name		= "ldo"#_num"s",				\
+	.supply_name	= _supply,					\
+	.of_match	= of_match_ptr("ldo"#_num"s"),			\
+	.regulators_node = of_match_ptr("regulators"),			\
+	.id		= S2MPG15_LDO##_num,				\
+	.ops		= &s2mps15_reg_ldo_ops,				\
+	.type		= REGULATOR_VOLTAGE,				\
+	.owner		= THIS_MODULE,					\
+	.linear_ranges	= _range,					\
+	.n_linear_ranges = ARRAY_SIZE(_range),				\
+	.n_voltages	= _range##_count,				\
+	.vsel_reg	= S2MPG15_PMIC_L##_num##S_CTRL,			\
+	.vsel_mask	= GENMASK(5, 0),				\
+	.enable_reg	= S2MPG15_PMIC_L##_num##S_CTRL,			\
+	.enable_mask	= GENMASK(7, 6),				\
+}
+
+static const struct regulator_desc s2mpg14_regulators[] = {
+	regulator_desc_s2mpg14_buck(7, "vinb7m", s2mpg14_buck_vranges1),
+};
+
+static const struct regulator_desc s2mpg15_regulators[] = {
+	regulator_desc_s2mpg15_buck(2, "vinb2s", s2mpg15_buck_vranges1),
+	regulator_desc_s2mpg15_buck(8, "vinb8s", s2mpg15_buck_vranges1),
+	regulator_desc_s2mpg15_buck(11, "vinb11s", s2mpg15_buck_vranges1),
+	regulator_desc_s2mpg15_ldo(1, "vinl1s", s2mpg15_ldo_vranges1),
+};
+
 static int s2mps14_pmic_enable_ext_control(struct s2mps11_info *s2mps11,
 					   struct regulator_dev *rdev)
 {
@@ -2187,6 +2265,16 @@ static int s2mps11_pmic_probe(struct platform_device *pdev)
 		s2mpg1x_regulators = s2mpg11_regulators;
 		BUILD_BUG_ON(ARRAY_SIZE(s2mpg11_regulators) > S2MPS_REGULATOR_MAX);
 		break;
+	case S2MPG14:
+		rdev_num = ARRAY_SIZE(s2mpg14_regulators);
+		regulators = s2mpg14_regulators;
+		BUILD_BUG_ON(ARRAY_SIZE(s2mpg14_regulators) > S2MPS_REGULATOR_MAX);
+		break;
+	case S2MPG15:
+		rdev_num = ARRAY_SIZE(s2mpg15_regulators);
+		regulators = s2mpg15_regulators;
+		BUILD_BUG_ON(ARRAY_SIZE(s2mpg15_regulators) > S2MPS_REGULATOR_MAX);
+		break;
 	case S2MPS11X:
 		rdev_num = ARRAY_SIZE(s2mps11_regulators);
 		regulators = s2mps11_regulators;
@@ -2266,6 +2354,8 @@ static int s2mps11_pmic_probe(struct platform_device *pdev)
 }
 
 static const struct platform_device_id s2mps11_pmic_id[] = {
+	{ .name = "s2mpg14-regulator", .driver_data = S2MPG14 },
+	{ .name = "s2mpg15-regulator", .driver_data = S2MPG15 },
 	{ .name = "s2mpg10-regulator", .driver_data = S2MPG10 },
 	{ .name = "s2mpg11-regulator", .driver_data = S2MPG11 },
 	{ .name = "s2mps11-regulator", .driver_data = S2MPS11X },
