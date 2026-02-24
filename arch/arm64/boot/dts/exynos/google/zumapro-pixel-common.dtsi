@@ -22,7 +22,7 @@
 
 	chosen {
 		/* Bootloader expects bootargs specified otherwise it crashes */
-		bootargs = "";
+		bootargs = "earlycon=exynos4210,0x10870000";
 		stdout-path = &serial_0;
 
 		/* Use display framebuffer as setup by bootloader */
