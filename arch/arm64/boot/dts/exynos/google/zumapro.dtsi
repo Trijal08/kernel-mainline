@@ -1895,6 +1895,12 @@
 			interrupts = <GIC_SPI 433 IRQ_TYPE_LEVEL_HIGH 0>;
 		};
 
+		pd_hsi0: pd-hsi0@15462a80 {
+			compatible = "samsung,exynos5433-pd";
+			reg = <0x15462a80 0x20>;
+			#power-domain-cells = <0>;
+		};
+
 		ufs_0: ufs@13200000 {
 			compatible = "google,zuma-ufs", "google,gs101-ufs";
 			reg = <0x13200000 0x200>,
