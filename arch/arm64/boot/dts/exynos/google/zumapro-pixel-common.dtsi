@@ -459,6 +459,10 @@
 	status = "okay";
 };
 
+&serial_18 {
+	status = "okay";
+};
+
 &ufs_0 {
 	vcc-supply = <&ufs_0_fixed_vcc_reg>;
 	vdd-hba-supply = <&s_ldo2_reg>;
@@ -527,14 +531,91 @@
 // 	status = "okay";
 // };
 
-&usi12 {
+&usi10 {
 	samsung,mode = <USI_MODE_I2C>;
 
 	status = "okay";
 };
 
+&usi12 {
+	status = "disabled";
+};
+
+&usi13 {
+	status = "disabled";
+};
+
+&usi15 {
+
+	status = "okay";
+};
+
+&usi17 {
+&usi18 {
+	samsung,clkreq-on; /* needed for UART mode */
+
+	status = "okay";
+};
+
+&usi19 {
+	status = "disabled";
+};
+
+&usi20 {
+	samsung,mode = <USI_MODE_SPI>;
+
+	status = "okay";
+};
+
+&usi21 {
+	samsung,mode = <USI_MODE_SPI>;
+
+	status = "okay";
+};
+
+&usi22 {
+	samsung,mode = <USI_MODE_SPI>;
+
+	status = "okay";
+};
+
+&usi23 {
+	samsung,mode = <USI_MODE_SPI>;
+
+	status = "okay";
+};
+
+&usi24 {
+	samsung,mode = <USI_MODE_SPI>;
+
+	status = "okay";
+};
+
+&spi_15 {
+	status = "okay";
+};
+
+&spi_18 {
+	status = "okay";
+};
+
+&spi_19 {
+	status = "okay";
+};
+
+&spi_20 {
+	status = "okay";
+};
+
+&spi_21 {
+	status = "okay";
+};
+
+&spi_22 {
+	status = "okay";
+};
+
 &watchdog_cl0 {
 	timeout-sec = <30>;
-
 	status = "okay";
 };
