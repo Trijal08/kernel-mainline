@@ -244,14 +244,14 @@
 	};
 };
 
-&hsi2c_12 {
+&hsi2c_6 {
 	status = "okay";
 	/* TODO: add the devices once drivers exist */
 
-	usb-typec@25 {
+	max77759tcpc: usb-typec@25 {
 		compatible = "maxim,max77759-tcpci", "maxim,max33359";
 		reg = <0x25>;
-		interrupts-extended = <&gpa8 2 IRQ_TYPE_LEVEL_LOW>;
+		interrupts-extended = <&gpa8 3 IRQ_TYPE_LEVEL_LOW>;
 		pinctrl-0 = <&typec_int>;
 		pinctrl-names = "default";
 
@@ -343,18 +343,18 @@
 	};
 
 	pmic@66 {
-		compatible = "maxim,max77759";
+		compatible = "maxim,max77779";
 		reg = <0x66>;
 
 		pinctrl-0 = <&if_pmic_int>;
 		pinctrl-names = "default";
-		interrupts-extended = <&gpa8 3 IRQ_TYPE_LEVEL_LOW>;
+		interrupts-extended = <&gpa8 0 IRQ_TYPE_LEVEL_LOW>;
 
 		interrupt-controller;
 		#interrupt-cells = <2>;
 
 		gpio {
-			compatible = "maxim,max77759-gpio";
+			compatible = "maxim,max77779-gpio";
 
 			gpio-controller;
 			#gpio-cells = <2>;
@@ -370,7 +370,7 @@
 		};
 
 		nvmem-0 {
-			compatible = "maxim,max77759-nvmem";
+			compatible = "maxim,max77779-nvmem";
 
 			nvmem-layout {
 				compatible = "fixed-layout";
@@ -432,14 +432,14 @@
 	};
 
 	typec_int: typec-int-pins {
-		samsung,pins = "gpa8-2";
+		samsung,pins = "gpa8-3";
 		samsung,pin-function = <GS101_PIN_FUNC_EINT>;
 		samsung,pin-pud = <GS101_PIN_PULL_UP>;
 		samsung,pin-drv = <GS101_PIN_DRV_2_5_MA>;
 	};
 
 	if_pmic_int: if-pmic-int-pins {
-		samsung,pins = "gpa8-3";
+		samsung,pins = "gpa8-0";
 		samsung,pin-function = <GS101_PIN_FUNC_EINT>;
 		samsung,pin-pud = <GS101_PIN_PULL_UP>;
 		samsung,pin-drv = <GS101_PIN_DRV_2_5_MA>;
@@ -523,6 +523,11 @@
 &usi_uart {
 	samsung,clkreq-on; /* needed for UART mode */
 
+	status = "okay";
+};
+
+&usi6 {
+	samsung,mode = <USI_MODE_I2C>;
 	status = "okay";
 };
 
