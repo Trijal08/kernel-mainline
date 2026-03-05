@@ -969,140 +969,6 @@
 			status = "disabled";
 		};
 
-		s2mpu_s0_aur: s2mpu_s0_aur@20a80000 {
-			compatible = "samsung,s2mpu05-pmic";
-			reg = <0x20a80000 0x10000>;
-			interrupts = <GIC_SPI 158 IRQ_TYPE_LEVEL_HIGH 0>;
-			power-domains = <&pd_aur>;
-		};
-
-		s2mpu_s0_bw: s2mpu_s0_bw@1a670000 {
-			compatible = "samsung,s2mpu05-pmic";
-			reg = <0x1a670000 0x10000>;
-			interrupts = <GIC_SPI 168 IRQ_TYPE_LEVEL_HIGH 0>;
-			power-domains = <&pd_bw>;
-		};
-
-		s2mpu_s0_dpuf0: s2mpu_s0_dpuf0@19870000 {
-			compatible = "samsung,s2mpu05-pmic";
-			reg = <0x19870000 0x10000>;
-			interrupts = <GIC_SPI 279 IRQ_TYPE_LEVEL_HIGH 0>;
-			power-domains = <&pd_dpuf0>;
-		};
-
-		s2mpu_s0_dpuf1: s2mpu_s0_dpuf1@19c70000 {
-			compatible = "samsung,s2mpu05-pmic";
-			reg = <0x19c70000 0x10000>;
-			interrupts = <GIC_SPI 306 IRQ_TYPE_LEVEL_HIGH 0>;
-			power-domains = <&pd_dpuf1>;
-		};
-
-		s2mpu_s0_g2d: s2mpu_s0_g2d@1a8a0000 {
-			compatible = "samsung,s2mpu05-pmic";
-			reg = <0x1a8a0000 0x10000>;
-			interrupts = <GIC_SPI 344 IRQ_TYPE_LEVEL_HIGH 0>;
-			power-domains = <&pd_g2d>;
-		};
-
-		s2mpu_s0_gdc: s2mpu_s0_gdc@1d4f0000 {
-			compatible = "samsung,s2mpu05-pmic";
-			reg = <0x1d4f0000 0x10000>;
-			interrupts = <GIC_SPI 373 IRQ_TYPE_LEVEL_HIGH 0>;
-			power-domains = <&pd_gdc>;
-		};
-
-		s2mpu_s0_gse: s2mpu_s0_gse@1d8a0000 {
-			compatible = "samsung,s2mpu05-pmic";
-			reg = <0x1d8a0000 0x10000>;
-			interrupts = <GIC_SPI 387 IRQ_TYPE_LEVEL_HIGH 0>;
-			power-domains = <&pd_gse>;
-		};
-
-		s2mpu_s0_ispfe: s2mpu_s0_ispfe@1c140000 {
-			compatible = "samsung,s2mpu05-pmic";
-			reg = <0x1c140000 0x10000>;
-			interrupts = <GIC_SPI 490 IRQ_TYPE_LEVEL_HIGH 0>;
-			power-domains = <&pd_ispfe>;
-		};
-
-		s2mpu_s1_ispfe: s2mpu_s1_ispfe@1c180000 {
-			compatible = "samsung,s2mpu05-pmic";
-			reg = <0x1c180000 0x10000>;
-			interrupts = <GIC_SPI 494 IRQ_TYPE_LEVEL_HIGH 0>;
-			power-domains = <&pd_ispfe>;
-		};
-
-		s2mpu_s2_ispfe: s2mpu_s2_ispfe@1c1c0000 {
-			compatible = "samsung,s2mpu05-pmic";
-			reg = <0x1c1c0000 0x10000>;
-			interrupts = <GIC_SPI 498 IRQ_TYPE_LEVEL_HIGH 0>;
-			power-domains = <&pd_ispfe>;
-		};
-
-		s2mpu_s0_mcsc: s2mpu_s0_mcsc@1d0d0000 {
-			compatible = "samsung,s2mpu05-pmic";
-			reg = <0x1d0d0000 0x10000>;
-			interrupts = <GIC_SPI 513 IRQ_TYPE_LEVEL_HIGH 0>;
-			power-domains = <&pd_mcsc>;
-		};
-
-		s2mpu_s0_mfc: s2mpu_s0_mfc@1a4a0000 {
-			compatible = "samsung,s2mpu05-pmic";
-			reg = <0x1a4a0000 0x10000>;
-			interrupts = <GIC_SPI 520 IRQ_TYPE_LEVEL_HIGH 0>;
-			power-domains = <&pd_mfc>;
-		};
-
-		s2mpu_s0_rgbp: s2mpu_s0_rgbp@1c4d0000 {
-			compatible = "samsung,s2mpu05-pmic";
-			reg = <0x1c4d0000 0x10000>;
-			interrupts = <GIC_SPI 677 IRQ_TYPE_LEVEL_HIGH 0>;
-			power-domains = <&pd_rgbp>;
-		};
-
-		s2mpu_s1_rgbp: s2mpu_s1_rgbp@1c510000 {
-			compatible = "samsung,s2mpu05-pmic";
-			reg = <0x1c510000 0x10000>;
-			interrupts = <GIC_SPI 681 IRQ_TYPE_LEVEL_HIGH 0>;
-			power-domains = <&pd_rgbp>;
-		};
-
-		s2mpu_s0_tnr: s2mpu_s0_tnr@1ccb0000 {
-			compatible = "samsung,s2mpu05-pmic";
-			reg = <0x1ccb0000 0x10000>;
-			interrupts = <GIC_SPI 685 IRQ_TYPE_LEVEL_HIGH 0>;
-			power-domains = <&pd_tnr>;
-		};
-
-		s2mpu_s1_tnr: s2mpu_s1_tnr@1ccf0000 {
-			compatible = "samsung,s2mpu05-pmic";
-			reg = <0x1ccf0000 0x10000>;
-			interrupts = <GIC_SPI 689 IRQ_TYPE_LEVEL_HIGH 0>;
-			power-domains = <&pd_tnr>;
-		};
-
-		s2mpu_s2_tnr: s2mpu_s2_tnr@1cd30000 {
-			compatible = "samsung,s2mpu05-pmic";
-			reg = <0x1cd30000 0x10000>;
-			interrupts = <GIC_SPI 693 IRQ_TYPE_LEVEL_HIGH 0>;
-			power-domains = <&pd_tnr>;
-		};
-
-		s2mpu_s0_tpu: s2mpu_s0_tpu@1a370000 {
-			compatible = "samsung,s2mpu05-pmic";
-			reg = <0x1a370000 0x10000>;
-			interrupts = <GIC_SPI 735 IRQ_TYPE_LEVEL_HIGH 0>;
-			power-domains = <&pd_tpu>;
-		};
-
-		s2mpu_s0_yuvp: s2mpu_s0_yuvp@1c8a0000 {
-			compatible = "samsung,s2mpu05-pmic";
-			reg = <0x1c8a0000 0x10000>;
-			interrupts = <GIC_SPI 742 IRQ_TYPE_LEVEL_HIGH 0>;
-			power-domains = <&pd_yuvp>;
-		};
-
-
 		efuse@10000000 {
 			compatible = "google,zumapro-otp";
 			reg = <0x10000000 0xf084>;
@@ -1125,7 +991,6 @@
 			sysmmu,secure-irq;
 			sysmmu,secure_base = <0x1A650000>;
 			power-domains = <&pd_bw>;
-			s2mpus = <&s2mpu_s0_bw>;
 			port-name = "BW";
 			#iommu-cells = <0>;
 			pmmu0,default_stream = <STR_CFG(STR_SPTLB(0x00, 0x00), S2_EN, BL1, PREF_PRED, STLB_PREF, PTLB_PREF) >;
@@ -1205,7 +1070,6 @@
 			sysmmu,secure_base = <0x1A880000>;
 
 			power-domains = <&pd_g2d>;
-			s2mpus = <&s2mpu_s0_g2d>;
 
 			port-name = "G2D";
 			#iommu-cells = <0>;
@@ -1283,7 +1147,6 @@
 			sysmmu,secure-irq;
 			sysmmu,secure_base = <0x19850000>;
 			power-domains = <&pd_dpuf0>;
-			s2mpus = <&s2mpu_s0_dpuf0>;
 			port-name = "DPU F0";
 			#iommu-cells = <0>;
 
@@ -1383,7 +1246,6 @@
 			sysmmu,secure_base = <0x19C50000>;
 
 			power-domains = <&pd_dpuf1>;
-			s2mpus = <&s2mpu_s0_dpuf1>;
 
 			port-name = "DPU F1";
 			#iommu-cells = <0>;
@@ -1481,7 +1343,6 @@
 			sysmmu,secure-irq;
 			sysmmu,secure_base = <0x1C120000>;
 			power-domains = <&pd_ispfe>;
-			s2mpus = <&s2mpu_s0_ispfe>;
 			port-name = "ISPFE S0";
 			#iommu-cells = <0>;
 			pmmu0,default_stream = <STR_CFG(STR_SPTLB(0x06, 0x03), S2_EN, BL1, PREF_ASC, STLB_PREF, PTLB_NONE)>;
@@ -1520,7 +1381,6 @@
 			sysmmu,secure-irq;
 			sysmmu,secure_base = <0x1C160000>;
 			power-domains = <&pd_ispfe>;
-			s2mpus = <&s2mpu_s1_ispfe>;
 			port-name = "ISPFE S1";
 			#iommu-cells = <0>;
 			pmmu0,default_stream = <STR_CFG(STR_SPTLB(0x00, 0x00), S2_EN, BL1, PREF_ASC, STLB_PREF, PTLB_NONE)>;
@@ -1542,7 +1402,6 @@
 			sysmmu,secure-irq;
 			sysmmu,secure_base = <0x1C1A0000>;
 			power-domains = <&pd_ispfe>;
-			s2mpus = <&s2mpu_s2_ispfe>;
 			port-name = "ISPFE S2";
 			#iommu-cells = <0>;
 			pmmu0,default_stream = <STR_CFG(STR_SPTLB(0x00, 0x00), S2_EN, BL1, PREF_ASC, STLB_PREF, PTLB_NONE)>;
@@ -1570,7 +1429,6 @@
 			sysmmu,secure-irq;
 			sysmmu,secure_base = <0x1D880000>;
 			power-domains = <&pd_gse>;
-			s2mpus = <&s2mpu_s0_gse>;
 			port-name = "GSE";
 			#iommu-cells = <0>;
 			pmmu0,default_stream = <STR_CFG(STR_SPTLB(0x09, 0x00), S2_EN, BL1, PREF_ASC, STLB_PREF, PTLB_PREF)>;
@@ -1625,7 +1483,6 @@
 			sysmmu,secure-irq;
 			sysmmu,secure_base = <0x1A350000>;
 			power-domains = <&pd_tpu>;
-			s2mpus = <&s2mpu_s0_tpu>;
 			port-name = "TPU";
 			#iommu-cells = <0>;
 			pmmu0,default_stream = <STR_CFG(STR_SPTLB(0x00, 0x00), S2_EN, BL1, PREF_ASC, STLB_PREF, PTLB_PREF)>;
@@ -1683,7 +1540,6 @@
 			sysmmu,secure-irq;
 			sysmmu,secure_base = <0x1C880000>;
 			power-domains = <&pd_yuvp>;
-			s2mpus = <&s2mpu_s0_yuvp>;
 			port-name = "YUVP";
 			#iommu-cells = <0>;
 			pmmu0,default_stream = <STR_CFG(STR_SPTLB(0x05, 0x05), S2_EN, BL1, PREF_PRED, STLB_NONE, PTLB_NONE) >;
@@ -1718,7 +1574,6 @@
 			sysmmu,secure-irq;
 			sysmmu,secure_base = <0x1CC90000>;
 			power-domains = <&pd_tnr>;
-			s2mpus = <&s2mpu_s0_tnr>;
 			port-name = "TNR S0";
 			#iommu-cells = <0>;
 			pmmu0,default_stream = <STR_CFG(STR_SPTLB(0x00, 0x04), S2_EN, BL1, PREF_PRED, STLB_PREF, PTLB_PREF)>;
@@ -1779,7 +1634,6 @@
 			sysmmu,secure-irq;
 			sysmmu,secure_base = <0x1CCD0000>;
 			power-domains = <&pd_tnr>;
-			s2mpus = <&s2mpu_s1_tnr>;
 			port-name = "TNR S1";
 			#iommu-cells = <0>;
 			pmmu0,default_stream = <STR_CFG(STR_SPTLB(0x00, 0x00), S2_EN, BL1, PREF_PRED, STLB_PREF, PTLB_NONE)>;
@@ -1845,7 +1699,6 @@
 			sysmmu,secure-irq;
 			sysmmu,secure_base = <0x1CD10000>;
 			power-domains = <&pd_tnr>;
-			s2mpus = <&s2mpu_s2_tnr>;
 			port-name = "TNR S2";
 			#iommu-cells = <0>;
 			pmmu0,default_stream = <STR_CFG(STR_SPTLB(0x00, 0x01), S2_EN, BL8, PREF_PRED, STLB_PREF, PTLB_NONE)>;
@@ -1889,7 +1742,6 @@
 			sysmmu,secure-irq;
 			sysmmu,secure_base = <0x1C4B0000>;
 			power-domains = <&pd_rgbp>;
-			s2mpus = <&s2mpu_s0_rgbp>;
 			port-name = "RGBP S0";
 			#iommu-cells = <0>;
 			pmmu0,default_stream = <STR_CFG(STR_SPTLB(0x00, 0x00), S2_EN, BL1, PREF_PRED, STLB_PREF, PTLB_PREF)>;
@@ -1932,7 +1784,6 @@
 			sysmmu,secure-irq;
 			sysmmu,secure_base = <0x1C4F0000>;
 			power-domains = <&pd_rgbp>;
-			s2mpus = <&s2mpu_s1_rgbp>;
 			port-name = "RGBP S1";
 			#iommu-cells = <0>;
 			pmmu0,default_stream = <STR_CFG(STR_SPTLB(0x00, 0x00), S2_EN, BL32, PREF_PRED, STLB_PREF, PTLB_NONE)>;
@@ -2026,7 +1877,6 @@
 			sysmmu,secure-irq;
 			sysmmu,secure_base = <0x1A480000>;
 			power-domains = <&pd_mfc>;
-			s2mpus = <&s2mpu_s0_mfc>;
 			port-name = "MFC";
 			#iommu-cells = <0>;
 			pmmu0,default_stream = <STR_CFG(STR_SPTLB(0x00, 0x00), S2_EN, BL8, PREF_PRED, STLB_NONE, PTLB_NONE)>;
@@ -2047,7 +1897,6 @@
 			sysmmu,secure-irq;
 			sysmmu,secure_base = <0x1D0B0000>;
 			power-domains = <&pd_mcsc>;
-			s2mpus = <&s2mpu_s0_mcsc>;
 			port-name = "MCSC";
 			#iommu-cells = <0>;
 			pmmu0,default_stream = <STR_CFG(STR_SPTLB(0x00, 0x00), S2_EN, BL1, PREF_PRED, STLB_PREF, PTLB_PREF)>;
@@ -2183,7 +2032,6 @@
 			sysmmu,secure-irq;
 			sysmmu,secure_base = <0x1D4D0000>;
 			power-domains = <&pd_gdc>;
-			s2mpus= <&s2mpu_s0_gdc>;
 			port-name = "GDC";
 			#iommu-cells = <0>;
 			pmmu0,default_stream = <STR_CFG(STR_SPTLB(0x00, 0x00), S2_EN, BL32, PREF_PRED, STLB_PREF, PTLB_NONE)>;
@@ -2287,7 +2135,6 @@
 			sysmmu,secure-irq;
 			sysmmu,secure_base = <0x20A60000>;
 			power-domains = <&pd_aur>;
-			s2mpus = <&s2mpu_s0_aur>;
 			port-name = "AUR";
 			#iommu-cells = <0>;
 			pmmu0,default_stream = <STR_CFG(STR_SPTLB(0x00, 0x00), S2_EN, BL2, PREF_PRED, STLB_PREF, PTLB_PREF)>;
