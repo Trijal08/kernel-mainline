@@ -171,6 +171,23 @@ static u32 lv2ent_offset(sysmmu_iova_t iova)
 #define REG_V7_CAPA1		0x874
 #define REG_V7_CTRL_VM		0x8000
 
+/* v9.x registers (VM0 context) */
+#define REG_V9_CTRL_VM				0x8000
+#define REG_V9_ALL_INV_VM			0x8010
+#define REG_V9_RANGE_INV_START_VPN_VM		0x8020
+#define REG_V9_RANGE_INV_END_VPN_AND_TRIG_VM	0x8024
+#define REG_V9_INT_STATUS_VM			0x8060
+#define REG_V9_INT_CLEAR_VM			0x8064
+#define REG_V9_FAULT_VA_VM			0x8070
+#define REG_V9_FAULT_INFO0_VM			0x8074
+#define REG_V9_CONTEXT0_CFG_FLPT_BASE_VM	0x8404
+#define REG_V9_CONTEXT0_CFG_ATTRIBUTE_VM	0x8408
+
+#define CFG_QOS_OVERRIDE			BIT(11)
+#define CFG_PT_CACHEABLE_SHIFT			16
+#define CFG_PT_CACHEABLE_MASK			GENMASK(19, CFG_PT_CACHEABLE_SHIFT)
+#define CFG_PT_CACHEABLE_NORMAL_NC		(0x2 << CFG_PT_CACHEABLE_SHIFT)
+
 #define has_sysmmu(dev)		(dev_iommu_priv_get(dev) != NULL)
 
 static struct device *dma_dev;
@@ -363,6 +380,29 @@ static int exynos_sysmmu_v7_get_fault_info(struct sysmmu_drvdata *data,
 	return 0;
 }
 
+static int exynos_sysmmu_v9_get_fault_info(struct sysmmu_drvdata *data,
+					   unsigned int itype,
+					   struct sysmmu_fault *fault)
+{
+	static const char * const sysmmu_v9_fault_names[] = {
+		"PTW",
+		"PAGE",
+		"ACCESS PROTECTION",
+		"CONTEXT",
+	};
+	u32 info;
+
+	if (itype >= ARRAY_SIZE(sysmmu_v9_fault_names))
+		return -ENXIO;
+
+	info = readl(SYSMMU_REG(data, fault_info));
+	fault->addr = readl(SYSMMU_REG(data, fault_va));
+	fault->name = sysmmu_v9_fault_names[itype];
+	fault->type = (info & BIT(20)) ? IOMMU_FAULT_WRITE : IOMMU_FAULT_READ;
+
+	return 0;
+}
+
 /* SysMMU v1..v3 */
 static const struct sysmmu_variant sysmmu_v1_variant = {
 	.flush_all	= 0x0c,
@@ -420,6 +460,20 @@ static const struct sysmmu_variant sysmmu_v7_vm_variant = {
 	.get_fault_info	= exynos_sysmmu_v7_get_fault_info,
 };
 
+/* SysMMU v9: VM register layout */
+static const struct sysmmu_variant sysmmu_v9_variant = {
+	.pt_base	= REG_V9_CONTEXT0_CFG_FLPT_BASE_VM,
+	.flush_all	= REG_V9_ALL_INV_VM,
+	.flush_range	= REG_V9_RANGE_INV_END_VPN_AND_TRIG_VM,
+	.flush_start	= REG_V9_RANGE_INV_START_VPN_VM,
+	.int_status	= REG_V9_INT_STATUS_VM,
+	.int_clear	= REG_V9_INT_CLEAR_VM,
+	.fault_va	= REG_V9_FAULT_VA_VM,
+	.fault_info	= REG_V9_FAULT_INFO0_VM,
+
+	.get_fault_info	= exynos_sysmmu_v9_get_fault_info,
+};
+
 static struct exynos_iommu_domain *to_exynos_domain(struct iommu_domain *dom)
 {
 	return container_of(dom, struct exynos_iommu_domain, domain);
@@ -462,6 +516,15 @@ static void __sysmmu_tlb_invalidate_entry(struct sysmmu_drvdata *data,
 			       SYSMMU_REG(data, flush_entry));
 			iova += SPAGE_SIZE;
 		}
+	}
+	if (MMU_MAJ_VER(data->version) >= 9) {
+		/*
+		 * v9 range invalidation encodes VPN in 16-byte units and
+		 * triggers on writing end|1.
+		 */
+		writel((iova & SPAGE_MASK) >> 4, SYSMMU_REG(data, flush_start));
+		writel((((iova & SPAGE_MASK) + (num_inv - 1) * SPAGE_SIZE) >> 4) | 1,
+		       SYSMMU_REG(data, flush_range));
 	} else {
 		writel(iova & SPAGE_MASK, SYSMMU_REG(data, flush_start));
 		writel((iova & SPAGE_MASK) + (num_inv - 1) * SPAGE_SIZE,
@@ -534,13 +597,15 @@ static void __sysmmu_get_version(struct sysmmu_drvdata *data)
 		data->variant = &sysmmu_v1_variant;
 	} else if (MMU_MAJ_VER(data->version) < 7) {
 		data->variant = &sysmmu_v5_variant;
-	} else {
+	} else if (MMU_MAJ_VER(data->version) == 7) {
 		if (__sysmmu_has_capa1(data))
 			__sysmmu_get_vcr(data);
 		if (data->has_vcr)
 			data->variant = &sysmmu_v7_vm_variant;
 		else
 			data->variant = &sysmmu_v7_variant;
+	} else if (MMU_MAJ_VER(data->version) == 9) {
+		data->variant = &sysmmu_v9_variant;
 	}
 
 	__sysmmu_disable_clocks(data);
@@ -609,8 +674,14 @@ static void __sysmmu_disable(struct sysmmu_drvdata *data)
 	clk_enable(data->clk_master);
 
 	spin_lock_irqsave(&data->lock, flags);
-	writel(CTRL_DISABLE, data->sfrbase + REG_MMU_CTRL);
-	writel(0, data->sfrbase + REG_MMU_CFG);
+	if (MMU_MAJ_VER(data->version) == 9) {
+		writel(0, data->sfrbase + REG_V9_CTRL_VM);
+		writel(0, data->sfrbase + REG_V9_CONTEXT0_CFG_FLPT_BASE_VM);
+		__sysmmu_tlb_invalidate(data);
+	} else {
+		writel(CTRL_DISABLE, data->sfrbase + REG_MMU_CTRL);
+		writel(0, data->sfrbase + REG_MMU_CFG);
+	}
 	data->active = false;
 	spin_unlock_irqrestore(&data->lock, flags);
 
@@ -620,6 +691,17 @@ static void __sysmmu_disable(struct sysmmu_drvdata *data)
 static void __sysmmu_init_config(struct sysmmu_drvdata *data)
 {
 	unsigned int cfg;
+
+	if (MMU_MAJ_VER(data->version) == 9) {
+		cfg = readl(data->sfrbase + REG_V9_CONTEXT0_CFG_ATTRIBUTE_VM);
+		cfg &= ~CFG_PT_CACHEABLE_MASK;
+		cfg |= CFG_PT_CACHEABLE_NORMAL_NC;
+		cfg |= CFG_EAP;
+		cfg &= ~CFG_QOS(0xF);
+		cfg |= CFG_QOS_OVERRIDE | CFG_QOS(15);
+		writel(cfg, data->sfrbase + REG_V9_CONTEXT0_CFG_ATTRIBUTE_VM);
+		return;
+	}
 
 	if (data->version <= MAKE_MMU_VER(3, 1))
 		cfg = CFG_LRU | CFG_QOS(15);
@@ -637,6 +719,13 @@ static void __sysmmu_enable_vid(struct sysmmu_drvdata *data)
 {
 	u32 ctrl;
 
+	if (MMU_MAJ_VER(data->version) == 9) {
+		ctrl = readl(data->sfrbase + REG_V9_CTRL_VM);
+		ctrl |= CTRL_VM_ENABLE;
+		writel(ctrl, data->sfrbase + REG_V9_CTRL_VM);
+		return;
+	}
+
 	if (MMU_MAJ_VER(data->version) < 7 || !data->has_vcr)
 		return;
 
@@ -652,11 +741,13 @@ static void __sysmmu_enable(struct sysmmu_drvdata *data)
 	__sysmmu_enable_clocks(data);
 
 	spin_lock_irqsave(&data->lock, flags);
-	writel(CTRL_BLOCK, data->sfrbase + REG_MMU_CTRL);
+	if (!(MMU_MAJ_VER(data->version) == 9))
+		writel(CTRL_BLOCK, data->sfrbase + REG_MMU_CTRL);
 	__sysmmu_init_config(data);
 	__sysmmu_set_ptbase(data, data->pgtable);
 	__sysmmu_enable_vid(data);
-	writel(CTRL_ENABLE, data->sfrbase + REG_MMU_CTRL);
+	if (!(MMU_MAJ_VER(data->version) == 9))
+		writel(CTRL_ENABLE, data->sfrbase + REG_MMU_CTRL);
 	data->active = true;
 	spin_unlock_irqrestore(&data->lock, flags);
 
@@ -752,6 +843,8 @@ static int exynos_sysmmu_probe(struct platform_device *pdev)
 	}
 
 	data->clk = devm_clk_get_optional(dev, "sysmmu");
+	if (IS_ERR(data->clk) && PTR_ERR(data->clk) == -ENOENT)
+		data->clk = devm_clk_get_optional(dev, "gate");
 	if (IS_ERR(data->clk))
 		return PTR_ERR(data->clk);
 
