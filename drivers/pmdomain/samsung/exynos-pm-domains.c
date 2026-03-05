@@ -18,6 +18,16 @@
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/pm_runtime.h>
+#include <linux/arm-smccc.h>
+
+/*
+ * Secure PD transition SMC interface used by newer Exynos/Google SoCs.
+ * "need_smc" DT property carries the secure transition ID.
+ */
+#define EXYNOS_SMC_PREPARE_PD_ONOFF	0x82000410
+#define EXYNOS_GET_IN_PD_DOWN		0
+#define EXYNOS_WAKEUP_PD_DOWN		1
+#define EXYNOS_RUNTIME_PM_TZPC_GROUP	2
 
 struct exynos_pm_domain_config {
 	/* Value for LOCAL_PWR_CFG and STATUS fields for each domain */
@@ -31,17 +41,65 @@ struct exynos_pm_domain {
 	void __iomem *base;
 	struct generic_pm_domain pd;
 	u32 local_pwr_cfg;
+	u32 secure_transition_id;
+	bool needs_secure_transition;
 };
+
+static int exynos_pd_secure_prepare(struct exynos_pm_domain *pd, bool power_on)
+{
+	struct arm_smccc_res res;
+	unsigned long mode = power_on ? EXYNOS_WAKEUP_PD_DOWN :
+				       EXYNOS_GET_IN_PD_DOWN;
+
+	arm_smccc_smc(EXYNOS_SMC_PREPARE_PD_ONOFF, mode,
+		      pd->secure_transition_id, EXYNOS_RUNTIME_PM_TZPC_GROUP,
+		      0, 0, 0, 0, &res);
+
+	return (int)res.a0;
+}
 
 static int exynos_pd_power(struct generic_pm_domain *domain, bool power_on)
 {
 	struct exynos_pm_domain *pd;
 	void __iomem *base;
 	u32 timeout, pwr;
-	char *op;
+	const char *op;
 
 	pd = container_of(domain, struct exynos_pm_domain, pd);
 	base = pd->base;
+
+	if (pd->needs_secure_transition) {
+		int ret = exynos_pd_secure_prepare(pd, power_on);
+		u32 before = readl_relaxed(base + 0x4) & pd->local_pwr_cfg;
+		u32 after;
+
+		if (ret) {
+			pr_err("exynos-pd: %s: secure prepare %s failed: %d\n",
+			       domain->name, power_on ? "on" : "off", ret);
+			return ret;
+		}
+
+		/*
+		 * Secure world applies the transition; poll status to confirm
+		 * whether the local power state actually changed.
+		 */
+		timeout = 10;
+		pwr = power_on ? pd->local_pwr_cfg : 0;
+		after = readl_relaxed(base + 0x4) & pd->local_pwr_cfg;
+		while (after != pwr && timeout--) {
+			cpu_relax();
+			usleep_range(80, 100);
+			after = readl_relaxed(base + 0x4) & pd->local_pwr_cfg;
+		}
+
+		pr_info("exynos-pd: %s: secure power %s status %#x->%#x (%s)\n",
+			domain->name, power_on ? "on" : "off",
+			before, after, after == pwr ? "ok" : "timeout");
+		return 0;
+	}
+
+	op = power_on ? "on" : "off";
+	pr_info("exynos-pd: %s: power %s\n", domain->name, op);
 
 	pwr = power_on ? pd->local_pwr_cfg : 0;
 	writel_relaxed(pwr, base);
@@ -51,7 +109,6 @@ static int exynos_pd_power(struct generic_pm_domain *domain, bool power_on)
 
 	while ((readl_relaxed(base + 0x4) & pd->local_pwr_cfg) != pwr) {
 		if (!timeout) {
-			op = (power_on) ? "enable" : "disable";
 			pr_err("Power domain %s %s failed\n", domain->name, op);
 			return -ETIMEDOUT;
 		}
@@ -107,9 +164,11 @@ static int exynos_pd_probe(struct platform_device *pdev)
 	const struct exynos_pm_domain_config *pm_domain_cfg;
 	struct device *dev = &pdev->dev;
 	struct device_node *np = dev->of_node;
+	struct device_node *parent_np;
 	struct of_phandle_args child, parent;
 	struct exynos_pm_domain *pd;
 	int on, ret;
+	u32 secure_id;
 
 	pm_domain_cfg = of_device_get_match_data(dev);
 	pd = devm_kzalloc(dev, sizeof(*pd), GFP_KERNEL);
@@ -127,6 +186,20 @@ static int exynos_pd_probe(struct platform_device *pdev)
 	pd->pd.power_off = exynos_pd_power_off;
 	pd->pd.power_on = exynos_pd_power_on;
 	pd->local_pwr_cfg = pm_domain_cfg->local_pwr_cfg;
+	ret = of_property_read_u32(np, "need_smc", &secure_id);
+	if (!ret) {
+		pd->needs_secure_transition = true;
+		pd->secure_transition_id = secure_id;
+	}
+	parent_np = of_parse_phandle(np, "power-domains", 0);
+	if (parent_np) {
+		if (!pd->needs_secure_transition &&
+		    !of_property_read_u32(parent_np, "need_smc", &secure_id)) {
+			pd->needs_secure_transition = true;
+			pd->secure_transition_id = secure_id;
+		}
+		of_node_put(parent_np);
+	}
 
 	/*
 	 * Some Samsung platforms with bootloaders turning on the splash-screen
@@ -138,6 +211,8 @@ static int exynos_pd_probe(struct platform_device *pdev)
 		exynos_pd_power_off(&pd->pd);
 
 	on = readl_relaxed(pd->base + 0x4) & pd->local_pwr_cfg;
+	if (pd->needs_secure_transition)
+		on = pd->local_pwr_cfg;
 
 	pm_genpd_init(&pd->pd, NULL, !on);
 	ret = of_genpd_add_provider_simple(np, &pd->pd);
