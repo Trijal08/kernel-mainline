@@ -624,3 +624,31 @@
 	timeout-sec = <30>;
 	status = "okay";
 };
+
+&pcie_0_phy {
+	status = "okay";
+};
+
+&pcie_0 {
+	status = "okay";
+};
+
+&pcie_1_phy {
+	status = "okay";
+};
+
+&pcie_1 {
+	status = "okay";
+
+	ep-device-type = <0x1>;
+	pcie,wlan-gpio = <&gph3 4 0x1>;
+
+	wlan {
+		compatible = "android,bcmdhd_wlan";
+		wl_reg_on = <&gph3 4 0x1>;
+		wl_host_wake = <&gph3 3 0x1>;
+		wl_dev_wake = <&gph3 5 0x1>;
+		ch-num = <0x1>;
+		status = "okay";
+	};
+};
