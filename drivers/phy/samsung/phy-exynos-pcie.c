@@ -10,6 +10,7 @@
 
 #include <linux/io.h>
 #include <linux/mfd/syscon.h>
+#include <linux/of.h>
 #include <linux/of_platform.h>
 #include <linux/platform_device.h>
 #include <linux/phy/phy.h>
@@ -33,6 +34,7 @@
 
 /* PMU PCIE PHY isolation control */
 #define EXYNOS5433_PMU_PCIE_PHY_OFFSET		0x730
+#define ZUMA_PMU_PCIE_PHY_OFFSET		0x3ecc
 
 /* For Exynos pcie phy */
 struct exynos_pcie_phy {
@@ -68,7 +70,6 @@ static int exynos5433_pcie_phy_init(struct phy *phy)
 			   PCIE_REFCLK_MASK, PCIE_REFCLK);
 	regmap_update_bits(ep->fsysreg, PCIE_EXYNOS5433_PHY_GLOBAL_RESET,
 			   PCIE_GLOBAL_RESET, 0);
-
 
 	exynos_pcie_phy_writel(ep->base, 0x11, PCIE_PHY_OFFSET(0x3));
 
@@ -127,15 +128,41 @@ static int exynos5433_pcie_phy_exit(struct phy *phy)
 	return 0;
 }
 
+/* Zuma-specific PHY path: keep minimal and safe (no direct PMA programming). */
+static int zuma_pcie_phy_init(struct phy *phy)
+{
+	struct exynos_pcie_phy *ep = phy_get_drvdata(phy);
+
+	regmap_update_bits(ep->pmureg, ZUMA_PMU_PCIE_PHY_OFFSET, BIT(0), 1);
+	return 0;
+}
+
+static int zuma_pcie_phy_exit(struct phy *phy)
+{
+	struct exynos_pcie_phy *ep = phy_get_drvdata(phy);
+
+	regmap_update_bits(ep->pmureg, ZUMA_PMU_PCIE_PHY_OFFSET, BIT(0), 0);
+	return 0;
+}
+
 static const struct phy_ops exynos5433_phy_ops = {
 	.init		= exynos5433_pcie_phy_init,
 	.exit		= exynos5433_pcie_phy_exit,
 	.owner		= THIS_MODULE,
 };
 
+static const struct phy_ops zuma_phy_ops = {
+	.init		= zuma_pcie_phy_init,
+	.exit		= zuma_pcie_phy_exit,
+	.owner		= THIS_MODULE,
+};
+
 static const struct of_device_id exynos_pcie_phy_match[] = {
 	{
 		.compatible = "samsung,exynos5433-pcie-phy",
+	},
+	{
+		.compatible = "google,zuma-pcie-phy",
 	},
 	{},
 };
@@ -146,6 +173,7 @@ static int exynos_pcie_phy_probe(struct platform_device *pdev)
 	struct exynos_pcie_phy *exynos_phy;
 	struct phy *generic_phy;
 	struct phy_provider *phy_provider;
+	const struct phy_ops *phy_ops = &exynos5433_phy_ops;
 
 	exynos_phy = devm_kzalloc(dev, sizeof(*exynos_phy), GFP_KERNEL);
 	if (!exynos_phy)
@@ -156,20 +184,23 @@ static int exynos_pcie_phy_probe(struct platform_device *pdev)
 		return PTR_ERR(exynos_phy->base);
 
 	exynos_phy->pmureg = syscon_regmap_lookup_by_phandle(dev->of_node,
-							"samsung,pmu-syscon");
+						    "samsung,pmu-syscon");
 	if (IS_ERR(exynos_phy->pmureg)) {
 		dev_err(&pdev->dev, "PMU regmap lookup failed.\n");
 		return PTR_ERR(exynos_phy->pmureg);
 	}
 
 	exynos_phy->fsysreg = syscon_regmap_lookup_by_phandle(dev->of_node,
-							 "samsung,fsys-sysreg");
+						     "samsung,fsys-sysreg");
 	if (IS_ERR(exynos_phy->fsysreg)) {
 		dev_err(&pdev->dev, "FSYS sysreg regmap lookup failed.\n");
 		return PTR_ERR(exynos_phy->fsysreg);
 	}
 
-	generic_phy = devm_phy_create(dev, dev->of_node, &exynos5433_phy_ops);
+	if (of_device_is_compatible(dev->of_node, "google,zuma-pcie-phy"))
+		phy_ops = &zuma_phy_ops;
+
+	generic_phy = devm_phy_create(dev, dev->of_node, phy_ops);
 	if (IS_ERR(generic_phy)) {
 		dev_err(dev, "failed to create PHY\n");
 		return PTR_ERR(generic_phy);
