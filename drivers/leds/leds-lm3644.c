@@ -621,8 +621,7 @@ static const struct regmap_config lm3644_regmap = {
 	.max_register = 0xff,
 };
 
-static int lm3644_probe(struct i2c_client *client,
-			const struct i2c_device_id *id)
+static int lm3644_probe(struct i2c_client *client)
 {
 	struct lm3644 *pchip;
 	int rval;
@@ -664,14 +663,12 @@ static int lm3644_probe(struct i2c_client *client,
 	return 0;
 }
 
-static int lm3644_remove(struct i2c_client *client)
+static void lm3644_remove(struct i2c_client *client)
 {
 	struct lm3644 *pchip = i2c_get_clientdata(client);
 
 	lm3644_df_remove(pchip, DFILE_MAX);
 	lm3644_led_unregister(pchip, ID_MAX);
-
-	return 0;
 }
 
 static const struct i2c_device_id lm3644_id[] = {
