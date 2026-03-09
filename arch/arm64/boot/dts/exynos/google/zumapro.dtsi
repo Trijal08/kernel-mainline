@@ -3791,17 +3791,18 @@
 		};
 
 		cmu_dpu: clock-controller@19400000 {
-			compatible = "google,gs101-cmu-dpu";
-			reg = <0x1c000000 0x10000>;
+			compatible = "google,zuma-cmu-dpu";
+			reg = <0x19400000 0x10000>;
 			#clock-cells = <1>;
 
-			clocks = <&ext_24_5m>,
-				 <&cmu_top CLK_DOUT_CMU_DPU_BUS>;
-			clock-names = "oscclk", "bus";
+			clocks = <&ext_26m>,
+				 <&cmu_top CLK_DOUT_CMU_DPU_BUS>,
+				 <&cmu_top CLK_DOUT_CMU_SHARED0_DIV4>;
+			clock-names = "oscclk", "bus", "dsim";
 			samsung,sysreg = <&sysreg_dpu>;
 		};
 
-		sysreg_dpu: syscon@19420000 {
+		sysreg_cam0: sysreg_dpu: syscon@19420000 {
 			compatible = "google,gs101-dpu-sysreg", "syscon";
 			reg = <0x19420000 0x10000>;
 			clocks = <&cmu_dpu CLK_GOUT_DPU_SYSREG_DPU_PCLK>;
