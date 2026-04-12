@@ -114,8 +114,25 @@
 		compatible = "samsung,s2mpg14-pmic";
 		interrupt-parent = <&gic>;
 		interrupts = <GIC_SPI 75 IRQ_TYPE_LEVEL_HIGH 0>;
+		// interrupts-extended = <&gpa0 75 IRQ_TYPE_LEVEL_HIGH>;
+		gpios = <&gpa9 4 GPIO_ACTIVE_LOW>,		/* SMPL_WARN_R_L */
+			<&gpa10 0 GPIO_ACTIVE_HIGH>,		/* OCP_WARN_CPUCL1_R */
+			<&gpa10 1 GPIO_ACTIVE_HIGH>,		/* OCP_WARN_CPUCL2_R */
+			<&gpa10 2 GPIO_ACTIVE_HIGH>,		/* SOFT_OCP_WARN_CPUCL1_R */
+			<&gpa10 3 GPIO_ACTIVE_HIGH>,		/* SOFT_OCP_WARN_CPUCL2_R */
+			<&gpa9 2 GPIO_ACTIVE_HIGH>,		/* OCP_WARN_TPU_R */
+			<&gpa9 3 GPIO_ACTIVE_HIGH>;		/* SOFT_OCP_WARN_TPU_R */
+		pinctrl-names = "default";
+		pinctrl-0 = <&smpl_warn>;
 		system-power-controller;
 		wakeup-source;
+
+		clocks {
+			compatible = "samsung,s2mpg10-clk";
+			#clock-cells = <1>;
+			clock-output-names = "rtc32k_ap", "peri32k1",
+					     "peri32k2";
+		};
 
 		regulators {
 			m_buck7_reg: buck7m {
@@ -150,8 +167,13 @@
 
 	pmic-2 {
 		compatible = "samsung,s2mpg15-pmic";
-		interrupt-parent = <&gic>;
-		interrupts = <GIC_SPI 76 IRQ_TYPE_LEVEL_HIGH 0>;
+		interrupt-parent = <&gpa0>;
+		interrupts = <1 0 0>, // OCP_WARN_GPU
+			     <1 0 1>; // SOFT_OCP_WARN_GPU
+		// interrupts-extended = <&gpa0 76 IRQ_TYPE_LEVEL_HIGH>;
+		gpios = <&gpp17 0 GPIO_ACTIVE_HIGH>,
+			<&gpp17 1 GPIO_ACTIVE_HIGH>;
+		pinctrl-names = "default";
 		wakeup-source;
 
 		regulators {
@@ -417,15 +439,28 @@
 		samsung,pin-drv = <GS101_PIN_DRV_2_5_MA>;
 	};
 
-	key_voldown: key-voldown-pins {
-		samsung,pins = "gpa4-1";
+	smpl_warn: pmic-int-pins {
+		samsung,pins = "gpa9-4";
 		samsung,pin-function = <GS101_PIN_FUNC_EINT>;
 		samsung,pin-pud = <GS101_PIN_PULL_NONE>;
+	};
+
+	key_power: key-power-pins {
+		samsung,pins = "gpa4-0";
+		samsung,pin-function = <GS101_PIN_FUNC_EINT>;
+		samsung,pin-pud = <GS101_PIN_PULL_UP>;
 		samsung,pin-drv = <GS101_PIN_DRV_2_5_MA>;
 	};
 
 	key_volup: key-volup-pins {
 		samsung,pins = "gpa6-2";
+		samsung,pin-function = <GS101_PIN_FUNC_EINT>;
+		samsung,pin-pud = <GS101_PIN_PULL_NONE>;
+		samsung,pin-drv = <GS101_PIN_DRV_2_5_MA>;
+	};
+
+	key_voldown: key-voldown-pins {
+		samsung,pins = "gpa4-1";
 		samsung,pin-function = <GS101_PIN_FUNC_EINT>;
 		samsung,pin-pud = <GS101_PIN_PULL_NONE>;
 		samsung,pin-drv = <GS101_PIN_DRV_2_5_MA>;
@@ -440,15 +475,6 @@
 
 	if_pmic_int: if-pmic-int-pins {
 		samsung,pins = "gpa8-0";
-		samsung,pin-function = <GS101_PIN_FUNC_EINT>;
-		samsung,pin-pud = <GS101_PIN_PULL_UP>;
-		samsung,pin-drv = <GS101_PIN_DRV_2_5_MA>;
-	};
-};
-
-&pinctrl_gpio_alive {
-	key_power: key-power-pins {
-		samsung,pins = "gpa4-0";
 		samsung,pin-function = <GS101_PIN_FUNC_EINT>;
 		samsung,pin-pud = <GS101_PIN_PULL_UP>;
 		samsung,pin-drv = <GS101_PIN_DRV_2_5_MA>;
