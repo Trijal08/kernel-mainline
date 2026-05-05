@@ -29,8 +29,6 @@
 		framebuffer0: framebuffer-0 {
 			compatible = "simple-framebuffer";
 			memory-region = <&cont_splash_mem>;
-			vci-supply = <&s2mpg10_ldo22m>;
-			vddi-supply = <&s2mpg11_bucka>;
 			/* format properties to be added by actual board */
 			status = "disabled";
 		};
