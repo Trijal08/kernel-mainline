@@ -11,19 +11,13 @@
 
 #include <linux/clk.h>
 #include <linux/delay.h>
-#include <linux/gpio.h>
-#include <linux/gpio/consumer.h>
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
-#include <linux/of.h>
-#include <linux/of_gpio.h>
-#include <linux/mfd/syscon.h>
 #include <linux/pci.h>
 #include <linux/platform_device.h>
 #include <linux/phy/phy.h>
 #include <linux/regulator/consumer.h>
-#include <linux/regmap.h>
 #include <linux/module.h>
 
 #include "pcie-designware.h"
@@ -49,50 +43,18 @@
 #define PCIE_NONSTICKY_RESET		0x024
 #define PCIE_APP_INIT_RESET		0x028
 #define PCIE_APP_LTSSM_ENABLE		0x02c
-#define PCIE_APP_XFER_PENDING		0x074
 #define PCIE_ELBI_RDLH_LINKUP		0x074
-#define PCIE_ELBI_LTSSM_STATE_MASK	0x3f
 #define PCIE_ELBI_XMLH_LINKUP		BIT(4)
 #define PCIE_ELBI_LTSSM_ENABLE		0x1
 #define PCIE_ELBI_SLV_AWMISC		0x11c
 #define PCIE_ELBI_SLV_ARMISC		0x120
 #define PCIE_ELBI_SLV_DBI_ENABLE	BIT(21)
-#define PCIE_LINKDOWN_RST_CTRL_SEL	0x3a0
-#define PCIE_LINKDOWN_RST_MANUAL	BIT(1)
-#define PCIE_QCH_SEL			0x3a8
-#define CLOCK_GATING_PMU_MASK		(0xf << 8)
-#define CLOCK_GATING_APB_MASK		(0xf << 4)
-#define CLOCK_GATING_AXI_MASK		(0xf << 0)
-#define PCIE_APP_REQ_EXIT_L1_MODE	0x3bc
-#define APP_REQ_EXIT_L1_MODE		BIT(0)
-#define L1_REQ_NAK_CONTROL_MASTER	BIT(4)
-#define PCIE_MSTR_PEND_SEL_NAK		0x474
-#define NACK_ENABLE			0x1
-#define PCIE_DBI_L1_EXIT_DISABLE	0x1078
-#define DBI_L1_EXIT_DISABLE		0x1
-#define ZUMA_WLAN_PWR_DELAY_US		100000
-#define ZUMA_WLAN_OFF_DELAY_US		20000
-#define EP_BCM_WIFI			0x1
-#define ZUMA_LINKUP_POLL_MAX		5000
-#define ZUMA_LINKUP_RETRY_MAX		3
-#define ZUMA_PMU_LINKUP_REQ_MASK	BIT(10)
-#define ZUMA_UDBG_LINK_CTRL		0xC800
 
 struct exynos_pcie {
 	struct dw_pcie			pci;
 	struct clk_bulk_data		*clks;
 	struct phy			*phy;
 	struct regulator_bulk_data	supplies[2];
-	struct regmap			*pmureg;
-	void __iomem			*udbg_base;
-	struct gpio_desc		*perst_gpio;
-	u32				perst_delay_us;
-	u32				ip_ver;
-	u32				pmu_offset;
-	u32				ch_num;
-	u32				ep_device_type;
-	int				wlan_gpio;
-	bool				is_zuma;
 };
 
 static void exynos_pcie_writel(void __iomem *base, u32 val, u32 reg)
@@ -103,60 +65,6 @@ static void exynos_pcie_writel(void __iomem *base, u32 val, u32 reg)
 static u32 exynos_pcie_readl(void __iomem *base, u32 reg)
 {
 	return readl(base + reg);
-}
-
-static void exynos_pcie_zuma_pre_ltssm(struct exynos_pcie *ep)
-{
-	struct dw_pcie *pci = &ep->pci;
-	u32 val;
-
-	if (ep->pmureg)
-		regmap_update_bits(ep->pmureg, ep->pmu_offset,
-				   ZUMA_PMU_LINKUP_REQ_MASK,
-				   ZUMA_PMU_LINKUP_REQ_MASK);
-
-	if (ep->udbg_base) {
-		if (ep->ch_num == 0) {
-			val = readl(ep->udbg_base + ZUMA_UDBG_LINK_CTRL);
-			val &= ~(0x3 << 5);
-			writel(val, ep->udbg_base + ZUMA_UDBG_LINK_CTRL);
-		} else {
-			writel(0x421, ep->udbg_base + ZUMA_UDBG_LINK_CTRL);
-		}
-	}
-
-	val = exynos_pcie_readl(pci->elbi_base, PCIE_APP_REQ_EXIT_L1_MODE);
-	val |= APP_REQ_EXIT_L1_MODE | L1_REQ_NAK_CONTROL_MASTER;
-	exynos_pcie_writel(pci->elbi_base, val, PCIE_APP_REQ_EXIT_L1_MODE);
-
-	exynos_pcie_writel(pci->elbi_base, PCIE_LINKDOWN_RST_MANUAL,
-			   PCIE_LINKDOWN_RST_CTRL_SEL);
-	exynos_pcie_writel(pci->elbi_base, 0x1, PCIE_APP_XFER_PENDING);
-
-	val = exynos_pcie_readl(pci->elbi_base, PCIE_QCH_SEL);
-	if (ep->ip_ver >= 0x889500)
-		val &= ~(CLOCK_GATING_PMU_MASK |
-			 CLOCK_GATING_APB_MASK |
-			 CLOCK_GATING_AXI_MASK);
-	exynos_pcie_writel(pci->elbi_base, val, PCIE_QCH_SEL);
-
-	exynos_pcie_writel(pci->elbi_base, NACK_ENABLE, PCIE_MSTR_PEND_SEL_NAK);
-	exynos_pcie_writel(pci->elbi_base, DBI_L1_EXIT_DISABLE,
-			   PCIE_DBI_L1_EXIT_DISABLE);
-}
-
-static void exynos_pcie_zuma_post_link(struct exynos_pcie *ep)
-{
-	exynos_pcie_writel(ep->pci.elbi_base, 0x0, PCIE_APP_XFER_PENDING);
-}
-
-static void exynos_pcie_zuma_prepare_retry(struct exynos_pcie *ep)
-{
-	int ret;
-
-	ret = phy_reset(ep->phy);
-	if (ret)
-		dev_dbg(ep->pci.dev, "zuma phy_reset failed: %d\n", ret);
 }
 
 static void exynos_pcie_sideband_dbi_w_mode(struct exynos_pcie *ep, bool on)
@@ -214,77 +122,13 @@ static void exynos_pcie_deassert_core_reset(struct exynos_pcie *ep)
 
 static int exynos_pcie_start_link(struct dw_pcie *pci)
 {
-	struct exynos_pcie *ep = to_exynos_pcie(pci);
 	u32 val;
-	int attempt, poll;
-
-	if (ep->is_zuma)
-		exynos_pcie_zuma_pre_ltssm(ep);
-
-	if (ep->is_zuma && ep->ep_device_type == EP_BCM_WIFI &&
-	    gpio_is_valid(ep->wlan_gpio)) {
-		gpio_set_value(ep->wlan_gpio, 0);
-		usleep_range(ZUMA_WLAN_OFF_DELAY_US, ZUMA_WLAN_OFF_DELAY_US + 5000);
-		gpio_set_value(ep->wlan_gpio, 1);
-		usleep_range(ZUMA_WLAN_PWR_DELAY_US, ZUMA_WLAN_PWR_DELAY_US + 10000);
-		dev_info(pci->dev, "zuma wlan power-cycled, gpio=%d state=%d\n",
-			 ep->wlan_gpio, gpio_get_value(ep->wlan_gpio));
-	}
-
-	if (ep->is_zuma && ep->ep_device_type == EP_BCM_WIFI) {
-		for (attempt = 0; attempt < ZUMA_LINKUP_RETRY_MAX; attempt++) {
-			if (attempt > 0) {
-				exynos_pcie_writel(pci->elbi_base, 0,
-						   PCIE_APP_LTSSM_ENABLE);
-				if (ep->perst_gpio)
-					gpiod_set_raw_value_cansleep(ep->perst_gpio, 0);
-				usleep_range(2000, 3000);
-			}
-
-			exynos_pcie_zuma_prepare_retry(ep);
-			exynos_pcie_zuma_pre_ltssm(ep);
-
-			if (ep->perst_gpio) {
-				gpiod_set_raw_value_cansleep(ep->perst_gpio, 1);
-				usleep_range(ep->perst_delay_us,
-					     ep->perst_delay_us + 2000);
-			}
-
-			val = exynos_pcie_readl(pci->elbi_base, PCIE_SW_WAKE);
-			val &= ~PCIE_BUS_EN;
-			exynos_pcie_writel(pci->elbi_base, val, PCIE_SW_WAKE);
-
-			exynos_pcie_writel(pci->elbi_base, PCIE_ELBI_LTSSM_ENABLE,
-					   PCIE_APP_LTSSM_ENABLE);
-
-			for (poll = 0; poll < ZUMA_LINKUP_POLL_MAX; poll++) {
-				val = exynos_pcie_readl(pci->elbi_base,
-							PCIE_ELBI_RDLH_LINKUP);
-				if (val & PCIE_ELBI_XMLH_LINKUP)
-					return 0;
-				usleep_range(10, 12);
-			}
-
-			dev_info(pci->dev,
-				 "zuma link retry %d failed (ltssm=0x%x, perst=%d, wlan=%d)\n",
-				 attempt + 1,
-				 exynos_pcie_readl(pci->elbi_base,
-						   PCIE_ELBI_RDLH_LINKUP) &
-				 PCIE_ELBI_LTSSM_STATE_MASK,
-				 ep->perst_gpio ? gpiod_get_raw_value(ep->perst_gpio) : -1,
-				 gpio_is_valid(ep->wlan_gpio) ?
-				 gpio_get_value(ep->wlan_gpio) : -1);
-		}
-
-		dev_warn(pci->dev, "zuma link did not come up after %d attempts\n",
-			 ZUMA_LINKUP_RETRY_MAX);
-		return 0;
-	}
 
 	val = exynos_pcie_readl(pci->elbi_base, PCIE_SW_WAKE);
 	val &= ~PCIE_BUS_EN;
 	exynos_pcie_writel(pci->elbi_base, val, PCIE_SW_WAKE);
 
+	/* assert LTSSM enable */
 	exynos_pcie_writel(pci->elbi_base, PCIE_ELBI_LTSSM_ENABLE,
 			  PCIE_APP_LTSSM_ENABLE);
 	return 0;
@@ -293,6 +137,7 @@ static int exynos_pcie_start_link(struct dw_pcie *pci)
 static void exynos_pcie_clear_irq_pulse(struct exynos_pcie *ep)
 {
 	struct dw_pcie *pci = &ep->pci;
+
 	u32 val = exynos_pcie_readl(pci->elbi_base, PCIE_IRQ_PULSE);
 
 	exynos_pcie_writel(pci->elbi_base, val, PCIE_IRQ_PULSE);
@@ -309,6 +154,7 @@ static irqreturn_t exynos_pcie_irq_handler(int irq, void *arg)
 static void exynos_pcie_enable_irq_pulse(struct exynos_pcie *ep)
 {
 	struct dw_pcie *pci = &ep->pci;
+
 	u32 val = IRQ_INTA_ASSERT | IRQ_INTB_ASSERT |
 		  IRQ_INTC_ASSERT | IRQ_INTD_ASSERT;
 
@@ -383,8 +229,10 @@ static int exynos_pcie_host_init(struct dw_pcie_rp *pp)
 	pp->bridge->ops = &exynos_pci_ops;
 
 	exynos_pcie_assert_core_reset(ep);
+
 	phy_init(ep->phy);
 	phy_power_on(ep->phy);
+
 	exynos_pcie_deassert_core_reset(ep);
 	exynos_pcie_enable_irq_pulse(ep);
 
@@ -396,7 +244,7 @@ static const struct dw_pcie_host_ops exynos_pcie_host_ops = {
 };
 
 static int exynos_add_pcie_port(struct exynos_pcie *ep,
-				struct platform_device *pdev)
+				       struct platform_device *pdev)
 {
 	struct dw_pcie *pci = &ep->pci;
 	struct dw_pcie_rp *pp = &pci->pp;
@@ -423,9 +271,6 @@ static int exynos_add_pcie_port(struct exynos_pcie *ep,
 		return ret;
 	}
 
-	if (ep->is_zuma)
-		exynos_pcie_zuma_post_link(ep);
-
 	return 0;
 }
 
@@ -441,7 +286,6 @@ static int exynos_pcie_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct exynos_pcie *ep;
 	struct device_node *np = dev->of_node;
-	u32 perst_delay_us;
 	int ret;
 
 	ep = devm_kzalloc(dev, sizeof(*ep), GFP_KERNEL);
@@ -450,68 +294,6 @@ static int exynos_pcie_probe(struct platform_device *pdev)
 
 	ep->pci.dev = dev;
 	ep->pci.ops = &dw_pcie_ops;
-	ep->is_zuma = of_device_is_compatible(np, "google,zuma-pcie");
-	ep->perst_delay_us = 20000;
-	ep->pmu_offset = 0;
-	ep->ch_num = 0;
-	ep->ep_device_type = 0;
-	ep->wlan_gpio = -EINVAL;
-	ep->pmureg = NULL;
-	ep->udbg_base = NULL;
-	of_property_read_u32(np, "ip-ver", &ep->ip_ver);
-	of_property_read_u32(np, "pmu-offset", &ep->pmu_offset);
-	of_property_read_u32(np, "ch-num", &ep->ch_num);
-	of_property_read_u32(np, "ep-device-type", &ep->ep_device_type);
-
-	if (ep->is_zuma &&
-	    !of_property_read_u32(np, "perst-delay-us", &perst_delay_us))
-		ep->perst_delay_us = perst_delay_us;
-
-	if (ep->is_zuma) {
-		struct resource *res;
-
-		ep->perst_gpio = devm_gpiod_get_optional(dev, NULL, GPIOD_ASIS);
-		if (IS_ERR(ep->perst_gpio))
-			return dev_err_probe(dev, PTR_ERR(ep->perst_gpio),
-					     "failed to get PERST gpio\n");
-		if (ep->perst_gpio) {
-			ret = gpiod_direction_output_raw(ep->perst_gpio, 0);
-			if (ret)
-				return dev_err_probe(dev, ret,
-						     "failed to set PERST gpio direction\n");
-		}
-
-		ep->pmureg = syscon_regmap_lookup_by_phandle(np, "samsung,pmu-syscon");
-		if (IS_ERR(ep->pmureg))
-			return dev_err_probe(dev, PTR_ERR(ep->pmureg),
-					     "failed to lookup pmu syscon\n");
-
-		res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "udbg");
-		if (res) {
-			ep->udbg_base = devm_ioremap_resource(dev, res);
-			if (IS_ERR(ep->udbg_base))
-				return PTR_ERR(ep->udbg_base);
-		}
-
-		if (ep->ep_device_type == EP_BCM_WIFI) {
-			ep->wlan_gpio = of_get_named_gpio(np, "pcie,wlan-gpio", 0);
-			if (ep->wlan_gpio == -EPROBE_DEFER)
-				return dev_err_probe(dev, -EPROBE_DEFER,
-						     "wlan gpio provider not ready\n");
-			if (gpio_is_valid(ep->wlan_gpio)) {
-				ret = devm_gpio_request_one(dev, ep->wlan_gpio,
-							    GPIOF_OUT_INIT_LOW, "pcie_wlan");
-				if (ret)
-					return dev_err_probe(dev, ret,
-							     "failed to request wlan gpio\n");
-			}
-		}
-
-		dev_info(dev,
-			 "zuma mode enabled (ch=%u ip-ver=0x%x, ep-device-type=%u, pmu-offset=0x%x, perst-delay-us=%u, wlan-gpio=%d)\n",
-			 ep->ch_num, ep->ip_ver, ep->ep_device_type,
-			 ep->pmu_offset, ep->perst_delay_us, ep->wlan_gpio);
-	}
 
 	ep->phy = devm_of_phy_get(dev, np, NULL);
 	if (IS_ERR(ep->phy))
@@ -594,7 +376,6 @@ static const struct dev_pm_ops exynos_pcie_pm_ops = {
 };
 
 static const struct of_device_id exynos_pcie_of_match[] = {
-	{ .compatible = "google,zuma-pcie", },
 	{ .compatible = "samsung,exynos5433-pcie", },
 	{ },
 };
