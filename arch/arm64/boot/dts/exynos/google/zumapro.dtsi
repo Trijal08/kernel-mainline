@@ -665,7 +665,7 @@
 		compatible = "simple-bus";
 		#address-cells = <1>;
 		#size-cells = <1>;
-		ranges = <0x0 0x0 0x0 0x80000000>;
+		ranges = <0x0 0x0 0x0 0x40000000>;
 		pd_g3d: pd-g3d@15461A80 {
 			compatible = "samsung,exynos5433-pd";
 			reg = <0x15461A80 0x20>;
@@ -1877,44 +1877,6 @@
 			port-name = "HSI0";
 			#iommu-cells = <0>;
 			pmmu0,default_stream = <STR_CFG(STR_SPTLB(0x00, 0x00), S2_EN, BL1, PREF_PRED, STLB_NONE, PTLB_NONE)>;
-		};
-
-		sysmmu_hsi1: iommu@12060000 {
-			compatible = "samsung,exynos-sysmmu", "samsung,pcie-sysmmu";
-			reg = <0x12060000 0x10000>;
-
-			clocks = <&ext_24_5m>;
-			clock-names = "sysmmu";
-
-			interrupts = <0 424 IRQ_TYPE_LEVEL_HIGH 0>;
-
-			qos = <15>;
-
-			port-name = "PCIe_CH0";
-			hsi-block-num = <1>;
-			pcie-vid-num = <0>;
-			#iommu-cells = <0>;
-			ignore-tlb-inval = <1>;
-			use-map-once = "false";
-		};
-
-		sysmmu_hsi2: iommu@131c0000 {
-			compatible = "samsung,exynos-sysmmu", "samsung,pcie-sysmmu";
-			reg = <0x131c0000 0x10000>;
-
-			clocks = <&ext_24_5m>;
-			clock-names = "sysmmu";
-
-			interrupts = <0 458 IRQ_TYPE_LEVEL_HIGH 0>;
-
-			qos = <15>;
-
-			port-name = "PCIe_CH1";
-			hsi-block-num = <2>;
-			pcie-vid-num = <1>;
-			#iommu-cells = <0>;
-			ignore-tlb-inval = <1>;
-			use-map-once = "false";
 		};
 
 		sysmmu_gsa: iommu@16440000 {
@@ -3280,12 +3242,6 @@
 			clocks = <&cmu_hsi0 CLK_GOUT_HSI0_SYSREG_HSI0_PCLK>;
 		};
 
-		sysreg_hsi1: syscon@12020000 {
-			compatible = "google,gs101-hsi0-sysreg", "syscon";
-			reg = <0x12020000 0x10000>;
-			clocks = <&cmu_hsi0 CLK_GOUT_HSI0_SYSREG_HSI0_PCLK>;
-		};
-
 		usbdrd31_phy: phy@11100000 {
 			compatible = "google,gs101-usb31drd-phy";
 			reg = <0x11100000 0x0200>,
@@ -3806,144 +3762,6 @@
 			compatible = "google,gs101-dpu-sysreg", "syscon";
 			reg = <0x19420000 0x10000>;
 			clocks = <&cmu_dpu CLK_GOUT_DPU_SYSREG_DPU_PCLK>;
-		};
-
-		/* HSI1 GEN3A_0 */
-		pcie_0_phy: pcie-phy@12140000 {
-			compatible = "google,zuma-pcie-phy";
-			reg = <0x12140000 0x3000>;
-			samsung,pmu-syscon = <&pmu_system_controller>;
-			samsung,fsys-sysreg = <&sysreg_hsi1>;
-			#phy-cells = <0>;
-
-			status = "disabled";
-		};
-
-		/* HSI1 GEN3A_0 */
-		pcie_0:	pcie@12100000 {
-			compatible = "google,zuma-pcie", "samsung,exynos5433-pcie";
-			gpios = <&gph0 0 0x1 /* PERST */>;
-			reg =  <0x12100000 0x2000	/* elbi base */
-				0x12110000 0x5000   /* soc base */
-				0x12130000 0xD000   /* udbg base */
-				0x12140000 0x3000	/* phy base */
-				0x12020000 0x2000	/* sysreg base */
-				0x12400000 0x381000	/* DBI base */
-				0x12120000 0x5000	/* phy pcs base */
-				0x40FFE000 0x2000	/* configuration space */
-				0x12170000 0x1000>;	/* I/A space */
-			reg-names = "elbi", "soc", "udbg", "phy", "sysreg", "dbi", "pcs", "config", "ia";
-			interrupts = <GIC_SPI 414 IRQ_TYPE_LEVEL_HIGH 0>,
-				     <GIC_SPI 416 IRQ_TYPE_LEVEL_HIGH 0>,
-				     <GIC_SPI 417 IRQ_TYPE_LEVEL_HIGH 0>,
-				     <GIC_SPI 418 IRQ_TYPE_LEVEL_HIGH 0>,
-				     <GIC_SPI 419 IRQ_TYPE_LEVEL_HIGH 0>,
-				     <GIC_SPI 420 IRQ_TYPE_LEVEL_HIGH 0>;
-			interrupt-names = "msi";
-			samsung,pmu-syscon = <&pmu_system_controller>;
-			pinctrl-names = "active";
-			pinctrl-0 = <&pcie0_clkreq &pcie0_perst>;
-			device_type = "pci";
-			#address-cells = <3>;
-			#size-cells = <2>;
-			bus-range = <0x00 0xff>;
-			/* non-prefetchable memory */
-			ranges = <0x82000000 0 0x40000000 0x40000000 0 0x00FF0000>;
-			ip-ver = <0x987500>;	/* zuma pro*/
-			num-lanes = <2>;
-			ch-num = <0>;
-			pcie-clk-num = <0>;
-			phy-clk-num = <0>;
-			pcie-pm-qos-int = <200000>;
-			separated-msi = <1>;
-			use-cache-coherency = "false";
-			use-pcieon-sleep = "false";
-			use-msi = "false";
-			support-msi64-addressing = "false";
-			use-sicd = "false";
-			use-sysmmu = "false";
-			use-ia = "false";
-			use-l1ss = "false";
-			pmu-offset = <0x3ec4>;
-			perst-delay-us = <20000>;
-			max-link-speed = <3>;
-
-			phys = <&pcie_0_phy>;
-			status = "disabled";
-		};
-
-		pcie_1_phy: pcie-phy@13160000 {
-			compatible = "google,zuma-pcie-phy";
-			reg = <0x13160000 0x3000>;
-			samsung,pmu-syscon = <&pmu_system_controller>;
-			samsung,fsys-sysreg = <&sysreg_hsi2>;
-			#phy-cells = <0>;
-
-			status = "disabled";
-		};
-
-		/* HSI2 GEN3A_1 */
-		pcie_1:	pcie@13120000 {
-			compatible = "google,zuma-pcie", "samsung,exynos5433-pcie";
-			gpios = <&gph3 0 0x1 /* PERST */>;
-			reg = <0x13120000 0x2000	/* elbi base */
-			       0x13130000 0x5000	/* soc base */
-			       0x13150000 0xD000	/* udbg base */
-			       0x13160000 0x3000	/* phy base */
-			       0x13020000 0x2000	/* sysreg base */
-			       0x13400000 0x381000	/* DBI base */
-			       0x13140000 0x5000	/* phy pcs base */
-			       0x60FFE000 0x2000	/* configuration space */
-			       0x13100000 0x1000>;	/* I/A space */
-			reg-names = "elbi", "soc", "udbg", "phy", "sysreg",
-				    "dbi", "pcs", "config", "ia";
-			interrupts = <GIC_SPI 439 IRQ_TYPE_LEVEL_HIGH 0>,
-				     <GIC_SPI 441 IRQ_TYPE_LEVEL_HIGH 0>,
-				     <GIC_SPI 442 IRQ_TYPE_LEVEL_HIGH 0>,
-				     <GIC_SPI 443 IRQ_TYPE_LEVEL_HIGH 0>,
-				     <GIC_SPI 444 IRQ_TYPE_LEVEL_HIGH 0>,
-				     <GIC_SPI 445 IRQ_TYPE_LEVEL_HIGH 0>;
-			interrupt-names = "msi";
-			#interrupt-cells = <1>;
-			interrupt-map-mask = <0 0 0 0>;
-			interrupt-map = <0 0 0 0 &gic GIC_SPI 439 IRQ_TYPE_LEVEL_HIGH 0>;
-			samsung,pmu-syscon = <&pmu_system_controller>;
-			pinctrl-names = "active";
-			pinctrl-0 = <&pcie1_clkreq &pcie1_perst
-				     &pcie1_wlan_host_wake
-				     &pcie1_wlan_reg_on
-				     &pcie1_wlan_dev_wake>;
-			device_type = "pci";
-			#address-cells = <3>;
-			#size-cells = <2>;
-			bus-range = <0x00 0xff>;
-			/* non-prefetchable memory */
-			ranges = <0x82000000 0 0x60000000 0x60000000 0 0x00FF0000>;
-			ip-ver = <0x987500>;
-			num-lanes = <1>;
-			ch-num = <1>;
-			pcie-clk-num = <0>;
-			phy-clk-num = <0>;
-			pcie-pm-qos-int = <200000>;
-			separated-msi = <1>;
-			use-cache-coherency = "false";
-			use-pcieon-sleep = "false";
-			use-msi = "true";
-			support-msi64-addressing = "false";
-			use-sicd = "true";
-			use-sysmmu = "false";
-			use-ia = "false";
-			use-l1ss = "true";
-			pmu-offset = <0x3ec8>;
-			ep-device-type = <0x1>;
-			perst-delay-us = <15000>;
-			pcie,wlan-gpio = <&gph3 4 0x1>;
-			max-link-speed = <3>;
-			customized-de-emphasis = "false";
-			de-emphasis-value = <0>;
-
-			phys = <&pcie_1_phy>;
-			status = "disabled";
 		};
 
 		cmu_top: clock-controller@26040000 {
