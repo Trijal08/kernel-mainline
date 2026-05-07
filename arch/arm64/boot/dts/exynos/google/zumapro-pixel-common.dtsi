@@ -359,7 +359,7 @@
 
 		pinctrl-0 = <&if_pmic_fg_int>;
 		pinctrl-names = "default";
-		interrupts-extended = <&gpa9 3 IRQ_TYPE_LEVEL_LOW>;
+		interrupts-extended = <&gpa7 7 IRQ_TYPE_LEVEL_LOW>;
 
 		shunt-resistor-micro-ohms = <5000>;
 	};
