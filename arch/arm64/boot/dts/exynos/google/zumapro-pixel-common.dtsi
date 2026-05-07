@@ -354,14 +354,14 @@
 	};
 
 	fuel-gauge@36 {
-		compatible = "maxim,max77759-fg";
+		compatible = "maxim,max77759-fg", "google,zuma-fuel-gauge";
 		reg = <0x36>;
 
 		pinctrl-0 = <&if_pmic_fg_int>;
 		pinctrl-names = "default";
 		interrupts-extended = <&gpa7 7 IRQ_TYPE_LEVEL_LOW>;
 
-		shunt-resistor-micro-ohms = <5000>;
+		shunt-resistor-micro-ohms = <10000>;
 	};
 
 	pmic@66 {
