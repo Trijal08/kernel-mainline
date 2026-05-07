@@ -305,14 +305,21 @@ static int max17042_get_property(struct power_supply *psy,
 			return ret;
 
 		val->intval = data >> 8;
-		val->intval *= 20000; /* Units of LSB = 20mV */
+		if (of_device_is_compatible(chip->dev->of_node, "google,zuma-fuel-gauge"))
+			val->intval *= 17187; /* Corrects ~5.1V back to ~4.4V */
+		else
+			val->intval *= 20000; /* Units of LSB = 20mV */
 		break;
 	case POWER_SUPPLY_PROP_VOLTAGE_MIN:
 		ret = regmap_read(map, MAX17042_MinMaxVolt, &data);
 		if (ret < 0)
 			return ret;
 
-		val->intval = (data & 0xff) * 20000; /* Units of 20mV */
+		val->intval = (data & 0xff);
+		if (of_device_is_compatible(chip->dev->of_node, "google,zuma-fuel-gauge"))
+			val->intval *= 17187;
+		else
+			val->intval *= 20000; /* Units of 20mV */
 		break;
 	case POWER_SUPPLY_PROP_VOLTAGE_MIN_DESIGN:
 		if (chip->chip_type == MAXIM_DEVICE_TYPE_MAX17042)
@@ -323,28 +330,51 @@ static int max17042_get_property(struct power_supply *psy,
 			return ret;
 
 		val->intval = data >> 7;
-		val->intval *= 10000; /* Units of LSB = 10mV */
+		if (of_device_is_compatible(chip->dev->of_node, "google,zuma-fuel-gauge"))
+			val->intval *= 12500; /* Align Zuma V_Empty LSB (12.5mV) */
+		else
+			val->intval *= 10000; /* Units of LSB = 10mV */
 		break;
 	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
 		ret = regmap_read(map, MAX17042_VCELL, &data);
 		if (ret < 0)
 			return ret;
 
-		val->intval = data * MAX17042_VOLTAGE_LSB;
+		if (of_device_is_compatible(chip->dev->of_node, "google,zuma-fuel-gauge"))
+			val->intval = data * 1250;
+		else
+			val->intval = data * 625 / 8;
 		break;
 	case POWER_SUPPLY_PROP_VOLTAGE_AVG:
 		ret = regmap_read(map, MAX17042_AvgVCELL, &data);
 		if (ret < 0)
 			return ret;
 
-		val->intval = data * MAX17042_VOLTAGE_LSB;
+		/*
+		 * Pixel 9 (Zuma Pro) uses 1.25mV per LSB.
+		 * Standard MAX17042 uses 78.125uV (625 / 8).
+		 */
+		if (of_device_is_compatible(chip->dev->of_node, "google,zuma-fuel-gauge"))
+			val->intval = data * 1250;
+		else
+			val->intval = data * 625 / 8;
 		break;
 	case POWER_SUPPLY_PROP_VOLTAGE_OCV:
-		ret = regmap_read(map, MAX17042_OCVInternal, &data);
+		/* Use appropriate register based on psp */
+		if (psp == POWER_SUPPLY_PROP_VOLTAGE_NOW)
+			ret = regmap_read(map, MAX17042_VCELL, &data);
+		else if (psp == POWER_SUPPLY_PROP_VOLTAGE_AVG)
+			ret = regmap_read(map, MAX17042_AvgVCELL, &data);
+		else
+			ret = regmap_read(map, MAX17042_OCVInternal, &data);
+
 		if (ret < 0)
 			return ret;
 
-		val->intval = data * MAX17042_VOLTAGE_LSB;
+		if (of_device_is_compatible(chip->dev->of_node, "google,zuma-fuel-gauge"))
+			val->intval = data * 1250;
+		else
+			val->intval = data * 625 / 8;
 		break;
 	case POWER_SUPPLY_PROP_CAPACITY:
 		if (chip->enable_current_sense)
@@ -354,14 +384,24 @@ static int max17042_get_property(struct power_supply *psy,
 		if (ret < 0)
 			return ret;
 
-		val->intval = data >> 8;
+		/* Pixel 9 (Zuma Pro) uses a 0.5% LSB, requiring a 9-bit shift */
+		if (of_device_is_compatible(chip->dev->of_node, "google,zuma-fuel-gauge"))
+			val->intval = data >> 9;
+		else
+			val->intval = data >> 8; /* Standard for Pixel 6 and others */
+
 		break;
 	case POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN:
 		ret = regmap_read(map, MAX17042_DesignCap, &data);
 		if (ret < 0)
 			return ret;
 
-		data64 = data * MAX17042_CAPACITY_LSB;
+		data64 = data;
+		if (of_device_is_compatible(chip->dev->of_node, "google,zuma-fuel-gauge"))
+			data64 *= 50000000ll; // 10x higher for Zuma scaling
+		else
+			data64 *= 5000000ll;
+
 		data64 *= chip->task_period;
 		do_div(data64, MAX17042_DEFAULT_TASK_PERIOD);
 		do_div(data64, chip->r_sns);
@@ -372,7 +412,12 @@ static int max17042_get_property(struct power_supply *psy,
 		if (ret < 0)
 			return ret;
 
-		data64 = data * MAX17042_CAPACITY_LSB;
+		data64 = data;
+		if (of_device_is_compatible(chip->dev->of_node, "google,zuma-fuel-gauge"))
+			data64 *= 50000000ll; // 10x higher for Zuma scaling
+		else
+			data64 *= 5000000ll;
+
 		data64 *= chip->task_period;
 		do_div(data64, MAX17042_DEFAULT_TASK_PERIOD);
 		do_div(data64, chip->r_sns);
@@ -383,7 +428,12 @@ static int max17042_get_property(struct power_supply *psy,
 		if (ret < 0)
 			return ret;
 
-		data64 = data * MAX17042_CAPACITY_LSB;
+		data64 = data;
+		if (of_device_is_compatible(chip->dev->of_node, "google,zuma-fuel-gauge"))
+			data64 *= 50000000ll; // 10x higher for Zuma scaling
+		else
+			data64 *= 5000000ll;
+
 		data64 *= chip->task_period;
 		do_div(data64, MAX17042_DEFAULT_TASK_PERIOD);
 		do_div(data64, chip->r_sns);
@@ -438,8 +488,17 @@ static int max17042_get_property(struct power_supply *psy,
 			if (ret < 0)
 				return ret;
 
-			data64 = sign_extend64(data, 15) * MAX17042_CURRENT_LSB;
-			val->intval = div_s64(data64, chip->r_sns);
+			data64 = sign_extend64(data, 15);
+			/* Apply the correct multiplier BEFORE the division */
+			if (of_device_is_compatible(chip->dev->of_node, "google,zuma-fuel-gauge")) {
+				/* Pixel 9 (Zuma) needs 10x smaller multiplier than older chips */
+				data64 *= 156250ll;
+			} else {
+				/* Standard multiplier for Pixel 6 / MAX17042 */
+				data64 *= 1562500ll;
+			}
+
+			val->intval = div_s64(data64, chip->pdata->r_sns);
 		} else {
 			return -EINVAL;
 		}
@@ -1402,7 +1461,7 @@ static const struct regmap_config max77759_fg_regmap_cfg = {
 	.max_register = 0xff,
 	.wr_table = &max77759_fg_write_table,
 	.rd_table = &max77759_fg_rd_table,
-	.val_format_endian = REGMAP_ENDIAN_NATIVE,
+	.val_format_endian = REGMAP_ENDIAN_BIG,
 	.cache_type = REGCACHE_NONE,
 };
 
