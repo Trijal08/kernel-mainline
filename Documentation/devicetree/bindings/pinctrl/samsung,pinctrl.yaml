@@ -144,7 +144,17 @@ allOf:
       required:
         - clocks
         - clock-names
-    else:
+
+  - if:
+      not:
+        properties:
+          compatible:
+            contains:
+              enum:
+                - google,gs101-pinctrl
+                - google,zumapro-pinctrl
+                - samsung,exynos8890-pinctrl
+    then:
       properties:
         clocks: false
         clock-names: false
