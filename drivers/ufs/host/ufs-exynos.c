@@ -72,6 +72,7 @@
 #define REFCLK_CTRL_EN		BIT(7)
 #define UNIPRO_PCLK_CTRL_EN	BIT(6)
 #define UNIPRO_MCLK_CTRL_EN	BIT(5)
+#define MPHY_APBCLK_CTRL_EN	BIT(10)
 #define HCI_CORECLK_CTRL_EN	BIT(4)
 #define CLK_CTRL_EN_MASK	(REFCLK_CTRL_EN |\
 				 UNIPRO_PCLK_CTRL_EN |\
@@ -105,6 +106,7 @@
 #define UFS_GS101_RD_SHARABLE		BIT(0)
 #define UFS_GS101_SHARABLE		(UFS_GS101_WR_SHARABLE | \
 					 UFS_GS101_RD_SHARABLE)
+#define UFS_ZUMAPRO_BUS_COMPONENT_DRCG_EN	0x104
 #define UFS_SHAREABILITY_OFFSET		0x710
 
 /* Multi-host registers */
@@ -213,6 +215,25 @@ static inline void exynos_ufs_ungate_clks(struct exynos_ufs *ufs)
 	exynos_ufs_ctrl_clkstop(ufs, false);
 }
 
+static void exynos_ufs_mphy_apbclk_ctrl(struct exynos_ufs *ufs, bool en)
+{
+	u32 reg = hci_readl(ufs, HCI_MISC);
+
+	if (en)
+		hci_writel(ufs, reg | MPHY_APBCLK_CTRL_EN, HCI_MISC);
+	else
+		hci_writel(ufs, reg & ~MPHY_APBCLK_CTRL_EN, HCI_MISC);
+}
+
+static void exynos_ufs_restore_link_clk_ctrl(struct exynos_ufs *ufs)
+{
+	u32 reg = hci_readl(ufs, HCI_MISC);
+
+	reg |= MPHY_APBCLK_CTRL_EN | REFCLK_CTRL_EN | UNIPRO_PCLK_CTRL_EN;
+	reg &= ~HCI_CORECLK_CTRL_EN;
+	hci_writel(ufs, reg, HCI_MISC);
+}
+
 static int exynos_ufs_shareability(struct exynos_ufs *ufs)
 {
 	/* IO Coherency setting */
@@ -243,23 +264,35 @@ static int gs101_ufs_drv_init(struct exynos_ufs *ufs)
 	return exynos_ufs_shareability(ufs);
 }
 
-static int zuma_ufs_drv_init(struct exynos_ufs *ufs)
+static int zumapro_ufs_drv_init(struct exynos_ufs *ufs)
 {
 	struct ufs_hba *hba = ufs->hba;
 	u32 reg;
 
-	/* Keep WriteBooster support. */
+	/* Enable WriteBooster */
 	hba->caps |= UFSHCD_CAP_WB_EN;
 
-	/*
-	 * Temporary stability setting for Zuma bring-up:
-	 * avoid Hibern8/clock-gating transitions until CDR/H8 exit is stable.
-	 */
+	/* Keep runtime clock gating and hibern8 disabled during bring-up */
 	hba->caps &= ~(UFSHCD_CAP_CLK_GATING | UFSHCD_CAP_HIBERN8_WITH_CLK_GATING);
 
-	/* Keep ACG under software control as on GS101. */
+	/* set ACG to be controlled by UFS_ACG_DISABLE */
 	reg = hci_readl(ufs, HCI_IOP_ACG_DISABLE);
 	hci_writel(ufs, reg & (~HCI_IOP_ACG_DISABLE_EN), HCI_IOP_ACG_DISABLE);
+
+	/*
+	 * Downstream brackets CAL with M-PHY APB enabled. Keep it forced on
+	 * while runtime PM is disabled for bring-up; bracket this around CAL
+	 * if runtime PM is re-enabled later.
+	 */
+	exynos_ufs_mphy_apbclk_ctrl(ufs, false);
+
+	/*
+	 * Downstream Zuma PMUCAL programs SYSREG_HSI2 BUS_COMPONENT_DRCG_EN
+	 * before bringing up UFS.
+	 */
+	if (ufs->sysreg)
+		regmap_write(ufs->sysreg, UFS_ZUMAPRO_BUS_COMPONENT_DRCG_EN,
+			     0xffffffff);
 
 	return exynos_ufs_shareability(ufs);
 }
@@ -1045,21 +1078,29 @@ static void exynos_ufs_specify_nexus_t_tm_req(struct ufs_hba *hba,
 	}
 }
 
+static void exynos_ufs_get_available_lanes(struct exynos_ufs *ufs)
+{
+	struct ufs_hba *hba = ufs->hba;
+
+	if (ufs->avail_ln_rx != 0 && ufs->avail_ln_tx != 0)
+		return;
+
+	ufshcd_dme_get(hba, UIC_ARG_MIB(PA_AVAILRXDATALANES),
+		       &ufs->avail_ln_rx);
+	ufshcd_dme_get(hba, UIC_ARG_MIB(PA_AVAILTXDATALANES),
+		       &ufs->avail_ln_tx);
+	WARN(ufs->avail_ln_rx != ufs->avail_ln_tx,
+	     "available data lane is not equal(rx:%d, tx:%d)\n",
+	     ufs->avail_ln_rx, ufs->avail_ln_tx);
+}
+
 static int exynos_ufs_phy_init(struct exynos_ufs *ufs)
 {
 	struct ufs_hba *hba = ufs->hba;
 	struct phy *generic_phy = ufs->phy;
 	int ret = 0;
 
-	if (ufs->avail_ln_rx == 0 || ufs->avail_ln_tx == 0) {
-		ufshcd_dme_get(hba, UIC_ARG_MIB(PA_AVAILRXDATALANES),
-			&ufs->avail_ln_rx);
-		ufshcd_dme_get(hba, UIC_ARG_MIB(PA_AVAILTXDATALANES),
-			&ufs->avail_ln_tx);
-		WARN(ufs->avail_ln_rx != ufs->avail_ln_tx,
-			"available data lane is not equal(rx:%d, tx:%d)\n",
-			ufs->avail_ln_rx, ufs->avail_ln_tx);
-	}
+	exynos_ufs_get_available_lanes(ufs);
 
 	phy_set_bus_width(generic_phy, ufs->avail_ln_rx);
 
@@ -1165,6 +1206,9 @@ static int exynos_ufs_pre_link(struct ufs_hba *hba)
 	/* unipro */
 	exynos_ufs_config_unipro(ufs);
 
+	if (ufs->opts & EXYNOS_UFS_OPT_PRE_LINK_GET_LANES)
+		exynos_ufs_get_available_lanes(ufs);
+
 	if (ufs->drv_data->pre_link)
 		ufs->drv_data->pre_link(ufs);
 
@@ -1174,6 +1218,8 @@ static int exynos_ufs_pre_link(struct ufs_hba *hba)
 		exynos_ufs_config_phy_time_attr(ufs);
 		exynos_ufs_config_phy_cap_attr(ufs);
 	}
+	if (ufs->opts & EXYNOS_UFS_OPT_RESTORE_MPHY_APBCLK)
+		exynos_ufs_restore_link_clk_ctrl(ufs);
 
 	return 0;
 }
@@ -1190,7 +1236,23 @@ static void exynos_ufs_fit_aggr_timeout(struct exynos_ufs *ufs)
 	}
 
 	val = exynos_ufs_calc_time_cntr(ufs, IATOVAL_NSEC / CNTR_DIV_VAL);
+	if (ufs->opts & EXYNOS_UFS_OPT_TIMER_TICK_USES_MCLK)
+		val = ufs->mclk_rate / 1000000;
 	hci_writel(ufs, val & CNT_VAL_1US_MASK, HCI_1US_TO_CNT_VAL);
+}
+
+static void exynos_ufs_early_hci_setup(struct exynos_ufs *ufs)
+{
+	exynos_ufs_fit_aggr_timeout(ufs);
+
+	hci_writel(ufs, PRDT_PREFETCH_EN | ilog2(DATA_UNIT_SIZE),
+		   HCI_TXPRDT_ENTRY_SIZE);
+	hci_writel(ufs, ilog2(DATA_UNIT_SIZE), HCI_RXPRDT_ENTRY_SIZE);
+	hci_writel(ufs, 0xffffffff, HCI_UTRL_NEXUS_TYPE);
+	hci_writel(ufs, 0xffffffff, HCI_UTMRL_NEXUS_TYPE);
+	hci_writel(ufs, 0xa, HCI_DATA_REORDER);
+	hci_writel(ufs, WLU_EN | WLU_BURST_LEN(3),
+		   HCI_AXIDMA_RWDATA_BURST_LEN);
 }
 
 static int exynos_ufs_post_link(struct ufs_hba *hba)
@@ -1744,6 +1806,15 @@ static int exynos_ufs_hce_enable_notify(struct ufs_hba *hba,
 		ret = exynos_ufs_host_reset(hba);
 		if (ret)
 			return ret;
+
+		/*
+		 * Some Tensor hosts need VS_HCI setup before HCE/link startup.
+		 * Host reset clears this state, so restore it here while the
+		 * clock rates are valid.
+		 */
+		if (ufs->opts & EXYNOS_UFS_OPT_EARLY_HCI_SETUP)
+			exynos_ufs_early_hci_setup(ufs);
+
 		exynos_ufs_dev_hw_reset(hba);
 		break;
 	case POST_CHANGE:
@@ -2087,7 +2158,7 @@ static int gs101_ufs_pre_link(struct exynos_ufs *ufs)
 	return 0;
 }
 
-static int zuma_ufs_pre_link(struct exynos_ufs *ufs)
+static int zumapro_ufs_pre_link(struct exynos_ufs *ufs)
 {
 	struct ufs_hba *hba = ufs->hba;
 	int i;
@@ -2101,11 +2172,10 @@ static int zuma_ufs_pre_link(struct exynos_ufs *ufs)
 	unipro_writel(ufs, get_mclk_period_unipro_18(ufs), COMP_CLK_PERIOD);
 
 	/*
-	 * Match additional Zuma CAL pre-link MIB programming.
-	 * These are missing in mainline GS101 path and are required for
-	 * stable link startup on Tensor G4.
+	 * Zumapro M-PHY OSC = 38.4 MHz; downstream init_cfg_evt1 sets
+	 * PCS_COMN 0x202 = 0x22. GS101 does not write 0x202 because
+	 * its OSC is 24.5 MHz.
 	 */
-	ufshcd_dme_set(hba, UIC_ARG_MIB(0x44), 0x00);
 	ufshcd_dme_set(hba, UIC_ARG_MIB(0x202), 0x22);
 
 	ufshcd_dme_set(hba, UIC_ARG_MIB(0x200), 0x40);
@@ -2120,7 +2190,6 @@ static int zuma_ufs_pre_link(struct exynos_ufs *ufs)
 			       (rx_line_reset_period >> 8) & 0xFF);
 		ufshcd_dme_set(hba, UIC_ARG_MIB_SEL(VND_RX_LINERESET_VALUE0, i),
 			       (rx_line_reset_period) & 0xFF);
-		/* Zuma CAL uses 0x79 here (GS101 uses 0x69). */
 		ufshcd_dme_set(hba, UIC_ARG_MIB_SEL(0x2f, i), 0x79);
 		ufshcd_dme_set(hba, UIC_ARG_MIB_SEL(0x84, i), 0x1);
 		ufshcd_dme_set(hba, UIC_ARG_MIB_SEL(0x25, i), 0xf6);
@@ -2142,9 +2211,17 @@ static int zuma_ufs_pre_link(struct exynos_ufs *ufs)
 	}
 
 	ufshcd_dme_set(hba, UIC_ARG_MIB(0x200), 0x0);
+	ufshcd_dme_set(hba, UIC_ARG_MIB(PA_LOCAL_TX_LCC_ENABLE), 0x0);
+	ufshcd_dme_set(hba, UIC_ARG_MIB(N_DEVICEID), 0x0);
+	ufshcd_dme_set(hba, UIC_ARG_MIB(N_DEVICEID_VALID), 0x1);
+	ufshcd_dme_set(hba, UIC_ARG_MIB(T_PEERDEVICEID), 0x1);
+	ufshcd_dme_set(hba, UIC_ARG_MIB(T_CONNECTIONSTATE), CPORT_CONNECTED);
+
+	/*
+	 * Downstream Zuma cal-if writes UNIPRO_STD_MIB 0x155e = 0;
+	 * mainline GS101 pre-link does not.
+	 */
 	ufshcd_dme_set(hba, UIC_ARG_MIB(0x155E), 0x0);
-	ufshcd_dme_set(hba, UIC_ARG_MIB(0x3000), 0x0);
-	ufshcd_dme_set(hba, UIC_ARG_MIB(0x3001), 0x1);
 
 	return 0;
 }
@@ -2377,28 +2454,6 @@ static const struct exynos_ufs_drv_data gs101_ufs_drvs = {
 	.suspend		= gs101_ufs_suspend,
 };
 
-/*
- * Zuma reuses most GS101 host settings, but needs a small pre-link delta
- * from GS101 CAL tables (RX lane MIB 0x2f = 0x79).
- */
-static const struct exynos_ufs_drv_data zuma_ufs_drvs = {
-	.uic_attr		= &gs101_uic_attr,
-	/*
-	 * Match downstream zuma "fixed-prdt-req_list-ocs" mode:
-	 * clear PRDT-byte-granularity / req-list-clr / OCS-fatal / skip-reset-agg quirks.
-	 */
-	.quirks			= UFSHCI_QUIRK_SKIP_MANUAL_WB_FLUSH_CTRL |
-				  UFSHCD_QUIRK_SKIP_DEF_UNIPRO_TIMEOUT_SETTING,
-	.opts			= EXYNOS_UFS_OPT_SKIP_CONFIG_PHY_ATTR |
-				  EXYNOS_UFS_OPT_UFSPR_SECURE |
-				  EXYNOS_UFS_OPT_TIMER_TICK_SELECT,
-	.iocc_mask		= UFS_GS101_SHARABLE,
-	.drv_init		= zuma_ufs_drv_init,
-	.pre_link		= zuma_ufs_pre_link,
-	.post_link		= gs101_ufs_post_link,
-	.pre_pwr_change		= gs101_ufs_pre_pwr_change,
-	.suspend		= gs101_ufs_suspend,
-};
 static const struct exynos_ufs_drv_data exynosautov920_ufs_drvs = {
 	.uic_attr               = &exynos7_uic_attr,
 	.quirks                 = UFSHCD_QUIRK_SKIP_DEF_UNIPRO_TIMEOUT_SETTING,
@@ -2414,11 +2469,30 @@ static const struct exynos_ufs_drv_data exynosautov920_ufs_drvs = {
 	.pre_pwr_change         = exynosautov920_ufs_pre_pwr_change,
 };
 
+static const struct exynos_ufs_drv_data zumapro_ufs_drvs = {
+	.uic_attr		= &gs101_uic_attr,
+	.quirks			= UFSHCI_QUIRK_SKIP_MANUAL_WB_FLUSH_CTRL |
+				  UFSHCD_QUIRK_SKIP_DEF_UNIPRO_TIMEOUT_SETTING,
+	.opts			= EXYNOS_UFS_OPT_SKIP_CONFIG_PHY_ATTR |
+				  EXYNOS_UFS_OPT_UFSPR_SECURE |
+				  EXYNOS_UFS_OPT_TIMER_TICK_SELECT |
+				  EXYNOS_UFS_OPT_EARLY_HCI_SETUP |
+				  EXYNOS_UFS_OPT_PRE_LINK_GET_LANES |
+				  EXYNOS_UFS_OPT_TIMER_TICK_USES_MCLK |
+				  EXYNOS_UFS_OPT_RESTORE_MPHY_APBCLK,
+	.iocc_mask		= UFS_GS101_SHARABLE,
+	.drv_init		= zumapro_ufs_drv_init,
+	.pre_link		= zumapro_ufs_pre_link,
+	.post_link		= gs101_ufs_post_link,
+	.pre_pwr_change		= gs101_ufs_pre_pwr_change,
+	.suspend		= gs101_ufs_suspend,
+};
+
 static const struct of_device_id exynos_ufs_of_match[] = {
 	{ .compatible = "google,gs101-ufs",
 	  .data	      = &gs101_ufs_drvs },
-	{ .compatible = "google,zuma-ufs",
-	  .data	      = &zuma_ufs_drvs },
+	{ .compatible = "google,zumapro-ufs",
+	  .data	      = &zumapro_ufs_drvs },
 	{ .compatible = "samsung,exynos7-ufs",
 	  .data	      = &exynos_ufs_drvs },
 	{ .compatible = "samsung,exynosautov9-ufs",
