@@ -35,6 +35,10 @@ properties:
       - google,gs101-cmu-misc
       - google,gs101-cmu-peric0
       - google,gs101-cmu-peric1
+      - google,zumapro-cmu-top
+      - google,zumapro-cmu-hsi2
+      - google,zumapro-cmu-peric0
+      - google,zumapro-cmu-peric1
 
   clocks:
     minItems: 1
@@ -131,6 +135,7 @@ allOf:
           contains:
             enum:
               - google,gs101-cmu-hsi2
+              - google,zumapro-cmu-hsi2
 
     then:
       properties:
