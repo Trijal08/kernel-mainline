@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# Serial device configuration
+#
+
+config SERIAL_EXYNOS
+	tristate "Exynos SoC serial support"
+	# NOTE(mainline): mainline's SERIAL_SAMSUNG depends on ARCH_EXYNOS, which
+	# is off for SOC_ZUMA, so the old "depends on SERIAL_SAMSUNG" prevented
+	# this self-contained driver from building. exynos_tty.c only needs the
+	# serial_core API and register defs from <linux/serial_s3c.h> (it does
+	# not use any samsung_tty internals), so just select SERIAL_CORE.
+	# (Must not also "depends on SERIAL_CORE" — select+depends on the same
+	# symbol is a Kconfig recursive dependency.)
+	select SERIAL_CORE
+	help
+	  Support for the on-chip UARTs on the Samsung Exynos series CPUs,
+	  providing /dev/ttySAC0, 1 and 2 (note, some machines may not
+	  provide all of these ports, depending on how the serial port
+	  pins are configured.
+
+config SERIAL_EXYNOS_UARTS
+	int
+	depends on SERIAL_EXYNOS
+	default 24
+	help
+	  Select the number of available UART ports for the Samsung
+	  Exynos serial driver
+
