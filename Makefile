@@ -5,6 +5,11 @@ SUBLEVEL = 0
 EXTRAVERSION = -rc6
 NAME = Baby Opossum Posse
 
+export KCONFIG_SOC_GS_PREFIX := google-modules/soc/gs/
+export KCONFIG_EXT_MODULES_PREFIX := ./
+export KBUILD_BUILD_TIMESTAMP := Mon Oct 13 22:28:16 UTC 2025
+KCFLAGS += -D__ANDROID_COMMON_KERNEL__
+
 # *DOCUMENTATION*
 # To see a list of typical targets execute "make help"
 # More info can be located in ./README
@@ -1579,6 +1584,16 @@ kselftest-merge:
 ifneq ($(wildcard $(srctree)/arch/$(SRCARCH)/boot/dts/),)
 dtstree := arch/$(SRCARCH)/boot/dts
 endif
+
+ifdef CONFIG_SOC_ZUMAPRO
+dtstree := google-devices/zumapro/dts
+else ifdef CONFIG_SOC_ZUMA
+dtstree := google-devices/zuma/dts
+else ifdef CONFIG_SOC_GS201
+dtstree := google-devices/gs201/dts
+endif
+DTC_INCLUDE := $(srctree)/google-modules/soc/gs/include/dtc
+export DTC_INCLUDE
 
 dtbindingtree := Documentation/devicetree/bindings
 
