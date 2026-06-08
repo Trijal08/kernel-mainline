@@ -382,11 +382,11 @@ int ln8411_read_adc(struct ln8411_charger *ln8411,
 int get_chip_info(struct ln8411_charger *chg);
 int ln8411_check_active(struct ln8411_charger *ln8411);
 
-extern s32 debug_printk_prlog;
-extern s32 debug_no_logbuffer;
+extern s32 ln8411_debug_printk_prlog;
+extern s32 ln8411_debug_no_logbuffer;
 
 #define logbuffer_prlog(p, level, fmt, ...)	\
-    gbms_logbuffer_prlog(p->log, level, debug_no_logbuffer, debug_printk_prlog, fmt, ##__VA_ARGS__)
+    gbms_logbuffer_prlog(p->log, level, ln8411_debug_no_logbuffer, ln8411_debug_printk_prlog, fmt, ##__VA_ARGS__)
 
 /* charge stats */
 void ln8411_chg_stats_init(struct ln8411_chg_stats *chg_data);

@@ -90,7 +90,7 @@ config CHARGER_MAX77729
 	help
 	  Say Y to enable support for the Maxim MAX77729 battery charger.
 
-config CHARGER_MAX77759
+config GOOGLE_CHARGER_MAX77759
 	tristate "Maxim MAX77759 battery charger driver"
 	depends on I2C && OF
 	help

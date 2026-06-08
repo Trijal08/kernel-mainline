@@ -20,8 +20,8 @@
 
 /* Logging ----------------------------------------------------------------- */
 
-int debug_printk_prlog = LOGLEVEL_INFO;
-int debug_no_logbuffer;
+int hl7132_debug_printk_prlog = LOGLEVEL_INFO;
+int hl7132_debug_no_logbuffer;
 
 /* DC PPS integration ------------------------------------------------------ */
 

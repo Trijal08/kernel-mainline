@@ -14,7 +14,7 @@ GBMS_MODULES =	GOOGLE_BMS \
 		PMIC_MAX77729 \
 		UIC_MAX77729 \
 		CHARGER_MAX77729 \
-		CHARGER_MAX77759 \
+		GOOGLE_CHARGER_MAX77759 \
 		CHARGER_MAX77779 \
 		CHARGER_MAX77779_I2C \
 		MAXQ_MAX77759 \
@@ -88,7 +88,7 @@ obj-$(CONFIG_UIC_MAX77729)	+= max77729_uic.o
 obj-$(CONFIG_CHARGER_MAX77729)	+= max77729_charger.o
 
 # max77759 if-pmic based device (todo use the standalone)
-obj-$(CONFIG_CHARGER_MAX77759)	+= max77759-charger.o
+obj-$(CONFIG_GOOGLE_CHARGER_MAX77759)	+= max77759-charger.o
 max77759-charger-objs += max77759_charger.o
 max77759-charger-objs += max77759_usecase.o
 

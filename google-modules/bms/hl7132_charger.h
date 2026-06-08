@@ -357,11 +357,11 @@ int hl7132_is_present(struct hl7132_charger *hl7132);
 int hl7132_get_status(struct hl7132_charger *hl7132);
 int hl7132_get_charge_type(struct hl7132_charger *hl7132);
 
-extern int debug_printk_prlog;
-extern int debug_no_logbuffer;
+extern int hl7132_debug_printk_prlog;
+extern int hl7132_debug_no_logbuffer;
 
 #define logbuffer_prlog(p, level, fmt, ...)	\
-	gbms_logbuffer_prlog(p->log, level, debug_no_logbuffer, debug_printk_prlog, \
+	gbms_logbuffer_prlog(p->log, level, hl7132_debug_no_logbuffer, hl7132_debug_printk_prlog, \
 				fmt, ##__VA_ARGS__)
 
 /* charge stats */

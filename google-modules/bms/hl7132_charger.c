@@ -4730,9 +4730,9 @@ static int hl7132_create_fs_entries(struct hl7132_charger *chip)
 	}
 
 	debugfs_create_u32("debug_level", 0644, chip->debug_root,
-			   &debug_printk_prlog);
+			   &hl7132_debug_printk_prlog);
 	debugfs_create_u32("no_logbuffer", 0644, chip->debug_root,
-			   &debug_no_logbuffer);
+			   &hl7132_debug_no_logbuffer);
 
 	// TODO testing
 	debugfs_create_u32("init_sleep", 0644, chip->debug_root,
