@@ -5471,9 +5471,9 @@ static int ln8411_create_fs_entries(struct ln8411_charger *chip)
 
 
 	debugfs_create_u32("debug_level", 0644, chip->debug_root,
-			   &debug_printk_prlog);
+			   &ln8411_debug_printk_prlog);
 	debugfs_create_u32("no_logbuffer", 0644, chip->debug_root,
-			   &debug_no_logbuffer);
+			   &ln8411_debug_no_logbuffer);
 
 	debugfs_create_file("data", 0644, chip->debug_root, chip, &register_debug_ops_ln8411);
 	debugfs_create_x32("address", 0644, chip->debug_root, &chip->debug_address);

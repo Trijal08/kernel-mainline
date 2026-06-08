@@ -355,11 +355,11 @@ int pca9468_is_present(struct pca9468_charger *pca9468);
 int pca9468_get_status(struct pca9468_charger *pca9468);
 int pca9468_get_charge_type(struct pca9468_charger *pca9468);
 
-extern int debug_printk_prlog;
-extern int debug_no_logbuffer;
+extern int pca9468_debug_printk_prlog;
+extern int pca9468_debug_no_logbuffer;
 
 #define logbuffer_prlog(p, level, fmt, ...)	\
-	gbms_logbuffer_prlog(p->log, level, debug_no_logbuffer, debug_printk_prlog, fmt, ##__VA_ARGS__)
+	gbms_logbuffer_prlog(p->log, level, pca9468_debug_no_logbuffer, pca9468_debug_printk_prlog, fmt, ##__VA_ARGS__)
 
 /* charge stats */
 void p9468_chg_stats_init(struct p9468_chg_stats *chg_data);

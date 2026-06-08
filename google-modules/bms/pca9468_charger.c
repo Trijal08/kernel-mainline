@@ -5117,9 +5117,9 @@ static int pca9468_create_fs_entries(struct pca9468_charger *chip)
 
 
 	debugfs_create_u32("debug_level", 0644, chip->debug_root,
-			   &debug_printk_prlog);
+			   &pca9468_debug_printk_prlog);
 	debugfs_create_u32("no_logbuffer", 0644, chip->debug_root,
-			   &debug_no_logbuffer);
+			   &pca9468_debug_no_logbuffer);
 
 	debugfs_create_file("data", 0644, chip->debug_root, chip, &register_debug_ops);
 	debugfs_create_x32("address", 0644, chip->debug_root, &chip->debug_address);
