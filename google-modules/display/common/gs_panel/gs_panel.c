@@ -1880,6 +1880,18 @@ int gs_dsi_panel_common_init(struct mipi_dsi_device *dsi, struct gs_panel *ctx)
 #if IS_ENABLED(CONFIG_OF)
 	ctx->bridge.of_node = ctx->gs_connector->kdev->of_node;
 #endif
+	/*
+	 * NOTE(mainline): the 6.16 drm_bridge refcount/alloc rework made
+	 * drm_bridge_add() assume bridges are allocated via
+	 * devm_drm_bridge_alloc() (which INIT_LIST_HEADs ->list and kref_inits
+	 * ->refcount). This driver embeds the bridge statically, so initialize
+	 * those fields to match — otherwise drm_bridge_add() runs list_del_init()
+	 * on a zeroed (NULL ->next) list and panics on a NULL+0x8 write, and the
+	 * refcount underflows. ->container stays NULL (benign one-line WARN); the
+	 * bridge lives for the life of ctx and is never kref-freed.
+	 */
+	INIT_LIST_HEAD(&ctx->bridge.list);
+	kref_init(&ctx->bridge.refcount);
 	devm_drm_bridge_add(dev, &ctx->bridge);
 
 	/* Parse device tree - Backlight */

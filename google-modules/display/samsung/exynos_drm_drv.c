@@ -1032,6 +1032,14 @@ static const struct file_operations exynos_drm_driver_fops = {
 	.unlocked_ioctl	= drm_ioctl,
 	.compat_ioctl	= drm_compat_ioctl,
 	.release	= drm_release,
+	/*
+	 * NOTE(mainline): drm_open_helper() now WARNs and returns -EINVAL unless
+	 * the DRM fops advertise FOP_UNSIGNED_OFFSET (DRM uses large/unsigned
+	 * mmap offsets for GEM objects). DRM_GEM_FOPS sets it automatically;
+	 * these hand-rolled fops (custom .mmap) must set it explicitly or no
+	 * client can open /dev/dri/card* (graphics times out).
+	 */
+	.fop_flags	= FOP_UNSIGNED_OFFSET,
 };
 
 static struct drm_driver exynos_drm_driver = {

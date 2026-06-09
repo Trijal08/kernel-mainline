@@ -742,6 +742,17 @@ static int trusty_virtio_probe(struct platform_device *pdev)
 
 	set_dma_ops(&pdev->dev, &trusty_virtio_dma_map_ops);
 
+	/*
+	 * NOTE(mainline): mainline's dma_map_phys() WARNs and returns
+	 * DMA_MAPPING_ERROR when dev->dma_mask is NULL, *before* dispatching to
+	 * our custom ->map_phys hook. This platform device is used as the vring
+	 * DMA device (vdev->dev.parent), so it must have a dma_mask or every
+	 * virtqueue_add_inbuf() fails. The actual mask value is irrelevant since
+	 * trusty_virtio_dma_map_phys() returns a trusty buffer id, not a real
+	 * bus address. On the GKI base, dma_map_page() had no such pre-check.
+	 */
+	dma_coerce_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64));
+
 	tctx->check_wq = alloc_workqueue("trusty-check-wq",
 					 WQ_UNBOUND | WQ_HIGHPRI, 0);
 	if (!tctx->check_wq) {

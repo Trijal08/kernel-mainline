@@ -5845,6 +5845,9 @@ int exynos_panel_common_init(struct mipi_dsi_device *dsi,
 #ifdef CONFIG_OF
 	ctx->bridge.of_node = ctx->dev->of_node;
 #endif
+	/* mainline 6.16 drm_bridge refcount rework: init statically-embedded bridge (devm_drm_bridge_alloc() equivalent) so drm_bridge_add() doesn't list_del_init() a NULL list / underflow refcount */
+	INIT_LIST_HEAD(&ctx->bridge.list);
+	kref_init(&ctx->bridge.refcount);
 	drm_bridge_add(&ctx->bridge);
 
 	ret = sysfs_create_files(&dev->kobj, panel_attrs);

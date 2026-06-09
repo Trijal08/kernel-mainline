@@ -24,6 +24,7 @@
 #include <linux/errno.h>
 #include <linux/gpio.h>
 #include <linux/gpio/consumer.h>
+#include <linux/gpio/driver.h>
 #include <linux/of.h>
 #include <linux/string.h>
 
@@ -39,55 +40,50 @@ enum of_gpio_flags {
 };
 
 /*
- * Derive a gpiod con_id from a legacy DT property name by stripping the
- * trailing "-gpios"/"-gpio"/"gpios"/"gpio" suffix. fwnode_gpiod_get_index()
- * re-appends "-gpios" (and falls back to "-gpio"), matching the original
- * property lookup. Returns an empty string for the bare "gpios" property,
- * which the caller maps to a NULL con_id.
+ * Resolve a legacy named GPIO property to its global GPIO number the way the
+ * removed of_get_named_gpio() did: read the property by its *exact* name as a
+ * GPIO specifier (phandle + #gpio-cells args) and look up the descriptor on the
+ * referenced gpiochip. This works for raw property names (e.g.
+ * "usbpd,usbpd_int", "gpio_gnss2ap_spi") as well as the "<name>-gpios"
+ * convention, unlike fwnode_gpiod_get_index() which only accepts the suffixed
+ * con_id form and therefore mistranslates raw-named properties to -ENOENT.
  */
-static inline void __of_gpio_propname_to_conid(const char *propname,
-					       char *buf, size_t buflen)
-{
-	size_t len;
-
-	if (!propname) {
-		buf[0] = '\0';
-		return;
-	}
-	strscpy(buf, propname, buflen);
-	len = strlen(buf);
-	if (len >= 6 && !strcmp(buf + len - 6, "-gpios"))
-		buf[len - 6] = '\0';
-	else if (len >= 5 && !strcmp(buf + len - 5, "-gpio"))
-		buf[len - 5] = '\0';
-	else if (len == 5 && !strcmp(buf, "gpios"))
-		buf[0] = '\0';
-	else if (len == 4 && !strcmp(buf, "gpio"))
-		buf[0] = '\0';
-}
-
 static inline int of_get_named_gpio_flags(const struct device_node *np,
 					  const char *propname, int index,
 					  enum of_gpio_flags *flags)
 {
+	struct of_phandle_args gpiospec;
+	struct gpio_device *gdev;
 	struct gpio_desc *desc;
-	char conid[64];
-	const char *con;
-	int gpio;
+	int gpio, ret;
 
-	__of_gpio_propname_to_conid(propname, conid, sizeof(conid));
-	con = conid[0] ? conid : NULL;
+	ret = of_parse_phandle_with_args(np, propname, "#gpio-cells", index,
+					 &gpiospec);
+	if (ret)
+		return ret;
 
-	desc = fwnode_gpiod_get_index(of_fwnode_handle((struct device_node *)np),
-				      con, index, GPIOD_ASIS, "of_get_named_gpio");
-	if (IS_ERR(desc))
+	gdev = gpio_device_find_by_fwnode(of_fwnode_handle(gpiospec.np));
+	of_node_put(gpiospec.np);
+	if (!gdev)
+		return -EPROBE_DEFER;
+
+	/*
+	 * Standard GPIO specifiers encode <line flags>; the line number is the
+	 * chip-relative hwnum. This matches every controller these modules use
+	 * (exynos pinctrl banks, PMIC GPIOs, etc.).
+	 */
+	desc = gpio_device_get_desc(gdev, gpiospec.args[0]);
+	if (IS_ERR(desc)) {
+		gpio_device_put(gdev);
 		return PTR_ERR(desc);
+	}
 
 	if (flags)
-		*flags = gpiod_is_active_low(desc) ? OF_GPIO_ACTIVE_LOW : 0;
+		*flags = (gpiospec.args_count > 1 && (gpiospec.args[1] & 1)) ?
+			 OF_GPIO_ACTIVE_LOW : 0;
 
 	gpio = desc_to_gpio(desc);
-	gpiod_put(desc);
+	gpio_device_put(gdev);
 	return gpio;
 }
 

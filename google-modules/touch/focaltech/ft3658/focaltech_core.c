@@ -1195,6 +1195,9 @@ static int register_panel_bridge(struct fts_ts_data *ts)
     ts->panel_bridge.of_node = ts->spi->dev.of_node;
 #endif
     ts->panel_bridge.funcs = &panel_bridge_funcs;
+    /* mainline 6.16 drm_bridge refcount rework: init statically-embedded bridge (devm_drm_bridge_alloc() equivalent) so drm_bridge_add() doesn't list_del_init() a NULL list / underflow refcount */
+    INIT_LIST_HEAD(&ts->panel_bridge.list);
+    kref_init(&ts->panel_bridge.refcount);
     drm_bridge_add(&ts->panel_bridge);
     FTS_FUNC_EXIT();
     return 0;

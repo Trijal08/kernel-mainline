@@ -2831,6 +2831,9 @@ static int syna_register_panel_bridge(struct syna_tcm *tcm)
 	tcm->panel_bridge.of_node = tcm->pdev->dev.parent->of_node;
 #endif
 	tcm->panel_bridge.funcs = &panel_bridge_funcs;
+	/* mainline 6.16 drm_bridge refcount rework: init statically-embedded bridge (devm_drm_bridge_alloc() equivalent) so drm_bridge_add() doesn't list_del_init() a NULL list / underflow refcount */
+	INIT_LIST_HEAD(&tcm->panel_bridge.list);
+	kref_init(&tcm->panel_bridge.refcount);
 	drm_bridge_add(&tcm->panel_bridge);
 
 	return 0;
