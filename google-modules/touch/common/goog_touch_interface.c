@@ -2397,6 +2397,9 @@ static int register_panel_bridge(struct goog_touch_interface *gti)
 	gti->panel_bridge.of_node = gti->vendor_dev->of_node;
 #endif
 	gti->panel_bridge.funcs = &panel_bridge_funcs;
+	/* mainline 6.16 drm_bridge refcount rework: init statically-embedded bridge (devm_drm_bridge_alloc() equivalent) so drm_bridge_add() doesn't list_del_init() a NULL list / underflow refcount */
+	INIT_LIST_HEAD(&gti->panel_bridge.list);
+	kref_init(&gti->panel_bridge.refcount);
 	drm_bridge_add(&gti->panel_bridge);
 
 	return 0;

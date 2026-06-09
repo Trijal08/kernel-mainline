@@ -1662,22 +1662,32 @@ static int samsung_sysmmu_device_probe(struct platform_device *pdev)
 		goto err_get_hw_info;
 	}
 
-	err = iommu_device_register(&data->iommu, &samsung_sysmmu_ops, dev);
-	if (err) {
-		dev_err(dev, "failed to register iommu\n");
-		goto err_iommu_register;
-	}
-
+	/*
+	 * NOTE(mainline): create the global page-table caches (flpt_cache/
+	 * slpt_cache) BEFORE iommu_device_register(). On mainline 7.1+,
+	 * iommu_device_register() synchronously probes the bus and immediately
+	 * allocates each group's default domain via ->domain_alloc_paging(),
+	 * which needs flpt_cache. On the GKI base, registration did not probe
+	 * synchronously, so the original order (register, then init_global)
+	 * happened to work; on mainline it left flpt_cache NULL during the
+	 * synchronous probe and failed with -ENOMEM (reported as -EINVAL).
+	 */
 	mutex_lock(&initialization_mutex);
 	if (!sysmmu_global_init_done) {
 		err = samsung_sysmmu_init_global();
 		if (err) {
 			dev_err(dev, "failed to initialize global data\n");
 			mutex_unlock(&initialization_mutex);
-			goto err_global_init;
+			goto err_iommu_register;
 		}
 	}
 	mutex_unlock(&initialization_mutex);
+
+	err = iommu_device_register(&data->iommu, &samsung_sysmmu_ops, dev);
+	if (err) {
+		dev_err(dev, "failed to register iommu\n");
+		goto err_iommu_register;
+	}
 
 	dev_info(dev, "initialized IOMMU. Ver %d.%d.%d, %sgate clock\n",
 		 MMU_VERSION_MAJOR(data->version),
@@ -1686,8 +1696,6 @@ static int samsung_sysmmu_device_probe(struct platform_device *pdev)
 		 data->clk ? "" : "no ");
 	return 0;
 
-err_global_init:
-	iommu_device_unregister(&data->iommu);
 err_iommu_register:
 	iommu_device_sysfs_remove(&data->iommu);
 err_get_hw_info:

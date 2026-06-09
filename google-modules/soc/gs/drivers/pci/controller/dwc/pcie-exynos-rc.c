@@ -5665,6 +5665,16 @@ static int exynos_pcie_rc_probe(struct platform_device *pdev)
 	if (ret)
 		goto probe_fail;
 	pci->dbi_base = exynos_pcie->rc_dbi_base;
+	/*
+	 * NOTE(mainline): mainline's dw_pcie_get_resources() gained native
+	 * handling of the optional "elbi" resource and requests it via
+	 * devm_ioremap_resource() unless pci->elbi_base is already set. This
+	 * driver maps "elbi" itself (exynos_pcie->elbi_base), so hand that
+	 * mapping to the core to avoid a double devm_request_mem_region() that
+	 * fails with -EBUSY ("can't request region for resource"). The GKI dwc
+	 * core had no elbi handling, so this assignment was previously absent.
+	 */
+	pci->elbi_base = exynos_pcie->elbi_base;
 
 	/* NOTE: TDB */
 	/* Mapping PHY functions */
