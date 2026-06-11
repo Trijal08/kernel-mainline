@@ -1,0 +1,72 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/input/touchscreen/syna,tcm-spi.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Synaptics TouchComm (TCM) SPI touchscreen controller
+
+maintainers:
+  - Steffen Deusch <steffen@deusch.me>
+
+description:
+  Synaptics touchscreen controllers speaking the TouchComm protocol
+  version 2 over SPI, as found on Google Pixel phones.  The controller
+  runs its firmware from internal flash and reports its panel geometry
+  through the protocol, so no panel-specific properties are needed.
+
+allOf:
+  - $ref: touchscreen.yaml#
+  - $ref: /schemas/spi/spi-peripheral-props.yaml#
+
+properties:
+  compatible:
+    const: syna,tcm-spi
+
+  reg:
+    maxItems: 1
+
+  interrupts:
+    maxItems: 1
+
+  reset-gpios:
+    maxItems: 1
+    description: Active-low reset line.
+
+  vdd-supply:
+    description: Digital I/O voltage rail (1.8 V).
+
+  avdd-supply:
+    description: Analog voltage rail (3.3 V).
+
+  spi-max-frequency: true
+
+required:
+  - compatible
+  - reg
+  - interrupts
+  - reset-gpios
+  - vdd-supply
+  - avdd-supply
+
+unevaluatedProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/gpio/gpio.h>
+    #include <dt-bindings/interrupt-controller/irq.h>
+
+    spi {
+        #address-cells = <1>;
+        #size-cells = <0>;
+
+        touchscreen@0 {
+            compatible = "syna,tcm-spi";
+            reg = <0>;
+            spi-max-frequency = <10000000>;
+            interrupts-extended = <&gpn0 0 IRQ_TYPE_LEVEL_LOW>;
+            reset-gpios = <&gpp1 1 GPIO_ACTIVE_LOW>;
+            vdd-supply = <&ts_vdd>;
+            avdd-supply = <&ts_avdd>;
+        };
+    };
