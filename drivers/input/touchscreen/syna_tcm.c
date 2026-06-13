@@ -7,14 +7,9 @@
  * (syna_tcm2 / synaptics_touchcom_core_v1.c):
  *
  *  - every device message is led by a 4-byte header [0xa5 marker, code,
- *    length_le16]; the header read announces the payload length, and the
- *    device restarts the message at the marker on every chip select (the
- *    reference implementation's [0xa5, STATUS_CONTINUED_READ] chunked
- *    continuation never materialized on the tegu part: header-only reads
- *    are answered, but chunk transactions only ever re-led with marker
- *    plus announcement fragments and 0xff filler), so the full message -
- *    header, payload and trailer - is fetched in one bus transaction
- *    once the length is known,
+ *    length_le16]; the header read announces the payload length and the
+ *    payload/trailer are then fetched with [0xa5, STATUS_CONTINUED_READ]
+ *    continuation transactions,
  *  - a message tail carries one 0x5a end-of-message pad byte and, when
  *    the firmware has the features enabled, a CRC-16 (CCITT-FALSE,
  *    little-endian) plus an RC byte and one further pad.  Presence of
@@ -62,11 +57,16 @@
 
 /* Worst-case end-of-message trailer: pad + CRC-16 + RC + final pad. */
 #define SYNA_TCM_TRAILER_MAX		5
-/* Largest payload a single-transaction message read accepts. */
+/* Largest payload a message read accepts. */
 #define SYNA_TCM_PAYLOAD_MAX		512
-/* Single-transaction startup read: header, identify payload, trailer. */
-#define SYNA_TCM_DETECT_READ		(SYNA_TCM_HEADER_SIZE + 32 + \
-					 SYNA_TCM_TRAILER_MAX)
+/*
+ * Keep SPI transfers below the s3c64xx polling FIFO depth.  Continuation
+ * packets spend two bytes on marker/status, leaving the rest for data.
+ */
+#define SYNA_TCM_XFER_MAX		63
+#define SYNA_TCM_CONT_HEADER_SIZE	2
+#define SYNA_TCM_CONT_DATA_MAX		(SYNA_TCM_XFER_MAX - \
+					 SYNA_TCM_CONT_HEADER_SIZE)
 
 #define SYNA_TCM_RETRIES		5
 
@@ -253,6 +253,13 @@ static int syna_tcm_send(struct syna_tcm *ts, u8 command, const u8 *payload,
 	return syna_tcm_spi_write(ts, total);
 }
 
+static int syna_tcm_send_startup_identify(struct syna_tcm *ts)
+{
+	ts->tx[0] = TCM_CMD_IDENTIFY;
+
+	return syna_tcm_spi_write(ts, 1);
+}
+
 /*
  * Read one bus transaction into ts->rx and verify the leading v1 marker,
  * retrying on garbage like the reference syna_tcm_v1_read().
@@ -299,16 +306,72 @@ static unsigned int syna_tcm_trailer_len(struct syna_tcm *ts)
 }
 
 /*
+ * Drain the payload and trailer of the current message.  After a v1 header,
+ * the remaining bytes are supplied by continuation transactions led by
+ * [0xa5, STATUS_CONTINUED_READ].
+ */
+static int syna_tcm_read_continued(struct syna_tcm *ts)
+{
+	unsigned int total;
+	unsigned int remaining;
+	unsigned int offset;
+	unsigned int chunk;
+	int error;
+
+	if (!ts->payload_len)
+		return 0;
+
+	total = ts->payload_len + syna_tcm_trailer_len(ts);
+	if (SYNA_TCM_HEADER_SIZE + total > SYNA_TCM_MSG_MAX)
+		return -EMSGSIZE;
+
+	remaining = total;
+	offset = SYNA_TCM_HEADER_SIZE;
+
+	while (remaining) {
+		chunk = min_t(unsigned int, remaining, SYNA_TCM_CONT_DATA_MAX);
+
+		if (chunk == 1) {
+			ts->msg[offset++] = TCM_V1_PADDING;
+			remaining--;
+			continue;
+		}
+
+		usleep_range(SYNA_TCM_TAT_DELAY_US,
+			     2 * SYNA_TCM_TAT_DELAY_US);
+
+		error = syna_tcm_read_packet(ts,
+					     chunk + SYNA_TCM_CONT_HEADER_SIZE);
+		if (error)
+			return error;
+
+		if (ts->rx[1] != TCM_STATUS_CONTINUED_READ) {
+			dev_warn_ratelimited(&ts->spi->dev,
+					     "bad continuation %*ph\n",
+					     (int)umin(chunk + SYNA_TCM_CONT_HEADER_SIZE,
+						       4),
+					     ts->rx);
+			return -EBADMSG;
+		}
+
+		memcpy(&ts->msg[offset], &ts->rx[SYNA_TCM_CONT_HEADER_SIZE],
+		       chunk);
+		offset += chunk;
+		remaining -= chunk;
+	}
+
+	return 0;
+}
+
+/*
  * Read the device's pending message into ts->msg.  A header-only read
- * announces code and payload length; a message with payload is then
- * fetched by re-reading header, payload and trailer in one bus
- * transaction, since the device restarts the message at the marker on
- * every chip select.  Protocol-level corruption is reported as -EBADMSG
- * so callers can retry.
+ * announces code and payload length; a message with payload is then fetched
+ * through continued-read chunks.  Protocol-level corruption is reported as
+ * -EBADMSG so callers can retry.
  */
 static int syna_tcm_get_response(struct syna_tcm *ts)
 {
-	unsigned int total, want;
+	unsigned int total;
 	int error;
 
 	error = syna_tcm_read_packet(ts, SYNA_TCM_HEADER_SIZE);
@@ -334,33 +397,21 @@ static int syna_tcm_get_response(struct syna_tcm *ts)
 		return -EBADMSG;
 	}
 
-	want = SYNA_TCM_HEADER_SIZE + total + syna_tcm_trailer_len(ts);
-
-	usleep_range(SYNA_TCM_TAT_DELAY_US, 2 * SYNA_TCM_TAT_DELAY_US);
-
-	error = syna_tcm_read_packet(ts, want);
-	if (error)
-		return error;
-
-	if (ts->rx[1] != ts->code ||
-	    get_unaligned_le16(&ts->rx[2]) != total) {
+	if (SYNA_TCM_HEADER_SIZE + total + syna_tcm_trailer_len(ts) >
+	    SYNA_TCM_MSG_MAX) {
 		dev_warn_ratelimited(&ts->spi->dev,
-				     "message did not restart, leads %*ph\n",
-				     (int)umin(want, 8), ts->rx);
+				     "oversize message %*ph\n",
+				     SYNA_TCM_HEADER_SIZE, ts->msg);
 		return -EBADMSG;
 	}
 
-	memcpy(ts->msg, ts->rx, want);
-
-	return 0;
+	return syna_tcm_read_continued(ts);
 }
 
 /*
- * Send a command and poll for the message answering it.  On return
- * ts->code holds either a status code (response consumed) or a report
- * code >= 0x10 (an asynchronous report arrived instead; the command
- * response will follow on a later read).  There is no command resend in
- * TouchComm v1 — the device answers every command exactly once.
+ * Send a command and poll for the message answering it.  Asynchronous
+ * reports share the same stream; drain them and keep waiting, except that
+ * IDENTIFY is itself returned as an identify report.
  */
 static int syna_tcm_exchange(struct syna_tcm *ts, u8 command,
 			     const u8 *payload, u16 len)
@@ -387,8 +438,12 @@ static int syna_tcm_exchange(struct syna_tcm *ts, u8 command,
 				/* Response not ready yet, keep polling. */
 				break;
 			default:
-				if (ts->code >= TCM_REPORT_IDENTIFY)
-					return 0;
+				if (ts->code >= TCM_REPORT_IDENTIFY) {
+					if (command == TCM_CMD_IDENTIFY &&
+					    ts->code == TCM_REPORT_IDENTIFY)
+						return 0;
+					break;
+				}
 				dev_dbg(&ts->spi->dev,
 					"command %#x failed, status %#x\n",
 					command, ts->code);
@@ -650,11 +705,11 @@ static int syna_tcm_power_on(struct syna_tcm *ts)
 }
 
 /*
- * After reset the device queues an IDENTIFY report and asserts ATTN; the
- * first raw header read tells the protocol generation apart: a TouchComm
- * v1 header leads with the 0xa5 marker, a v2 header CRC-6s to zero.
- * Drains the identify message, sniffs the optional CRC/RC trailer and
- * checks that the part came up in application firmware mode.
+ * After reset, send the raw v1 startup identify byte and read the pending
+ * IDENTIFY report.  The first header read tells the protocol generation
+ * apart: a TouchComm v1 header leads with the 0xa5 marker, a v2 header
+ * CRC-6s to zero.  Drain the identify message, sniff the optional CRC/RC
+ * trailer and check that the part came up in application firmware mode.
  */
 static int syna_tcm_detect(struct syna_tcm *ts)
 {
@@ -664,7 +719,14 @@ static int syna_tcm_detect(struct syna_tcm *ts)
 	int error;
 
 	for (tries = 0; tries < SYNA_TCM_RETRIES; tries++) {
-		error = syna_tcm_spi_read(ts, SYNA_TCM_DETECT_READ);
+		error = syna_tcm_send_startup_identify(ts);
+		if (error)
+			return error;
+
+		usleep_range(SYNA_TCM_TAT_DELAY_US,
+			     2 * SYNA_TCM_TAT_DELAY_US);
+
+		error = syna_tcm_spi_read(ts, SYNA_TCM_HEADER_SIZE);
 		if (error)
 			return error;
 
@@ -691,10 +753,14 @@ static int syna_tcm_detect(struct syna_tcm *ts)
 	ts->payload_len = get_unaligned_le16(&ts->rx[2]);
 
 	if (ts->code == TCM_REPORT_IDENTIFY && ts->payload_len >= 24 &&
-	    ts->payload_len <= SYNA_TCM_DETECT_READ - SYNA_TCM_HEADER_SIZE -
-			       SYNA_TCM_TRAILER_MAX) {
-		/* The whole startup packet came in with the single read. */
-		memcpy(ts->msg, ts->rx, SYNA_TCM_DETECT_READ);
+	    ts->payload_len <= SYNA_TCM_PAYLOAD_MAX) {
+		memcpy(ts->msg, ts->rx, SYNA_TCM_HEADER_SIZE);
+		error = syna_tcm_read_continued(ts);
+		if (error) {
+			dev_err(dev, "startup identify read failed: %d\n",
+				error);
+			return error;
+		}
 	} else {
 		/*
 		 * No usable startup packet: log the raw stream and ask for
@@ -702,7 +768,7 @@ static int syna_tcm_detect(struct syna_tcm *ts)
 		 * syna_tcm_v1_detect() fallback.
 		 */
 		dev_err(dev, "no startup identify, read %*ph\n",
-			SYNA_TCM_DETECT_READ, ts->rx);
+			SYNA_TCM_HEADER_SIZE, ts->rx);
 		error = syna_tcm_exchange(ts, TCM_CMD_IDENTIFY, NULL, 0);
 		if (error) {
 			dev_err(dev, "identify failed, last read %*ph: %d\n",
