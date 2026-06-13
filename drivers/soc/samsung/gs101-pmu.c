@@ -330,6 +330,18 @@ const struct exynos_pmu_data gs101_pmu_data = {
 };
 
 /*
+ * Zumapro (Tensor G4) shares gs101's EL3-protected PMU_ALIVE: writes must go
+ * through the same TENSOR_SMC_PMU_SEC_REG SMC interface, so pmu_secure reuses
+ * the regmap_smccfg ops above. No access tables yet - EL3 enforces its own
+ * write allowlist and rejected accesses simply return -EINVAL - and no
+ * pmu_cpuhp, as zumapro has no pmu-intr-gen node and uses standard PSCI for
+ * CPU hotplug/idle. This is enough for the UFS and USB PHY isolation writes.
+ */
+const struct exynos_pmu_data zumapro_pmu_data = {
+	.pmu_secure = true,
+};
+
+/*
  * Tensor SoCs are configured so that PMU_ALIVE registers can only be written
  * from EL3, but are still read accessible. As Linux needs to write some of
  * these registers, the following functions are provided and exposed via
