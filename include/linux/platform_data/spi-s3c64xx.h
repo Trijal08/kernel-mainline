@@ -9,6 +9,7 @@
 #define __SPI_S3C64XX_H
 
 #include <linux/dmaengine.h>
+#include <linux/types.h>
 
 struct platform_device;
 
@@ -16,6 +17,8 @@ struct platform_device;
  * struct s3c64xx_spi_csinfo - ChipSelect description
  * @fb_delay: Slave specific feedback delay.
  *            Refer to FB_CLK_SEL register definition in SPI chapter.
+ * @manual_cs: Use native manual chip select for this SPI target.
+ * @cs_setup_delay_ns: Delay after native chip select assertion.
  *
  * This is per SPI-Slave Chipselect information.
  * Allocate and initialize one in machine init code and make the
@@ -23,6 +26,8 @@ struct platform_device;
  */
 struct s3c64xx_spi_csinfo {
 	u8 fb_delay;
+	bool manual_cs;
+	u32 cs_setup_delay_ns;
 };
 
 /**
