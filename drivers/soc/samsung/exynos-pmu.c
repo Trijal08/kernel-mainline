@@ -523,9 +523,21 @@ static int exynos_pmu_probe(struct platform_device *pdev)
 	struct resource *res;
 	int ret;
 
-	pmu_base_addr = devm_platform_ioremap_resource(pdev, 0);
-	if (IS_ERR(pmu_base_addr))
-		return PTR_ERR(pmu_base_addr);
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	if (!res)
+		return -ENODEV;
+
+	/*
+	 * The PMU register block is a syscon that can contain child devices
+	 * with their own reg windows - e.g. the Tensor/Zumapro power domains,
+	 * whose control registers sit at PMU offsets.  Map it without an
+	 * exclusive request_mem_region(), like the generic syscon of_iomap()
+	 * path, so those sub-devices can claim their windows instead of the
+	 * PMU probe failing with -EBUSY.
+	 */
+	pmu_base_addr = devm_ioremap(dev, res->start, resource_size(res));
+	if (!pmu_base_addr)
+		return -ENOMEM;
 
 	ctx = devm_kzalloc_obj(&pdev->dev, struct exynos_pmu_context);
 	if (!ctx)
@@ -538,10 +550,6 @@ static int exynos_pmu_probe(struct platform_device *pdev)
 	 * a CPU that passes the gate.
 	 */
 	smp_store_release(&pmu_context, ctx);
-
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	if (!res)
-		return -ENODEV;
 
 	pmu_context->pmu_data = of_device_get_match_data(dev);
 
