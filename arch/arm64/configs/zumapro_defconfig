@@ -74,7 +74,7 @@ CONFIG_CP15_BARRIER_EMULATION=y
 CONFIG_SETEND_EMULATION=y
 CONFIG_RANDOMIZE_BASE=y
 # CONFIG_RANDOMIZE_MODULE_REGION_FULL is not set
-CONFIG_CMDLINE="ramoops.max_reason=0 printk.always_kmsg_dump=Y stack_depot_disable=on cgroup_disable=pressure kasan.page_alloc.sample=10 kasan.stacktrace=off kvm-arm.mode=nvhe bootconfig ioremap_guard v4l2loopback.devices=2 v4l2loopback.card_label=\"Back Camera,Front Camera\" v4l2loopback.exclusive_caps=1,1 v4l2loopback.max_buffers=6 androidboot.usbcontroller=11210000.dwc3"
+CONFIG_CMDLINE="ramoops.max_reason=0 printk.always_kmsg_dump=Y stack_depot_disable=on cgroup_disable=pressure kasan.page_alloc.sample=10 kasan.stacktrace=off kvm-arm.mode=nvhe bootconfig ioremap_guard v4l2loopback.devices=2 v4l2loopback.card_label=\"Back Camera,Front Camera\" v4l2loopback.exclusive_caps=1,1 v4l2loopback.max_buffers=6 androidboot.usbcontroller=11210000.dwc3 force_panic_secs=30"
 CONFIG_CMDLINE_EXTEND=y
 # CONFIG_EFI is not set
 CONFIG_PM_USERSPACE_AUTOSLEEP=y

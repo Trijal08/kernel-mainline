@@ -4068,6 +4068,8 @@ static void dwc3_gadget_disconnect_interrupt(struct dwc3 *dwc)
 {
 	int			reg;
 
+	dev_info(dwc->dev, "ZUMADBG gadget DISCONNECT\n");
+
 	dwc->suspended = false;
 
 	dwc3_gadget_set_link_state(dwc, DWC3_LINK_STATE_RX_DET);
@@ -4100,6 +4102,8 @@ static void dwc3_gadget_disconnect_interrupt(struct dwc3 *dwc)
 static void dwc3_gadget_reset_interrupt(struct dwc3 *dwc)
 {
 	u32			reg;
+
+	dev_info(dwc->dev, "ZUMADBG gadget USB RESET (host began enumeration)\n");
 
 	dwc->suspended = false;
 
@@ -4185,6 +4189,8 @@ static void dwc3_gadget_conndone_interrupt(struct dwc3 *dwc)
 
 	if (!dwc->softconnect)
 		return;
+
+	dev_info(dwc->dev, "ZUMADBG gadget CONNDONE (speed handshake complete)\n");
 
 	reg = dwc3_readl(dwc, DWC3_DSTS);
 	speed = reg & DWC3_DSTS_CONNECTSPD;

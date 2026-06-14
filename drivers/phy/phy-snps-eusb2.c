@@ -162,6 +162,15 @@ struct snps_eusb2_phy_drvdata {
 	int num_clks;
 	/* Clear the PLL charge-pump bias control (eUSB rev 0x701, e.g. zumapro) */
 	bool cpbias_cntrl_zero;
+	/*
+	 * The eUSB2 repeater is described in the board device tree only as a
+	 * standalone I2C device (no "phys" link back to this PHY), so fall back
+	 * to a non-DT phy lookup to find it. This also lets phy_init() drive the
+	 * repeater in-order, immediately before the eUSB2 init (matching the
+	 * downstream sequence), which is required for the eUSB2<->repeater link
+	 * to establish reliably.
+	 */
+	bool needs_repeater_lookup;
 };
 
 struct snps_eusb2_hsphy {
@@ -404,9 +413,10 @@ static const struct snps_eusb2_phy_drvdata exynos2200_snps_eusb2_phy = {
 };
 
 static const struct snps_eusb2_phy_drvdata google_zuma_snps_eusb2_phy = {
-	.phy_init	= exynos_snps_eusb2_hsphy_init,
-	.clk_names	= exynos_eusb2_hsphy_clock_names,
-	.num_clks	= ARRAY_SIZE(exynos_eusb2_hsphy_clock_names),
+	.phy_init		= exynos_snps_eusb2_hsphy_init,
+	.clk_names		= exynos_eusb2_hsphy_clock_names,
+	.num_clks		= ARRAY_SIZE(exynos_eusb2_hsphy_clock_names),
+	.needs_repeater_lookup	= true,
 };
 
 static const struct snps_eusb2_phy_drvdata google_zumapro_snps_eusb2_phy = {
@@ -414,6 +424,7 @@ static const struct snps_eusb2_phy_drvdata google_zumapro_snps_eusb2_phy = {
 	.clk_names		= exynos_eusb2_hsphy_clock_names,
 	.num_clks		= ARRAY_SIZE(exynos_eusb2_hsphy_clock_names),
 	.cpbias_cntrl_zero	= true,
+	.needs_repeater_lookup	= true,
 };
 
 static int qcom_snps_eusb2_hsphy_init(struct phy *p)
@@ -642,6 +653,19 @@ static int snps_eusb2_hsphy_probe(struct platform_device *pdev)
 	if (IS_ERR(phy->repeater))
 		return dev_err_probe(dev, PTR_ERR(phy->repeater),
 				     "failed to get repeater\n");
+
+	/*
+	 * Boards whose repeater is not linked via DT "phys" describe it only as
+	 * a standalone I2C device; fall back to a non-DT phy lookup. Defer until
+	 * the repeater has probed so that phy_init() always configures it
+	 * in-order right before the eUSB2 init.
+	 */
+	if (!phy->repeater && phy->data->needs_repeater_lookup) {
+		phy->repeater = devm_phy_get(dev, "repeater");
+		if (IS_ERR(phy->repeater))
+			return dev_err_probe(dev, -EPROBE_DEFER,
+					     "waiting for eUSB2 repeater\n");
+	}
 
 	generic_phy = devm_phy_create(dev, NULL, &snps_eusb2_hsphy_ops);
 	if (IS_ERR(generic_phy)) {

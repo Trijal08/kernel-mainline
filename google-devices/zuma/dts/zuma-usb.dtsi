@@ -137,6 +137,14 @@
 			snps,lpm-nyet-threshold = <0>;
 			snps,usb2-gadget-lpm-disable;
 			snps,dis-u2-freeclk-exists-quirk;
+			/*
+			 * Keep the HS (eUSB2) PHY powered/clocked instead of letting
+			 * it enter U2 suspend between connections. With repeated
+			 * gadget rebinds (e.g. recovery sideload) a suspended eUSB2
+			 * PHY does not reliably wake for the next pull-up, so
+			 * enumeration only succeeds intermittently.
+			 */
+			snps,dis-u2-susphy-quirk;
 			/* disabling U1/U2 speeds up NCM tethering by >2x */
 			snps,dis-u1-entry-quirk;
 			snps,dis-u2-entry-quirk;

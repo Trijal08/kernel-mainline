@@ -42,6 +42,13 @@
  */
 #define SAMSUNG_EUSB_REPEATER_GLOBAL_CONFIG	0xb2
 
+/*
+ * Consumer eUSB2 PHY device (phy@11110000) used for the non-DT phy lookup, so
+ * the eUSB2 PHY can find and drive this repeater even though the board DT only
+ * describes it as a standalone I2C device (no "phys" link).
+ */
+#define SAMSUNG_EUSB_REPEATER_EUSB2_DEV		"11110000.phy"
+
 struct samsung_eusb_repeater_tune {
 	u32 reg;
 	u32 value;
@@ -187,13 +194,30 @@ static int samsung_eusb_repeater_apply_tunes(struct samsung_eusb_repeater *rptr)
 	return 0;
 }
 
+static int samsung_eusb_repeater_configure(struct samsung_eusb_repeater *rptr)
+{
+	int ret;
+
+	/* Bring the data path out of its disabled state, then apply tuning. */
+	ret = regmap_write(rptr->regmap, SAMSUNG_EUSB_REPEATER_GLOBAL_CONFIG, 0);
+	if (ret)
+		return ret;
+
+	return samsung_eusb_repeater_apply_tunes(rptr);
+}
+
 /*
- * Hardware is fully configured at probe; phy_init() is a no-op so boards that
- * do wire a "phys" link (and thus call phy_init on us) still work.
+ * Re-apply the repeater enable + tuning here (not only at probe) so it runs
+ * in-order, immediately before the consuming eUSB2 PHY's init/Port-Reset.
+ * Decoupling repeater config from the eUSB2 init makes the eUSB2<->repeater
+ * link establish only intermittently (per-boot coin flip), so the eUSB2 PHY
+ * drives us via phy_init() right before it powers up.
  */
 static int samsung_eusb_repeater_init(struct phy *phy)
 {
-	return 0;
+	struct samsung_eusb_repeater *rptr = phy_get_drvdata(phy);
+
+	return samsung_eusb_repeater_configure(rptr);
 }
 
 static const struct phy_ops samsung_eusb_repeater_ops = {
@@ -231,14 +255,10 @@ static int samsung_eusb_repeater_probe(struct i2c_client *client)
 
 	fsleep(SAMSUNG_EUSB_REPEATER_RH_READY_US);
 
-	/* Bring the repeater data path out of its disabled state before tuning. */
-	ret = regmap_write(rptr->regmap, SAMSUNG_EUSB_REPEATER_GLOBAL_CONFIG, 0);
+	/* Initial configuration (also re-applied in-order from phy_init()). */
+	ret = samsung_eusb_repeater_configure(rptr);
 	if (ret)
-		return dev_err_probe(dev, ret, "failed to enable repeater\n");
-
-	ret = samsung_eusb_repeater_apply_tunes(rptr);
-	if (ret)
-		return ret;
+		return dev_err_probe(dev, ret, "failed to configure repeater\n");
 
 	rptr->phy = devm_phy_create(dev, dev->of_node,
 				    &samsung_eusb_repeater_ops);
@@ -251,6 +271,13 @@ static int samsung_eusb_repeater_probe(struct i2c_client *client)
 	phy_provider = devm_of_phy_provider_register(dev, of_phy_simple_xlate);
 	if (IS_ERR(phy_provider))
 		return PTR_ERR(phy_provider);
+
+	/*
+	 * The board DT does not link us to the eUSB2 PHY via "phys" (we are a
+	 * standalone I2C node), so publish a non-DT phy lookup so the eUSB2 PHY
+	 * (phy@11110000) can get us and drive our init in-order via phy_init().
+	 */
+	phy_create_lookup(rptr->phy, "repeater", SAMSUNG_EUSB_REPEATER_EUSB2_DEV);
 
 	dev_info(dev, "eUSB2 repeater configured (%d tune regs)\n",
 		 rptr->num_tune);
