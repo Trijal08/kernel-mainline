@@ -118,9 +118,21 @@ config PHY_PISTACHIO_USB
 	help
 	  Enable this to support the USB2.0 PHY on the IMG Pistachio SoC.
 
+config PHY_SAMSUNG_EUSB2_REPEATER
+	tristate "Samsung eUSB2 to USB2 repeater driver"
+	depends on I2C
+	depends on OF
+	select GENERIC_PHY
+	select REGMAP_I2C
+	help
+	  Enable this to support the Samsung eUSB2 signal-conditioning repeater
+	  found on Google Tensor (zuma/zumapro) boards. It sits between the SoC
+	  eUSB2 PHY and the USB 2.0 connector and is driven as an eUSB2-to-USB2.0
+	  repeater PHY referenced by the SoC eUSB2 PHY.
+
 config PHY_SNPS_EUSB2
 	tristate "SNPS eUSB2 PHY Driver"
-	depends on OF && (ARCH_EXYNOS || ARCH_QCOM || COMPILE_TEST)
+	depends on OF && (ARCH_EXYNOS || ARCH_QCOM || SOC_GOOGLE || COMPILE_TEST)
 	select GENERIC_PHY
 	help
 	  Enable support for the USB high-speed SNPS eUSB2 phy on select

@@ -8,6 +8,7 @@
  * Author: Vivek Gautam <gautam.vivek@samsung.com>
  */
 
+#include <linux/arm-smccc.h>
 #include <linux/bitfield.h>
 #include <linux/clk.h>
 #include <linux/delay.h>
@@ -15,6 +16,7 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/of.h>
+#include <linux/of_address.h>
 #include <linux/iopoll.h>
 #include <linux/phy/phy.h>
 #include <linux/platform_device.h>
@@ -524,6 +526,10 @@ struct exynos5_usbdrd_phy {
 		u32 index;
 		struct regmap *reg_pmu;
 		u32 pmu_offset;
+		/* Physical base of the PMU, for SoCs whose PHY-control
+		 * register is secure and must be reached via the EL3 monitor.
+		 */
+		phys_addr_t pmu_base;
 		const struct exynos5_usbdrd_phy_config *phy_cfg;
 	} phys[EXYNOS5_DRDPHYS_NUM];
 	u32 extrefclk;
@@ -592,6 +598,29 @@ static void exynos5_usbdrd_phy_isol(struct phy_usb_instance *inst,
 
 	regmap_update_bits(inst->reg_pmu, inst->pmu_offset,
 			   EXYNOS4_PHY_ENABLE, val);
+}
+
+/* SiP SMC to read-modify-write a secure (EL3-owned) register. */
+#define EXYNOS_SMC_CMD_PRIV_REG		0x82000504
+#define EXYNOS_PRIV_REG_OPTION_RMW	2
+
+/*
+ * Google Tensor (zuma/zumapro) keeps the USB PHY-control PMU register in the
+ * secure world, so it cannot be poked through the plain MMIO PMU syscon (a
+ * direct write faults with an external SError). Route the isolation control
+ * through the EL3 monitor instead, matching the vendor driver.
+ */
+static void zuma_usbdrd_phy_isol(struct phy_usb_instance *inst, bool isolate)
+{
+	struct arm_smccc_res res;
+	u32 val = isolate ? 0 : EXYNOS4_PHY_ENABLE;
+
+	if (!inst->pmu_base)
+		return;
+
+	arm_smccc_smc(EXYNOS_SMC_CMD_PRIV_REG, inst->pmu_base + inst->pmu_offset,
+		      EXYNOS_PRIV_REG_OPTION_RMW, EXYNOS4_PHY_ENABLE, val,
+		      0, 0, 0, &res);
 }
 
 /*
@@ -674,6 +703,9 @@ exynos5_usbdrd_apply_phy_tunes(struct exynos5_usbdrd_phy *phy_drd,
 			       enum exynos5_usbdrd_phy_tuning_state state)
 {
 	const struct exynos5_usbdrd_phy_tuning *tune;
+
+	if (!phy_drd->drv_data->phy_tunes)
+		return;
 
 	tune = phy_drd->drv_data->phy_tunes[state];
 	if (!tune)
@@ -1367,16 +1399,22 @@ static void exynos2200_usbdrd_link_init(struct exynos5_usbdrd_phy *phy_drd)
 	u32 reg;
 
 	/*
-	 * Disable HWACG (hardware auto clock gating control). This will force
-	 * QACTIVE signal in Q-Channel interface to HIGH level, to make sure
-	 * the PHY clock is not gated by the hardware.
+	 * Disable HWACG (hardware auto clock gating control) by forcing the
+	 * Q-Channel QACTIVE signal HIGH so the PHY clock is never gated, and
+	 * bypass the debounce filters on vbusvalid/bvalid/id so the forced
+	 * session signals below are seen by the link immediately and reliably
+	 * (without bus_filter_bypass the forced bvalid/vbusvalid go through a
+	 * debounce filter and session-valid can be intermittently missed).
 	 */
 	reg = readl(regs_base + EXYNOS850_DRD_LINKCTRL);
-	reg |= LINKCTRL_FORCE_QACT;
+	reg |= LINKCTRL_FORCE_QACT | LINKCTRL_BUS_FILTER_BYPASS;
 	writel(reg, regs_base + EXYNOS850_DRD_LINKCTRL);
 
-	/* De-assert link reset */
+	/* Pulse the link soft-reset so the controller starts from a clean state */
 	reg = readl(regs_base + EXYNOS2200_DRD_CLKRST);
+	reg |= CLKRST_LINK_SW_RST;
+	writel(reg, regs_base + EXYNOS2200_DRD_CLKRST);
+	udelay(10);
 	reg &= ~CLKRST_LINK_SW_RST;
 	writel(reg, regs_base + EXYNOS2200_DRD_CLKRST);
 
@@ -1431,6 +1469,8 @@ static int exynos2200_usbdrd_phy_init(struct phy *phy)
 	struct exynos5_usbdrd_phy *phy_drd = to_usbdrd_phy(inst);
 	int ret;
 
+	dev_info(phy_drd->dev, "ZUMADBG phy_init id=%d\n", inst->phy_cfg->id);
+
 	if (inst->phy_cfg->id == EXYNOS5_DRDPHY_UTMI) {
 		/* Power-on PHY ... */
 		ret = regulator_bulk_enable(phy_drd->drv_data->n_regulators,
@@ -1443,9 +1483,10 @@ static int exynos2200_usbdrd_phy_init(struct phy *phy)
 	}
 	/*
 	 * ... and ungate power via PMU. Without this here, we get an SError
-	 * trying to access PMA registers
+	 * trying to access PMA registers. Use the per-SoC isolation callback:
+	 * some SoCs (zuma) own this PMU register in the secure world.
 	 */
-	exynos5_usbdrd_phy_isol(inst, false);
+	inst->phy_cfg->phy_isol(inst, false);
 
 	ret = clk_bulk_prepare_enable(phy_drd->drv_data->n_clks, phy_drd->clks);
 	if (ret)
@@ -1487,7 +1528,7 @@ static int exynos2200_usbdrd_phy_exit(struct phy *phy)
 
 	clk_bulk_disable_unprepare(phy_drd->drv_data->n_clks, phy_drd->clks);
 
-	exynos5_usbdrd_phy_isol(inst, true);
+	inst->phy_cfg->phy_isol(inst, true);
 	return regulator_bulk_disable(phy_drd->drv_data->n_regulators,
 				      phy_drd->regulators);
 }
@@ -2875,10 +2916,50 @@ static const struct exynos5_usbdrd_phy_drvdata gs101_usbd31rd_phy = {
 	.n_regulators			= ARRAY_SIZE(gs101_regulator_names),
 };
 
+/*
+ * Google Tensor zuma/zumapro USB3.1 DRD combo PHY. Like exynos2200, the
+ * high-speed side is an external Synopsys eUSB2 PHY (the "hs" sub-PHY) reached
+ * through the same link/UTMI sequence; the SuperSpeed side is the Synopsys
+ * USBDP Gen2 V4 combo, brought up via the same PMA sequence as gs101. zuma and
+ * zumapro share this PHY; the only delta (eUSB cp_bias) lives in the eUSB2 PHY
+ * driver, so a single combo drvdata covers both.
+ */
+static const struct exynos5_usbdrd_phy_config phy_cfg_zuma[] = {
+	{
+		.id		= EXYNOS5_DRDPHY_UTMI,
+		.phy_isol	= zuma_usbdrd_phy_isol,
+		.phy_init	= exynos2200_usbdrd_utmi_init,
+	},
+	{
+		.id		= EXYNOS5_DRDPHY_PIPE3,
+		.phy_isol	= zuma_usbdrd_phy_isol,
+		.phy_init	= exynos5_usbdrd_gs101_pipe3_init,
+	},
+};
+
+static const struct exynos5_usbdrd_phy_drvdata zuma_usb31drd_phy = {
+	.phy_cfg			= phy_cfg_zuma,
+	.phy_ops			= &exynos2200_usbdrd_phy_ops,
+	.pmu_offset_usbdrd0_phy		= GS101_PHY_CTRL_USB20,
+	.pmu_offset_usbdrd0_phy_ss	= GS101_PHY_CTRL_USBDP,
+	.clk_names			= exynos5_clk_names,
+	.n_clks				= ARRAY_SIZE(exynos5_clk_names),
+	/* SuperSpeed tuning is left at PHY defaults, like the zuma DT */
+	.phy_tunes			= NULL,
+	/* clocks and regulators are specific to the underlying PHY blocks */
+	.core_clk_names			= NULL,
+	.n_core_clks			= 0,
+	.regulator_names		= NULL,
+	.n_regulators			= 0,
+};
+
 static const struct of_device_id exynos5_usbdrd_phy_of_match[] = {
 	{
 		.compatible = "google,gs101-usb31drd-phy",
 		.data = &gs101_usbd31rd_phy
+	}, {
+		.compatible = "google,zuma-usb31drd-phy",
+		.data = &zuma_usb31drd_phy,
 	}, {
 		.compatible = "samsung,exynos2200-usb32drd-phy",
 		.data = &exynos2200_usb32drd_phy,
@@ -2925,6 +3006,8 @@ static int exynos5_usbdrd_phy_probe(struct platform_device *pdev)
 	struct phy_provider *phy_provider;
 	const struct exynos5_usbdrd_phy_drvdata *drv_data;
 	struct regmap *reg_pmu;
+	struct device_node *pmu_np;
+	phys_addr_t pmu_base = 0;
 	u32 pmu_offset;
 	int i, ret;
 	int channel;
@@ -2953,15 +3036,24 @@ static int exynos5_usbdrd_phy_probe(struct platform_device *pdev)
 			return PTR_ERR(reg);
 		phy_drd->reg_phy = reg;
 
-		reg = devm_platform_ioremap_resource_byname(pdev, "pcs");
-		if (IS_ERR(reg))
-			return PTR_ERR(reg);
-		phy_drd->reg_pcs = reg;
+		/*
+		 * The "pcs" and "pma" regions are optional: combo PHYs that
+		 * keep SuperSpeed tuning at PHY defaults (e.g. zuma) do not
+		 * expose a separate PCS region, and only touch the PMA.
+		 */
+		if (platform_get_resource_byname(pdev, IORESOURCE_MEM, "pcs")) {
+			reg = devm_platform_ioremap_resource_byname(pdev, "pcs");
+			if (IS_ERR(reg))
+				return PTR_ERR(reg);
+			phy_drd->reg_pcs = reg;
+		}
 
-		reg = devm_platform_ioremap_resource_byname(pdev, "pma");
-		if (IS_ERR(reg))
-			return PTR_ERR(reg);
-		phy_drd->reg_pma = reg;
+		if (platform_get_resource_byname(pdev, IORESOURCE_MEM, "pma")) {
+			reg = devm_platform_ioremap_resource_byname(pdev, "pma");
+			if (IS_ERR(reg))
+				return PTR_ERR(reg);
+			phy_drd->reg_pma = reg;
+		}
 	} else {
 		/* DTB with just a single region */
 		phy_drd->reg_phy = devm_platform_ioremap_resource(pdev, 0);
@@ -2989,6 +3081,20 @@ static int exynos5_usbdrd_phy_probe(struct platform_device *pdev)
 	if (IS_ERR(reg_pmu))
 		return dev_err_probe(dev, PTR_ERR(reg_pmu),
 				     "Failed to lookup PMU regmap\n");
+
+	/*
+	 * Also resolve the PMU's physical base. SoCs whose PHY-control register
+	 * is secure (e.g. zuma) reach it through the EL3 monitor by physical
+	 * address rather than the MMIO regmap.
+	 */
+	pmu_np = of_parse_phandle(dev->of_node, "samsung,pmu-syscon", 0);
+	if (pmu_np) {
+		struct resource pmu_res;
+
+		if (!of_address_to_resource(pmu_np, 0, &pmu_res))
+			pmu_base = pmu_res.start;
+		of_node_put(pmu_np);
+	}
 
 	/*
 	 * Exynos5420 SoC has multiple channels for USB 3.0 PHY, with
@@ -3030,6 +3136,7 @@ static int exynos5_usbdrd_phy_probe(struct platform_device *pdev)
 		phy_drd->phys[i].phy = phy;
 		phy_drd->phys[i].index = i;
 		phy_drd->phys[i].reg_pmu = reg_pmu;
+		phy_drd->phys[i].pmu_base = pmu_base;
 		switch (channel) {
 		case 1:
 			pmu_offset = drv_data->pmu_offset_usbdrd1_phy;

@@ -1726,6 +1726,15 @@ int usb_gadget_register_driver_owner(struct usb_gadget_driver *driver,
 
 	mutex_lock(&udc_lock);
 	if (!driver->is_bound) {
+		struct usb_udc *zdbg_udc;
+
+		pr_info("ZUMADBG gadget '%s' wants udc_name='%s'; registered UDCs:\n",
+			driver->function,
+			driver->udc_name ? driver->udc_name : "(null)");
+		list_for_each_entry(zdbg_udc, &udc_list, list)
+			pr_info("ZUMADBG   udc='%s' bound_driver=%s\n",
+				dev_name(&zdbg_udc->dev),
+				zdbg_udc->driver ? zdbg_udc->driver->function : "(none)");
 		if (driver->match_existing_only) {
 			pr_warn("%s: couldn't find an available UDC or it's busy\n",
 					driver->function);

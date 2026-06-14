@@ -128,7 +128,18 @@ static inline void dwc3_exynos_writel(void __iomem *base, u32 offset, u32 value)
 
 int dwc3_exynos_host_event(struct device *dev, int action);
 int dwc3_exynos_device_event(struct device *dev, bool action);
+#if IS_ENABLED(CONFIG_USB_DWC3_EXYNOS_GS)
 int dwc3_exynos_phy_enable(int owner, bool on);
+#else
+/*
+ * When the out-of-tree dwc3-exynos glue is not built (e.g. when the mainline
+ * dwc3-exynos + phy-exynos5-usbdrd stack is used instead), this combo-PHY DP
+ * hook has no provider. Stub it out so DP-alt-mode consumers still link; the
+ * combo PHY's DP muxing must be wired to the mainline phy/typec framework for
+ * DisplayPort-over-USB-C to actually work.
+ */
+static inline int dwc3_exynos_phy_enable(int owner, bool on) { return 0; }
+#endif
 extern int dwc3_exynos_set_bus_clock(struct device *dev, int clk_level);
 
 int dwc3_exynos_core_init(struct dwc3 *dwc, struct dwc3_exynos *exynos);

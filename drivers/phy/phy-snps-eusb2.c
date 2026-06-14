@@ -15,6 +15,7 @@
 
 #define EXYNOS_USB_PHY_HS_PHY_CTRL_RST	(0x0)
 #define USB_PHY_RST_MASK		GENMASK(1, 0)
+#define USB_PHY_RESET			BIT(0)	/* phy_reset only (not ovrd_en) */
 #define UTMI_PORT_RST_MASK		GENMASK(5, 4)
 
 #define EXYNOS_USB_PHY_HS_PHY_CTRL_COMMON	(0x4)
@@ -25,6 +26,7 @@
 #define FSEL_48_MHZ_VAL			(0x2)
 
 #define EXYNOS_USB_PHY_CFG_PLLCFG0	(0x8)
+#define EXYNOS_PHY_CFG_PLL_CPBIAS_CNTRL_MASK	GENMASK(6, 0)
 #define PHY_CFG_PLL_FB_DIV_19_8_MASK	GENMASK(19, 8)
 #define DIV_19_8_19_2_MHZ_VAL		(0x170)
 #define DIV_19_8_20_MHZ_VAL		(0x160)
@@ -158,6 +160,8 @@ struct snps_eusb2_phy_drvdata {
 	int (*phy_init)(struct phy *p);
 	const char * const *clk_names;
 	int num_clks;
+	/* Clear the PLL charge-pump bias control (eUSB rev 0x701, e.g. zumapro) */
+	bool cpbias_cntrl_zero;
 };
 
 struct snps_eusb2_hsphy {
@@ -333,6 +337,16 @@ static int exynos_snps_eusb2_hsphy_init(struct phy *p)
 	if (ret)
 		return ret;
 
+	/*
+	 * Some revisions (eUSB ver 0x701, e.g. zumapro) require the PLL
+	 * charge-pump bias control to be cleared instead of using the
+	 * hardware default.
+	 */
+	if (phy->data->cpbias_cntrl_zero)
+		snps_eusb2_hsphy_write_mask(phy->base, EXYNOS_USB_PHY_CFG_PLLCFG0,
+					    EXYNOS_PHY_CFG_PLL_CPBIAS_CNTRL_MASK,
+					    FIELD_PREP(EXYNOS_PHY_CFG_PLL_CPBIAS_CNTRL_MASK, 0x0));
+
 	/* default parameter: tx fsls-vref */
 	snps_eusb2_hsphy_write_mask(phy->base, EXYNOS_PHY_CFG_TX,
 				    EXYNOS_PHY_CFG_TX_FSLS_VREF_TUNE_MASK,
@@ -340,14 +354,39 @@ static int exynos_snps_eusb2_hsphy_init(struct phy *p)
 
 	snps_eusb2_hsphy_write_mask(phy->base, EXYNOS_USB_PHY_UTMI_TESTSE,
 				    TEST_IDDQ, 0);
-	fsleep(10); /* required after releasing test_iddq */
 
+	/* Keep the PHY disabled while running the power-up sequence. */
+	snps_eusb2_hsphy_write_mask(phy->base, EXYNOS_USB_PHY_HS_PHY_CTRL_COMMON,
+				    PHY_ENABLE, 0);
+
+	/*
+	 * phy_reset must stay asserted >=10us after releasing test_iddq.
+	 *
+	 * The eUSB2 databook power-up timing below uses busy-wait udelay(), NOT
+	 * sleeping delays: usleep_range()/fsleep() can overshoot by milliseconds
+	 * under boot-time load, and the T5 window in particular bounds how long
+	 * the PHY broadcasts Port-Reset (ESE1) on the eUSB lines before
+	 * utmi_port_reset is released. Overshooting holds ESE1 too long and the
+	 * repeater/link fails to latch (intermittent / no enumeration).
+	 */
+	udelay(10);
+
+	/*
+	 * Release phy_reset but keep its override enabled (clear only the reset
+	 * bit, not ovrd_en) so the PHY stays out of reset, then allow time for
+	 * REXT calibration.
+	 */
 	snps_eusb2_hsphy_write_mask(phy->base, EXYNOS_USB_PHY_HS_PHY_CTRL_RST,
-				    USB_PHY_RST_MASK, 0);
+				    USB_PHY_RESET, 0);
+	udelay(10);	/* REXT calibration */
 
 	snps_eusb2_hsphy_write_mask(phy->base, EXYNOS_USB_PHY_HS_PHY_CTRL_COMMON,
 				    PHY_ENABLE, PHY_ENABLE);
+	udelay(1000);	/* REXT calibration after phy_enable */
+	udelay(28);	/* T4: analog/digital powered up, utmi_clk starts */
+	udelay(2500);	/* T5: Port-Reset (ESE1) transmitted on the eUSB lines */
 
+	/* Release the UTMI port reset (and its override). */
 	snps_eusb2_hsphy_write_mask(phy->base, EXYNOS_USB_PHY_HS_PHY_CTRL_RST,
 				    UTMI_PORT_RST_MASK, 0);
 
@@ -362,6 +401,19 @@ static const struct snps_eusb2_phy_drvdata exynos2200_snps_eusb2_phy = {
 	.phy_init	= exynos_snps_eusb2_hsphy_init,
 	.clk_names	= exynos_eusb2_hsphy_clock_names,
 	.num_clks	= ARRAY_SIZE(exynos_eusb2_hsphy_clock_names),
+};
+
+static const struct snps_eusb2_phy_drvdata google_zuma_snps_eusb2_phy = {
+	.phy_init	= exynos_snps_eusb2_hsphy_init,
+	.clk_names	= exynos_eusb2_hsphy_clock_names,
+	.num_clks	= ARRAY_SIZE(exynos_eusb2_hsphy_clock_names),
+};
+
+static const struct snps_eusb2_phy_drvdata google_zumapro_snps_eusb2_phy = {
+	.phy_init		= exynos_snps_eusb2_hsphy_init,
+	.clk_names		= exynos_eusb2_hsphy_clock_names,
+	.num_clks		= ARRAY_SIZE(exynos_eusb2_hsphy_clock_names),
+	.cpbias_cntrl_zero	= true,
 };
 
 static int qcom_snps_eusb2_hsphy_init(struct phy *p)
@@ -614,6 +666,12 @@ static const struct of_device_id snps_eusb2_hsphy_of_match_table[] = {
 	}, {
 		.compatible = "samsung,exynos2200-eusb2-phy",
 		.data = &exynos2200_snps_eusb2_phy,
+	}, {
+		.compatible = "google,zuma-eusb2-phy",
+		.data = &google_zuma_snps_eusb2_phy,
+	}, {
+		.compatible = "google,zumapro-eusb2-phy",
+		.data = &google_zumapro_snps_eusb2_phy,
 	}, {
 		/* sentinel */
 	}

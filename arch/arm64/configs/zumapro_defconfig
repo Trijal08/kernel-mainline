@@ -74,7 +74,7 @@ CONFIG_CP15_BARRIER_EMULATION=y
 CONFIG_SETEND_EMULATION=y
 CONFIG_RANDOMIZE_BASE=y
 # CONFIG_RANDOMIZE_MODULE_REGION_FULL is not set
-CONFIG_CMDLINE="ramoops.max_reason=0 printk.always_kmsg_dump=Y stack_depot_disable=on cgroup_disable=pressure kasan.page_alloc.sample=10 kasan.stacktrace=off kvm-arm.mode=nvhe bootconfig ioremap_guard v4l2loopback.devices=2 v4l2loopback.card_label=\"Back Camera,Front Camera\" v4l2loopback.exclusive_caps=1,1 v4l2loopback.max_buffers=6"
+CONFIG_CMDLINE="ramoops.max_reason=0 printk.always_kmsg_dump=Y stack_depot_disable=on cgroup_disable=pressure kasan.page_alloc.sample=10 kasan.stacktrace=off kvm-arm.mode=nvhe bootconfig ioremap_guard v4l2loopback.devices=2 v4l2loopback.card_label=\"Back Camera,Front Camera\" v4l2loopback.exclusive_caps=1,1 v4l2loopback.max_buffers=6 androidboot.usbcontroller=11210000.dwc3"
 CONFIG_CMDLINE_EXTEND=y
 # CONFIG_EFI is not set
 CONFIG_PM_USERSPACE_AUTOSLEEP=y
@@ -437,6 +437,7 @@ CONFIG_USB_ACM=m
 CONFIG_USB_STORAGE=y
 CONFIG_USB_UAS=y
 CONFIG_USB_DWC3=y
+CONFIG_USB_DWC3_DUAL_ROLE=y
 CONFIG_USB_SERIAL=m
 CONFIG_USB_SERIAL_FTDI_SIO=m
 CONFIG_USB_GADGET=y
@@ -670,8 +671,11 @@ CONFIG_S5910=m
 CONFIG_SBB_MUX=m
 CONFIG_PCI_EXYNOS_GS=m
 CONFIG_PCI_EXYNOS_CAL_ZUMA=m
-CONFIG_PHY_EXYNOS_EUSB_REPEATER=m
-CONFIG_PHY_EXYNOS_USBDRD_EUSB=m
+# CONFIG_PHY_EXYNOS_EUSB_REPEATER is not set
+# CONFIG_PHY_EXYNOS_USBDRD_EUSB is not set
+CONFIG_PHY_EXYNOS5_USBDRD=y
+CONFIG_PHY_SNPS_EUSB2=y
+CONFIG_PHY_SAMSUNG_EUSB2_REPEATER=y
 CONFIG_PHY_EXYNOS_MIPI=m
 CONFIG_PHY_EXYNOS_MIPI_DSIM=m
 CONFIG_PINCTRL_EXYNOS_GS=m
@@ -726,9 +730,10 @@ CONFIG_THERMAL_UCLAMP_COOLING_DEVICE=m
 CONFIG_SERIAL_EXYNOS=m
 CONFIG_SCSI_UFS_EXYNOS_GS=m
 CONFIG_SCSI_UFS_CRYPTO_SW_KEYS_MODE=y
-CONFIG_USB_XHCI_EXYNOS=m
-CONFIG_USB_XHCI_GOOG_DMA=m
-CONFIG_USB_DWC3_EXYNOS_GS=m
+# CONFIG_USB_XHCI_EXYNOS is not set
+# CONFIG_USB_XHCI_GOOG_DMA is not set
+# CONFIG_USB_DWC3_EXYNOS_GS is not set
+CONFIG_USB_DWC3_EXYNOS=y
 CONFIG_USB_CONFIGFS_F_DM=m
 CONFIG_TYPEC_COOLING_DEV=m
 CONFIG_TYPEC_MAX77759=m

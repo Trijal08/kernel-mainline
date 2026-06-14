@@ -6,6 +6,11 @@
  */
 #include "zuma/zuma-usb.dtsi"
 
-&usbdrd_phy0 {
-	phy_eusb_version = <0x701>;
+/*
+ * zumapro shares the zuma USB PHY; the only delta is the eUSB revision
+ * (0x701 vs 0x700), which clears the PLL charge-pump bias control. That is
+ * encoded by the more-specific eUSB2 PHY compatible.
+ */
+&usb_hsphy {
+	compatible = "google,zumapro-eusb2-phy", "google,zuma-eusb2-phy";
 };

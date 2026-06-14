@@ -2390,6 +2390,8 @@ static int dwc3_probe(struct platform_device *pdev)
 	struct resource *res;
 	struct dwc3 *dwc;
 
+	dev_info(&pdev->dev, "ZUMADBG dwc3_probe entered\n");
+
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	if (!res) {
 		dev_err(&pdev->dev, "missing memory resource\n");

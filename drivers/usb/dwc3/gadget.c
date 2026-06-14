@@ -4794,6 +4794,9 @@ int dwc3_gadget_init(struct dwc3 *dwc)
 	if (dwc->sys_wakeup)
 		device_wakeup_disable(dwc->sysdev);
 
+	dev_info(dwc->dev, "ZUMADBG dwc3_gadget_init OK, udc registered as '%s'\n",
+		 dev_name(dwc->dev));
+
 	return 0;
 
 err5:

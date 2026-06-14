@@ -286,7 +286,14 @@ static ssize_t gadget_dev_desc_UDC_store(struct config_item *item,
 
 	mutex_lock(&gi->lock);
 
-	if (!strlen(name)) {
+	/*
+	 * Android userspace (incl. recovery) writes the literal string "none"
+	 * to unbind the gadget; treat it the same as an empty string. Vanilla
+	 * configfs only accepts "" so the "none" write would otherwise be taken
+	 * as a UDC name and fail with -EBUSY, leaving the gadget bound/unbound
+	 * incorrectly.
+	 */
+	if (!strlen(name) || strcmp(name, "none") == 0) {
 		ret = unregister_gadget(gi);
 		if (ret)
 			goto err;
