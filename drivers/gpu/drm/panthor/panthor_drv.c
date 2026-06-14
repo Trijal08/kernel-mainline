@@ -1881,8 +1881,14 @@ static const struct panthor_soc_data soc_data_mediatek_mt8196 = {
 	.asn_hash = { 0xb, 0xe, 0x0, },
 };
 
+static const struct panthor_soc_data soc_data_google_zuma = {
+	.asn_hash_enable = true,
+	.asn_hash = { 0x0036db6d, 0x005b6db6, 0x0, },
+};
+
 static const struct of_device_id dt_match[] = {
 	{ .compatible = "mediatek,mt8196-mali", .data = &soc_data_mediatek_mt8196, },
+	{ .compatible = "google,zuma-mali", .data = &soc_data_google_zuma, },
 	{ .compatible = "rockchip,rk3588-mali" },
 	{ .compatible = "arm,mali-valhall-csf" },
 	{}
