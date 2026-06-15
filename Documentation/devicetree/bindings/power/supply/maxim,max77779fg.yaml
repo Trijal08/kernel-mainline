@@ -1,0 +1,53 @@
+# SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/power/supply/maxim,max77779fg.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Maxim MAX77779 ModelGauge m5 fuel gauge
+
+maintainers:
+  - Steffen Deusch <steffen@deusch.me>
+
+description:
+  The MAX77779 PMIC integrates a ModelGauge m5 fuel gauge that is reachable as
+  an independent I2C device (default address 0x36). This binding describes the
+  fuel-gauge function only.
+
+allOf:
+  - $ref: power-supply.yaml#
+
+properties:
+  compatible:
+    const: maxim,max77779fg
+
+  reg:
+    maxItems: 1
+
+  interrupts:
+    maxItems: 1
+
+  shunt-resistor-micro-ohms:
+    description:
+      Resistance of the battery current-sense resistor. Required for current
+      and charge (capacity) readings; state-of-charge, voltage and temperature
+      are reported regardless of its presence.
+
+required:
+  - compatible
+  - reg
+
+unevaluatedProperties: false
+
+examples:
+  - |
+    i2c {
+        #address-cells = <1>;
+        #size-cells = <0>;
+
+        fuel-gauge@36 {
+            compatible = "maxim,max77779fg";
+            reg = <0x36>;
+            shunt-resistor-micro-ohms = <5000>;
+        };
+    };
