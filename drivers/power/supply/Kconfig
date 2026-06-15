@@ -471,6 +471,20 @@ config BATTERY_MAX1720X
 
 	  Say Y to include support for the MAX17201/MAX17205 Fuel Gauges.
 
+config BATTERY_MAX77779
+	tristate "Maxim MAX77779 Fuel Gauge"
+	depends on I2C
+	select REGMAP_I2C
+	help
+	  The MAX77779 PMIC integrates a ModelGauge m5 fuel gauge reachable as
+	  an independent I2C device. This is a read-only driver that reports the
+	  gauge's autonomously tracked state-of-charge, voltage, current and
+	  temperature through the power_supply class; it does not program the
+	  battery model or touch any charge rail.
+
+	  Say Y here to enable battery state-of-charge reporting on boards that
+	  populate the MAX77779, such as the Google Pixel 9a.
+
 config BATTERY_MAX1721X
 	tristate "MAX17211/MAX17215 standalone gas-gauge"
 	depends on W1
