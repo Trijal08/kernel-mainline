@@ -264,6 +264,20 @@ static int gs101_ufs_drv_init(struct exynos_ufs *ufs)
 	return exynos_ufs_shareability(ufs);
 }
 
+/*
+ * Program the HSI2 SYSREG-level state that lives outside the UFS controller
+ * and is therefore not rebuilt by the core's reset_and_restore on resume:
+ * the Zuma BUS_COMPONENT_DRCG_EN gate and the IO-coherency shareability bits.
+ */
+static int zumapro_ufs_config_externals(struct exynos_ufs *ufs)
+{
+	if (ufs->sysreg)
+		regmap_write(ufs->sysreg, UFS_ZUMAPRO_BUS_COMPONENT_DRCG_EN,
+			     0xffffffff);
+
+	return exynos_ufs_shareability(ufs);
+}
+
 static int zumapro_ufs_drv_init(struct exynos_ufs *ufs)
 {
 	struct ufs_hba *hba = ufs->hba;
@@ -272,8 +286,20 @@ static int zumapro_ufs_drv_init(struct exynos_ufs *ufs)
 	/* Enable WriteBooster */
 	hba->caps |= UFSHCD_CAP_WB_EN;
 
-	/* Keep runtime clock gating and hibern8 disabled during bring-up */
+	/*
+	 * Runtime clock gating and hibern8 retention are deferred (Phase 2:
+	 * needs the CAL h8-enter/exit PHY tweaks and M-PHY APB bracketing).
+	 * They do not affect system suspend, which gates clocks unconditionally.
+	 */
 	hba->caps &= ~(UFSHCD_CAP_CLK_GATING | UFSHCD_CAP_HIBERN8_WITH_CLK_GATING);
+
+	/*
+	 * Match downstream: system suspend fully powers the link down
+	 * (device POWERDOWN, link OFF) and resume re-trains from scratch.
+	 * This reuses the link-OFF suspend clock ordering and avoids the
+	 * HIBERN8-across-suspend POST_CHANGE clock path.
+	 */
+	hba->spm_lvl = UFS_PM_LVL_5;
 
 	/* set ACG to be controlled by UFS_ACG_DISABLE */
 	reg = hci_readl(ufs, HCI_IOP_ACG_DISABLE);
@@ -286,15 +312,12 @@ static int zumapro_ufs_drv_init(struct exynos_ufs *ufs)
 	 */
 	exynos_ufs_mphy_apbclk_ctrl(ufs, false);
 
-	/*
-	 * Downstream Zuma PMUCAL programs SYSREG_HSI2 BUS_COMPONENT_DRCG_EN
-	 * before bringing up UFS.
-	 */
-	if (ufs->sysreg)
-		regmap_write(ufs->sysreg, UFS_ZUMAPRO_BUS_COMPONENT_DRCG_EN,
-			     0xffffffff);
+	return zumapro_ufs_config_externals(ufs);
+}
 
-	return exynos_ufs_shareability(ufs);
+static int zumapro_ufs_resume(struct exynos_ufs *ufs)
+{
+	return zumapro_ufs_config_externals(ufs);
 }
 
 static int exynosauto_ufs_drv_init(struct exynos_ufs *ufs)
@@ -1179,14 +1202,30 @@ static int exynos_ufs_setup_clocks(struct ufs_hba *hba, bool on,
 		return 0;
 
 	if (on && status == PRE_CHANGE) {
+		/*
+		 * Resuming from a link-off suspend that gated the HBA clocks:
+		 * the core only re-enables them between PRE_CHANGE and
+		 * POST_CHANGE, so the HCI register bus is still dead here.  Defer
+		 * the ungate to POST_CHANGE.  Boot and runtime clock-gating exit
+		 * have the clocks on already, so ungate immediately.
+		 */
+		if (ufs->clks_gated_for_link_off)
+			return 0;
 		if (ufs->opts & EXYNOS_UFS_OPT_BROKEN_AUTO_CLK_CTRL)
 			exynos_ufs_disable_auto_ctrl_hcc(ufs);
 		exynos_ufs_ungate_clks(ufs);
+	} else if (on && status == POST_CHANGE && ufs->clks_gated_for_link_off) {
+		/* HBA clocks are enabled now; safe to touch HCI clk-stop. */
+		if (ufs->opts & EXYNOS_UFS_OPT_BROKEN_AUTO_CLK_CTRL)
+			exynos_ufs_disable_auto_ctrl_hcc(ufs);
+		exynos_ufs_ungate_clks(ufs);
+		ufs->clks_gated_for_link_off = false;
 	} else if (!on && status == PRE_CHANGE && ufshcd_is_link_off(hba)) {
 		/* Link-off suspend disables all HBA clocks before POST_CHANGE. */
 		exynos_ufs_gate_clks(ufs);
 		if (ufs->opts & EXYNOS_UFS_OPT_BROKEN_AUTO_CLK_CTRL)
 			exynos_ufs_enable_auto_ctrl_hcc(ufs);
+		ufs->clks_gated_for_link_off = true;
 	} else if (!on && status == POST_CHANGE) {
 		if (ufshcd_is_link_off(hba))
 			return 0;
@@ -1935,6 +1974,15 @@ static int exynos_ufs_resume(struct ufs_hba *hba, enum ufs_pm_op pm_op)
 
 	exynos_ufs_config_smu(ufs);
 	exynos_ufs_fmp_resume(hba);
+
+	/*
+	 * Restore SoC-level state that the core's reset_and_restore does not
+	 * touch.  Runs with host clocks on, before the link is re-trained.
+	 */
+	exynos_ufs_shareability(ufs);
+	if (ufs->drv_data->resume)
+		ufs->drv_data->resume(ufs);
+
 	return 0;
 }
 
@@ -2494,6 +2542,7 @@ static const struct exynos_ufs_drv_data zumapro_ufs_drvs = {
 	.post_link		= gs101_ufs_post_link,
 	.pre_pwr_change		= gs101_ufs_pre_pwr_change,
 	.suspend		= gs101_ufs_suspend,
+	.resume			= zumapro_ufs_resume,
 };
 
 static const struct of_device_id exynos_ufs_of_match[] = {
