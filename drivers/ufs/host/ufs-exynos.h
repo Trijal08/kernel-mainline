@@ -193,6 +193,7 @@ struct exynos_ufs_drv_data {
 	int (*pre_hce_enable)(struct exynos_ufs *ufs);
 	int (*post_hce_enable)(struct exynos_ufs *ufs);
 	int (*suspend)(struct exynos_ufs *ufs);
+	int (*resume)(struct exynos_ufs *ufs);
 };
 
 struct ufs_phy_time_cfg {
@@ -231,6 +232,7 @@ struct exynos_ufs {
 	struct ufs_phy_time_cfg t_cfg;
 	ktime_t entry_hibern8_t;
 	const struct exynos_ufs_drv_data *drv_data;
+	bool clks_gated_for_link_off;
 	struct regmap *sysreg;
 	u32 iocc_offset;
 	u32 iocc_mask;
