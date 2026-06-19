@@ -1,0 +1,93 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/leds/ti,lm3644.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Texas Instruments LM3644 dual-channel flash LED controller
+
+maintainers:
+  - Linux LED Subsystem <linux-leds@vger.kernel.org>
+
+description: |
+  The LM3644 is a two-channel flash LED controller. Its outputs can drive
+  separate LED components or be grouped to drive one logical flash LED.
+
+properties:
+  compatible:
+    const: ti,lm3644
+
+  reg:
+    maxItems: 1
+
+  enable-gpios:
+    maxItems: 1
+    description: Connection to the active-high HWEN pin.
+
+  led:
+    type: object
+    $ref: common.yaml#
+    unevaluatedProperties: false
+
+    properties:
+      led-sources:
+        description:
+          Output channels connected to the logical LED. Channel 0 denotes
+          LED1 and channel 1 denotes LED2.
+        minItems: 1
+        maxItems: 2
+        uniqueItems: true
+        items:
+          minimum: 0
+          maximum: 1
+
+      led-max-microamp:
+        minimum: 977
+        maximum: 360000
+
+      flash-max-microamp:
+        minimum: 10900
+        maximum: 1500000
+
+      flash-max-timeout-us:
+        minimum: 10000
+        maximum: 1600000
+
+    required:
+      - led-sources
+      - led-max-microamp
+      - flash-max-microamp
+      - flash-max-timeout-us
+
+required:
+  - compatible
+  - reg
+  - enable-gpios
+  - led
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/gpio/gpio.h>
+    #include <dt-bindings/leds/common.h>
+
+    i2c {
+        #address-cells = <1>;
+        #size-cells = <0>;
+
+        led-controller@63 {
+            compatible = "ti,lm3644";
+            reg = <0x63>;
+            enable-gpios = <&gpio 1 GPIO_ACTIVE_HIGH>;
+
+            led {
+                function = LED_FUNCTION_FLASH;
+                color = <LED_COLOR_ID_WHITE>;
+                led-sources = <0>, <1>;
+                led-max-microamp = <90000>;
+                flash-max-microamp = <750000>;
+                flash-max-timeout-us = <100000>;
+            };
+        };
+    };
