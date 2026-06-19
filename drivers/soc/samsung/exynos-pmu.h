@@ -32,6 +32,10 @@ struct exynos_pmu_conf {
  * @pmu_cpuhp: Whether or not extra handling is required for CPU hotplug and
  *             CPUidle outside of standard PSCI calls, due to non-compliant
  *             firmware.
+ * @pmu_sicd_wakeup: Whether the firmware needs every idling CPU to publish its
+ *                   idle intent through CPU_INFORM (and the wakeup mask armed)
+ *                   to keep the cores powered down during system idle/sleep,
+ *                   because plain PSCI alone does not hold them down.
  * @pmu_init: Optional init function.
  * @powerdown_conf: Optional callback before entering target system states:
  *                  SYS_AFTR, SYS_LPA, SYS_SLEEP. This will be invoked before
@@ -50,6 +54,7 @@ struct exynos_pmu_data {
 	const struct exynos_pmu_conf *pmu_config_extra;
 	bool pmu_secure;
 	bool pmu_cpuhp;
+	bool pmu_sicd_wakeup;
 
 	void (*pmu_init)(void);
 	void (*powerdown_conf)(enum sys_powerdown);
