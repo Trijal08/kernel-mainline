@@ -1,0 +1,77 @@
+# SPDX-License-Identifier: GPL-2.0
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/timer/samsung,exynos-mct-v3.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Samsung Exynos SoC Multi Core Timer (MCT) v3
+
+maintainers:
+  - Krzysztof Kozlowski <krzk@kernel.org>
+
+description: |
+  The v3 Multi Core Timer found on Google Tensor (Zuma/Zumapro) SoCs provides a
+  64-bit free-running counter and a set of per-CPU comparators living in the
+  always-on power block.  Unlike the older exynos4210-mct global/local timer
+  layout it has no global comparator; each comparator raises its own per-CPU
+  interrupt.  Because the comparators keep counting across CPU power-down idle
+  states they can be used as the always-on per-CPU tick.
+
+properties:
+  compatible:
+    const: samsung,exynos-mct-v3
+
+  reg:
+    maxItems: 1
+
+  clocks:
+    maxItems: 2
+
+  clock-names:
+    items:
+      - const: fin_pll
+      - const: mct
+
+  interrupts:
+    description:
+      One interrupt per comparator, in comparator-index order; the driver uses
+      one comparator per possible CPU.
+    minItems: 1
+    maxItems: 12
+
+  div:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description:
+      Divider applied to the input clock to derive the free-running counter
+      rate.  Defaults to 3 when absent.
+
+required:
+  - compatible
+  - reg
+  - clocks
+  - clock-names
+  - interrupts
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/clock/google,zumapro.h>
+    #include <dt-bindings/interrupt-controller/arm-gic.h>
+
+    timer@100d0000 {
+        compatible = "samsung,exynos-mct-v3";
+        reg = <0x100d0000 0x800>;
+        clocks = <&ext_24_5m>, <&cmu_misc CLK_GOUT_MISC_MCT_PCLK>;
+        clock-names = "fin_pll", "mct";
+        interrupts = <GIC_SPI 758 IRQ_TYPE_LEVEL_HIGH 0>,
+                     <GIC_SPI 759 IRQ_TYPE_LEVEL_HIGH 0>,
+                     <GIC_SPI 760 IRQ_TYPE_LEVEL_HIGH 0>,
+                     <GIC_SPI 761 IRQ_TYPE_LEVEL_HIGH 0>,
+                     <GIC_SPI 762 IRQ_TYPE_LEVEL_HIGH 0>,
+                     <GIC_SPI 763 IRQ_TYPE_LEVEL_HIGH 0>,
+                     <GIC_SPI 764 IRQ_TYPE_LEVEL_HIGH 0>,
+                     <GIC_SPI 765 IRQ_TYPE_LEVEL_HIGH 0>,
+                     <GIC_SPI 766 IRQ_TYPE_LEVEL_HIGH 0>;
+        div = <1>;
+    };
