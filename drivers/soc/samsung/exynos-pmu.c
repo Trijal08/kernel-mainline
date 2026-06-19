@@ -229,6 +229,7 @@ EXPORT_SYMBOL_GPL(exynos_get_pmu_regmap_by_phandle);
  */
 #define CPU_INFORM_CLEAR	0
 #define CPU_INFORM_C2		1
+#define CPU_INFORM_SICD		3
 
 /*
  * __gs101_cpu_pmu_ prefix functions are common code shared by CPU PM notifiers
@@ -476,6 +477,101 @@ static int setup_cpuhp_and_cpuidle(struct device *dev)
 	return 0;
 }
 
+/*
+ * Zumapro's firmware does not program the PMU wakeup interrupt enables for the
+ * powered-down system idle/sleep states.  Arm them around system suspend so the
+ * firmware has a valid wake source; mirrors the downstream cpupm "wakeup-mask"
+ * node (the external/pin EINT masks are programmed separately by pinctrl).
+ */
+static const struct {
+	unsigned int stat_reg;
+	unsigned int en_reg;
+	u32 mask;
+} zumapro_wakeup_mask[] = {
+	{ GS101_WAKEUP_STAT, GS101_TOP_INT_EN, 0xff00000 },
+	{ 0x3970, GS101_WAKEUP2_INT_EN, 0x0 },
+};
+
+static void zumapro_set_wakeup_mask(bool arm)
+{
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(zumapro_wakeup_mask); i++) {
+		regmap_write(pmu_context->pmureg,
+			     zumapro_wakeup_mask[i].stat_reg, 0);
+		regmap_write(pmu_context->pmureg, zumapro_wakeup_mask[i].en_reg,
+			     arm ? zumapro_wakeup_mask[i].mask : 0);
+	}
+}
+
+static struct cpumask zumapro_idle_cpus;
+/* cpu currently asserting system idle (SICD), or -1 if none */
+static int zumapro_sicd_holder = -1;
+/* debug counters, printed once per resume */
+static u32 zumapro_dbg_c2, zumapro_dbg_sicd, zumapro_dbg_fail;
+
+/*
+ * Plain PSCI does not keep zumapro's cores powered down during system idle: the
+ * firmware needs every idling core to publish its idle intent through its
+ * CPU_INFORM register, and the last core down to request system idle (SICD)
+ * with the wakeup mask armed (see zumapro_set_wakeup_mask()); otherwise it
+ * powers the cores straight back up.  Mirrors the downstream exynos-cpupm
+ * CPU_INFORM hints; no pmu-intr-gen handshake is needed (downstream does not
+ * touch it on the idle-enter path).  Only active inside a system suspend, when
+ * the mask is armed and all cores are parking; awake idle uses standard PSCI.
+ */
+static int zumapro_cpu_pm_notify(struct notifier_block *self,
+				 unsigned long action, void *v)
+{
+	unsigned int cpu = smp_processor_id();
+	u32 hint;
+
+	raw_spin_lock(&pmu_context->cpupm_lock);
+
+	if (!pmu_context->sys_insuspend) {
+		raw_spin_unlock(&pmu_context->cpupm_lock);
+		return NOTIFY_OK;
+	}
+
+	switch (action) {
+	case CPU_PM_ENTER:
+		cpumask_set_cpu(cpu, &zumapro_idle_cpus);
+		/*
+		 * Elect a single SICD holder: the first core to go idle claims
+		 * system idle, the rest report plain C2.  Exactly one SICD hint
+		 * (plus the armed wakeup mask) is what makes the firmware hold
+		 * the cluster; a kernel cpumask "all idle" test never fires
+		 * because the cores enter/exit faster than they ever coincide.
+		 */
+		if (zumapro_sicd_holder < 0) {
+			zumapro_sicd_holder = cpu;
+			hint = CPU_INFORM_SICD;
+			zumapro_dbg_sicd++;
+		} else {
+			hint = CPU_INFORM_C2;
+			zumapro_dbg_c2++;
+		}
+		if (regmap_write(pmu_context->pmureg, GS101_CPU_INFORM(cpu), hint))
+			zumapro_dbg_fail++;
+		break;
+	case CPU_PM_EXIT:
+		cpumask_clear_cpu(cpu, &zumapro_idle_cpus);
+		if (zumapro_sicd_holder == cpu)
+			zumapro_sicd_holder = -1;
+		regmap_write(pmu_context->pmureg, GS101_CPU_INFORM(cpu),
+			     CPU_INFORM_CLEAR);
+		break;
+	}
+
+	raw_spin_unlock(&pmu_context->cpupm_lock);
+	return NOTIFY_OK;
+}
+
+static struct notifier_block zumapro_cpu_pm_notifier = {
+	.notifier_call = zumapro_cpu_pm_notify,
+	.priority = INT_MAX,
+};
+
 static int exynos_pmu_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -548,6 +644,9 @@ static int exynos_pmu_probe(struct platform_device *pdev)
 			return ret;
 	}
 
+	if (pmu_context->pmu_data && pmu_context->pmu_data->pmu_sicd_wakeup)
+		cpu_pm_register_notifier(&zumapro_cpu_pm_notifier);
+
 	if (pmu_context->pmu_data && pmu_context->pmu_data->pmu_init)
 		pmu_context->pmu_data->pmu_init();
 
@@ -569,12 +668,32 @@ static int exynos_cpupm_suspend_noirq(struct device *dev)
 {
 	raw_spin_lock(&pmu_context->cpupm_lock);
 	pmu_context->sys_insuspend = true;
+	/* start the idle-hint tracking clean for this suspend */
+	cpumask_clear(&zumapro_idle_cpus);
+	zumapro_sicd_holder = -1;
+	zumapro_dbg_c2 = zumapro_dbg_sicd = zumapro_dbg_fail = 0;
 	raw_spin_unlock(&pmu_context->cpupm_lock);
+
+	if (pmu_context->pmu_data && pmu_context->pmu_data->pmu_sicd_wakeup) {
+		unsigned int v = 0xdead;
+
+		zumapro_set_wakeup_mask(true);
+		regmap_read(pmu_context->pmureg, GS101_TOP_INT_EN, &v);
+		pr_info("zumapro: suspend: wakeup mask armed, TOP_INT_EN(0x3944)=0x%x\n",
+			v);
+	}
+
 	return 0;
 }
 
 static int exynos_cpupm_resume_noirq(struct device *dev)
 {
+	if (pmu_context->pmu_data && pmu_context->pmu_data->pmu_sicd_wakeup) {
+		zumapro_set_wakeup_mask(false);
+		pr_info("zumapro: resume: CPU_INFORM hints c2=%u sicd=%u fails=%u\n",
+			zumapro_dbg_c2, zumapro_dbg_sicd, zumapro_dbg_fail);
+	}
+
 	raw_spin_lock(&pmu_context->cpupm_lock);
 	pmu_context->sys_insuspend = false;
 	raw_spin_unlock(&pmu_context->cpupm_lock);
