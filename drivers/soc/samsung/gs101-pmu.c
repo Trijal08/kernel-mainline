@@ -336,9 +336,14 @@ const struct exynos_pmu_data gs101_pmu_data = {
  * write allowlist and rejected accesses simply return -EINVAL - and no
  * pmu_cpuhp, as zumapro has no pmu-intr-gen node and uses standard PSCI for
  * CPU hotplug/idle. This is enough for the UFS and USB PHY isolation writes.
+ *
+ * pmu_sicd_wakeup is set because plain PSCI does not keep zumapro's cores
+ * powered down during system idle; the firmware needs each idling CPU to
+ * publish CPU_INFORM and the wakeup mask armed (see exynos-pmu.c).
  */
 const struct exynos_pmu_data zumapro_pmu_data = {
 	.pmu_secure = true,
+	.pmu_sicd_wakeup = true,
 };
 
 /*
@@ -362,7 +367,8 @@ int tensor_sec_reg_write(void *context, unsigned int reg, unsigned int val)
 
 	/* returns -EINVAL if access isn't allowed or 0 */
 	if (res.a0)
-		pr_warn("%s(): SMC failed: %d\n", __func__, (int)res.a0);
+		pr_warn("%s(): reg 0x%x val 0x%x SMC failed: %d\n", __func__,
+			reg, val, (int)res.a0);
 
 	return (int)res.a0;
 }
@@ -379,7 +385,8 @@ static int tensor_sec_reg_rmw(void *context, unsigned int reg,
 
 	/* returns -EINVAL if access isn't allowed or 0 */
 	if (res.a0)
-		pr_warn("%s(): SMC failed: %d\n", __func__, (int)res.a0);
+		pr_warn("%s(): reg 0x%x mask 0x%x val 0x%x SMC failed: %d\n",
+			__func__, reg, mask, val, (int)res.a0);
 
 	return (int)res.a0;
 }
