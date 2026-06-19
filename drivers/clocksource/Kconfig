@@ -458,6 +458,17 @@ config CLKSRC_EXYNOS_MCT
 	help
 	  Support for Multi Core Timer controller on Exynos SoCs.
 
+config CLKSRC_EXYNOS_MCT_V3
+	bool "Exynos multi core timer v3 driver" if COMPILE_TEST
+	depends on ARM64
+	depends on ARCH_EXYNOS || COMPILE_TEST
+	help
+	  Support for the v3 Multi Core Timer controller found on Google
+	  Tensor (Zuma/Zumapro) SoCs. The block exposes a free-running
+	  counter and per-CPU comparators that keep running across CPU
+	  power-down idle states, so they are used as the always-on
+	  per-CPU tick.
+
 config CLKSRC_SAMSUNG_PWM
 	bool "PWM timer driver for Samsung S3C, S5P" if COMPILE_TEST
 	depends on HAS_IOMEM
