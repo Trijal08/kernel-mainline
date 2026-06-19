@@ -144,6 +144,7 @@ config ARCH_EXYNOS
 	bool "Samsung Exynos SoC family"
 	select COMMON_CLK_SAMSUNG
 	select CLKSRC_EXYNOS_MCT
+	select CLKSRC_EXYNOS_MCT_V3
 	select EXYNOS_PM_DOMAINS if PM_GENERIC_DOMAINS
 	select EXYNOS_PMU
 	select PINCTRL
