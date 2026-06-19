@@ -401,6 +401,21 @@ static int psci_idle_init_cpu(struct device *dev, int cpu)
 		return ret ? : -ENODEV;
 
 	/*
+	 * States that stop the local timer (CPUIDLE_FLAG_TIMER_STOP) are woken
+	 * through a broadcast clockevent.  The suspend-to-idle entry path,
+	 * enter_s2idle_proper(), does not switch the CPU to the broadcast device
+	 * the way cpuidle_enter_state() does, so a CPU entering such a state via
+	 * s2idle keeps its local timer armed and is woken by the periodic tick
+	 * instead of staying idle - spinning the whole machine at HZ.  Don't
+	 * offer these states to s2idle; it then falls back to the regular idle
+	 * path, which stops the tick and manages the broadcast.  In OSI mode
+	 * psci_cpu_init_idle() restores enter_s2idle on the hierarchical state.
+	 */
+	for (int i = 1; i < drv->state_count; i++)
+		if (drv->states[i].flags & CPUIDLE_FLAG_TIMER_STOP)
+			drv->states[i].enter_s2idle = NULL;
+
+	/*
 	 * Initialize PSCI idle states.
 	 */
 	ret = psci_cpu_init_idle(dev, drv, cpu, ret);
