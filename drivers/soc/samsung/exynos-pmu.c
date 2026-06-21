@@ -575,6 +575,37 @@ static struct notifier_block zumapro_cpu_pm_notifier = {
 	.priority = INT_MAX,
 };
 
+/*
+ * SYSREG_CPUCL0 (CMU_CPUCL0 base 0x29c00000 + 0x20000) BUS_COMPONENT_DRCG_EN
+ * registers for the boot cluster's DynamIQ Shared Unit.
+ */
+#define ZUMAPRO_CPUCL0_SYSREG		0x29c20000
+#define CPUCL0_DSU_DRCG_EN		0x0104
+#define CPUCL0_DSU_DRCG_EN_INT		0x010c
+
+/*
+ * Enable dynamic root clock gating of the CPUCL0 DynamIQ Shared Unit. The DSU
+ * clock is shared by the whole boot cluster; until DRCG is enabled it never
+ * gates while a core is idle, so the firmware will not hold the cluster in the
+ * C2 power-down state and bounces the cores straight back out - suspend-to-idle
+ * never settles. Downstream programs this from pmucal_lpm_init. Mainline does
+ * not model the CPUCL0 CMU (CPU DVFS is ACPM-managed and the clk driver only
+ * sees the CMU_TOP feeds), and the generic DRCG helper writes a single register,
+ * so enable both DSU DRCG registers with a small direct SYSREG write here.
+ */
+static void zumapro_enable_dsu_drcg(struct device *dev)
+{
+	void __iomem *va = ioremap(ZUMAPRO_CPUCL0_SYSREG, 0x1000);
+
+	if (!va) {
+		dev_warn(dev, "CPUCL0 DSU DRCG: ioremap failed\n");
+		return;
+	}
+	writel(~0u, va + CPUCL0_DSU_DRCG_EN);
+	writel(~0u, va + CPUCL0_DSU_DRCG_EN_INT);
+	iounmap(va);
+}
+
 static int exynos_pmu_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -665,6 +696,7 @@ static int exynos_pmu_probe(struct platform_device *pdev)
 			 ret, inform0);
 
 		cpu_pm_register_notifier(&zumapro_cpu_pm_notifier);
+		zumapro_enable_dsu_drcg(dev);
 	}
 
 	if (pmu_context->pmu_data && pmu_context->pmu_data->pmu_init)
