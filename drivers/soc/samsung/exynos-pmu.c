@@ -231,6 +231,9 @@ EXPORT_SYMBOL_GPL(exynos_get_pmu_regmap_by_phandle);
 #define CPU_INFORM_C2		1
 #define CPU_INFORM_SICD		3
 
+/* PMU_INFORM0 value telling EL3/TF-A that Linux may use the C2 idle state. */
+#define PMU_ALLOWED_C2		1
+
 /*
  * __gs101_cpu_pmu_ prefix functions are common code shared by CPU PM notifiers
  * (CPUIdle) and CPU hotplug callbacks. Functions should be called with IRQs
@@ -644,8 +647,25 @@ static int exynos_pmu_probe(struct platform_device *pdev)
 			return ret;
 	}
 
-	if (pmu_context->pmu_data && pmu_context->pmu_data->pmu_sicd_wakeup)
+	if (pmu_context->pmu_data && pmu_context->pmu_data->pmu_sicd_wakeup) {
+		unsigned int inform0 = 0;
+
+		/*
+		 * Tell EL3/TF-A that Linux is allowed to use the C2 (CPU
+		 * power-down) idle state by writing PMU_INFORM0, mirroring what
+		 * the downstream cpupm does at init. Without it the firmware
+		 * bounces the cores straight back out of C2, so s2idle never
+		 * settles even with the per-core CPU_INFORM hints (armed by the
+		 * notifier registered below).
+		 */
+		ret = regmap_write(pmu_context->pmureg, GS101_INFORM0,
+				   PMU_ALLOWED_C2);
+		regmap_read(pmu_context->pmureg, GS101_INFORM0, &inform0);
+		dev_info(dev, "PMU_INFORM0 C2-allow: ret=%d readback=0x%x\n",
+			 ret, inform0);
+
 		cpu_pm_register_notifier(&zumapro_cpu_pm_notifier);
+	}
 
 	if (pmu_context->pmu_data && pmu_context->pmu_data->pmu_init)
 		pmu_context->pmu_data->pmu_init();
