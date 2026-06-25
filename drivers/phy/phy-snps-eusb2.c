@@ -14,6 +14,7 @@
 
 #define EXYNOS_USB_PHY_HS_PHY_CTRL_RST	(0x0)
 #define USB_PHY_RST_MASK		GENMASK(1, 0)
+#define USB_PHY_RESET			BIT(0)	/* phy_reset only (not ovrd_en) */
 #define UTMI_PORT_RST_MASK		GENMASK(5, 4)
 
 #define EXYNOS_USB_PHY_HS_PHY_CTRL_COMMON	(0x4)
@@ -24,6 +25,7 @@
 #define FSEL_48_MHZ_VAL			(0x2)
 
 #define EXYNOS_USB_PHY_CFG_PLLCFG0	(0x8)
+#define EXYNOS_PHY_CFG_PLL_CPBIAS_CNTRL_MASK	GENMASK(6, 0)
 #define PHY_CFG_PLL_FB_DIV_19_8_MASK	GENMASK(19, 8)
 #define DIV_19_8_19_2_MHZ_VAL		(0x170)
 #define DIV_19_8_20_MHZ_VAL		(0x160)
@@ -157,6 +159,16 @@ struct snps_eusb2_phy_drvdata {
 	int (*phy_init)(struct phy *p);
 	const char * const *clk_names;
 	int num_clks;
+	/* Clear the PLL charge-pump bias control (eUSB rev 0x701, e.g. zumapro) */
+	bool cpbias_cntrl_zero;
+	/*
+	 * Use the full eUSB2 databook power-up timing instead of the short
+	 * sequence. Needed on integrations that drive an external
+	 * eUSB2<->USB2 repeater (e.g. zuma/zumapro): the PHY must finish
+	 * analog power-up and hold the Port-Reset (ESE1) broadcast on the
+	 * eUSB lines long enough for the repeater to latch.
+	 */
+	bool databook_power_up_timing;
 };
 
 struct snps_eusb2_hsphy {
@@ -254,6 +266,31 @@ static int exynos_eusb2_ref_clk_init(struct snps_eusb2_hsphy *phy)
 		}
 	}
 
+	/*
+	 * On some SoCs (e.g. zuma/zumapro) the cmu models the eUSB2 reference as
+	 * a bare gate on a high-frequency PLL mux, so clk_get_rate() reports the
+	 * undivided input (e.g. 614.4 MHz) rather than the ~19.2 MHz the PHY pin
+	 * actually receives. Fall back to the DT-declared
+	 * "samsung,ref-clock-frequency" when the live rate isn't a valid eUSB2
+	 * reference.
+	 */
+	if (!config) {
+		u32 dt_freq = 0;
+
+		if (!of_property_read_u32(phy->phy->dev.of_node,
+					  "samsung,ref-clock-frequency", &dt_freq)) {
+			for (int i = 0; i < ARRAY_SIZE(exynos_eusb2_ref_clk); i++) {
+				if (exynos_eusb2_ref_clk[i].freq == dt_freq) {
+					dev_info(&phy->phy->dev,
+						 "modeled ref_clk %lu implausible, using DT %u\n",
+						 ref_clk_freq, dt_freq);
+					config = &exynos_eusb2_ref_clk[i];
+					break;
+				}
+			}
+		}
+	}
+
 	if (!config) {
 		dev_err(&phy->phy->dev, "unsupported ref_clk_freq: %lu\n", ref_clk_freq);
 		return -EINVAL;
@@ -332,6 +369,16 @@ static int exynos_snps_eusb2_hsphy_init(struct phy *p)
 	if (ret)
 		return ret;
 
+	/*
+	 * Some revisions (eUSB ver 0x701, e.g. zumapro) require the PLL
+	 * charge-pump bias control to be cleared instead of using the
+	 * hardware default.
+	 */
+	if (phy->data->cpbias_cntrl_zero)
+		snps_eusb2_hsphy_write_mask(phy->base, EXYNOS_USB_PHY_CFG_PLLCFG0,
+					    EXYNOS_PHY_CFG_PLL_CPBIAS_CNTRL_MASK,
+					    FIELD_PREP(EXYNOS_PHY_CFG_PLL_CPBIAS_CNTRL_MASK, 0x0));
+
 	/* default parameter: tx fsls-vref */
 	snps_eusb2_hsphy_write_mask(phy->base, EXYNOS_PHY_CFG_TX,
 				    EXYNOS_PHY_CFG_TX_FSLS_VREF_TUNE_MASK,
@@ -339,13 +386,44 @@ static int exynos_snps_eusb2_hsphy_init(struct phy *p)
 
 	snps_eusb2_hsphy_write_mask(phy->base, EXYNOS_USB_PHY_UTMI_TESTSE,
 				    TEST_IDDQ, 0);
-	fsleep(10); /* required after releasing test_iddq */
 
-	snps_eusb2_hsphy_write_mask(phy->base, EXYNOS_USB_PHY_HS_PHY_CTRL_RST,
-				    USB_PHY_RST_MASK, 0);
+	if (phy->data->databook_power_up_timing) {
+		/*
+		 * Full eUSB2 databook power-up timing. Busy-wait udelay(), NOT
+		 * sleeping delays: usleep_range()/fsleep() can overshoot by
+		 * milliseconds under boot-time load, and the T5 window bounds
+		 * how long the PHY broadcasts Port-Reset (ESE1) on the eUSB
+		 * lines before utmi_port_reset is released; overshooting holds
+		 * ESE1 too long and an external repeater fails to latch.
+		 */
 
-	snps_eusb2_hsphy_write_mask(phy->base, EXYNOS_USB_PHY_HS_PHY_CTRL_COMMON,
-				    PHY_ENABLE, PHY_ENABLE);
+		/* Keep the PHY disabled while running the power-up sequence. */
+		snps_eusb2_hsphy_write_mask(phy->base, EXYNOS_USB_PHY_HS_PHY_CTRL_COMMON,
+					    PHY_ENABLE, 0);
+		udelay(10);	/* phy_reset held >=10us after test_iddq */
+
+		/*
+		 * Release phy_reset but keep its override enabled (clear only
+		 * the reset bit, not ovrd_en), then allow REXT calibration.
+		 */
+		snps_eusb2_hsphy_write_mask(phy->base, EXYNOS_USB_PHY_HS_PHY_CTRL_RST,
+					    USB_PHY_RESET, 0);
+		udelay(10);	/* REXT calibration */
+
+		snps_eusb2_hsphy_write_mask(phy->base, EXYNOS_USB_PHY_HS_PHY_CTRL_COMMON,
+					    PHY_ENABLE, PHY_ENABLE);
+		udelay(1000);	/* REXT calibration after phy_enable */
+		udelay(28);	/* T4: analog/digital powered up, utmi_clk starts */
+		udelay(2500);	/* T5: Port-Reset (ESE1) transmitted on eUSB lines */
+	} else {
+		fsleep(10); /* required after releasing test_iddq */
+
+		snps_eusb2_hsphy_write_mask(phy->base, EXYNOS_USB_PHY_HS_PHY_CTRL_RST,
+					    USB_PHY_RST_MASK, 0);
+
+		snps_eusb2_hsphy_write_mask(phy->base, EXYNOS_USB_PHY_HS_PHY_CTRL_COMMON,
+					    PHY_ENABLE, PHY_ENABLE);
+	}
 
 	snps_eusb2_hsphy_write_mask(phy->base, EXYNOS_USB_PHY_HS_PHY_CTRL_RST,
 				    UTMI_PORT_RST_MASK, 0);
@@ -361,6 +439,21 @@ static const struct snps_eusb2_phy_drvdata exynos2200_snps_eusb2_phy = {
 	.phy_init	= exynos_snps_eusb2_hsphy_init,
 	.clk_names	= exynos_eusb2_hsphy_clock_names,
 	.num_clks	= ARRAY_SIZE(exynos_eusb2_hsphy_clock_names),
+};
+
+static const struct snps_eusb2_phy_drvdata google_zuma_snps_eusb2_phy = {
+	.phy_init		= exynos_snps_eusb2_hsphy_init,
+	.clk_names		= exynos_eusb2_hsphy_clock_names,
+	.num_clks		= ARRAY_SIZE(exynos_eusb2_hsphy_clock_names),
+	.databook_power_up_timing = true,
+};
+
+static const struct snps_eusb2_phy_drvdata google_zumapro_snps_eusb2_phy = {
+	.phy_init		= exynos_snps_eusb2_hsphy_init,
+	.clk_names		= exynos_eusb2_hsphy_clock_names,
+	.num_clks		= ARRAY_SIZE(exynos_eusb2_hsphy_clock_names),
+	.cpbias_cntrl_zero	= true,
+	.databook_power_up_timing = true,
 };
 
 static int qcom_snps_eusb2_hsphy_init(struct phy *p)
@@ -619,6 +712,12 @@ static const struct of_device_id snps_eusb2_hsphy_of_match_table[] = {
 	}, {
 		.compatible = "samsung,exynos2200-eusb2-phy",
 		.data = &exynos2200_snps_eusb2_phy,
+	}, {
+		.compatible = "google,zuma-eusb2-phy",
+		.data = &google_zuma_snps_eusb2_phy,
+	}, {
+		.compatible = "google,zumapro-eusb2-phy",
+		.data = &google_zumapro_snps_eusb2_phy,
 	}, {
 		/* sentinel */
 	}
