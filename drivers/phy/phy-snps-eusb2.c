@@ -598,6 +598,12 @@ static int snps_eusb2_hsphy_probe(struct platform_device *pdev)
 
 	dev_set_drvdata(dev, phy);
 	phy_set_drvdata(generic_phy, phy);
+	/*
+	 * Keep a back-pointer to the generic PHY so &phy->phy->dev (used for
+	 * dev_err/dev_info and for reading per-PHY DT properties) is valid at
+	 * .init time. Without this it is NULL and any such deref oopses.
+	 */
+	phy->phy = generic_phy;
 
 	phy_provider = devm_of_phy_provider_register(dev, of_phy_simple_xlate);
 	if (IS_ERR(phy_provider))
