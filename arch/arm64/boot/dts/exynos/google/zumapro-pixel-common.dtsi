@@ -516,7 +516,8 @@
 	dr_mode = "otg";
 	usb-role-switch;
 	role-switch-default-mode = "peripheral";
-	maximum-speed = "super-speed-plus";
+	/* HS-only until the combo PHY SuperSpeed (USBDP) PMA is brought up */
+	maximum-speed = "high-speed";
 
 	status = "okay";
 
