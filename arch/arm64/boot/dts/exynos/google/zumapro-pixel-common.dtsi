@@ -557,6 +557,38 @@
 	status = "okay";
 };
 
+/*
+ * eUSB2 repeater bus. usi9 wraps hsi2c_9; the USI mux must be enabled and put
+ * in I2C mode or the controller (and the repeater @0x3e) never probes, leaving
+ * the eUSB2 PHY with no path to the connector. The eUSB2 PHY (usb_hsphy)
+ * consumes this repeater via phys = <&eusb_repeater>.
+ */
+&usi9 {
+	samsung,mode = <USI_MODE_I2C>;
+	status = "okay";
+};
+
+&hsi2c_9 {
+	status = "okay";
+
+	eusb_repeater: eusb-repeater@3e {
+		compatible = "samsung,eusb-repeater";
+		reg = <0x3e>;
+		#phy-cells = <0>;
+		vdd33-supply = <&reg_placeholder>;
+		/* board signal tuning, as <register value> pairs */
+		samsung,tune-param = <0x50 0x0a>,
+				     <0x70 0x7c>,
+				     <0x71 0x3c>,
+				     <0x72 0x92>,
+				     <0x73 0x83>,
+				     <0x77 0x00>,
+				     <0x78 0x0b>,
+				     <0x79 0x60>;
+		status = "okay";
+	};
+};
+
 // &usi8 {
 // 	samsung,mode = <USI_MODE_I2C>;
 // 	status = "okay";
