@@ -3242,19 +3242,40 @@
 			clocks = <&cmu_hsi0 CLK_GOUT_HSI0_SYSREG_HSI0_PCLK>;
 		};
 
+		/*
+		 * zuma/zumapro HS is eUSB2 (like exynos2200), not gs101's
+		 * USBDP-internal HS. The combo PHY delegates HS to this eUSB2
+		 * sub-PHY ("hs"), which drives the external eUSB2<->USB2 repeater
+		 * (samsung,eusb-repeater) on the board. clk-zuma models the eUSB2
+		 * "ref" gate as the undivided 614.4 MHz PLL input, so
+		 * samsung,ref-clock-frequency declares the real 19.2 MHz the PHY
+		 * pin receives.
+		 */
+		usb_hsphy: phy@11110000 {
+			compatible = "google,zuma-eusb2-phy";
+			reg = <0x11110000 0x0200>;
+			clocks = <&cmu_hsi0 CLK_GOUT_HSI0_USB31DRD_I_USB20_PHY_REFCLK_26>,
+				 <&cmu_hsi0 CLK_GOUT_HSI0_USB31DRD_ACLK_PHYCTRL>,
+				 <&cmu_hsi0 CLK_GOUT_HSI0_UASC_HSI0_CTRL_ACLK>;
+			clock-names = "ref", "bus", "ctrl";
+			samsung,ref-clock-frequency = <19200000>;
+			#phy-cells = <0>;
+			phys = <&eusb_repeater>;
+			power-domains = <&pd_hsi0>;
+			status = "okay";
+		};
+
 		usbdrd31_phy: phy@11100000 {
-			compatible = "google,gs101-usb31drd-phy";
+			compatible = "google,zuma-usb31drd-phy";
 			reg = <0x11100000 0x0200>,
-			      <0x110f0000 0x0800>,
 			      <0x110e0000 0x2800>;
-			reg-names = "phy", "pcs", "pma";
-			clocks = <&cmu_hsi0 CLK_GOUT_HSI0_USB31DRD_ACLK_PHYCTRL>,
-				 <&cmu_hsi0 CLK_GOUT_HSI0_USB31DRD_I_USB20_PHY_REFCLK_26>,
-				 <&cmu_hsi0 CLK_GOUT_HSI0_UASC_HSI0_CTRL_ACLK>,
-				 <&cmu_hsi0 CLK_GOUT_HSI0_UASC_HSI0_CTRL_PCLK>,
-				 <&cmu_hsi0 CLK_GOUT_HSI0_USB31DRD_I_USBDPPHY_SCL_APB_PCLK>;
-			clock-names = "phy", "ref", "ctrl_aclk", "ctrl_pclk", "scl_pclk";
+			reg-names = "phy", "pma";
+			/* HSI0 PHY-control ACLK gates register access (exynos2200's "phy") */
+			clocks = <&cmu_hsi0 CLK_GOUT_HSI0_USB31DRD_ACLK_PHYCTRL>;
+			clock-names = "phy";
 			#phy-cells = <1>;
+			phys = <&usb_hsphy>;
+			phy-names = "hs";
 			samsung,pmu-syscon = <&pmu_system_controller>;
 
 			status = "disabled";
@@ -3279,8 +3300,15 @@
 				clocks = <&cmu_hsi0 CLK_GOUT_HSI0_USB31DRD_I_USB31DRD_REF_CLK_40>;
 				clock-names = "ref";
 				interrupts = <GIC_SPI 402 IRQ_TYPE_LEVEL_HIGH 0>;
-				phys = <&usbdrd31_phy 0>, <&usbdrd31_phy 1>;
-				phy-names = "usb2-phy", "usb3-phy";
+				/*
+				 * HS-only for now: the combo PHY's SuperSpeed
+				 * (USBDP) PMA bring-up still needs a zuma-specific
+				 * sequence. Only the eUSB2 "usb2-phy" is wired so
+				 * the gadget enumerates at high-speed; re-add
+				 * <&usbdrd31_phy 1> / "usb3-phy" once SS works.
+				 */
+				phys = <&usbdrd31_phy 0>;
+				phy-names = "usb2-phy";
 				snps,has-lpm-erratum;
 				snps,dis_u2_susphy_quirk;
 				snps,dis_u3_susphy_quirk;
