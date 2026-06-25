@@ -26,6 +26,7 @@ properties:
   compatible:
     enum:
       - google,gs101-usb31drd-phy
+      - google,zuma-usb31drd-phy
       - samsung,exynos2200-usb32drd-phy
       - samsung,exynos5250-usbdrd-phy
       - samsung,exynos5420-usbdrd-phy
@@ -82,7 +83,7 @@ properties:
     minItems: 1
     items:
       - const: phy
-      - const: pcs
+      - enum: [pcs, pma]
       - const: pma
 
   samsung,pmu-syscon:
@@ -169,6 +170,45 @@ allOf:
 
       required:
         - reg-names
+        - orientation-switch
+        - port
+        - pll-supply
+        - dvdd-usb20-supply
+        - vddh-usb20-supply
+        - vdd33-usb20-supply
+        - vdda-usbdp-supply
+        - vddh-usbdp-supply
+
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: google,zuma-usb31drd-phy
+    then:
+      allOf:
+        - $ref: /schemas/usb/usb-switch.yaml#
+        - $ref: /schemas/usb/usb-switch-ports.yaml#
+
+      properties:
+        clocks:
+          maxItems: 1
+
+        clock-names:
+          items:
+            - const: phy
+
+        reg:
+          minItems: 2
+          maxItems: 2
+
+        reg-names:
+          minItems: 2
+          maxItems: 2
+
+      required:
+        - reg-names
+        - phys
+        - phy-names
         - orientation-switch
         - port
         - pll-supply
