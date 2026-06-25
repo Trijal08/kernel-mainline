@@ -11,11 +11,15 @@ maintainers:
 
 description:
   Samsung Exynos2200 eUSB2 phy, based on Synopsys eUSB2 IP block, supports
-  LS/FS/HS usb connectivity.
+  LS/FS/HS usb connectivity. The same IP block is used on Google Tensor
+  zuma/zumapro SoCs, where the PHY drives an external eUSB2 to USB 2.0
+  repeater.
 
 properties:
   compatible:
     enum:
+      - google,zuma-eusb2-phy
+      - google,zumapro-eusb2-phy
       - samsung,exynos2200-eusb2-phy
 
   reg:
@@ -39,10 +43,22 @@ properties:
   resets:
     maxItems: 1
 
+  power-domains:
+    maxItems: 1
+
   phys:
     maxItems: 1
     description:
       Phandle to eUSB2 to USB 2.0 repeater
+
+  samsung,ref-clock-frequency:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description:
+      Effective reference clock frequency, in Hz, seen by the PHY on its
+      reference clock pin. Used when the supplied "ref" clock models an
+      undivided source (e.g. the PLL input) rather than the divided clock
+      that actually reaches the PHY, so the driver cannot derive the rate
+      from the clock framework alone.
 
   vdd-supply:
     description:
@@ -58,8 +74,17 @@ required:
   - "#phy-cells"
   - clocks
   - clock-names
-  - vdd-supply
-  - vdda12-supply
+
+allOf:
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: samsung,exynos2200-eusb2-phy
+    then:
+      required:
+        - vdd-supply
+        - vdda12-supply
 
 additionalProperties: false
 
@@ -77,4 +102,20 @@ examples:
 
         vdd-supply = <&vreg_0p88>;
         vdda12-supply = <&vreg_1p2>;
+    };
+
+  - |
+    usb_hsphy2: phy@11110000 {
+        compatible = "google,zuma-eusb2-phy";
+        reg = <0x11110000 0x0200>;
+        #phy-cells = <0>;
+
+        clocks = <&cmu_hsi0 7>,
+                 <&cmu_hsi0 5>,
+                 <&cmu_hsi0 8>;
+        clock-names = "ref", "bus", "ctrl";
+        samsung,ref-clock-frequency = <19200000>;
+
+        phys = <&eusb_repeater>;
+        power-domains = <&pd_hsi0>;
     };
