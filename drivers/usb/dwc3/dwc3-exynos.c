@@ -187,6 +187,12 @@ static const struct dwc3_exynos_driverdata gs101_drvdata = {
 	.suspend_clk_idx = 1,
 };
 
+static const struct dwc3_exynos_driverdata zuma_drvdata = {
+	.clk_names = { "link_aclk", "susp_clk", "bus_early" },
+	.num_clks = 3,
+	.suspend_clk_idx = 1,
+};
+
 static const struct dwc3_exynos_driverdata exynosautov920_drvdata = {
 	.clk_names = { "ref", "susp_clk"},
 	.num_clks = 2,
@@ -218,6 +224,9 @@ static const struct of_device_id exynos_dwc3_match[] = {
 	}, {
 		.compatible = "google,gs101-dwusb3",
 		.data = &gs101_drvdata,
+	}, {
+		.compatible = "google,zuma-dwusb3",
+		.data = &zuma_drvdata,
 	}, {
 	}
 };
