@@ -161,6 +161,18 @@ config PHY_SNPS_EUSB2
 	  Enable support for the USB high-speed SNPS eUSB2 phy on select
 	  SoCs. The PHY is usually paired with a Synopsys DWC3 USB controller.
 
+config PHY_SAMSUNG_EUSB2_REPEATER
+	tristate "Samsung eUSB2 to USB2 repeater driver"
+	depends on I2C
+	depends on OF
+	select GENERIC_PHY
+	select REGMAP_I2C
+	help
+	  Enable this to support the Samsung eUSB2 signal-conditioning repeater
+	  found on Google Tensor (zuma/zumapro) boards. It sits between the SoC
+	  eUSB2 PHY and the USB 2.0 connector and is driven as an eUSB2-to-USB2.0
+	  repeater PHY referenced by the SoC eUSB2 PHY.
+
 config PHY_XGENE
 	tristate "APM X-Gene 15Gbps PHY support"
 	depends on HAS_IOMEM && OF && (ARCH_XGENE || COMPILE_TEST)
