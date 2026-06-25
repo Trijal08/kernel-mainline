@@ -1,0 +1,72 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/phy/samsung,eusb2-repeater.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Samsung eUSB2 to USB 2.0 repeater
+
+maintainers:
+  - Andrei Drimbarean <andreid021101@gmail.com>
+
+description:
+  eUSB2 repeater converts between eUSB2 and USB 2.0 signaling levels and
+  allows an eUSB2 PHY to connect to legacy USB 2.0 products. The repeater
+  sits on an I2C bus and is found on Google Tensor zuma/zumapro based
+  boards, downstream of the SoC eUSB2 PHY.
+
+properties:
+  compatible:
+    const: samsung,eusb-repeater
+
+  reg:
+    maxItems: 1
+
+  "#phy-cells":
+    const: 0
+
+  vdd33-supply:
+    description:
+      Phandle to 3.3V regulator supply to the repeater.
+
+  samsung,tune-param:
+    $ref: /schemas/types.yaml#/definitions/uint32-matrix
+    description:
+      Board-specific signal tuning, expressed as a list of
+      <register value> pairs that are programmed into the repeater over
+      its I2C interface during initialization.
+    minItems: 1
+    items:
+      items:
+        - description: Repeater register offset
+        - description: Value to program into the register
+
+required:
+  - compatible
+  - reg
+  - "#phy-cells"
+
+additionalProperties: false
+
+examples:
+  - |
+    i2c {
+        #address-cells = <1>;
+        #size-cells = <0>;
+
+        eusb_repeater: phy@3e {
+            compatible = "samsung,eusb-repeater";
+            reg = <0x3e>;
+            #phy-cells = <0>;
+            vdd33-supply = <&reg_3p3>;
+            samsung,tune-param = <0x50 0x0a>,
+                                 <0x70 0x7c>,
+                                 <0x71 0x3c>,
+                                 <0x72 0x92>,
+                                 <0x73 0x83>,
+                                 <0x77 0x00>,
+                                 <0x78 0x0b>,
+                                 <0x79 0x60>;
+        };
+    };
+...
