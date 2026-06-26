@@ -8,6 +8,7 @@
 #define TCPCI_MAXIM_H_
 
 #include <linux/gpio/driver.h>
+#include <linux/workqueue.h>
 
 #define VENDOR_CC_STATUS2                       0x85
 #define CC1_VUFP_RD0P5                          BIT(1)
@@ -68,6 +69,7 @@ struct max_tcpci_chip {
 	bool veto_vconn_swap;
 	struct regulator *vbus_reg;
 	struct gpio_chip gpio;
+	struct work_struct sourcing_vbus_work;
 };
 
 static inline int max_tcpci_read16(struct max_tcpci_chip *chip, unsigned int reg, u16 *val)
