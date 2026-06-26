@@ -66,14 +66,21 @@ static int max77779_otg_enable(struct regulator_dev *rdev)
 	int ret;
 
 	if (chg->ext_bst_ctl) {
+		/*
+		 * External boost sources VBUS; keep the charger off. Assert the
+		 * boost-enable regardless of the mode write so VBUS comes up.
+		 */
 		ret = charger_set_mode(chg, MAX77779_CHGR_MODE_ALL_OFF);
 		if (ret)
-			return ret;
+			dev_warn(chg->dev, "OTG: ALL_OFF failed: %d\n", ret);
 
 		gpiod_set_value_cansleep(chg->ext_bst_ctl, 1);
+		dev_info(chg->dev, "OTG VBUS on: external boost, ext_bst=%d\n",
+			 gpiod_get_value_cansleep(chg->ext_bst_ctl));
 		return 0;
 	}
 
+	dev_info(chg->dev, "OTG VBUS on: internal reverse boost\n");
 	return charger_set_mode(chg, MAX77779_CHGR_MODE_OTG_BOOST_ON);
 }
 
