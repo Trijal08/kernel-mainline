@@ -3025,6 +3025,16 @@ static void zuma_ss_cr_clk(struct exynos5_usbdrd_phy *phy_drd, bool high)
 	else
 		reg &= ~PHY_CR_PARA_CON0_PHY0_CR_PARA_CLK;
 	writel(reg, base + EXYNOSAUTOV920_USB31DRD_PHY_CR_PARA_CON0);
+
+	/*
+	 * The CR-para port is a bit-banged serial bus into the PHY's internal
+	 * register space; its FSM samples on each clock edge. Without a settle
+	 * delay the toggles run far faster than the PHY can sample on a fast
+	 * SoC, so calibration writes (RX-cal, RTUNE, term/iBoost, the SRAM
+	 * firmware patch) land corrupted and SS RxEQ training never converges.
+	 * Match the ~1us/edge timing the bring-up reference uses.
+	 */
+	udelay(1);
 }
 
 static void zuma_ss_cr_port_clear(struct exynos5_usbdrd_phy *phy_drd)
