@@ -221,6 +221,19 @@ static int get_vbus_regulator_handle(struct max_tcpci_chip *chip)
 	return 0;
 }
 
+static void max_tcpci_sourcing_vbus_work(struct work_struct *work)
+{
+	struct max_tcpci_chip *chip = container_of(work, struct max_tcpci_chip,
+						   sourcing_vbus_work);
+
+	tcpm_sourcing_vbus(chip->port);
+}
+
+static void max_tcpci_cancel_sourcing_vbus_work(void *data)
+{
+	cancel_work_sync(data);
+}
+
 static int max_tcpci_set_vbus(struct tcpci *tcpci, struct tcpci_data *tdata, bool source, bool sink)
 {
 	struct max_tcpci_chip *chip = tdata_to_max_tcpci(tdata);
@@ -243,6 +256,17 @@ static int max_tcpci_set_vbus(struct tcpci *tcpci, struct tcpci_data *tdata, boo
 	if (source) {
 		if (!regulator_is_enabled(chip->vbus_reg))
 			ret = regulator_enable(chip->vbus_reg);
+		if (ret >= 0)
+			/*
+			 * The "vbus" regulator is an external boost the TCPC
+			 * cannot sense, so its POWER_STATUS never reports
+			 * SOURCING_VBUS and tcpm would otherwise time out the
+			 * source attach. Tell tcpm explicitly that VBUS is up.
+			 * Deferred to a work item: tcpm calls set_vbus() with
+			 * its port lock held, and tcpm_sourcing_vbus() retakes
+			 * it.
+			 */
+			schedule_work(&chip->sourcing_vbus_work);
 	} else {
 		if (regulator_is_enabled(chip->vbus_reg))
 			ret = regulator_disable(chip->vbus_reg);
@@ -575,6 +599,8 @@ static int max_tcpci_probe(struct i2c_client *client)
 	chip->data.cable_comm_capable = true;
 	chip->data.attempt_vconn_swap_discovery = max_tcpci_attempt_vconn_swap_discovery;
 
+	INIT_WORK(&chip->sourcing_vbus_work, max_tcpci_sourcing_vbus_work);
+
 	max_tcpci_init_regs(chip);
 	chip->tcpci = tcpci_register_port(chip->dev, &chip->data);
 	if (IS_ERR(chip->tcpci))
@@ -586,6 +612,12 @@ static int max_tcpci_probe(struct i2c_client *client)
 				       chip->tcpci);
         if (ret)
                 return ret;
+
+	ret = devm_add_action_or_reset(&client->dev,
+				       max_tcpci_cancel_sourcing_vbus_work,
+				       &chip->sourcing_vbus_work);
+	if (ret)
+		return ret;
 
 	chip->port = tcpci_get_tcpm_port(chip->tcpci);
 
