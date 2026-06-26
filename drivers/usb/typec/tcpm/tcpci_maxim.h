@@ -7,6 +7,8 @@
 #ifndef TCPCI_MAXIM_H_
 #define TCPCI_MAXIM_H_
 
+#include <linux/gpio/driver.h>
+
 #define VENDOR_CC_STATUS2                       0x85
 #define CC1_VUFP_RD0P5                          BIT(1)
 #define CC2_VUFP_RD0P5                          BIT(5)
@@ -41,6 +43,10 @@
 #define ADCINSEL                                GENMASK(7, 5)
 #define ADCEN                                   BIT(0)
 
+/* External VBUS boost enable, exposed as a single GPIO (e.g. komodo). */
+#define TCPC_VENDOR_EXTBST_CTRL                 0x92
+#define EXT_BST_EN                              BIT(0)
+
 enum contamiant_state {
 	NOT_DETECTED,
 	DETECTED,
@@ -61,6 +67,7 @@ struct max_tcpci_chip {
 	enum contamiant_state contaminant_state;
 	bool veto_vconn_swap;
 	struct regulator *vbus_reg;
+	struct gpio_chip gpio;
 };
 
 static inline int max_tcpci_read16(struct max_tcpci_chip *chip, unsigned int reg, u16 *val)
