@@ -505,6 +505,12 @@
 	status = "okay";
 };
 
+&gpu {
+	status = "okay";
+
+	sram-supply = <&s_ldo1_reg>;
+};
+
 &ufs_0 {
 	vcc-supply = <&ufs_0_fixed_vcc_reg>;
 	vdd-hba-supply = <&s_ldo2_reg>;
