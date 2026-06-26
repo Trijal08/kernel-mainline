@@ -3818,8 +3818,23 @@
 		gpu: gpu@1f000000 {
 			compatible = "google,zuma-mali", "arm,mali-valhall-csf";
 			reg = <0x1f000000 0x480000>;
+			/*
+			 * "core" is wired to the 24.576 MHz oscillator as a
+			 * placeholder: the real G3D clock and DVFS are driven by
+			 * ACPM firmware (cal-if), which mainline has no provider
+			 * for, so the GPU runs at the rate firmware/bootloader
+			 * left it at. A single-point OPP (in the board dtsi) is
+			 * still required for panthor to probe.
+			 */
 			clocks = <&ext_24_5m>;
 			clock-names = "core";
+			/*
+			 * The Mali block spans two power domains: pd_g3d ("top",
+			 * which owns the G3D CMU) and its child pd_embedded_g3d
+			 * ("cores", the shader cores).
+			 */
+			power-domains = <&pd_g3d>, <&pd_embedded_g3d>;
+			power-domain-names = "top", "cores";
 			interrupt-names = "job", "mmu", "gpu";
 			interrupts = <GIC_SPI 420 IRQ_TYPE_LEVEL_HIGH 0>,
 				     <GIC_SPI 421 IRQ_TYPE_LEVEL_HIGH 0>,
