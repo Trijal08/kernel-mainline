@@ -653,6 +653,19 @@ config CHARGER_MAX77759
 
 	  If built as a module, it will be called max77759_charger.
 
+config CHARGER_MAX77779
+	tristate "Maxim MAX77779 charger OTG regulator driver"
+	depends on MFD_MAX77779 && REGULATOR
+	default MFD_MAX77779
+	help
+	  Say M or Y here to enable VBUS sourcing (USB OTG / host mode) via
+	  the MAX77779 charger. The charger is a function of the MAX77779
+	  companion PMIC. This driver registers the OTG boost as a regulator,
+	  supporting both the internal reverse boost and an external boost
+	  enabled through a GPIO (as used on zumapro/komodo).
+
+	  If built as a module, it will be called max77779_charger.
+
 config CHARGER_MAX77976
 	tristate "Maxim MAX77976 battery charger driver"
 	depends on I2C
