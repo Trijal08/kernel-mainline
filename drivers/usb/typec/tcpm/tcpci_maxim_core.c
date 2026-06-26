@@ -487,6 +487,57 @@ static void max_tcpci_unregister_tcpci_port(void *tcpci)
 	tcpci_unregister_port(tcpci);
 }
 
+static int max_tcpci_ext_bst_get_direction(struct gpio_chip *gc, unsigned int offset)
+{
+	return GPIO_LINE_DIRECTION_OUT;
+}
+
+static int max_tcpci_ext_bst_get(struct gpio_chip *gc, unsigned int offset)
+{
+	struct max_tcpci_chip *chip = gpiochip_get_data(gc);
+	u8 val;
+	int ret;
+
+	ret = max_tcpci_read8(chip, TCPC_VENDOR_EXTBST_CTRL, &val);
+	if (ret)
+		return ret;
+
+	return !!(val & EXT_BST_EN);
+}
+
+static int max_tcpci_ext_bst_set(struct gpio_chip *gc, unsigned int offset,
+				 int value)
+{
+	struct max_tcpci_chip *chip = gpiochip_get_data(gc);
+
+	return max_tcpci_write8(chip, TCPC_VENDOR_EXTBST_CTRL,
+				value ? EXT_BST_EN : 0);
+}
+
+/*
+ * The MAX77759 TCPC exposes a single GPIO (EXT_BST_EN) that enables an external
+ * VBUS boost. On boards that source OTG VBUS this way (e.g. zumapro/komodo), it
+ * is consumed by the charger's OTG regulator. Register it so that consumer can
+ * drive it; harmless on boards that don't reference it.
+ */
+static int max_tcpci_gpio_init(struct max_tcpci_chip *chip)
+{
+	if (!IS_ENABLED(CONFIG_GPIOLIB))
+		return 0;
+
+	chip->gpio.label = "max77759_tcpc_gpio";
+	chip->gpio.parent = chip->dev;
+	chip->gpio.owner = THIS_MODULE;
+	chip->gpio.base = -1;
+	chip->gpio.ngpio = 1;
+	chip->gpio.can_sleep = true;
+	chip->gpio.get_direction = max_tcpci_ext_bst_get_direction;
+	chip->gpio.get = max_tcpci_ext_bst_get;
+	chip->gpio.set = max_tcpci_ext_bst_set;
+
+	return devm_gpiochip_add_data(chip->dev, &chip->gpio, chip);
+}
+
 static int max_tcpci_probe(struct i2c_client *client)
 {
 	int ret;
@@ -548,6 +599,10 @@ static int max_tcpci_probe(struct i2c_client *client)
 	ret = devm_device_init_wakeup(chip->dev);
 	if (ret)
 		return dev_err_probe(chip->dev, ret, "Failed to init wakeup\n");
+
+	ret = max_tcpci_gpio_init(chip);
+	if (ret)
+		return dev_err_probe(chip->dev, ret, "Failed to init GPIO\n");
 
 	return 0;
 }
