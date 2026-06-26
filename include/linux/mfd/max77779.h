@@ -69,6 +69,7 @@
 #define MAX77779_CHGR_REG_CHG_DETAILS_02        0xb7
 #define MAX77779_CHGR_REG_CHG_DETAILS_03        0xb8
 #define MAX77779_CHGR_REG_CHG_CNFG_00           0xb9
+#define   MAX77779_CHGR_REG_CHG_CNFG_00_MODE    GENMASK(3, 0)
 #define MAX77779_CHGR_REG_CHG_CNFG_01           0xba
 #define MAX77779_CHGR_REG_CHG_CNFG_02           0xbb
 #define MAX77779_CHGR_REG_CHG_CNFG_03           0xbc
@@ -88,6 +89,15 @@
 #define MAX77779_CHGR_REG_CHG_CNFG_17           0xca
 #define MAX77779_CHGR_REG_CHG_CNFG_18           0xcb
 #define MAX77779_CHGR_REG_CHG_CNFG_19           0xcc
+
+/* Charger MODE field (CHG_CNFG_00.MODE) values */
+enum max77779_chgr_mode {
+	MAX77779_CHGR_MODE_ALL_OFF		= 0x0,
+	MAX77779_CHGR_MODE_BUCK_ON		= 0x4,
+	MAX77779_CHGR_MODE_BOOST_UNO_ON		= 0x8,
+	MAX77779_CHGR_MODE_BOOST_ON		= 0x9,
+	MAX77779_CHGR_MODE_OTG_BOOST_ON		= 0xa,
+};
 
 /* MaxQ opcodes for max77779_maxq_command() */
 #define MAX77779_MAXQ_OPCODE_MAXLENGTH (MAX77779_MAXQ_REG_AP_DATAOUT32 - \
