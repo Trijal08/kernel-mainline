@@ -3281,11 +3281,19 @@
 			reg-names = "phy", "pma", "tca", "link";
 			/*
 			 * "phy": HSI0 PHY-control ACLK gates register access;
-			 * "ref": Synopsys USB-DP SuperSpeed PHY reference clock.
+			 * "ref": HS UTMI reference clock (FSEL). The SuperSpeed
+			 * USB-DP PMA needs its own SoC-PLL reference
+			 * ("ss_phy_ref") plus the PCS/PHY APB and PHY ACLK
+			 * gates, else the SS PLL never locks.
 			 */
 			clocks = <&cmu_hsi0 CLK_GOUT_HSI0_USB31DRD_ACLK_PHYCTRL>,
-				 <&cmu_hsi0 CLK_GOUT_HSI0_USB31DRD_I_USB20_PHY_REFCLK_26>;
-			clock-names = "phy", "ref";
+				 <&cmu_hsi0 CLK_GOUT_HSI0_USB31DRD_I_USB20_PHY_REFCLK_26>,
+				 <&cmu_hsi0 CLK_GOUT_HSI0_USB31DRD_I_USBDPPHY_REF_SOC_PLL>,
+				 <&cmu_hsi0 CLK_GOUT_HSI0_USB31DRD_I_USBDPPHY_SCL_APB_PCLK>,
+				 <&cmu_hsi0 CLK_GOUT_HSI0_USB31DRD_I_USBPCS_APB_CLK>,
+				 <&cmu_hsi0 CLK_GOUT_HSI0_USB31DRD_USBDPPHY_I_ACLK>;
+			clock-names = "phy", "ref", "ss_phy_ref",
+				      "scl_apb", "pcs_apb", "ss_phy_aclk";
 			#phy-cells = <1>;
 			phys = <&usb_hsphy>;
 			phy-names = "hs";
