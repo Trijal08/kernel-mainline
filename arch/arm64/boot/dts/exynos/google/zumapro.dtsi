@@ -3818,28 +3818,59 @@
 		gpu: gpu@1f000000 {
 			compatible = "google,zuma-mali", "arm,mali-valhall-csf";
 			reg = <0x1f000000 0x480000>;
+			#cooling-cells = <2>;
+			interrupts = <GIC_SPI 347 IRQ_TYPE_LEVEL_HIGH 0>,
+				     <GIC_SPI 348 IRQ_TYPE_LEVEL_HIGH 0>,
+				     <GIC_SPI 346 IRQ_TYPE_LEVEL_HIGH 0>;
+			interrupt-names = "job", "mmu", "gpu";
 			/*
-			 * "core" is wired to the 24.576 MHz oscillator as a
-			 * placeholder: the real G3D clock and DVFS are driven by
-			 * ACPM firmware (cal-if), which mainline has no provider
-			 * for, so the GPU runs at the rate firmware/bootloader
-			 * left it at. A single-point OPP (in the board dtsi) is
-			 * still required for panthor to probe.
+			 * The OPP core scales panthor's "core" clock, which is
+			 * clock index 0.  Put G3D there: in the vendor DVFS table the
+			 * G3D (gpu1) rate is unique per operating point, whereas the
+			 * paired G3DL2 (gpu0) rate repeats (e.g. four G3D points share
+			 * L2 900 MHz), so scaling G3DL2 would be ambiguous.  G3DL2 is
+			 * carried as "coregroup"; the ACPM firmware couples its rate to
+			 * the G3D point we request (noted per OPP below).
 			 */
-			clocks = <&ext_24_5m>;
-			clock-names = "core";
-			/*
-			 * The Mali block spans two power domains: pd_g3d ("top",
-			 * which owns the G3D CMU) and its child pd_embedded_g3d
-			 * ("cores", the shader cores).
-			 */
+			clocks = <&acpm_ipc GS101_CLK_ACPM_DVFS_G3D>,
+				 <&acpm_ipc GS101_CLK_ACPM_DVFS_G3DL2>;
+			clock-names = "core", "coregroup";
 			power-domains = <&pd_g3d>, <&pd_embedded_g3d>;
 			power-domain-names = "top", "cores";
-			interrupt-names = "job", "mmu", "gpu";
-			interrupts = <GIC_SPI 420 IRQ_TYPE_LEVEL_HIGH 0>,
-				     <GIC_SPI 421 IRQ_TYPE_LEVEL_HIGH 0>,
-				     <GIC_SPI 419 IRQ_TYPE_LEVEL_HIGH 0>;
+			/*
+			 * SLC temporarily removed for bring-up: rule out whether
+			 * enabling the gpu_write_alloc partition switches the cache to
+			 * deny-by-default and drops the untagged (pbha-0) page-table
+			 * walk. With no google,slc phandle panthor skips the SLC
+			 * entirely (slc_pbha 0, no PBHA tagging).
+			 */
+			operating-points-v2 = <&gpu_opp_table>;
 
+			gpu_opp_table: opp-table {
+				compatible = "operating-points-v2";
+
+				/*
+				 * Frequency-only G3D shader-core points from the zuma
+				 * vendor DVFS table v2 (gpu1 column).  Voltage is
+				 * ASV/ECT-calibrated and owned by ACPM, so no opp-microvolt.
+				 * Capped at gpu_dvfs_max_freq (890 MHz); the v2 boost row
+				 * (940 MHz / L2 950 MHz) is omitted as it exceeds the
+				 * declared max.  The paired G3DL2 rate is noted per OPP.
+				 */
+				opp-150000000 { opp-hz = /bits/ 64 <150000000>; }; /* L2 160 MHz */
+				opp-302000000 { opp-hz = /bits/ 64 <302000000>; }; /* L2 386 MHz */
+				opp-337000000 { opp-hz = /bits/ 64 <337000000>; }; /* L2 430 MHz */
+				opp-376000000 { opp-hz = /bits/ 64 <376000000>; }; /* L2 531 MHz */
+				opp-419000000 { opp-hz = /bits/ 64 <419000000>; }; /* L2 531 MHz */
+				opp-467000000 { opp-hz = /bits/ 64 <467000000>; }; /* L2 659 MHz */
+				opp-521000000 { opp-hz = /bits/ 64 <521000000>; }; /* L2 659 MHz */
+				opp-580000000 { opp-hz = /bits/ 64 <580000000>; }; /* L2 749 MHz */
+				opp-649000000 { opp-hz = /bits/ 64 <649000000>; }; /* L2 749 MHz */
+				opp-723000000 { opp-hz = /bits/ 64 <723000000>; }; /* L2 900 MHz */
+				opp-807000000 { opp-hz = /bits/ 64 <807000000>; }; /* L2 900 MHz */
+				opp-850000000 { opp-hz = /bits/ 64 <850000000>; }; /* L2 900 MHz */
+				opp-890000000 { opp-hz = /bits/ 64 <890000000>; }; /* L2 900 MHz, Fmax */
+			};
 		};
 	};
 
