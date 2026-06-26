@@ -2085,8 +2085,15 @@ static const char * const exynos5_clk_names[] = {
  * PLL/PCS/SRAM. Both must be enabled across phy_init() (clk_bulk) so the SS
  * bring-up can talk to a live PHY -- without "ref" the SRAM never inits.
  */
+/*
+ * "phy"/"ref" gate register access and the HS reference. The SuperSpeed
+ * (USB-DP) PMA additionally needs its SoC-PLL reference ("ss_phy_ref") plus the
+ * PCS/PHY APB and PHY ACLK gates; none carry CLK_IGNORE_UNUSED in the clock
+ * driver, so they must be claimed and held enabled here or clk_disable_unused()
+ * gates them off and the SS PLL never locks (no pipe clock -> SS link dead).
+ */
 static const char * const zuma_clk_names[] = {
-	"phy", "ref",
+	"phy", "ref", "ss_phy_ref", "scl_apb", "pcs_apb", "ss_phy_aclk",
 };
 
 static const char * const exynos5_core_clk_names[] = {
