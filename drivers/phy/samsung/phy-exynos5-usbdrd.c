@@ -568,6 +568,14 @@ struct exynos5_usbdrd_phy_drvdata {
 	 * so other SoCs keep their existing link-init behaviour.
 	 */
 	bool link_session_quirk;
+	/*
+	 * Keep the PHY clock bulk enabled for the PHY's whole active life
+	 * (init..exit) instead of only across init(). The SuperSpeed USB-DP PMA
+	 * reference clock must keep running for the PLL to stay locked and feed
+	 * the pipe clock to the controller; gating it right after init (the
+	 * exynos2200 HS-only behaviour) leaves the SS link without a pipe clock.
+	 */
+	bool pipe3_clk_always_on;
 };
 
 /**
@@ -1560,7 +1568,14 @@ static int exynos2200_usbdrd_phy_init(struct phy *phy)
 	/* UTMI or PIPE3 specific init */
 	inst->phy_cfg->phy_init(phy_drd);
 
-	clk_bulk_disable_unprepare(phy_drd->drv_data->n_clks, phy_drd->clks);
+	/*
+	 * On SuperSpeed-capable integrations the USB-DP PMA reference clock must
+	 * keep running past init() or the SS PLL drops out (no pipe clock); such
+	 * SoCs balance this enable in exit(). Otherwise gate it back here.
+	 */
+	if (!phy_drd->drv_data->pipe3_clk_always_on)
+		clk_bulk_disable_unprepare(phy_drd->drv_data->n_clks,
+					   phy_drd->clks);
 
 	return 0;
 }
@@ -1573,9 +1588,17 @@ static int exynos2200_usbdrd_phy_exit(struct phy *phy)
 	u32 reg;
 	int ret;
 
-	ret = clk_bulk_prepare_enable(phy_drd->drv_data->n_clks, phy_drd->clks);
-	if (ret)
-		return ret;
+	/*
+	 * With pipe3_clk_always_on the bulk is still enabled from init(); the
+	 * unconditional disable below then balances that init() enable. Without
+	 * it, re-enable here just for the register access in this function.
+	 */
+	if (!phy_drd->drv_data->pipe3_clk_always_on) {
+		ret = clk_bulk_prepare_enable(phy_drd->drv_data->n_clks,
+					      phy_drd->clks);
+		if (ret)
+			return ret;
+	}
 
 	reg = readl(regs_base + EXYNOS2200_DRD_UTMI);
 	reg &= ~(EXYNOS2200_UTMI_FORCE_BVALID | EXYNOS2200_UTMI_FORCE_VBUSVALID);
@@ -3548,6 +3571,8 @@ static const struct exynos5_usbdrd_phy_drvdata zuma_usb31drd_phy = {
 	.n_clks				= ARRAY_SIZE(zuma_clk_names),
 	/* external eUSB2 repeater: harden link session-valid latching */
 	.link_session_quirk		= true,
+	/* SuperSpeed USB-DP PMA needs its clocks held on past init() */
+	.pipe3_clk_always_on		= true,
 	/* SuperSpeed tuning is left at PHY defaults, like the zuma DT */
 	.phy_tunes			= NULL,
 	/* clocks and regulators are specific to the underlying PHY blocks */
