@@ -538,6 +538,12 @@ static int max_tcpci_ext_bst_set(struct gpio_chip *gc, unsigned int offset,
 				value ? EXT_BST_EN : 0);
 }
 
+static int max_tcpci_ext_bst_direction_output(struct gpio_chip *gc,
+					      unsigned int offset, int value)
+{
+	return max_tcpci_ext_bst_set(gc, offset, value);
+}
+
 /*
  * The MAX77759 TCPC exposes a single GPIO (EXT_BST_EN) that enables an external
  * VBUS boost. On boards that source OTG VBUS this way (e.g. zumapro/komodo), it
@@ -556,6 +562,7 @@ static int max_tcpci_gpio_init(struct max_tcpci_chip *chip)
 	chip->gpio.ngpio = 1;
 	chip->gpio.can_sleep = true;
 	chip->gpio.get_direction = max_tcpci_ext_bst_get_direction;
+	chip->gpio.direction_output = max_tcpci_ext_bst_direction_output;
 	chip->gpio.get = max_tcpci_ext_bst_get;
 	chip->gpio.set = max_tcpci_ext_bst_set;
 
