@@ -277,6 +277,13 @@
 		pinctrl-0 = <&typec_int>;
 		pinctrl-names = "default";
 
+		/* EXT_BST_EN, consumed by the max77779 OTG regulator below */
+		gpio-controller;
+		#gpio-cells = <2>;
+
+		/* VBUS sourcing (host mode) via the max77779 external boost */
+		vbus-supply = <&max77779_otg>;
+
 		connector {
 			compatible = "usb-c-connector";
 			label = "USB-C";
@@ -374,6 +381,15 @@
 
 		interrupt-controller;
 		#interrupt-cells = <2>;
+
+		/* OTG VBUS sourced via the TCPC's external-boost enable */
+		extbst-gpios = <&max77759tcpc 0 GPIO_ACTIVE_HIGH>;
+
+		max77779_otg: otg-regulator {
+			regulator-name = "vbus";
+			regulator-min-microvolt = <5000000>;
+			regulator-max-microvolt = <5000000>;
+		};
 
 		gpio {
 			compatible = "maxim,max77779-gpio";
