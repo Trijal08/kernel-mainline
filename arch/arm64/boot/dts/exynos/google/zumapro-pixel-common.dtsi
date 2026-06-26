@@ -534,11 +534,9 @@
 };
 
 &gpu {
-	mali-supply = <&s_buck2_reg>;
+	status = "okay";
+
 	sram-supply = <&s_ldo1_reg>;
-	buck8s-supply = <&s_buck8_reg>;
-	ldo1s-supply = <&s_ldo1_reg>;
-	buck7m-supply = <&s_buck11_reg>;
 };
 
 &ufs_0 {
