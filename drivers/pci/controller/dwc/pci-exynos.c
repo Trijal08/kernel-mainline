@@ -11,12 +11,17 @@
 
 #include <linux/clk.h>
 #include <linux/delay.h>
+#include <linux/gpio/consumer.h>
 #include <linux/interrupt.h>
+#include <linux/iopoll.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
+#include <linux/mfd/syscon.h>
+#include <linux/of.h>
 #include <linux/pci.h>
 #include <linux/platform_device.h>
 #include <linux/phy/phy.h>
+#include <linux/regmap.h>
 #include <linux/regulator/consumer.h>
 #include <linux/module.h>
 
@@ -50,11 +55,60 @@
 #define PCIE_ELBI_SLV_ARMISC		0x120
 #define PCIE_ELBI_SLV_DBI_ENABLE	BIT(21)
 
+/* ELBI registers for the Google Tensor (zuma/zumapro) controller */
+#define PCIE_ZUMA_DEVICE_TYPE		0x0080
+#define   PCIE_ZUMA_DEVICE_TYPE_RC	0x4
+#define PCIE_ZUMA_SOFT_PWR_RESET	0x03a4
+#define PCIE_ZUMA_PMA_RST_PCS		0x1400
+#define PCIE_ZUMA_PMA_RST_PHY		0x1404
+#define PCIE_ZUMA_PMA_RST_CMN		0x1408
+#define PCIE_ZUMA_SLV_PEND_SEL_NAK	0x03d8
+#define PCIE_ZUMA_APP_REQ_EXIT_L1	0x03bc
+#define   APP_REQ_EXIT_L1_MODE		BIT(0)
+#define   L1_REQ_NAK_CTRL_MASTER	BIT(4)
+#define PCIE_ZUMA_LINKDOWN_RST_CTRL	0x03a0
+#define   LINKDOWN_RST_MANUAL		BIT(1)
+#define PCIE_ZUMA_APP_XFER_PENDING	0x0074
+#define PCIE_ZUMA_QCH_SEL		0x03a8
+#define   CLOCK_GATING_PMU_MASK		(0xf << 8)
+#define   CLOCK_GATING_APB_MASK		(0xf << 4)
+#define   CLOCK_GATING_AXI_MASK		(0xf << 0)
+#define PCIE_ZUMA_MSTR_PEND_SEL_NAK	0x0474
+#define   NACK_ENABLE			BIT(0)
+#define PCIE_ZUMA_DBI_L1_EXIT_DISABLE	0x1078
+#define   DBI_L1_EXIT_DISABLE		BIT(0)
+#define PCIE_ZUMA_APP_LTSSM_ENABLE	0x0054
+#define   LTSSM_ENABLE			BIT(0)
+#define PCIE_ZUMA_RDLH_LINKUP		0x02c8
+#define   LTSSM_STATE_MASK		0x3f
+#define   LTSSM_STATE_L0		0x11
+/* PMU PCIE_PHY control bit set during link bring-up */
+#define PCIE_ZUMA_PMU_PHY_CTRL		BIT(10)
+/* Auxiliary-clock frequency (drives the LTSSM timers) */
+#define PCIE_AUX_CLK_FREQ_OFF		0xb40
+#define PCIE_AUX_CLK_FREQ_24MHZ		0x18
+
+struct exynos_pcie;
+
+struct exynos_pcie_drvdata {
+	const struct dw_pcie_ops	*dw_pcie_ops;
+	const struct dw_pcie_host_ops	*host_ops;
+	/* Tensor (zuma) controllers drive the link via GPIO PERST + PMU */
+	bool				zuma;
+};
+
 struct exynos_pcie {
 	struct dw_pcie			pci;
+	const struct exynos_pcie_drvdata *drvdata;
 	struct clk_bulk_data		*clks;
 	struct phy			*phy;
 	struct regulator_bulk_data	supplies[2];
+	/* zuma only */
+	struct regmap			*pmureg;
+	struct gpio_desc		*perst_gpio;
+	struct gpio_desc		*wlan_gpio;
+	u32				pmu_offset;
+	u32				perst_delay_us;
 };
 
 static void exynos_pcie_writel(void __iomem *base, u32 val, u32 reg)
@@ -243,6 +297,149 @@ static const struct dw_pcie_host_ops exynos_pcie_host_ops = {
 	.init = exynos_pcie_host_init,
 };
 
+/* Google Tensor (zuma/zumapro) controller -------------------------------- */
+
+/*
+ * The PMA reset bits live in the ELBI bank, so the controller (not the PHY)
+ * owns them and brackets the PHY callbacks: assert before phy_init(), release
+ * before phy_power_on() (which then waits for the PLL/CDR locks).
+ */
+static void exynos_zuma_assert_pma_reset(struct exynos_pcie *ep)
+{
+	void __iomem *elbi = ep->pci.elbi_base;
+
+	/* device type = root complex */
+	exynos_pcie_writel(elbi, PCIE_ZUMA_DEVICE_TYPE_RC, PCIE_ZUMA_DEVICE_TYPE);
+
+	/* soft power reset */
+	exynos_pcie_writel(elbi, 0xf, PCIE_ZUMA_SOFT_PWR_RESET);
+	exynos_pcie_writel(elbi, 0xd, PCIE_ZUMA_SOFT_PWR_RESET);
+	udelay(10);
+	exynos_pcie_writel(elbi, 0xf, PCIE_ZUMA_SOFT_PWR_RESET);
+	udelay(10);
+
+	/* pulse the PMA reset */
+	exynos_pcie_writel(elbi, 1, PCIE_ZUMA_PMA_RST_PHY);
+	exynos_pcie_writel(elbi, 1, PCIE_ZUMA_PMA_RST_CMN);
+	exynos_pcie_writel(elbi, 1, PCIE_ZUMA_PMA_RST_PCS);
+	exynos_pcie_writel(elbi, 0, PCIE_ZUMA_PMA_RST_PHY);
+	exynos_pcie_writel(elbi, 0, PCIE_ZUMA_PMA_RST_CMN);
+	exynos_pcie_writel(elbi, 0, PCIE_ZUMA_PMA_RST_PCS);
+
+	exynos_pcie_writel(elbi, 1, PCIE_ZUMA_SLV_PEND_SEL_NAK);
+}
+
+static void exynos_zuma_release_pma_reset(struct exynos_pcie *ep)
+{
+	void __iomem *elbi = ep->pci.elbi_base;
+
+	exynos_pcie_writel(elbi, 1, PCIE_ZUMA_PMA_RST_PHY);
+	udelay(10);
+	exynos_pcie_writel(elbi, 1, PCIE_ZUMA_PMA_RST_CMN);
+	exynos_pcie_writel(elbi, 1, PCIE_ZUMA_PMA_RST_PCS);
+}
+
+static int exynos_zuma_pcie_host_init(struct dw_pcie_rp *pp)
+{
+	struct dw_pcie *pci = to_dw_pcie_from_pp(pp);
+	struct exynos_pcie *ep = to_exynos_pcie(pci);
+
+	pp->bridge->ops = &exynos_pci_ops;
+
+	exynos_pcie_assert_core_reset(ep);
+
+	/* power the endpoint (e.g. Wi-Fi WLAN_EN / REG_ON) */
+	gpiod_set_value_cansleep(ep->wlan_gpio, 1);
+
+	/* enable the PCIE_PHY control in the PMU */
+	regmap_update_bits(ep->pmureg, ep->pmu_offset,
+			   PCIE_ZUMA_PMU_PHY_CTRL, PCIE_ZUMA_PMU_PHY_CTRL);
+
+	/*
+	 * Vendor ordering: bring up the PHY input clock + reference PLL first,
+	 * then issue the ELBI soft-power/PMA reset, then program the PHY.
+	 */
+	phy_reset(ep->phy);
+	exynos_zuma_assert_pma_reset(ep);
+	phy_init(ep->phy);
+	exynos_zuma_release_pma_reset(ep);
+	phy_power_on(ep->phy);
+
+	exynos_pcie_deassert_core_reset(ep);
+	exynos_pcie_enable_irq_pulse(ep);
+
+	return 0;
+}
+
+static int exynos_zuma_pcie_start_link(struct dw_pcie *pci)
+{
+	struct exynos_pcie *ep = to_exynos_pcie(pci);
+	void __iomem *elbi = pci->elbi_base;
+	u8 exp_cap;
+	u32 val;
+
+	/* deassert PERST to the endpoint and let it come up */
+	gpiod_set_value_cansleep(ep->perst_gpio, 1);
+	usleep_range(ep->perst_delay_us, ep->perst_delay_us + 2000);
+
+	/* keep the link out of L1 during training */
+	val = exynos_pcie_readl(elbi, PCIE_ZUMA_APP_REQ_EXIT_L1);
+	val |= APP_REQ_EXIT_L1_MODE | L1_REQ_NAK_CTRL_MASTER;
+	exynos_pcie_writel(elbi, val, PCIE_ZUMA_APP_REQ_EXIT_L1);
+
+	exynos_pcie_writel(elbi, LINKDOWN_RST_MANUAL, PCIE_ZUMA_LINKDOWN_RST_CTRL);
+	exynos_pcie_writel(elbi, 1, PCIE_ZUMA_APP_XFER_PENDING);
+
+	/* do not clock-gate the link while training */
+	val = exynos_pcie_readl(elbi, PCIE_ZUMA_QCH_SEL);
+	val &= ~(CLOCK_GATING_PMU_MASK | CLOCK_GATING_APB_MASK |
+		 CLOCK_GATING_AXI_MASK);
+	exynos_pcie_writel(elbi, val, PCIE_ZUMA_QCH_SEL);
+
+	exynos_pcie_writel(elbi, NACK_ENABLE, PCIE_ZUMA_MSTR_PEND_SEL_NAK);
+	exynos_pcie_writel(elbi, DBI_L1_EXIT_DISABLE,
+			   PCIE_ZUMA_DBI_L1_EXIT_DISABLE);
+
+	/*
+	 * Tell the controller its real auxiliary-clock rate (24.576MHz
+	 * oscclk) so the LTSSM timers are calibrated correctly. The vendor
+	 * value of 26MHz is for the OOT's 26MHz aux clock and miscalibrates
+	 * detection on this 24.576MHz mainline clock.
+	 */
+	dw_pcie_dbi_ro_wr_en(pci);
+	dw_pcie_writel_dbi(pci, PCIE_AUX_CLK_FREQ_OFF, PCIE_AUX_CLK_FREQ_24MHZ);
+
+	/*
+	 * Do not advertise ASPM L1 on this link. Reliable L1 exit on the
+	 * Synopsys PHY requires a CLKREQ#/LTR handshake that the endpoint
+	 * driver is expected to negotiate once the device is fully up; until
+	 * then the link cannot reliably leave L1 and config-space accesses
+	 * time out. Clear the root port's advertised L1 support so the PCI
+	 * core never enables ASPM L1 on this link.
+	 */
+	exp_cap = dw_pcie_find_capability(pci, PCI_CAP_ID_EXP);
+	val = dw_pcie_readl_dbi(pci, exp_cap + PCI_EXP_LNKCAP);
+	val &= ~PCI_EXP_LNKCAP_ASPM_L1;
+	dw_pcie_writel_dbi(pci, exp_cap + PCI_EXP_LNKCAP, val);
+	dw_pcie_dbi_ro_wr_dis(pci);
+
+	/* assert LTSSM enable */
+	exynos_pcie_writel(elbi, LTSSM_ENABLE, PCIE_ZUMA_APP_LTSSM_ENABLE);
+
+	return 0;
+}
+
+static bool exynos_zuma_pcie_link_up(struct dw_pcie *pci)
+{
+	u32 val = exynos_pcie_readl(pci->elbi_base, PCIE_ZUMA_RDLH_LINKUP);
+
+	return (val & LTSSM_STATE_MASK) == LTSSM_STATE_L0;
+}
+
+static const struct dw_pcie_host_ops exynos_zuma_pcie_host_ops = {
+	.init = exynos_zuma_pcie_host_init,
+};
+
 static int exynos_add_pcie_port(struct exynos_pcie *ep,
 				       struct platform_device *pdev)
 {
@@ -262,7 +459,7 @@ static int exynos_add_pcie_port(struct exynos_pcie *ep,
 		return ret;
 	}
 
-	pp->ops = &exynos_pcie_host_ops;
+	pp->ops = ep->drvdata->host_ops;
 	pp->msi_irq[0] = -ENODEV;
 
 	ret = dw_pcie_host_init(pp);
@@ -281,6 +478,25 @@ static const struct dw_pcie_ops dw_pcie_ops = {
 	.start_link = exynos_pcie_start_link,
 };
 
+static const struct dw_pcie_ops exynos_zuma_dw_pcie_ops = {
+	.read_dbi = exynos_pcie_read_dbi,
+	.write_dbi = exynos_pcie_write_dbi,
+	.link_up = exynos_zuma_pcie_link_up,
+	.start_link = exynos_zuma_pcie_start_link,
+};
+
+static const struct exynos_pcie_drvdata exynos5433_pcie_drvdata = {
+	.dw_pcie_ops	= &dw_pcie_ops,
+	.host_ops	= &exynos_pcie_host_ops,
+	.zuma		= false,
+};
+
+static const struct exynos_pcie_drvdata zuma_pcie_drvdata = {
+	.dw_pcie_ops	= &exynos_zuma_dw_pcie_ops,
+	.host_ops	= &exynos_zuma_pcie_host_ops,
+	.zuma		= true,
+};
+
 static int exynos_pcie_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -292,8 +508,12 @@ static int exynos_pcie_probe(struct platform_device *pdev)
 	if (!ep)
 		return -ENOMEM;
 
+	ep->drvdata = of_device_get_match_data(dev);
+	if (!ep->drvdata)
+		return -EINVAL;
+
 	ep->pci.dev = dev;
-	ep->pci.ops = &dw_pcie_ops;
+	ep->pci.ops = ep->drvdata->dw_pcie_ops;
 
 	ep->phy = devm_of_phy_get(dev, np, NULL);
 	if (IS_ERR(ep->phy))
@@ -303,16 +523,45 @@ static int exynos_pcie_probe(struct platform_device *pdev)
 	if (ret < 0)
 		return ret;
 
-	ep->supplies[0].supply = "vdd18";
-	ep->supplies[1].supply = "vdd10";
-	ret = devm_regulator_bulk_get(dev, ARRAY_SIZE(ep->supplies),
-				      ep->supplies);
-	if (ret)
-		return ret;
+	if (ep->drvdata->zuma) {
+		ep->pmureg = syscon_regmap_lookup_by_phandle(np,
+							"samsung,pmu-syscon");
+		if (IS_ERR(ep->pmureg))
+			return dev_err_probe(dev, PTR_ERR(ep->pmureg),
+					     "PMU regmap lookup failed\n");
 
-	ret = regulator_bulk_enable(ARRAY_SIZE(ep->supplies), ep->supplies);
-	if (ret)
-		return ret;
+		if (of_property_read_u32(np, "samsung,pmu-offset",
+					 &ep->pmu_offset))
+			return dev_err_probe(dev, -EINVAL,
+					     "missing samsung,pmu-offset\n");
+
+		ep->perst_gpio = devm_gpiod_get(dev, "reset", GPIOD_OUT_LOW);
+		if (IS_ERR(ep->perst_gpio))
+			return dev_err_probe(dev, PTR_ERR(ep->perst_gpio),
+					     "failed to get PERST GPIO\n");
+
+		ep->wlan_gpio = devm_gpiod_get_optional(dev, "wlan-reg-on",
+							GPIOD_OUT_LOW);
+		if (IS_ERR(ep->wlan_gpio))
+			return dev_err_probe(dev, PTR_ERR(ep->wlan_gpio),
+					     "failed to get WLAN GPIO\n");
+
+		ep->perst_delay_us = 15000;
+		of_property_read_u32(np, "samsung,perst-delay-us",
+				     &ep->perst_delay_us);
+	} else {
+		ep->supplies[0].supply = "vdd18";
+		ep->supplies[1].supply = "vdd10";
+		ret = devm_regulator_bulk_get(dev, ARRAY_SIZE(ep->supplies),
+					      ep->supplies);
+		if (ret)
+			return ret;
+
+		ret = regulator_bulk_enable(ARRAY_SIZE(ep->supplies),
+					    ep->supplies);
+		if (ret)
+			return ret;
+	}
 
 	platform_set_drvdata(pdev, ep);
 
@@ -324,7 +573,8 @@ static int exynos_pcie_probe(struct platform_device *pdev)
 
 fail_probe:
 	phy_exit(ep->phy);
-	regulator_bulk_disable(ARRAY_SIZE(ep->supplies), ep->supplies);
+	if (!ep->drvdata->zuma)
+		regulator_bulk_disable(ARRAY_SIZE(ep->supplies), ep->supplies);
 
 	return ret;
 }
@@ -337,7 +587,8 @@ static void exynos_pcie_remove(struct platform_device *pdev)
 	exynos_pcie_assert_core_reset(ep);
 	phy_power_off(ep->phy);
 	phy_exit(ep->phy);
-	regulator_bulk_disable(ARRAY_SIZE(ep->supplies), ep->supplies);
+	if (!ep->drvdata->zuma)
+		regulator_bulk_disable(ARRAY_SIZE(ep->supplies), ep->supplies);
 }
 
 static int exynos_pcie_suspend_noirq(struct device *dev)
@@ -347,7 +598,8 @@ static int exynos_pcie_suspend_noirq(struct device *dev)
 	exynos_pcie_assert_core_reset(ep);
 	phy_power_off(ep->phy);
 	phy_exit(ep->phy);
-	regulator_bulk_disable(ARRAY_SIZE(ep->supplies), ep->supplies);
+	if (!ep->drvdata->zuma)
+		regulator_bulk_disable(ARRAY_SIZE(ep->supplies), ep->supplies);
 
 	return 0;
 }
@@ -359,14 +611,17 @@ static int exynos_pcie_resume_noirq(struct device *dev)
 	struct dw_pcie_rp *pp = &pci->pp;
 	int ret;
 
-	ret = regulator_bulk_enable(ARRAY_SIZE(ep->supplies), ep->supplies);
-	if (ret)
-		return ret;
+	if (!ep->drvdata->zuma) {
+		ret = regulator_bulk_enable(ARRAY_SIZE(ep->supplies),
+					    ep->supplies);
+		if (ret)
+			return ret;
+	}
 
-	/* exynos_pcie_host_init controls ep->phy */
-	exynos_pcie_host_init(pp);
+	/* the host_init callback controls ep->phy */
+	ep->drvdata->host_ops->init(pp);
 	dw_pcie_setup_rc(pp);
-	exynos_pcie_start_link(pci);
+	ep->drvdata->dw_pcie_ops->start_link(pci);
 	return dw_pcie_wait_for_link(pci);
 }
 
@@ -376,7 +631,14 @@ static const struct dev_pm_ops exynos_pcie_pm_ops = {
 };
 
 static const struct of_device_id exynos_pcie_of_match[] = {
-	{ .compatible = "samsung,exynos5433-pcie", },
+	{
+		.compatible = "samsung,exynos5433-pcie",
+		.data = &exynos5433_pcie_drvdata,
+	},
+	{
+		.compatible = "google,zuma-pcie",
+		.data = &zuma_pcie_drvdata,
+	},
 	{ },
 };
 
