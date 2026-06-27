@@ -665,7 +665,9 @@
 		compatible = "simple-bus";
 		#address-cells = <1>;
 		#size-cells = <1>;
-		ranges = <0x0 0x0 0x0 0x40000000>;
+		ranges = <0x0 0x0 0x0 0x40000000>,
+			 /* PCIe (HSI2) outbound MEM window + config space */
+			 <0x60000000 0x0 0x60000000 0x01000000>;
 		pd_g3d: pd-g3d@15461A80 {
 			compatible = "samsung,exynos5433-pd";
 			reg = <0x15461A80 0x20>;
@@ -3373,6 +3375,56 @@
 			clocks = <&cmu_hsi2 CLK_GOUT_HSI2_GPIO_HSI2_PCLK>;
 			clock-names = "pclk";
 			interrupts = <GIC_SPI 433 IRQ_TYPE_LEVEL_HIGH 0>;
+		};
+
+		pcie_1_phy: phy@13160000 {
+			compatible = "google,zuma-pcie-phy";
+			reg = <0x13160000 0x3000>,
+			      <0x13140000 0x5000>,
+			      <0x13130000 0x5000>,
+			      <0x13150000 0xd000>;
+			reg-names = "phy", "pcs", "soc", "udbg";
+			samsung,pmu-syscon = <&pmu_system_controller>;
+			samsung,pmu-offset = <0x3ec8>;
+			num-lanes = <1>;
+			#phy-cells = <0>;
+			status = "disabled";
+		};
+
+		pcie_1: pcie@13120000 {
+			compatible = "google,zuma-pcie";
+			reg = <0x13120000 0x2000>,
+			      <0x13400000 0x381000>,
+			      <0x60ffe000 0x2000>;
+			reg-names = "elbi", "dbi", "config";
+			interrupts = <GIC_SPI 439 IRQ_TYPE_LEVEL_HIGH 0>;
+			#address-cells = <3>;
+			#size-cells = <2>;
+			#interrupt-cells = <1>;
+			interrupt-map-mask = <0 0 0 0>;
+			interrupt-map = <0 0 0 0 &gic GIC_SPI 439 IRQ_TYPE_LEVEL_HIGH 0>;
+			device_type = "pci";
+			ranges = <0x82000000 0 0x60000000 0x60000000 0 0x00ff0000>;
+			bus-range = <0x00 0xff>;
+			num-lanes = <1>;
+			clocks = <&cmu_hsi2 CLK_GOUT_HSI2_PCIE_GEN4_1_PCIE_003_DBI_ACLK_UG>,
+				 <&cmu_hsi2 CLK_GOUT_HSI2_PCIE_GEN4_1_PCIE_003_MSTR_ACLK_UG>,
+				 <&cmu_hsi2 CLK_GOUT_HSI2_PCIE_GEN4_1_PCIE_003_SLV_ACLK_UG>,
+				 <&cmu_hsi2 CLK_GOUT_HSI2_PCIE_GEN4_1_PCIE_003_I_DRIVER_APB_CLK>,
+				 <&cmu_hsi2 CLK_GOUT_HSI2_PCIE_GEN4_1_PCIE_004_DBI_ACLK_UG>,
+				 <&cmu_hsi2 CLK_GOUT_HSI2_PCIE_GEN4_1_PCIE_004_MSTR_ACLK_UG>,
+				 <&cmu_hsi2 CLK_GOUT_HSI2_PCIE_GEN4_1_PCIE_004_SLV_ACLK_UG>,
+				 <&cmu_hsi2 CLK_GOUT_HSI2_PCIE_GEN4_1_PCIE_004_I_DRIVER_APB_CLK>,
+				 <&cmu_hsi2 CLK_GOUT_HSI2_PCIE_GEN4_1_PCS_PMA_PHY_UDBG_I_APB_PCLK>,
+				 <&cmu_hsi2 CLK_GOUT_HSI2_PCIE_GEN4_1_PCS_PMA_PIPE_PAL_PCIE_I_APB_PCLK>,
+				 <&cmu_hsi2 CLK_GOUT_HSI2_PCIE_GEN4_1_PCS_PMA_PCIEPHY210X2_QCH_I_APB_PCLK>,
+				 <&cmu_hsi2 CLK_GOUT_HSI2_PCIE_GEN4_1_PCIE_004_PHY_REFCLK_IN>;
+			phys = <&pcie_1_phy>;
+			phy-names = "pcie-phy";
+			samsung,pmu-syscon = <&pmu_system_controller>;
+			samsung,pmu-offset = <0x3ec8>;
+			samsung,perst-delay-us = <15000>;
+			status = "disabled";
 		};
 
 		ufs_0: ufs@13200000 {
