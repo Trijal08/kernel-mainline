@@ -20,6 +20,54 @@
 /* SOC Interconnect types (aka chip types) */
 #define SOCI_SB		0
 #define SOCI_AI		1
+#define SOCI_NCI	6
+
+/* NCI ("BOOKER" non-coherent interconnect) EROM enumeration.
+ * The chipcommon EROM pointer (offset 0xfc) points at the EROM2 region; the
+ * OOBR and EROM1 regions (which hold each core's CoreInfo/InterfaceConfig) are
+ * derived from it by masking.
+ */
+#define NCI_NODEPTR_MASK		0xfffffff8
+#define NCI_OOBR_BASE_MASK		0x00001fff
+#define NCI_EROM1_BASE_MASK		0x00000fff
+
+/* interface descriptor word 1 */
+#define NCI_ID_COREINFOPTR_MASK		0x00001fff
+#define NCI_ID_CORETYPE_MASK		0x08000000	/* 0: OOBR, 1: EROM1 */
+#define NCI_ID_MI_MASK			0x04000000	/* master interface */
+#define NCI_ID_NADDR_MASK		0x03000000
+#define NCI_ID_NADDR_SHIFT		24
+#define NCI_ID_BPID_MASK		0x00f00000
+#define NCI_ID_BPID_SHIFT		20
+#define NCI_ID_WORDOFFSET_MASK		0xf0000000
+#define NCI_ID_WORDOFFSET_SHIFT		28
+#define NCI_ID_ENDMARKER		0xffffffff
+
+/* CoreInfo word */
+#define NCI_COREINFO_ID_MASK		0x00000fff
+#define NCI_COREINFO_REV_MASK		0x000ff000
+#define NCI_COREINFO_REV_SHIFT		12
+#define NCI_COREINFO_ISBP_MASK		0x08000000	/* core is a backplane */
+#define NCI_EROM_VENDOR_BRCM		0x800
+
+/* InterfaceConfig word */
+#define NCI_IC_IFACECNT_MASK		0x0000f000
+#define NCI_IC_IFACECNT_SHIFT		12
+
+/* slave-port address descriptor */
+#define NCI_SP_BASE_ADDR_MASK		0xffffff00
+#define NCI_SP_BOUND_ADDR_MASK		0x00000040
+#define NCI_SP_64BIT_ADDR_MASK		0x00000020
+
+/* backplane ids (non-4397/4384 chips) */
+#define NCI_BP_BOOKER			0
+#define NCI_BP_WL_PMNI			2
+#define NCI_BP_SAQM_PMNI		8
+
+/* idm wrapper reset (the NCI equivalent of the AI BCMA_RESET_CTL) */
+#define NCI_IDM_RESET_CONTROL		0x140
+#define NCI_IDM_RESET_ENTRY		0x1
+#define NCI_RESET_SPINWAIT		5000	/* us */
 
 /* PL-368 DMP definitions */
 #define DMP_DESC_TYPE_MSK	0x0000000F
@@ -764,6 +812,11 @@ int brcmf_chip_get_raminfo(struct brcmf_chip *pub)
 				brcmf_err("RAM base not provided with ARM CA7 core\n");
 				return -EINVAL;
 			}
+			/* The sysmem bank readout under-reports RAM on the
+			 * BCM4390; use the known device RAM size instead.
+			 */
+			if (ci->pub.chip == BRCM_CC_4390_CHIP_ID)
+				ci->pub.ramsize = 0x320000;
 		} else {
 			mem = brcmf_chip_get_core(&ci->pub,
 						  BCMA_CORE_INTERNAL_MEM);
@@ -951,6 +1004,165 @@ u32 brcmf_chip_enum_base(u16 devid)
 	return SI_ENUM_BASE_DEFAULT;
 }
 
+static bool brcmf_chip_nci_iscoreup(struct brcmf_core_priv *core)
+{
+	struct brcmf_chip_priv *ci = core->chip;
+	u32 regdata;
+
+	regdata = ci->ops->read32(ci->ctx,
+				  core->wrapbase + NCI_IDM_RESET_CONTROL);
+	return (regdata & NCI_IDM_RESET_ENTRY) == 0;
+}
+
+static void brcmf_chip_nci_coredisable(struct brcmf_core_priv *core,
+				       u32 prereset, u32 reset)
+{
+	struct brcmf_chip_priv *ci = core->chip;
+	u32 regdata;
+
+	regdata = ci->ops->read32(ci->ctx,
+				  core->wrapbase + NCI_IDM_RESET_CONTROL);
+	if (regdata & NCI_IDM_RESET_ENTRY)
+		return;
+
+	/* assert reset through the core's idm wrapper */
+	ci->ops->write32(ci->ctx, core->wrapbase + NCI_IDM_RESET_CONTROL,
+			 regdata | NCI_IDM_RESET_ENTRY);
+	SPINWAIT((ci->ops->read32(ci->ctx,
+				  core->wrapbase + NCI_IDM_RESET_CONTROL) &
+		  NCI_IDM_RESET_ENTRY) != NCI_IDM_RESET_ENTRY,
+		 NCI_RESET_SPINWAIT);
+}
+
+static void brcmf_chip_nci_resetcore(struct brcmf_core_priv *core, u32 prereset,
+				     u32 reset, u32 postreset)
+{
+	struct brcmf_chip_priv *ci = core->chip;
+	u32 regdata;
+
+	/* must disable first to work from an arbitrary core state */
+	brcmf_chip_nci_coredisable(core, prereset, reset);
+
+	/* deassert reset */
+	regdata = ci->ops->read32(ci->ctx,
+				  core->wrapbase + NCI_IDM_RESET_CONTROL);
+	ci->ops->write32(ci->ctx, core->wrapbase + NCI_IDM_RESET_CONTROL,
+			 regdata & ~NCI_IDM_RESET_ENTRY);
+	SPINWAIT((ci->ops->read32(ci->ctx,
+				  core->wrapbase + NCI_IDM_RESET_CONTROL) &
+		  NCI_IDM_RESET_ENTRY) == NCI_IDM_RESET_ENTRY,
+		 NCI_RESET_SPINWAIT);
+}
+
+/* Enumerate the cores on an NCI ("BOOKER") backplane. Unlike the AI EROM, the
+ * NCI EROM2 stream holds only interface and address descriptors; each core's
+ * id/rev and interface count live in a separate CoreInfo word in the OOBR or
+ * EROM1 region, referenced by the first interface descriptor.
+ */
+static int brcmf_chip_nci_scan(struct brcmf_chip_priv *ci)
+{
+	u32 erom2base, oobr_base, erom1base, erom2ptr, regdata;
+
+	regdata = ci->ops->read32(ci->ctx,
+				  CORE_CC_REG(ci->pub.enum_base, eromptr));
+	erom2base = regdata & NCI_NODEPTR_MASK;
+	oobr_base = erom2base & ~NCI_OOBR_BASE_MASK;
+	erom1base = erom2base & ~NCI_EROM1_BASE_MASK;
+	erom2ptr = erom2base;
+
+	while (ci->ops->read32(ci->ctx, erom2ptr) != NCI_ID_ENDMARKER) {
+		u32 id1, coreptr, coreinfo, ifacecfg, base = 0, wrap = 0;
+		u32 wordoffset = 0;
+		bool wrap_set = false, base_set = false;
+		struct brcmf_core *core;
+		u16 coreid;
+		u8 ifacecnt, i;
+
+		/* CoreInfo/InterfaceConfig are pointed at by the first
+		 * interface descriptor's word 1, in OOBR or EROM1.
+		 */
+		id1 = ci->ops->read32(ci->ctx, erom2ptr + 4);
+		coreptr = (id1 & NCI_ID_CORETYPE_MASK ? erom1base : oobr_base) +
+			  (id1 & NCI_ID_COREINFOPTR_MASK);
+		coreinfo = ci->ops->read32(ci->ctx, coreptr);
+		ifacecfg = ci->ops->read32(ci->ctx, coreptr + 4);
+
+		coreid = coreinfo & NCI_COREINFO_ID_MASK;
+		if (coreid < 0xff)
+			coreid |= NCI_EROM_VENDOR_BRCM;
+		ifacecnt = (ifacecfg & NCI_IC_IFACECNT_MASK) >>
+			   NCI_IC_IFACECNT_SHIFT;
+
+		for (i = 0; i < ifacecnt; i++) {
+			u32 d0, d1, node_ptr;
+			bool master, is_pmni;
+			u8 bpid, naddr, a;
+
+			d0 = ci->ops->read32(ci->ctx, erom2ptr);
+			erom2ptr += 4;
+			d1 = ci->ops->read32(ci->ctx, erom2ptr);
+			erom2ptr += 4;
+
+			master = !!(d1 & NCI_ID_MI_MASK);
+			naddr = (d1 & NCI_ID_NADDR_MASK) >> NCI_ID_NADDR_SHIFT;
+			wordoffset = (d1 & NCI_ID_WORDOFFSET_MASK) >>
+				     NCI_ID_WORDOFFSET_SHIFT;
+			bpid = (d1 & NCI_ID_BPID_MASK) >> NCI_ID_BPID_SHIFT;
+			node_ptr = d0 & NCI_NODEPTR_MASK;
+			is_pmni = !master && bpid >= NCI_BP_WL_PMNI &&
+				  bpid <= NCI_BP_SAQM_PMNI;
+
+			/* the wrapper base is the BOOKER (AXI) node pointer */
+			if (bpid == NCI_BP_BOOKER && !wrap_set) {
+				wrap = node_ptr;
+				wrap_set = true;
+			}
+
+			/* a slave's NumAddressRegion is one short of the real
+			 * count (see the vendor nci_save_iface1_reg fixups)
+			 */
+			if (!master) {
+				if (wordoffset > 1)
+					naddr++;
+				else if (wordoffset == 0 &&
+					 ci->ops->read32(ci->ctx, erom2ptr) !=
+					 NCI_ID_ENDMARKER)
+					naddr++;
+			}
+
+			for (a = 0; a < naddr; a++) {
+				u32 adesc = ci->ops->read32(ci->ctx, erom2ptr);
+
+				erom2ptr += 4;
+				/* register base = region 0 of the core's APB
+				 * (PMNI) slave port, or of a backplane core
+				 */
+				if (a == 0 && !base_set && !master &&
+				    (is_pmni ||
+				     (coreinfo & NCI_COREINFO_ISBP_MASK))) {
+					base = adesc & NCI_SP_BASE_ADDR_MASK;
+					base_set = true;
+				}
+				if (adesc & NCI_SP_64BIT_ADDR_MASK)
+					erom2ptr += 12;
+				else if (adesc & NCI_SP_BOUND_ADDR_MASK)
+					erom2ptr += 4;
+			}
+		}
+
+		core = brcmf_chip_add_core(ci, coreid, base, wrap);
+		if (IS_ERR(core))
+			return PTR_ERR(core);
+		core->rev = (coreinfo & NCI_COREINFO_REV_MASK) >>
+			    NCI_COREINFO_REV_SHIFT;
+
+		if (wordoffset == 0)
+			break;
+	}
+
+	return 0;
+}
+
 static int brcmf_chip_recognition(struct brcmf_chip_priv *ci)
 {
 	struct brcmf_core *core;
@@ -978,7 +1190,8 @@ static int brcmf_chip_recognition(struct brcmf_chip_priv *ci)
 	brcmf_chip_name(ci->pub.chip, ci->pub.chiprev,
 			ci->pub.name, sizeof(ci->pub.name));
 	brcmf_dbg(INFO, "found %s chip: %s\n",
-		  socitype == SOCI_SB ? "SB" : "AXI", ci->pub.name);
+		  socitype == SOCI_SB ? "SB" :
+		  socitype == SOCI_NCI ? "NCI" : "AXI", ci->pub.name);
 
 	if (socitype == SOCI_SB) {
 		if (ci->pub.chip != BRCM_CC_4329_CHIP_ID) {
@@ -1025,6 +1238,14 @@ static int brcmf_chip_recognition(struct brcmf_chip_priv *ci)
 		ci->resetcore = brcmf_chip_ai_resetcore;
 
 		brcmf_chip_dmp_erom_scan(ci);
+	} else if (socitype == SOCI_NCI) {
+		ci->iscoreup = brcmf_chip_nci_iscoreup;
+		ci->coredisable = brcmf_chip_nci_coredisable;
+		ci->resetcore = brcmf_chip_nci_resetcore;
+
+		ret = brcmf_chip_nci_scan(ci);
+		if (ret)
+			return ret;
 	} else {
 		brcmf_err("chip backplane type %u is not supported\n",
 			  socitype);
