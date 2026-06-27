@@ -398,10 +398,10 @@ config PCI_EXYNOS
 	depends on PCI_MSI
 	select PCIE_DW_HOST
 	help
-	  Enables support for the PCIe controller in the Samsung Exynos SoCs
-	  to work in host mode. The PCI controller is based on the DesignWare
-	  hardware and therefore the driver re-uses the DesignWare core
-	  functions to implement the driver.
+	  Enables support for the PCIe controller in the Samsung Exynos and
+	  Google Tensor (zuma/zumapro) SoCs to work in host mode. The PCI
+	  controller is based on the DesignWare hardware and therefore the
+	  driver re-uses the DesignWare core functions to implement the driver.
 
 config PCIE_FU740
 	bool "SiFive FU740 PCIe controller"
