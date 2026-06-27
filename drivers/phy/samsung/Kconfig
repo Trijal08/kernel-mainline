@@ -26,8 +26,9 @@ config PHY_EXYNOS_PCIE
 	depends on OF && (ARCH_EXYNOS || COMPILE_TEST)
 	select GENERIC_PHY
 	help
-	  Enable PCIe PHY support for Exynos SoC series.
-	  This driver provides PHY interface for Exynos PCIe controller.
+	  Enable PCIe PHY support for the Exynos and Google Tensor
+	  (zuma/zumapro) SoC series. This driver provides the PHY interface
+	  for the Exynos/Tensor PCIe controller.
 
 config PHY_SAMSUNG_UFS
 	tristate "Exynos SoC series UFS PHY driver"
