@@ -1,0 +1,121 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/pci/google,zuma-pcie.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Google Tensor SoC PCIe Host Controller
+
+maintainers:
+  - Trijal Saha <97483939+Trijal08@users.noreply.github.com>
+
+description:
+  PCIe host controller found on the Google Tensor SoCs (zuma/zumapro). It is
+  based on the Synopsys DesignWare PCIe IP and thus inherits all the common
+  properties defined in snps,dw-pcie.yaml. The PHY input clock and the PHY
+  isolation are controlled through the PMU system controller.
+
+allOf:
+  - $ref: /schemas/pci/snps,dw-pcie.yaml#
+
+properties:
+  compatible:
+    const: google,zuma-pcie
+
+  reg:
+    items:
+      - description: External Local Bus Interface (ELBI) registers.
+      - description: Data Bus Interface (DBI) registers.
+      - description: PCIe configuration space region.
+
+  reg-names:
+    items:
+      - const: elbi
+      - const: dbi
+      - const: config
+
+  interrupts:
+    maxItems: 1
+
+  clocks:
+    minItems: 1
+    maxItems: 16
+
+  num-lanes:
+    const: 1
+
+  phys:
+    maxItems: 1
+
+  phy-names:
+    const: pcie-phy
+
+  samsung,pmu-syscon:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description:
+      Phandle to the PMU system controller, used to enable the PCIE_PHY
+      control bit during link bring-up.
+
+  samsung,pmu-offset:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description:
+      Offset of the PCIE_PHY control register within the PMU system controller.
+
+  samsung,perst-delay-us:
+    description:
+      Delay in microseconds after deasserting PERST# before link training.
+    default: 15000
+
+  reset-gpios:
+    maxItems: 1
+    description: PERST# reset GPIO driven to the endpoint.
+
+  wlan-reg-on-gpios:
+    maxItems: 1
+    description:
+      Optional power-enable (WLAN_EN / REG_ON) GPIO for a Wi-Fi endpoint.
+
+required:
+  - compatible
+  - reg
+  - reg-names
+  - interrupts
+  - clocks
+  - num-lanes
+  - phys
+  - phy-names
+  - samsung,pmu-syscon
+  - samsung,pmu-offset
+  - reset-gpios
+
+unevaluatedProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/interrupt-controller/irq.h>
+    #include <dt-bindings/interrupt-controller/arm-gic.h>
+    #include <dt-bindings/gpio/gpio.h>
+
+    pcie@13120000 {
+        compatible = "google,zuma-pcie";
+        reg = <0x13120000 0x2000>,
+              <0x13400000 0x381000>,
+              <0x60ffe000 0x2000>;
+        reg-names = "elbi", "dbi", "config";
+        interrupts = <GIC_SPI 439 IRQ_TYPE_LEVEL_HIGH 0>;
+        #address-cells = <3>;
+        #size-cells = <2>;
+        device_type = "pci";
+        ranges = <0x82000000 0 0x60000000 0x60000000 0 0x00ff0000>;
+        bus-range = <0x00 0xff>;
+        num-lanes = <1>;
+        clocks = <&cmu_hsi2 0>;
+        phys = <&pcie_1_phy>;
+        phy-names = "pcie-phy";
+        samsung,pmu-syscon = <&pmu_system_controller>;
+        samsung,pmu-offset = <0x3ec8>;
+        samsung,perst-delay-us = <15000>;
+        reset-gpios = <&gph3 0 GPIO_ACTIVE_HIGH>;
+        wlan-reg-on-gpios = <&gph3 4 GPIO_ACTIVE_HIGH>;
+    };
+...
