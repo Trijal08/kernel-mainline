@@ -1,0 +1,76 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/phy/google,zuma-pcie-phy.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Google Tensor SoC PCIe PHY
+
+maintainers:
+  - Trijal Saha <97483939+Trijal08@users.noreply.github.com>
+
+description:
+  PCIe PHY (Synopsys, Gen3) found on the Google Tensor SoCs (zuma/zumapro).
+  The companion PCIe host controller (google,zuma-pcie) brackets the PHY
+  init/power-on callbacks with its ELBI PMA-reset writes; the PHY itself
+  programs the PMA/PCS banks and selects the external-PLL reference clock.
+
+properties:
+  compatible:
+    const: google,zuma-pcie-phy
+
+  reg:
+    items:
+      - description: PMA (PHY) registers.
+      - description: PCS registers.
+      - description: SoC control registers (PHY input-clock select).
+      - description: micro-debug (external PLL) registers.
+
+  reg-names:
+    items:
+      - const: phy
+      - const: pcs
+      - const: soc
+      - const: udbg
+
+  "#phy-cells":
+    const: 0
+
+  samsung,pmu-syscon:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description:
+      Phandle to the PMU system controller that holds the PHY isolation bit.
+
+  samsung,pmu-offset:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description:
+      Offset of the PHY isolation control register within the PMU.
+
+  num-lanes:
+    const: 1
+
+required:
+  - compatible
+  - reg
+  - reg-names
+  - "#phy-cells"
+  - samsung,pmu-syscon
+  - samsung,pmu-offset
+
+additionalProperties: false
+
+examples:
+  - |
+    phy@13160000 {
+        compatible = "google,zuma-pcie-phy";
+        reg = <0x13160000 0x3000>,
+              <0x13140000 0x5000>,
+              <0x13130000 0x5000>,
+              <0x13150000 0xd000>;
+        reg-names = "phy", "pcs", "soc", "udbg";
+        samsung,pmu-syscon = <&pmu_system_controller>;
+        samsung,pmu-offset = <0x3ec8>;
+        num-lanes = <1>;
+        #phy-cells = <0>;
+    };
+...
