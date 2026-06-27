@@ -728,6 +728,8 @@ static u32 brcmf_chip_tcm_rambase(struct brcmf_chip_priv *ci)
 		return 0x352000;
 	case BRCM_CC_4387_CHIP_ID:
 		return 0x740000;
+	case BRCM_CC_4390_CHIP_ID:
+		return 0x2a0000;
 	default:
 		brcmf_err("unknown chip: %s\n", ci->pub.name);
 		break;
