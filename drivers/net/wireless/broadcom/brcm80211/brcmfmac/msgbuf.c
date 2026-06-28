@@ -75,7 +75,11 @@
 #define MSGBUF_TYPE_D2H_RING_DELETE_CMPLT	0x2E
 
 #define NR_TX_PKTIDS				2048
-#define NR_RX_PKTIDS				2048
+/* The firmware audits every host packet id against its own map and traps on
+ * anything outside it (the BCM4390 rejects id 1025), so the rx pool must not
+ * exceed 1024 ids.
+ */
+#define NR_RX_PKTIDS				1024
 
 #define BRCMF_IOCTL_REQ_PKTID			0xFFFE
 
@@ -1725,6 +1729,18 @@ int brcmf_proto_msgbuf_attach(struct brcmf_pub *drvr)
 
 	msgbuf->max_ioctlrespbuf = BRCMF_MSGBUF_MAX_IOCTLRESPBUF_POST;
 	msgbuf->max_eventbuf = BRCMF_MSGBUF_MAX_EVENTBUF_POST;
+
+	/* The rx data, event and ioctl-response buffers all draw their
+	 * packet ids from the same rx pool, which the firmware bounds to
+	 * NR_RX_PKTIDS. Some firmware (e.g. BCM4390) advertises a
+	 * max_rxbufpost far larger than that pool; left unbounded the rx
+	 * data fill consumes nearly every id and starves the event and
+	 * ioctl-response posts and their constant repost churn, leaving the
+	 * dongle unable to answer ioctls. Keep the rx data fill to at most
+	 * half the pool so the control buffers always have ids available.
+	 */
+	if (msgbuf->max_rxbufpost > NR_RX_PKTIDS / 2)
+		msgbuf->max_rxbufpost = NR_RX_PKTIDS / 2;
 
 	msgbuf->tx_pktids = brcmf_msgbuf_init_pktids(NR_TX_PKTIDS,
 						     DMA_TO_DEVICE);
