@@ -380,7 +380,14 @@ brcmf_msgbuf_alloc_pktid(struct device *dev,
 	do {
 		(*idx)++;
 		if (*idx == pktids->array_size)
-			*idx = 0;
+			/* Skip index 0: the dongle reserves packet id 0 as
+			 * an invalid id and traps if it is ever handed back
+			 * one on the wire. This only bites once more than
+			 * array_size buffers have been posted (e.g. the large
+			 * max_rxbufpost advertised by BCM4390 firmware), but
+			 * the id is invalid for every chip.
+			 */
+			*idx = 1;
 		if (array[*idx].allocated.counter == 0)
 			if (atomic_cmpxchg(&array[*idx].allocated, 0, 1) == 0)
 				break;
