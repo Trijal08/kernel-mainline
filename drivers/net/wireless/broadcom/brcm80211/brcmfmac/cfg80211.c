@@ -3321,6 +3321,10 @@ static s32 brcmf_inform_bss(struct brcmf_cfg80211_info *cfg)
 	int i;
 
 	bss_list = (struct brcmf_scan_results *)cfg->escan_info.escan_buf;
+	/* Newer firmware (e.g. BCM4390/4398, v114) only appends fields after
+	 * the ones brcmf_bss_info_le exposes and records are walked using the
+	 * firmware-provided length, so the same parser handles those versions.
+	 */
 	if (bss_list->count != 0 &&
 	    (bss_list->version < BRCMF_BSS_INFO_MIN_VERSION ||
 	    bss_list->version > BRCMF_BSS_INFO_MAX_VERSION)) {
