@@ -440,6 +440,8 @@ struct brcmf_pciedev_info {
 	struct brcmf_mp_device *settings;
 	struct brcmf_otp_params otp;
 	bool fwseed;
+	struct delayed_work poll_work;
+	bool poll_active;
 #ifdef DEBUG
 	u32 console_interval;
 	bool console_active;
@@ -1634,18 +1636,49 @@ static void brcmf_pcie_down(struct device *dev)
 	struct brcmf_pciedev *pcie_bus_dev = bus_if->bus_priv.pcie;
 	struct brcmf_pciedev_info *devinfo = pcie_bus_dev->devinfo;
 
+	if (devinfo->poll_active) {
+		devinfo->poll_active = false;
+		cancel_delayed_work_sync(&devinfo->poll_work);
+	}
+
 	brcmf_pcie_fwcon_timer(devinfo, false);
+}
+
+/* The BCM4390 firmware posts D2H ring completions and updates the DMA
+ * write index, but does not raise a host interrupt the driver can latch
+ * onto (its MSI doorbell does not reach us reliably). Poll the completion
+ * rings so the message-buffer protocol still makes progress.
+ */
+static void brcmf_pcie_poll_worker(struct work_struct *work)
+{
+	struct brcmf_pciedev_info *devinfo =
+		container_of(to_delayed_work(work),
+			     struct brcmf_pciedev_info, poll_work);
+
+	if (!devinfo->poll_active || devinfo->state != BRCMFMAC_PCIE_STATE_UP)
+		return;
+
+	brcmf_proto_msgbuf_rx_trigger(&devinfo->pdev->dev);
+
+	schedule_delayed_work(&devinfo->poll_work, msecs_to_jiffies(2));
 }
 
 static int brcmf_pcie_preinit(struct device *dev)
 {
 	struct brcmf_bus *bus_if = dev_get_drvdata(dev);
 	struct brcmf_pciedev *buspub = bus_if->bus_priv.pcie;
+	struct brcmf_pciedev_info *devinfo = buspub->devinfo;
 
 	brcmf_dbg(PCIE, "Enter\n");
 
-	brcmf_pcie_intr_enable(buspub->devinfo);
-	brcmf_pcie_hostready(buspub->devinfo);
+	brcmf_pcie_intr_enable(devinfo);
+	brcmf_pcie_hostready(devinfo);
+
+	if (!devinfo->poll_active) {
+		devinfo->poll_active = true;
+		INIT_DELAYED_WORK(&devinfo->poll_work, brcmf_pcie_poll_worker);
+		schedule_delayed_work(&devinfo->poll_work, 0);
+	}
 
 	return 0;
 }
@@ -2678,6 +2711,10 @@ static void brcmf_pcie_setup(struct device *dev, int ret,
 	return;
 
 fail:
+	if (devinfo->poll_active) {
+		devinfo->poll_active = false;
+		cancel_delayed_work_sync(&devinfo->poll_work);
+	}
 	brcmf_err(bus, "Dongle setup failed\n");
 	brcmf_pcie_bus_console_read(devinfo, true);
 	brcmf_fw_crashed(dev);
@@ -3055,6 +3092,10 @@ brcmf_pcie_remove(struct pci_dev *pdev)
 	brcmf_pcie_fwcon_timer(devinfo, false);
 
 	devinfo->state = BRCMFMAC_PCIE_STATE_DOWN;
+	if (devinfo->poll_active) {
+		devinfo->poll_active = false;
+		cancel_delayed_work_sync(&devinfo->poll_work);
+	}
 	if (devinfo->ci)
 		brcmf_pcie_intr_disable(devinfo);
 
