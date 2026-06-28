@@ -1809,6 +1809,7 @@ brcmf_pcie_init_share_ram_info(struct brcmf_pciedev_info *devinfo,
 	u32 host_cap;
 	u32 host_cap2;
 	u32 addr;
+	u32 i;
 
 	shared = &devinfo->shared;
 	shared->tcm_base_address = sharedram_addr;
@@ -1847,8 +1848,20 @@ brcmf_pcie_init_share_ram_info(struct brcmf_pciedev_info *devinfo,
 	addr = sharedram_addr + BRCMF_SHARED_DTOH_MB_DATA_ADDR_OFFSET;
 	shared->dtoh_mb_data_addr = brcmf_pcie_read_tcm32(devinfo, addr);
 
+	/* Some firmwares (e.g. the BCM4390) publish the shared-structure
+	 * address before they have finished populating it, so the ring-info
+	 * pointer can still be zero here. Poll until it points into device RAM
+	 * rather than racing the dongle.
+	 */
 	addr = sharedram_addr + BRCMF_SHARED_RING_INFO_ADDR_OFFSET;
-	shared->ring_info_addr = brcmf_pcie_read_tcm32(devinfo, addr);
+	for (i = 0; i < 100; i++) {
+		shared->ring_info_addr = brcmf_pcie_read_tcm32(devinfo, addr);
+		if (shared->ring_info_addr >= devinfo->ci->rambase &&
+		    shared->ring_info_addr < devinfo->ci->rambase +
+					     devinfo->ci->ramsize)
+			break;
+		usleep_range(1000, 2000);
+	}
 
 	brcmf_dbg(PCIE, "max rx buf post %d, rx dataoffset %d\n",
 		  shared->max_rxbufpost, shared->rx_dataoffset);
@@ -2099,6 +2112,7 @@ static int brcmf_pcie_download_fw_nvram(struct brcmf_pciedev_info *devinfo,
 	int err;
 	u32 address;
 	u32 resetintr;
+	u32 i, st;
 
 	brcmf_dbg(PCIE, "Halt ARM.\n");
 	err = brcmf_pcie_enter_download_state(devinfo);
@@ -2150,6 +2164,29 @@ static int brcmf_pcie_download_fw_nvram(struct brcmf_pciedev_info *devinfo,
 	err = brcmf_pcie_exit_download_state(devinfo, resetintr);
 	if (err)
 		return err;
+
+	/* Newer firmwares publish the shared-structure address before they
+	 * have finished writing the structure, and ring a doorbell once they
+	 * are fully booted. Wait for that boot doorbell (the same signal the
+	 * vendor driver waits on as a boot interrupt) so the shared structure
+	 * is complete before it is read.
+	 */
+	if (devinfo->reginfo == &brcmf_reginfo_64) {
+		brcmf_pcie_select_core(devinfo, BCMA_CORE_PCIE2);
+		for (i = 0; i < BRCMF_PCIE_FW_UP_TIMEOUT / 20; i++) {
+			st = brcmf_pcie_read_reg32(devinfo,
+						   devinfo->reginfo->mailboxint);
+			if (st) {
+				brcmf_pcie_write_reg32(devinfo,
+						devinfo->reginfo->mailboxint,
+						st);
+				brcmf_dbg(PCIE, "FW boot doorbell after %u ms\n",
+					  i * 20);
+				break;
+			}
+			msleep(20);
+		}
+	}
 
 	brcmf_dbg(PCIE, "Wait for FW init\n");
 	sharedram_addr = sharedram_addr_written;
