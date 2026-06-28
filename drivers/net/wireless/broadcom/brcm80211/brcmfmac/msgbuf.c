@@ -930,19 +930,43 @@ static void
 brcmf_msgbuf_process_ioctl_complete(struct brcmf_msgbuf *msgbuf, void *buf)
 {
 	struct msgbuf_ioctl_resp_hdr *ioctl_resp;
+	u32 pktid;
+	u16 trans_id;
 
 	ioctl_resp = (struct msgbuf_ioctl_resp_hdr *)buf;
+	pktid = le32_to_cpu(ioctl_resp->msg.request_id);
+	trans_id = le16_to_cpu(ioctl_resp->trans_id);
+
+	/* Replenish the consumed ioctl-response buffer regardless. */
+	if (msgbuf->cur_ioctlrespbuf)
+		msgbuf->cur_ioctlrespbuf--;
+	brcmf_msgbuf_rxbuf_ioctlresp_post(msgbuf);
+
+	/* The driver only ever has one ioctl outstanding. A completion whose
+	 * transaction id does not match the request in flight is stale (e.g.
+	 * a late response to a command that already timed out); waking the
+	 * waiter with it would hand back the wrong status. Drop it and free
+	 * its response buffer.
+	 */
+	if (trans_id != (u16)msgbuf->reqid) {
+		struct sk_buff *skb;
+
+		bphy_err(msgbuf->drvr, "stale ioctl resp cmd=%u trans_id=%u want=%u\n",
+			 le32_to_cpu(ioctl_resp->cmd), trans_id,
+			 (u16)msgbuf->reqid);
+		skb = brcmf_msgbuf_get_pktid(msgbuf->drvr->bus_if->dev,
+					     msgbuf->rx_pktids, pktid);
+		if (skb)
+			brcmu_pkt_buf_free_skb(skb);
+		return;
+	}
 
 	msgbuf->ioctl_resp_status =
 			(s16)le16_to_cpu(ioctl_resp->compl_hdr.status);
 	msgbuf->ioctl_resp_ret_len = le16_to_cpu(ioctl_resp->resp_len);
-	msgbuf->ioctl_resp_pktid = le32_to_cpu(ioctl_resp->msg.request_id);
+	msgbuf->ioctl_resp_pktid = pktid;
 
 	brcmf_msgbuf_ioctl_resp_wake(msgbuf);
-
-	if (msgbuf->cur_ioctlrespbuf)
-		msgbuf->cur_ioctlrespbuf--;
-	brcmf_msgbuf_rxbuf_ioctlresp_post(msgbuf);
 }
 
 
