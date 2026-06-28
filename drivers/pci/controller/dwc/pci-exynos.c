@@ -40,6 +40,15 @@
 #define PCIE_IRQ_EN_PULSE		0x00c
 #define PCIE_IRQ_EN_LEVEL		0x010
 #define PCIE_IRQ_EN_SPECIAL		0x014
+/*
+ * The Zuma/GS-family ELBI lays out a second IRQ bank ("IRQ2") that carries
+ * the integrated MSI-receive summary. Its enable register sits at 0x018,
+ * which on the older exynos5433 map is PCIE_SW_WAKE - so these must only be
+ * used on the zuma path.
+ */
+#define PCIE_ZUMA_IRQ2			0x008
+#define PCIE_ZUMA_IRQ2_EN		0x018
+#define PCIE_ZUMA_IRQ2_MSI		BIT(17)
 #define PCIE_SW_WAKE			0x018
 #define PCIE_BUS_EN			BIT(1)
 #define PCIE_CORE_RESET			0x01c
@@ -200,6 +209,46 @@ static void exynos_pcie_clear_irq_pulse(struct exynos_pcie *ep)
 static irqreturn_t exynos_pcie_irq_handler(int irq, void *arg)
 {
 	struct exynos_pcie *ep = arg;
+
+	/*
+	 * On zuma the controller multiplexes the integrated-MSI receive
+	 * summary into this single line via the IRQ2 bank. There is no
+	 * separate "msi" interrupt, so the DWC core never registers a chained
+	 * MSI handler (pp->msi_irq[0] is forced to -ENODEV); demux it here.
+	 */
+	if (ep->drvdata->zuma) {
+		struct dw_pcie *pci = &ep->pci;
+		struct dw_pcie_rp *pp = &pci->pp;
+		u32 val2 = exynos_pcie_readl(pci->elbi_base, PCIE_ZUMA_IRQ2);
+
+		if (val2)
+			exynos_pcie_writel(pci->elbi_base, val2, PCIE_ZUMA_IRQ2);
+		if (IS_ENABLED(CONFIG_PCI_MSI) && (val2 & PCIE_ZUMA_IRQ2_MSI)) {
+			int ctrl, num_ctrls;
+
+			dw_handle_msi_irq(pp);
+
+			/*
+			 * The elbi MSI summary (IRQ2 bit17) latches on the
+			 * rising edge of the integrated-MSI receiver output.
+			 * A new MSI whose status bit gets set while a previous
+			 * one is still pending produces no fresh rising edge
+			 * and would be lost. Toggle the per-vector mask to
+			 * force the receiver output low then high again,
+			 * regenerating the edge for any still-pending MSI.
+			 */
+			num_ctrls = pp->num_vectors / MAX_MSI_IRQS_PER_CTRL;
+			for (ctrl = 0; ctrl < num_ctrls; ctrl++) {
+				u32 off = ctrl * MSI_REG_CTRL_BLOCK_SIZE;
+
+				dw_pcie_writel_dbi(pci, PCIE_MSI_INTR0_MASK + off,
+						   0xffffffff);
+				dw_pcie_writel_dbi(pci, PCIE_MSI_INTR0_MASK + off,
+						   pp->irq_mask[ctrl]);
+			}
+		}
+		return IRQ_HANDLED;
+	}
 
 	exynos_pcie_clear_irq_pulse(ep);
 	return IRQ_HANDLED;
@@ -367,6 +416,19 @@ static int exynos_zuma_pcie_host_init(struct dw_pcie_rp *pp)
 
 	exynos_pcie_deassert_core_reset(ep);
 	exynos_pcie_enable_irq_pulse(ep);
+
+	/*
+	 * Route the integrated-MSI receive summary onto the controller IRQ.
+	 * The endpoint (e.g. the BCM4390 Wi-Fi) signals all msgbuf completions
+	 * via MSI; without this the host never sees the interrupt and every
+	 * ioctl to the dongle times out.
+	 */
+	if (IS_ENABLED(CONFIG_PCI_MSI)) {
+		u32 val = exynos_pcie_readl(pci->elbi_base, PCIE_ZUMA_IRQ2_EN);
+
+		val |= PCIE_ZUMA_IRQ2_MSI;
+		exynos_pcie_writel(pci->elbi_base, val, PCIE_ZUMA_IRQ2_EN);
+	}
 
 	return 0;
 }
