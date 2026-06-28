@@ -69,6 +69,9 @@
 #define NCI_IDM_RESET_ENTRY		0x1
 #define NCI_RESET_SPINWAIT		5000	/* us */
 
+/* offset of the DMP control register from a core's CoreInfo word */
+#define NCI_DMP_DMPCTRL_OFFSET		8
+
 /* PL-368 DMP definitions */
 #define DMP_DESC_TYPE_MSK	0x0000000F
 #define  DMP_DESC_EMPTY		0x00000000
@@ -276,6 +279,7 @@ struct sbsocramregs {
 struct brcmf_core_priv {
 	struct brcmf_core pub;
 	u32 wrapbase;
+	u32 dmp_ctrl;		/* NCI: backplane addr of the DMP control reg */
 	struct list_head list;
 	struct brcmf_chip_priv *chip;
 };
@@ -1014,44 +1018,78 @@ static bool brcmf_chip_nci_iscoreup(struct brcmf_core_priv *core)
 	return (regdata & NCI_IDM_RESET_ENTRY) == 0;
 }
 
-static void brcmf_chip_nci_coredisable(struct brcmf_core_priv *core,
-				       u32 prereset, u32 reset)
+/* Read-modify-write the core's DMP control register, which carries the SICF
+ * clock-enable/force-gated-clock bits and the core-specific control flags
+ * (e.g. the ARM CPU-halt bit).
+ */
+static void brcmf_chip_nci_cflags(struct brcmf_core_priv *core, u32 mask,
+				  u32 val)
+{
+	struct brcmf_chip_priv *ci = core->chip;
+	u32 regdata;
+
+	if (!mask && !val)
+		return;
+	regdata = (ci->ops->read32(ci->ctx, core->dmp_ctrl) & ~mask) | val;
+	ci->ops->write32(ci->ctx, core->dmp_ctrl, regdata);
+	ci->ops->read32(ci->ctx, core->dmp_ctrl);
+}
+
+static void brcmf_chip_nci_idm_reset(struct brcmf_core_priv *core, bool assert)
 {
 	struct brcmf_chip_priv *ci = core->chip;
 	u32 regdata;
 
 	regdata = ci->ops->read32(ci->ctx,
 				  core->wrapbase + NCI_IDM_RESET_CONTROL);
-	if (regdata & NCI_IDM_RESET_ENTRY)
-		return;
-
-	/* assert reset through the core's idm wrapper */
+	if (assert)
+		regdata |= NCI_IDM_RESET_ENTRY;
+	else
+		regdata &= ~NCI_IDM_RESET_ENTRY;
 	ci->ops->write32(ci->ctx, core->wrapbase + NCI_IDM_RESET_CONTROL,
-			 regdata | NCI_IDM_RESET_ENTRY);
-	SPINWAIT((ci->ops->read32(ci->ctx,
-				  core->wrapbase + NCI_IDM_RESET_CONTROL) &
-		  NCI_IDM_RESET_ENTRY) != NCI_IDM_RESET_ENTRY,
+			 regdata);
+	SPINWAIT(((ci->ops->read32(ci->ctx,
+				   core->wrapbase + NCI_IDM_RESET_CONTROL) &
+		   NCI_IDM_RESET_ENTRY) == NCI_IDM_RESET_ENTRY) != assert,
 		 NCI_RESET_SPINWAIT);
+}
+
+static void brcmf_chip_nci_coredisable(struct brcmf_core_priv *core,
+				       u32 prereset, u32 reset)
+{
+	u32 clkmask = SICF_FGC | SICF_CLOCK_EN;
+
+	/* gate the clock, apply the core control + reset flags, then assert
+	 * the idm reset
+	 */
+	brcmf_chip_nci_cflags(core, clkmask, 0);
+	udelay(1);
+	brcmf_chip_nci_cflags(core, ~clkmask, prereset | reset);
+	brcmf_chip_nci_idm_reset(core, true);
+
+	/* pulse the forced clock while held in reset */
+	brcmf_chip_nci_cflags(core, SICF_CLOCK_EN, SICF_CLOCK_EN);
+	brcmf_chip_nci_cflags(core, SICF_FGC, SICF_FGC);
+	udelay(1);
+	brcmf_chip_nci_cflags(core, clkmask, 0);
 }
 
 static void brcmf_chip_nci_resetcore(struct brcmf_core_priv *core, u32 prereset,
 				     u32 reset, u32 postreset)
 {
-	struct brcmf_chip_priv *ci = core->chip;
-	u32 regdata;
-
-	/* must disable first to work from an arbitrary core state */
+	/* disable first to start from a known state */
 	brcmf_chip_nci_coredisable(core, prereset, reset);
 
-	/* deassert reset */
-	regdata = ci->ops->read32(ci->ctx,
-				  core->wrapbase + NCI_IDM_RESET_CONTROL);
-	ci->ops->write32(ci->ctx, core->wrapbase + NCI_IDM_RESET_CONTROL,
-			 regdata & ~NCI_IDM_RESET_ENTRY);
-	SPINWAIT((ci->ops->read32(ci->ctx,
-				  core->wrapbase + NCI_IDM_RESET_CONTROL) &
-		  NCI_IDM_RESET_ENTRY) == NCI_IDM_RESET_ENTRY,
-		 NCI_RESET_SPINWAIT);
+	/* take the core out of reset and apply the post-reset control flags
+	 * (clearing e.g. the CPU-halt bit so the core runs)
+	 */
+	brcmf_chip_nci_idm_reset(core, false);
+	brcmf_chip_nci_cflags(core, ~(SICF_FGC | SICF_CLOCK_EN), postreset);
+
+	brcmf_chip_nci_cflags(core, SICF_CLOCK_EN, SICF_CLOCK_EN);
+	brcmf_chip_nci_cflags(core, SICF_FGC, SICF_FGC);
+	udelay(1);
+	brcmf_chip_nci_cflags(core, SICF_FGC, 0);
 }
 
 /* Enumerate the cores on an NCI ("BOOKER") backplane. Unlike the AI EROM, the
@@ -1155,6 +1193,9 @@ static int brcmf_chip_nci_scan(struct brcmf_chip_priv *ci)
 			return PTR_ERR(core);
 		core->rev = (coreinfo & NCI_COREINFO_REV_MASK) >>
 			    NCI_COREINFO_REV_SHIFT;
+		/* DMP control register (carries the SICF clock/halt flags) */
+		container_of(core, struct brcmf_core_priv, pub)->dmp_ctrl =
+			coreptr + NCI_DMP_DMPCTRL_OFFSET;
 
 		if (wordoffset == 0)
 			break;
