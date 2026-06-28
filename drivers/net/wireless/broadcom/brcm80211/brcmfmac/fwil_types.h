@@ -19,7 +19,9 @@
 #define BRCMF_ARP_OL_PEER_AUTO_REPLY	0x00000008
 
 #define	BRCMF_BSS_INFO_MIN_VERSION	109 /* min ver of brcmf_bss_info_le struct */
-#define	BRCMF_BSS_INFO_MAX_VERSION	112 /* max ver of brcmf_bss_info_le struct */
+#define	BRCMF_BSS_INFO_MAX_VERSION	114 /* max ver of brcmf_bss_info_le struct */
+#define	BRCMF_BSS_INFO_VERSION	109 /* curr ver of brcmf_bss_info_le struct */
+#define	BRCMF_BSS_INFO_VERSION_V114	114 /* BCM4390/4398 firmware */
 #define BRCMF_BSS_RSSI_ON_CHANNEL	0x0004
 
 #define BRCMF_STA_BRCM			0x00000001	/* Running a Broadcom driver */
