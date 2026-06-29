@@ -527,19 +527,6 @@
 	status = "okay";
 };
 
-/* PCIe channel 1 (HSI2) connects to the Broadcom BCM4390 Wi-Fi. */
-&pcie_1_phy {
-	status = "okay";
-};
-
-&pcie_1 {
-	pinctrl-0 = <&pcie1_clkreq &pcie1_perst>;
-	pinctrl-names = "default";
-	reset-gpios = <&gph3 0 GPIO_ACTIVE_HIGH>;	/* PERST */
-	wlan-reg-on-gpios = <&gph3 4 GPIO_ACTIVE_HIGH>;	/* WLAN_EN */
-	status = "okay";
-};
-
 &usbdrd31 {
 	vdd10-supply = <&reg_placeholder>;
 	vdd33-supply = <&reg_placeholder>;
