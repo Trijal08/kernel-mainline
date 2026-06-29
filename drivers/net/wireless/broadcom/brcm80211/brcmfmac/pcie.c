@@ -306,6 +306,9 @@ static const struct brcmf_firmware_mapping brcmf_pcie_fwnames[] = {
 #define BRCMF_SHARED_HOST_CAP2_OFFSET		112
 #define BRCMF_SHARED_HOST_CAP3_OFFSET		116
 
+/* host_cap3: acknowledge the device-advertised extended TX work-item tag */
+#define BRCMF_PCIE_SHARED_HOST_CAP3_TXPOST_EXT	0x00000008
+
 #define BRCMF_RING_H2D_RING_COUNT_OFFSET	0
 #define BRCMF_RING_D2H_RING_COUNT_OFFSET	1
 #define BRCMF_RING_H2D_RING_MEM_OFFSET		4
@@ -1932,6 +1935,14 @@ brcmf_pcie_init_share_ram_info(struct brcmf_pciedev_info *devinfo,
 			       BRCMF_SHARED_HOST_CAP_OFFSET, host_cap);
 	brcmf_pcie_write_tcm32(devinfo, sharedram_addr +
 			       BRCMF_SHARED_HOST_CAP2_OFFSET, host_cap2);
+
+	/* Acknowledge the device's extended TX work-item tag capability (host_cap3)
+	 * so host and device agree on the 80-byte work-item layout.
+	 */
+	if (shared->version >= 8)
+		brcmf_pcie_write_tcm32(devinfo, sharedram_addr +
+				       BRCMF_SHARED_HOST_CAP3_OFFSET,
+				       BRCMF_PCIE_SHARED_HOST_CAP3_TXPOST_EXT);
 
 	return 0;
 }
