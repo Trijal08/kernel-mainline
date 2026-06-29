@@ -3492,7 +3492,7 @@
 			clocks = <&cmu_apm CLK_GOUT_APM_APM_USI0_UART_PCLK>,
 				 <&cmu_apm CLK_GOUT_APM_APM_USI0_UART_IPCLK>;
 			clock-names = "pclk", "ipclk";
-			samsung,sysreg = <&sysreg_apm 0x0>;
+			samsung,sysreg = <&sysreg_apm 0x4e0>;
 			samsung,mode = <USI_MODE_UART>;
 			status = "disabled";
 
@@ -3519,7 +3519,7 @@
 			clocks = <&cmu_apm CLK_GOUT_APM_APM_USI1_UART_PCLK>,
 				 <&cmu_apm CLK_GOUT_APM_APM_USI1_UART_IPCLK>;
 			clock-names = "pclk", "ipclk";
-			samsung,sysreg = <&sysreg_apm 0x4>;
+			samsung,sysreg = <&sysreg_apm 0x4e4>;
 			samsung,mode = <USI_MODE_UART>;
 			status = "disabled";
 
@@ -3546,7 +3546,7 @@
 			clocks = <&cmu_apm CLK_GOUT_APM_APM_USI0_USI_PCLK>,
 				 <&cmu_apm CLK_GOUT_APM_APM_USI0_USI_IPCLK>;
 			clock-names = "pclk", "ipclk";
-			samsung,sysreg = <&sysreg_apm 0x8>;
+			samsung,sysreg = <&sysreg_apm 0x4e8>;
 			status = "disabled";
 
 			serial_19: serial@155e0000 {
