@@ -131,7 +131,19 @@ struct msgbuf_tx_msghdr {
 	struct msgbuf_buf_addr		data_buf_addr;
 	__le16				metadata_buf_len;
 	__le16				data_len;
-	__le32				rsvd0;
+	/* extended tx work-item tail required by firmware that advertises
+	 * the extended txpost layout; left zero when the optional rate
+	 * override and checksum-offload features are unused.
+	 */
+	u8				ext_flags;
+	u8				scale_factor;
+	u8				rate;
+	u8				exp_time;
+	/* Reserved space for the firmware-written extended tag (Active
+	 * Radiotap, 30 bytes) that this firmware appends to every work item,
+	 * rounded up so the whole item is a multiple of 8 (48 + 32 = 80).
+	 */
+	u8				ext_tags[32];
 };
 
 struct msgbuf_rx_bufpost {
@@ -814,6 +826,7 @@ static void brcmf_msgbuf_txflow(struct brcmf_msgbuf *msgbuf, u16 flowid)
 
 		tx_msghdr = (struct msgbuf_tx_msghdr *)ret_ptr;
 
+		memset(tx_msghdr, 0, sizeof(*tx_msghdr));
 		tx_msghdr->msg.msgtype = MSGBUF_TYPE_TX_POST;
 		tx_msghdr->msg.request_id = cpu_to_le32(pktid + 1);
 		tx_msghdr->msg.ifidx = brcmf_flowring_ifidx_get(flow, flowid);
