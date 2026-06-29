@@ -7,6 +7,7 @@
  */
 
 #include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/soc/samsung,exynos-usi.h>
 
 /* PCIe channel 1 (HSI2) connects to the Broadcom BCM4390 Wi-Fi. */
 &pcie_1_phy {
@@ -19,4 +20,31 @@
 	reset-gpios = <&gph3 0 GPIO_ACTIVE_HIGH>;	/* PERST */
 	wlan-reg-on-gpios = <&gph3 4 GPIO_ACTIVE_HIGH>;	/* WLAN_EN */
 	status = "okay";
+};
+
+/* Bluetooth: BCM4390 on the USI18 UART in H4 mode.  The hci_bcm serdev driver
+ * drives BT_REG_ON (shutdown), the device- and host-wake lines and loads the
+ * firmware patch.
+ */
+&usi18 {
+	samsung,mode = <USI_MODE_UART>;
+	status = "okay";
+};
+
+&serial_18 {
+	status = "okay";
+
+	bluetooth: btbcm {
+		compatible = "brcm,bcm4390-bt";
+		shutdown-gpios = <&gpn8 0 GPIO_ACTIVE_HIGH>;
+		device-wakeup-gpios = <&gpn9 0 GPIO_ACTIVE_HIGH>;
+		host-wakeup-gpios = <&gpa5 6 GPIO_ACTIVE_HIGH>;
+		/*
+		 * The APM USI1 UART baud clock is the 24.576 MHz oscclk (the PMU
+		 * owns the APM func mux, so it can't be reparented to a PLL), which
+		 * caps the usable rate; run the controller at 115200.
+		 */
+		max-speed = <115200>;
+		status = "okay";
+	};
 };
