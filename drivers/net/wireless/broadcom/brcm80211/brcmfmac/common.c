@@ -431,6 +431,15 @@ int brcmf_c_preinit_dcmds(struct brcmf_if *ifp)
 
 	/* Enable tx beamforming, errors can be ignored (not supported) */
 	(void)brcmf_fil_iovar_int_set(ifp, "txbf", 1);
+	/* Route tx frames by access category (DHD_FLOW_PRIO_AC_MAP == 0) so the
+	 * firmware's four-AC AQM and the host's per-AC flow rings agree. Without
+	 * this the dongle uses a different prio map than the host posts rings
+	 * for, mis-steering frames (TXDMA_QMISS) or aggregating into a fifo that
+	 * does not exist. The vendor driver sets this in dhd_flow_prio_map().
+	 */
+	(void)brcmf_fil_iovar_int_set(ifp, "bus:fl_prio_map", 0);
+
+	(void)brcmf_fil_iovar_int_set(ifp, "bus:llr_enable", 1);
 done:
 	return err;
 }
