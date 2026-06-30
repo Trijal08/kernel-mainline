@@ -185,6 +185,17 @@ int brcmf_commonring_write_complete(struct brcmf_commonring *commonring)
 
 	commonring->f_ptr = commonring->w_ptr;
 
+	/* Ensure the message payloads just written into the ring are globally
+	 * visible to the device's DMA engine before it observes the updated
+	 * write pointer / doorbell. The vendor bcmdhd driver flushes here
+	 * ("messages are flushed from cache prior to posting the new WR index");
+	 * without the barrier, on weakly-ordered ARM the wptr store can be
+	 * observed before the descriptor stores land, so at high TX rates the
+	 * firmware fetches a stale/garbage TX descriptor and corrupts its TX
+	 * state (BCM4390 txq_hw_fill TRAP under sustained throughput).
+	 */
+	dma_wmb();
+
 	if (commonring->cr_write_wptr)
 		commonring->cr_write_wptr(commonring->cr_ctx);
 	if (commonring->cr_ring_bell)
