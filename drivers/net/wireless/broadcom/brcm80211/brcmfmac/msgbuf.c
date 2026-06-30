@@ -704,6 +704,14 @@ brcmf_msgbuf_flowring_create_worker(struct brcmf_msgbuf *msgbuf,
 	}
 
 	create = (struct msgbuf_tx_flowring_create_req *)ret_ptr;
+	/* The control-submit ring slot is reused across messages, so zero the
+	 * whole work item before filling it. The dongle reads if_flags/tc/
+	 * priority/int_vector from this request to program the flowring's
+	 * hardware TX DMA; leaving them as stale ring bytes makes it
+	 * mis-configure the queue and PSM-assert TXDMA_QMISS on the first
+	 * frame. The vendor bcmdhd driver likewise zeroes these (if_flags=0).
+	 */
+	memset(create, 0, sizeof(*create));
 	create->msg.msgtype = MSGBUF_TYPE_FLOW_RING_CREATE;
 	create->msg.ifidx = work->ifidx;
 	create->msg.request_id = 0;
