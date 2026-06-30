@@ -864,6 +864,19 @@ static void brcmf_msgbuf_txflow(struct brcmf_msgbuf *msgbuf, u16 flowid)
 			break;
 		}
 		skb_orphan(skb);
+		/* The work item carries a single data_buf_addr that is DMA
+		 * mapped with dma_map_single() below, which only covers the
+		 * linear part of the skb. A non-linear skb (paged frags) would
+		 * leave its frags unmapped and hand the dongle adjacent garbage,
+		 * corrupting the frame it aggregates and tripping the firmware's
+		 * txq_hw_fill assert under load. Flatten the skb first; the
+		 * vendor driver likewise rejects frag'd tx skbs.
+		 */
+		if (skb_linearize(skb)) {
+			bphy_err(drvr, "skb_linearize failed, dropping tx\n");
+			brcmu_pkt_buf_free_skb(skb);
+			continue;
+		}
 		if (brcmf_msgbuf_alloc_pktid(msgbuf->drvr->bus_if->dev,
 					     msgbuf->tx_pktids, skb, ETH_HLEN,
 					     &physaddr, &pktid)) {
