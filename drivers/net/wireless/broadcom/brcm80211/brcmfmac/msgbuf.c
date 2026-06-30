@@ -755,11 +755,10 @@ static void brcmf_msgbuf_flowring_worker(struct work_struct *work)
 }
 
 
-static u32 brcmf_msgbuf_flowring_create(struct brcmf_msgbuf *msgbuf, int ifidx,
-					struct sk_buff *skb)
+static u32 brcmf_msgbuf_flowring_create_prio(struct brcmf_msgbuf *msgbuf,
+					     int ifidx, u8 *sa, u8 *da, u8 prio)
 {
 	struct brcmf_msgbuf_work_item *create;
-	struct ethhdr *eh = (struct ethhdr *)(skb->data);
 	u32 flowid;
 	ulong flags;
 
@@ -767,8 +766,7 @@ static u32 brcmf_msgbuf_flowring_create(struct brcmf_msgbuf *msgbuf, int ifidx,
 	if (create == NULL)
 		return BRCMF_FLOWRING_INVALID_ID;
 
-	flowid = brcmf_flowring_create(msgbuf->flow, eh->h_dest,
-				       skb->priority, ifidx);
+	flowid = brcmf_flowring_create(msgbuf->flow, da, prio, ifidx);
 	if (flowid == BRCMF_FLOWRING_INVALID_ID) {
 		kfree(create);
 		return flowid;
@@ -776,13 +774,46 @@ static u32 brcmf_msgbuf_flowring_create(struct brcmf_msgbuf *msgbuf, int ifidx,
 
 	create->flowid = flowid;
 	create->ifidx = ifidx;
-	memcpy(create->sa, eh->h_source, ETH_ALEN);
-	memcpy(create->da, eh->h_dest, ETH_ALEN);
+	memcpy(create->sa, sa, ETH_ALEN);
+	memcpy(create->da, da, ETH_ALEN);
 
 	spin_lock_irqsave(&msgbuf->flowring_work_lock, flags);
 	list_add_tail(&create->queue, &msgbuf->work_queue);
 	spin_unlock_irqrestore(&msgbuf->flowring_work_lock, flags);
 	schedule_work(&msgbuf->flowring_work);
+
+	return flowid;
+}
+
+static u32 brcmf_msgbuf_flowring_create(struct brcmf_msgbuf *msgbuf, int ifidx,
+					struct sk_buff *skb)
+{
+	struct ethhdr *eh = (struct ethhdr *)(skb->data);
+	u32 flowid;
+	u8 prio;
+
+	flowid = brcmf_msgbuf_flowring_create_prio(msgbuf, ifidx, eh->h_source,
+						   eh->h_dest, skb->priority);
+
+	/* Pre-create a flow ring for every other 802.1d priority to this peer.
+	 * The BCM4390 firmware originates frames itself - notably its offloaded
+	 * supplicant's group-key handshake, transmitted on the Voice AC - soon
+	 * after association, and steers every frame to the AQM fifo matching its
+	 * raw 802.1d priority. If the host has not posted that fifo's DMA ring
+	 * the MAC asserts a fatal TXDMA_QMISS. Posting all eight priority rings
+	 * on the first transmit (which happens at link-up, before the firmware
+	 * originates those frames) guarantees the rings exist, rather than
+	 * relying on host traffic happening to use each priority in time.
+	 */
+	for (prio = 0; prio < 8; prio++) {
+		if (prio == skb->priority)
+			continue;
+		if (brcmf_flowring_lookup(msgbuf->flow, eh->h_dest, prio,
+					  ifidx) == BRCMF_FLOWRING_INVALID_ID)
+			brcmf_msgbuf_flowring_create_prio(msgbuf, ifidx,
+							  eh->h_source,
+							  eh->h_dest, prio);
+	}
 
 	return flowid;
 }
