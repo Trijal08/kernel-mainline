@@ -1953,6 +1953,10 @@ brcmf_pcie_init_share_ram_info(struct brcmf_pciedev_info *devinfo,
 
 	/* Disable DS: this is not currently properly supported */
 	host_cap |= BRCMF_HOSTCAP_DS_NO_OOB_DW;
+	/* Advertise UR-no-trap so the firmware handles a transient buffer
+	 * underrun gracefully instead of trapping (matches the vendor driver).
+	 */
+	host_cap |= BRCMF_HOSTCAP_UR_FW_NO_TRAP;
 
 	brcmf_pcie_write_tcm32(devinfo, sharedram_addr +
 			       BRCMF_SHARED_HOST_CAP_OFFSET, host_cap);
