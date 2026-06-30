@@ -25,23 +25,23 @@
 #define BRCMF_FLOWRING_HASH_AP(da, fifo, ifidx) (da[5] * 2 + fifo + ifidx * 16)
 #define BRCMF_FLOWRING_HASH_STA(fifo, ifidx) (fifo + ifidx * 16)
 
-/* Identity 802.1d-priority -> fifo map: one flow ring per priority. The
- * BCM4390 firmware routes each frame to the AQM fifo matching its raw 802.1d
- * priority (including frames it originates itself, such as the offloaded
- * supplicant's group-key handshake on Voice/prio 6). The host flow ring's fifo
- * must therefore equal the priority, so collapsing priorities onto four AC
- * fifos would leave the firmware steering a prio-6 frame to a fifo with no
- * host DMA ring (fatal TXDMA_QMISS).
+/* Standard 802.1d-priority -> access-category map (matches the vendor driver's
+ * prio2ac). The firmware's AQM has only four EDCA fifos (one per AC); fifos
+ * above that are special (mcast/trigger). An identity prio->fifo map therefore
+ * steered prio 4-7 frames into those non-data fifos, corrupting the frame the
+ * firmware aggregated and tripping txq_hw_fill under load. The driver also asks
+ * the firmware to route by AC (bus:fl_prio_map) so host and dongle agree, which
+ * keeps every priority mapped onto a posted ring (no TXDMA_QMISS).
  */
 static const u8 brcmf_flowring_prio2fifo[] = {
 	0,
 	1,
+	1,
+	0,
+	2,
 	2,
 	3,
-	4,
-	5,
-	6,
-	7
+	3
 };
 
 static const u8 ALLFFMAC[ETH_ALEN] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
