@@ -2274,6 +2274,21 @@ static int brcmf_pcie_get_resource(struct brcmf_pciedev_info *devinfo)
 
 	pci_set_master(pdev);
 
+	/* Perform a PCIe function level reset before any chip access, mirroring
+	 * the vendor driver's flr_or_pwr_toggle() at attach. The dongle retains
+	 * PCIe-function state (msgring producer/consumer indices, MSI generation
+	 * state, mailbox interrupt masks) across an rmmod/modprobe or a warm
+	 * reboot; downloading firmware into that dirty state makes the dongle
+	 * fail to initialize ("FW failed to initialize") and can leave MSI
+	 * delivery wedged so the data path silently falls back to polling. An
+	 * FLR returns the function to a clean state, letting firmware re-download
+	 * and MSI work again without a cold power cycle. Called *_locked because
+	 * the PCI core already holds the device lock during ->probe.
+	 */
+	err = pci_reset_function_locked(pdev);
+	if (err)
+		brcmf_err(bus, "PCIe FLR failed (err=%d), continuing\n", err);
+
 	/* Bar-0 mapped address */
 	bar0_addr = pci_resource_start(pdev, 0);
 	/* Bar-1 mapped address */
