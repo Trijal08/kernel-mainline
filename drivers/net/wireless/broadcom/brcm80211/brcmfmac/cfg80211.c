@@ -6035,9 +6035,19 @@ static bool brcmf_is_linkup(struct brcmf_cfg80211_vif *vif,
 
 	if ((vif->profile.use_fwsup == BRCMF_PROFILE_FWSUP_PSK ||
 	     vif->profile.use_fwsup == BRCMF_PROFILE_FWSUP_SAE) &&
-	    event == BRCMF_E_PSK_SUP &&
-	    status == BRCMF_E_STATUS_FWSUP_COMPLETED)
-		set_bit(BRCMF_VIF_STATUS_EAP_SUCCESS, &vif->sme_state);
+	    event == BRCMF_E_PSK_SUP) {
+		/* The offloaded supplicant signals the unicast 4-way as done
+		 * with either FWSUP_COMPLETED (group key already in place) or
+		 * FWSUP_WAIT_G1 (unicast keyed, group handshake still pending).
+		 * Both authorize the data port; the vendor bcmdhd driver
+		 * accepts both. Only treating COMPLETED as success leaves the
+		 * connect unfinished when the firmware sends WAIT_G1, so the
+		 * supplicant/userspace gives up and retries.
+		 */
+		if (status == BRCMF_E_STATUS_FWSUP_COMPLETED ||
+		    status == BRCMF_E_STATUS_FWSUP_WAIT_G1)
+			set_bit(BRCMF_VIF_STATUS_EAP_SUCCESS, &vif->sme_state);
+	}
 	if (event == BRCMF_E_SET_SSID && status == BRCMF_E_STATUS_SUCCESS) {
 		brcmf_dbg(CONN, "Processing set ssid\n");
 		memcpy(vif->profile.bssid, e->addr, ETH_ALEN);
@@ -6092,7 +6102,8 @@ static bool brcmf_is_nonetwork(struct brcmf_cfg80211_info *cfg,
 	}
 
 	if (event == BRCMF_E_PSK_SUP &&
-	    status != BRCMF_E_STATUS_FWSUP_COMPLETED) {
+	    status != BRCMF_E_STATUS_FWSUP_COMPLETED &&
+	    status != BRCMF_E_STATUS_FWSUP_WAIT_G1) {
 		brcmf_dbg(CONN, "Processing failed supplicant state: %u\n",
 			  status);
 		return true;
