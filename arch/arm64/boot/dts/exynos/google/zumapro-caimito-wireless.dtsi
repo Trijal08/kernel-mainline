@@ -18,5 +18,11 @@
 	pinctrl-names = "default";
 	reset-gpios = <&gph3 0 GPIO_ACTIVE_HIGH>;	/* PERST */
 	wlan-reg-on-gpios = <&gph3 4 GPIO_ACTIVE_HIGH>;	/* WLAN_EN */
+	/* Out-of-band wake lines for the BCM4390 endpoint: WL_HOST_WAKE is the
+	 * device-to-host interrupt (the dongle has no usable in-band D2H
+	 * doorbell), WL_DEV_WAKE lets the host wake the dongle from deep sleep.
+	 */
+	host-wake-gpios = <&gpa5 3 GPIO_ACTIVE_HIGH>;	/* WL_HOST_WAKE */
+	device-wake-gpios = <&gph3 5 GPIO_ACTIVE_HIGH>;	/* WL_DEV_WAKE */
 	status = "okay";
 };
