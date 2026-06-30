@@ -836,7 +836,10 @@ static void brcmf_msgbuf_txflow(struct brcmf_msgbuf *msgbuf, u16 flowid)
 
 		memset(tx_msghdr, 0, sizeof(*tx_msghdr));
 		tx_msghdr->msg.msgtype = MSGBUF_TYPE_TX_POST;
-		tx_msghdr->msg.request_id = cpu_to_le32(pktid + 1);
+		/* request_id == pktid verbatim, matching bcmdhd (no +1 offset);
+		 * the allocator never hands out pktid 0 so it stays nonzero.
+		 */
+		tx_msghdr->msg.request_id = cpu_to_le32(pktid);
 		tx_msghdr->msg.ifidx = brcmf_flowring_ifidx_get(flow, flowid);
 		tx_msghdr->flags = BRCMF_MSGBUF_PKT_FLAGS_FRAME_802_3;
 		tx_msghdr->flags |= (skb->priority & 0x07) <<
@@ -1002,7 +1005,7 @@ brcmf_msgbuf_process_txstatus(struct brcmf_msgbuf *msgbuf, void *buf)
 	u16 flowid;
 
 	tx_status = (struct msgbuf_tx_status *)buf;
-	idx = le32_to_cpu(tx_status->msg.request_id) - 1;
+	idx = le32_to_cpu(tx_status->msg.request_id);
 	flow_ring_id = le16_to_cpu(tx_status->compl_hdr.flow_ring_id);
 	skb = brcmf_msgbuf_get_pktid(msgbuf->drvr->bus_if->dev,
 				     msgbuf->tx_pktids, idx);
