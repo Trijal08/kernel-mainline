@@ -10,6 +10,8 @@
 #include <linux/vmalloc.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
+#include <linux/gpio/consumer.h>
+#include <linux/of.h>
 #include <linux/bcma/bcma.h>
 #include <linux/sched.h>
 #include <linux/sched/signal.h>
@@ -445,6 +447,8 @@ struct brcmf_pciedev_info {
 	bool fwseed;
 	struct delayed_work poll_work;
 	bool poll_active;
+	int oob_irq;
+	struct gpio_desc *dev_wake_gpio;
 #ifdef DEBUG
 	u32 console_interval;
 	bool console_active;
@@ -1674,6 +1678,25 @@ static int brcmf_pcie_preinit(struct device *dev)
 
 	brcmf_dbg(PCIE, "Enter\n");
 
+	/* The firmware collapses its ARM/backplane power domain when the link
+	 * goes idle and, without an out-of-band device-wake, cannot be revived.
+	 * When WL_DEV_WAKE is wired (and asserted in brcmf_pcie_setup_oob_wake)
+	 * the firmware keeps itself awake through that soft request while still
+	 * managing its own DVFS.  Only when WL_DEV_WAKE is unavailable do we fall
+	 * back to pinning the PCIe and ARM power domains through the ChipCommon
+	 * SR power-request register -- that hard vote keeps the firmware running
+	 * but collides with its DVFS voltage transition and traps txq_hw_fill
+	 * under sustained load.
+	 */
+	if (!devinfo->dev_wake_gpio) {
+		brcmf_pcie_select_core(devinfo, BCMA_CORE_CHIPCOMMON);
+		val = brcmf_pcie_read_reg32(devinfo,
+					    BRCMF_CHIPCREG_POWERCONTROL);
+		brcmf_pcie_write_reg32(devinfo, BRCMF_CHIPCREG_POWERCONTROL,
+				       val | BRCMF_SRPWR_REQON_DMN0_DMN1);
+		brcmf_pcie_select_core(devinfo, BCMA_CORE_PCIE2);
+	}
+
 	brcmf_pcie_intr_enable(devinfo);
 	brcmf_pcie_hostready(devinfo);
 
@@ -2629,6 +2652,90 @@ static int brcmf_pcie_read_otp(struct brcmf_pciedev_info *devinfo)
 	return ret;
 }
 
+static irqreturn_t brcmf_pcie_oob_isr(int irq, void *arg)
+{
+	/* Out-of-band device-to-host wake.  For now this only acknowledges the
+	 * interrupt so it can be observed in /proc/interrupts; a later change
+	 * will service the D2H completion rings from here and retire the poll
+	 * worker.
+	 */
+	return IRQ_HANDLED;
+}
+
+/* The BCM4390 endpoint has no device tree node of its own, so its out-of-band
+ * WL_HOST_WAKE / WL_DEV_WAKE GPIOs are described on the PCIe host-controller
+ * node.  Reach that node through the host bridge.
+ */
+static struct device_node *
+brcmf_pcie_host_ctrl_node(struct brcmf_pciedev_info *devinfo)
+{
+	struct pci_host_bridge *bridge = pci_find_host_bridge(devinfo->pdev->bus);
+
+	if (bridge && bridge->dev.parent)
+		return bridge->dev.parent->of_node;
+	return NULL;
+}
+
+/* Register the out-of-band WL_HOST_WAKE interrupt.  The dongle raises this
+ * line when it has device-to-host work, as it has no usable in-band D2H
+ * doorbell.  The handler currently only acknowledges the interrupt; a later
+ * change will service the completion rings from here and drop the poll worker.
+ */
+static void brcmf_pcie_setup_oob_wake(struct brcmf_pciedev_info *devinfo)
+{
+	struct pci_dev *pdev = devinfo->pdev;
+	struct device_node *np = brcmf_pcie_host_ctrl_node(devinfo);
+	struct gpio_desc *desc;
+	int irq, err;
+
+	devinfo->oob_irq = -1;
+	devinfo->dev_wake_gpio = NULL;
+	if (!np)
+		return;
+
+	/* WL_DEV_WAKE: assert it (drive high) so the dongle stays awake through
+	 * this soft out-of-band request rather than by pinning its power domain
+	 * with the ChipCommon SR power vote.  Leaving the domain for the firmware
+	 * to manage lets its DVFS scale freely, avoiding the txq_hw_fill trap at
+	 * the DVFS voltage transition.
+	 */
+	desc = devm_fwnode_gpiod_get(&pdev->dev, of_fwnode_handle(np),
+				     "device-wake", GPIOD_OUT_HIGH, "wl_dev_wake");
+	if (!IS_ERR(desc)) {
+		devinfo->dev_wake_gpio = desc;
+		dev_info(&pdev->dev, "WL_DEV_WAKE asserted (out-of-band)\n");
+	} else {
+		brcmf_dbg(PCIE, "no WL_DEV_WAKE gpio (%ld)\n", PTR_ERR(desc));
+	}
+
+	desc = devm_fwnode_gpiod_get(&pdev->dev, of_fwnode_handle(np),
+				     "host-wake", GPIOD_IN, "wl_host_wake");
+	if (IS_ERR(desc)) {
+		brcmf_dbg(PCIE, "no WL_HOST_WAKE gpio (%ld)\n", PTR_ERR(desc));
+		return;
+	}
+
+	irq = gpiod_to_irq(desc);
+	if (irq < 0) {
+		dev_warn(&pdev->dev, "WL_HOST_WAKE gpiod_to_irq failed: %d\n",
+			 irq);
+		return;
+	}
+
+	err = devm_request_irq(&pdev->dev, irq, brcmf_pcie_oob_isr,
+			       IRQF_TRIGGER_RISING, "brcmf_wl_host_wake",
+			       devinfo);
+	if (err) {
+		dev_warn(&pdev->dev, "WL_HOST_WAKE irq %d request failed: %d\n",
+			 irq, err);
+		return;
+	}
+
+	devinfo->oob_irq = irq;
+	dev_info(&pdev->dev, "WL_HOST_WAKE out-of-band irq %d registered\n",
+		 irq);
+}
+
 #define BRCMF_PCIE_FW_CODE	0
 #define BRCMF_PCIE_FW_NVRAM	1
 #define BRCMF_PCIE_FW_CLM	2
@@ -2706,6 +2813,8 @@ static void brcmf_pcie_setup(struct device *dev, int ret,
 		goto fail;
 
 	brcmf_pcie_select_core(devinfo, BCMA_CORE_PCIE2);
+
+	brcmf_pcie_setup_oob_wake(devinfo);
 
 	/* hook the commonrings in the bus structure. */
 	for (i = 0; i < BRCMF_NROF_COMMON_MSGRINGS; i++)
