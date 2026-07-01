@@ -93,12 +93,6 @@
 
 #define BRCMF_MSGBUF_MAX_PKT_SIZE		2048
 #define BRCMF_MSGBUF_MAX_CTL_PKT_SIZE           8192
-/* Contiguous TX-copy pool: fixed 2 KB stride, one slot per in-flight TX pktid
- * so the round-robin cursor cannot lap a still-in-flight frame (the pktid pool
- * runs dry first). 2048 * 2 KB = 4 MB of coherent DMA.
- */
-#define BRCMF_MSGBUF_TXCOPY_SLOT_SIZE		BRCMF_MSGBUF_MAX_PKT_SIZE
-#define BRCMF_MSGBUF_TXCOPY_NSLOTS		NR_TX_PKTIDS
 #define BRCMF_MSGBUF_RXBUFPOST_THRESHOLD	32
 #define BRCMF_MSGBUF_MAX_IOCTLRESPBUF_POST	8
 #define BRCMF_MSGBUF_MAX_EVENTBUF_POST		8
@@ -329,19 +323,6 @@ struct brcmf_msgbuf {
 	u32 reqid;
 	wait_queue_head_t ioctl_resp_wait;
 	bool ctl_completed;
-
-	/* Contiguous, fixed-stride DMA pool that TX payloads are copied into so
-	 * consecutive frames of an A-MPDU physically abut. This lets the
-	 * firmware's SAQM engine emit compressed (15-byte) aggregation
-	 * descriptors instead of full (96-byte) ones for scattered skbs, keeping
-	 * the descriptor footprint under the 6-chunk hardware limit and avoiding
-	 * the txq_hw_fill trap under sustained TX. Mirrors the vendor driver's
-	 * contiguous host ring layout.
-	 */
-	void *txcopy_buf;
-	dma_addr_t txcopy_dma;
-	u32 txcopy_nslots;
-	u32 txcopy_next;
 
 	struct brcmf_msgbuf_pktids *tx_pktids;
 	struct brcmf_msgbuf_pktids *rx_pktids;
@@ -927,25 +908,7 @@ static void brcmf_msgbuf_txflow(struct brcmf_msgbuf *msgbuf, u16 flowid)
 		tx_msghdr->seg_cnt = 1;
 		memcpy(tx_msghdr->txhdr, skb->data, ETH_HLEN);
 		tx_msghdr->data_len = cpu_to_le16(skb->len - ETH_HLEN);
-		/* Point the work item's payload at a fixed-stride slot in the
-		 * contiguous TX pool rather than the scattered skb, so the frames
-		 * of an A-MPDU physically abut and the SAQM engine emits
-		 * compressed descriptors (A~=0). The skb is still DMA-mapped by
-		 * the pktid allocator (its cache clean makes this copy see the
-		 * committed data) and freed as usual on TX completion. Oversized
-		 * payloads keep the direct scattered mapping.
-		 */
-		if (msgbuf->txcopy_nslots &&
-		    (u32)(skb->len - ETH_HLEN) <= BRCMF_MSGBUF_TXCOPY_SLOT_SIZE) {
-			u32 off = (msgbuf->txcopy_next++ % msgbuf->txcopy_nslots) *
-				  BRCMF_MSGBUF_TXCOPY_SLOT_SIZE;
-
-			memcpy((u8 *)msgbuf->txcopy_buf + off,
-			       skb->data + ETH_HLEN, skb->len - ETH_HLEN);
-			address = (u64)msgbuf->txcopy_dma + off;
-		} else {
-			address = (u64)physaddr;
-		}
+		address = (u64)physaddr;
 		tx_msghdr->data_buf_addr.high_addr = cpu_to_le32(address >> 32);
 		tx_msghdr->data_buf_addr.low_addr =
 			cpu_to_le32(address & 0xffffffff);
@@ -1902,21 +1865,6 @@ int brcmf_proto_msgbuf_attach(struct brcmf_pub *drvr)
 	if (!msgbuf->rxdata_pktids)
 		goto fail;
 
-	/* Best-effort contiguous TX-copy pool. On failure TX falls back to
-	 * mapping the scattered skb directly (functional, but exposed to the
-	 * txq_hw_fill trap under sustained load).
-	 */
-	msgbuf->txcopy_nslots = BRCMF_MSGBUF_TXCOPY_NSLOTS;
-	msgbuf->txcopy_buf =
-		dma_alloc_coherent(drvr->bus_if->dev,
-				   (size_t)msgbuf->txcopy_nslots *
-				   BRCMF_MSGBUF_TXCOPY_SLOT_SIZE,
-				   &msgbuf->txcopy_dma, GFP_KERNEL);
-	if (!msgbuf->txcopy_buf) {
-		msgbuf->txcopy_nslots = 0;
-		bphy_err(drvr, "TX-copy pool alloc failed; using scattered-skb TX\n");
-	}
-
 	msgbuf->flow = brcmf_flowring_attach(drvr->bus_if->dev,
 					     if_msgbuf->max_flowrings);
 	if (!msgbuf->flow)
@@ -1955,11 +1903,6 @@ fail:
 					  BRCMF_TX_IOCTL_MAX_MSG_SIZE,
 					  msgbuf->ioctbuf,
 					  msgbuf->ioctbuf_handle);
-		if (msgbuf->txcopy_buf)
-			dma_free_coherent(drvr->bus_if->dev,
-					  (size_t)msgbuf->txcopy_nslots *
-					  BRCMF_MSGBUF_TXCOPY_SLOT_SIZE,
-					  msgbuf->txcopy_buf, msgbuf->txcopy_dma);
 		if (msgbuf->txflow_wq)
 			destroy_workqueue(msgbuf->txflow_wq);
 		kfree(msgbuf);
@@ -1993,11 +1936,6 @@ void brcmf_proto_msgbuf_detach(struct brcmf_pub *drvr)
 		dma_free_coherent(drvr->bus_if->dev,
 				  BRCMF_TX_IOCTL_MAX_MSG_SIZE,
 				  msgbuf->ioctbuf, msgbuf->ioctbuf_handle);
-		if (msgbuf->txcopy_buf)
-			dma_free_coherent(drvr->bus_if->dev,
-					  (size_t)msgbuf->txcopy_nslots *
-					  BRCMF_MSGBUF_TXCOPY_SLOT_SIZE,
-					  msgbuf->txcopy_buf, msgbuf->txcopy_dma);
 		brcmf_msgbuf_release_pktids(msgbuf);
 		kfree(msgbuf->flowring_dma_handle);
 		kfree(msgbuf);
