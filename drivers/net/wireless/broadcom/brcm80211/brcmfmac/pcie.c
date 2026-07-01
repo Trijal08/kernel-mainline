@@ -963,6 +963,7 @@ brcmf_pcie_send_mb_data(struct brcmf_pciedev_info *devinfo, u32 htod_mb_data)
 static void brcmf_pcie_handle_mb_data(struct brcmf_pciedev_info *devinfo, u32 data)
 {
 	brcmf_dbg(PCIE, "D2H_MB_DATA: 0x%04x\n", data);
+	dev_info(&devinfo->pdev->dev, "DBG D2H_MB_DATA: 0x%08x\n", data);
 	if (data & BRCMF_D2H_DEV_DS_ENTER_REQ)  {
 		brcmf_dbg(PCIE, "D2H_MB_DATA: DEEP SLEEP REQ\n");
 		brcmf_pcie_send_mb_data(devinfo, BRCMF_H2D_HOST_DS_ACK);
@@ -1701,6 +1702,9 @@ static int brcmf_pcie_preinit(struct device *dev)
 					    BRCMF_CHIPCREG_POWERCONTROL);
 		brcmf_pcie_write_reg32(devinfo, BRCMF_CHIPCREG_POWERCONTROL,
 				       val | BRCMF_SRPWR_REQON_DMN0_DMN1);
+		dev_info(&devinfo->pdev->dev, "DBG SRPWR 0x1e8: 0x%08x -> 0x%08x\n",
+			 val, brcmf_pcie_read_reg32(devinfo,
+						    BRCMF_CHIPCREG_POWERCONTROL));
 		brcmf_pcie_select_core(devinfo, BCMA_CORE_PCIE2);
 	}
 
@@ -1977,6 +1981,15 @@ brcmf_pcie_init_share_ram_info(struct brcmf_pciedev_info *devinfo,
 		brcmf_pcie_write_tcm32(devinfo, sharedram_addr +
 				       BRCMF_SHARED_HOST_CAP3_OFFSET,
 				       BRCMF_PCIE_SHARED_HOST_CAP3_TXPOST_EXT);
+
+	/* DBG: dump the negotiated shared-info / host_cap words so the version,
+	 * host capabilities and extended-TX (host_cap3) handshake are visible.
+	 */
+	dev_info(&devinfo->pdev->dev,
+		 "DBG shared: version=%u flags=0x%08x flags2=0x%08x host_cap=0x%08x host_cap3=0x%08x\n",
+		 shared->version, shared->flags, shared->flags2, host_cap,
+		 brcmf_pcie_read_tcm32(devinfo, sharedram_addr +
+				       BRCMF_SHARED_HOST_CAP3_OFFSET));
 
 	return 0;
 }
