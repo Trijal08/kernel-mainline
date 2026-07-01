@@ -311,6 +311,12 @@ static const struct brcmf_firmware_mapping brcmf_pcie_fwnames[] = {
 /* host_cap3: acknowledge the device-advertised extended TX work-item tag */
 #define BRCMF_PCIE_SHARED_HOST_CAP3_TXPOST_EXT	0x00000008
 
+/* ChipCommon SR power-request: hard-vote the PCIe/ARM power domains awake as a
+ * fallback when no out-of-band WL_DEV_WAKE GPIO is available.
+ */
+#define BRCMF_CHIPCREG_POWERCONTROL		0x1e8
+#define BRCMF_SRPWR_REQON_DMN0_DMN1		0x00000300
+
 #define BRCMF_RING_H2D_RING_COUNT_OFFSET	0
 #define BRCMF_RING_D2H_RING_COUNT_OFFSET	1
 #define BRCMF_RING_H2D_RING_MEM_OFFSET		4
@@ -1675,6 +1681,7 @@ static int brcmf_pcie_preinit(struct device *dev)
 	struct brcmf_bus *bus_if = dev_get_drvdata(dev);
 	struct brcmf_pciedev *buspub = bus_if->bus_priv.pcie;
 	struct brcmf_pciedev_info *devinfo = buspub->devinfo;
+	u32 val;
 
 	brcmf_dbg(PCIE, "Enter\n");
 
