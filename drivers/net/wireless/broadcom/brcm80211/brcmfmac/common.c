@@ -443,6 +443,15 @@ int brcmf_c_preinit_dcmds(struct brcmf_if *ifp)
 	(void)brcmf_fil_iovar_int_set(ifp, "bus:fl_prio_map", 0);
 
 	(void)brcmf_fil_iovar_int_set(ifp, "bus:llr_enable", 1);
+
+	/* Cap the TX block-ack window at 64, matching the vendor driver's PCIe
+	 * throughput tuning (dhd Kbuild CUSTOM_AMPDU_BA_WSIZE=64). Left at the
+	 * firmware default (256), the BCM4390 builds A-MPDUs whose aggregate
+	 * descriptor footprint overflows the six-chunk hardware ring and traps
+	 * txq_hw_fill under sustained TX; 64 frames keep it to ~3 chunks.
+	 */
+	bphy_err(drvr, "DBG ampdu_ba_wsize=64: iovar returned %d\n",
+		 brcmf_fil_iovar_int_set(ifp, "ampdu_ba_wsize", 64));
 done:
 	return err;
 }
