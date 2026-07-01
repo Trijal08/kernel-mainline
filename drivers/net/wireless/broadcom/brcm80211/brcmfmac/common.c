@@ -38,8 +38,11 @@ static int brcmf_sdiod_txglomsz = BRCMF_DEFAULT_TXGLOM_SIZE;
 module_param_named(txglomsz, brcmf_sdiod_txglomsz, int, 0);
 MODULE_PARM_DESC(txglomsz, "Maximum tx packet chain size [SDIO]");
 
-/* Debug level configuration. See debug.h for bits, sysfs modifiable */
-int brcmf_msg_level;
+/* Debug level configuration. See debug.h for bits, sysfs modifiable.
+ * Default to streaming the firmware console (FWCON) so the dongle's own
+ * log reaches dmesg on every boot without a module argument.
+ */
+int brcmf_msg_level = BRCMF_FWCON_VAL;
 module_param_named(debug, brcmf_msg_level, int, 0600);
 MODULE_PARM_DESC(debug, "Level of debug output");
 
