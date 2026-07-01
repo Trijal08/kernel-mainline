@@ -498,7 +498,7 @@ static int max17042_get_property(struct power_supply *psy,
 				data64 *= 1562500ll;
 			}
 
-			val->intval = div_s64(data64, chip->pdata->r_sns);
+			val->intval = div_s64(data64, chip->r_sns);
 		} else {
 			return -EINVAL;
 		}
