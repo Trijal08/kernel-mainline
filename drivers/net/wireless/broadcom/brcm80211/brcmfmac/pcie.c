@@ -346,6 +346,7 @@ static const struct brcmf_firmware_mapping brcmf_pcie_fwnames[] = {
 
 #define BRCMF_H2D_HOST_D3_INFORM		0x00000001
 #define BRCMF_H2D_HOST_DS_ACK			0x00000002
+#define BRCMF_H2D_HOST_DS_NAK			0x00000004
 #define BRCMF_H2D_HOST_D0_INFORM_IN_USE		0x00000008
 #define BRCMF_H2D_HOST_D0_INFORM		0x00000010
 
@@ -970,9 +971,18 @@ static void brcmf_pcie_handle_mb_data(struct brcmf_pciedev_info *devinfo, u32 da
 	brcmf_dbg(PCIE, "D2H_MB_DATA: 0x%04x\n", data);
 	dev_info(&devinfo->pdev->dev, "DBG D2H_MB_DATA: 0x%08x\n", data);
 	if (data & BRCMF_D2H_DEV_DS_ENTER_REQ)  {
+		/* Refuse deep sleep. brcmfmac does not implement the vendor
+		 * driver's inband deep-sleep worker (which refcounts host
+		 * activity and only acks when idle), so acking here lets the
+		 * dongle power down its cores mid-traffic. On the BCM4390 that
+		 * races the D11/SAQM DVFS transition against an in-flight TX
+		 * aggregate and traps txq_hw_fill. Nak instead to keep the
+		 * device awake, as the vendor driver does whenever the host is
+		 * active.
+		 */
 		brcmf_dbg(PCIE, "D2H_MB_DATA: DEEP SLEEP REQ\n");
-		brcmf_pcie_send_mb_data(devinfo, BRCMF_H2D_HOST_DS_ACK);
-		brcmf_dbg(PCIE, "D2H_MB_DATA: sent DEEP SLEEP ACK\n");
+		brcmf_pcie_send_mb_data(devinfo, BRCMF_H2D_HOST_DS_NAK);
+		dev_info(&devinfo->pdev->dev, "DBG D2H_MB_DATA: sent DEEP SLEEP NAK\n");
 	}
 	if (data & BRCMF_D2H_DEV_DS_EXIT_NOTE)
 		brcmf_dbg(PCIE, "D2H_MB_DATA: DEEP SLEEP EXIT\n");
