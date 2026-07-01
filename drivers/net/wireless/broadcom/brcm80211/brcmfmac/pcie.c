@@ -2378,17 +2378,6 @@ static int brcmf_pcie_get_resource(struct brcmf_pciedev_info *devinfo)
 
 	pci_set_master(pdev);
 
-	/* The Samsung/Exynos PCIe DMA engine on the Tensor SoCs (zuma/zumapro,
-	 * "gs101" family) cannot address the full 64 bits; the vendor driver
-	 * caps the DMA mask at 36 bits for exactly this reason. Match it so the
-	 * dongle addresses host DMA buffers natively instead of the core
-	 * bouncing every high buffer through the low 32-bit zone.
-	 */
-	err = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(36));
-	if (err)
-		brcmf_err(bus, "36-bit DMA mask failed (%d), using default\n",
-			  err);
-
 	/* Perform a PCIe function level reset before any chip access, mirroring
 	 * the vendor driver's flr_or_pwr_toggle() at attach. The dongle retains
 	 * PCIe-function state (msgring producer/consumer indices, MSI generation
