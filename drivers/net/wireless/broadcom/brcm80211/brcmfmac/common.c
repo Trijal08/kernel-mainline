@@ -443,6 +443,30 @@ int brcmf_c_preinit_dcmds(struct brcmf_if *ifp)
 	(void)brcmf_fil_iovar_int_set(ifp, "bus:fl_prio_map", 0);
 
 	(void)brcmf_fil_iovar_int_set(ifp, "bus:llr_enable", 1);
+
+	/* BCM4390: pin the firmware clock by disabling dynamic voltage/frequency
+	 * scaling. Its NDV->LDV DVFS transition races the AQM txq_hw_fill
+	 * descriptor fill and traps the dongle (pc 0x3e598a) under sustained
+	 * high-rate TX. The "dvfs" iovar is a versioned command struct
+	 * (dvfs_cmnd_v1_t in the vendor driver): subcommand 0 (ENABLE) with a
+	 * one-byte payload, 0 to disable. Errors are ignored on parts without
+	 * DVFS.
+	 */
+	{
+		struct {
+			__le16 ver;
+			__le16 len;
+			__le32 subcmd;
+			u8 data[1];
+		} __packed dvfs = {
+			.ver = cpu_to_le16(1),		/* DVFS_CMND_VERSION_1 */
+			.subcmd = cpu_to_le32(0),	/* DVFS_SUBCMD_ENABLE */
+			.data = { 0 },			/* 0 = disable DVFS */
+		};
+
+		dvfs.len = cpu_to_le16(sizeof(dvfs));
+		(void)brcmf_fil_iovar_data_set(ifp, "dvfs", &dvfs, sizeof(dvfs));
+	}
 done:
 	return err;
 }
