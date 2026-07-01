@@ -6489,6 +6489,7 @@ brcmf_bss_connect_done(struct brcmf_cfg80211_info *cfg,
 			set_bit(BRCMF_VIF_STATUS_CONNECTED,
 				&ifp->vif->sme_state);
 			conn_params.status = WLAN_STATUS_SUCCESS;
+			brcmf_disable_dvfs(ifp);
 		} else {
 			clear_bit(BRCMF_VIF_STATUS_EAP_SUCCESS,
 				  &ifp->vif->sme_state);
