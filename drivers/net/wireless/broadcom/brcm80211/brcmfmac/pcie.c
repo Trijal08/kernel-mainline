@@ -2037,13 +2037,19 @@ brcmf_pcie_init_share_ram_info(struct brcmf_pciedev_info *devinfo,
 	brcmf_pcie_write_tcm32(devinfo, sharedram_addr +
 			       BRCMF_SHARED_HOST_CAP2_OFFSET, host_cap2);
 
-	/* Acknowledge the device's extended TX work-item tag capability (host_cap3)
-	 * so host and device agree on the 80-byte work-item layout.
+	/* host_cap3 advertises which optional txpost extended tags the host
+	 * supplies. Bit 3 (0x8) is Active Radiotap, NOT a generic "enable
+	 * extended txpost" flag as previously assumed: setting it makes the
+	 * firmware run the ART txpost path and expect a radiotap tag in every TX
+	 * work item (which the host never writes -> txq_hw_fill NULL-derefs) and
+	 * stream raw 802.11 frames up to a monitor interface we do not have. The
+	 * vendor driver leaves host_cap3 at 0 for a normal STA (ART is a
+	 * user-enabled sniffer feature, off by default). Advertise no extended
+	 * tags.
 	 */
 	if (shared->version >= 8)
 		brcmf_pcie_write_tcm32(devinfo, sharedram_addr +
-				       BRCMF_SHARED_HOST_CAP3_OFFSET,
-				       BRCMF_PCIE_SHARED_HOST_CAP3_TXPOST_EXT);
+				       BRCMF_SHARED_HOST_CAP3_OFFSET, 0);
 
 	/* DBG: dump the negotiated shared-info / host_cap words so the version,
 	 * host capabilities and extended-TX (host_cap3) handshake are visible.
