@@ -462,6 +462,33 @@ int brcmf_c_preinit_dcmds(struct brcmf_if *ifp)
 	 */
 	bphy_err(drvr, "DBG btc_mode=0: iovar returned %d\n",
 		 brcmf_fil_iovar_int_set(ifp, "btc_mode", 0));
+
+	/* Disable DVFS. The firmware runs a per-core dynamic voltage/frequency
+	 * FSM; under momentary TX idle it drops the D11/SAQM core from nominal
+	 * to low-voltage ("dvfs[0]: state:1->0"), and txq_hw_fill then walks the
+	 * torn-down hardware-queue state and faults (NULL deref, r3=0) within
+	 * milliseconds. Pinning DVFS off keeps the core clock from dropping out
+	 * from under an in-flight aggregate. The knob is a versioned command
+	 * struct (dvfs_cmnd_v1: ver=1, DVFS_SUBCMD_ENABLE=0, data=0); a plain
+	 * int is rejected (-52).
+	 */
+	{
+		struct {
+			__le16 ver;
+			__le16 len;
+			__le32 subcmd;
+			u8 data[1];
+		} __packed dvfs = {
+			.ver = cpu_to_le16(1),
+			.len = cpu_to_le16(sizeof(dvfs)),
+			.subcmd = cpu_to_le32(0),	/* DVFS_SUBCMD_ENABLE */
+			.data[0] = 0,			/* 0 = disable */
+		};
+
+		bphy_err(drvr, "DBG dvfs disable: iovar returned %d\n",
+			 brcmf_fil_iovar_data_set(ifp, "dvfs", &dvfs,
+						  sizeof(dvfs)));
+	}
 done:
 	return err;
 }
