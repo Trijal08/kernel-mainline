@@ -70,7 +70,6 @@ void brcmf_release_module_param(struct brcmf_mp_device *module_param);
 
 /* Sets dongle media info (drv_version, mac address). */
 int brcmf_c_preinit_dcmds(struct brcmf_if *ifp);
-void brcmf_disable_dvfs(struct brcmf_if *ifp);
 int brcmf_c_set_cur_etheraddr(struct brcmf_if *ifp, const u8 *addr);
 
 #ifdef CONFIG_DMI
