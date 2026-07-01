@@ -1077,7 +1077,7 @@ static void brcmf_pcie_bus_console_read(struct brcmf_pciedev_info *devinfo,
 				__brcmf_err(bus, __func__, "CONSOLE: %s",
 					    console->log_str);
 			else
-				pr_debug("CONSOLE: %s", console->log_str);
+				pr_info("CONSOLE: %s", console->log_str);
 			console->log_idx = 0;
 		}
 	}
