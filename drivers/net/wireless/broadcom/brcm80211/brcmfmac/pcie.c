@@ -2071,8 +2071,8 @@ static int brcmf_alloc_rtlv(struct brcmf_pciedev_info *devinfo, u32 *address, u3
 	else
 		footer.length = length | ((length ^ 0xffff) << 16);
 
-	memcpy_toio(devinfo->tcm + *address - sizeof(struct brcmf_rtlv_footer),
-		    &footer, sizeof(struct brcmf_rtlv_footer));
+	brcmf_pcie_copy_mem(devinfo, *address - sizeof(struct brcmf_rtlv_footer),
+			    &footer, sizeof(struct brcmf_rtlv_footer), true);
 
 	*address = start_addr;
 
@@ -2096,7 +2096,8 @@ brcmf_pcie_add_random_seed(struct brcmf_pciedev_info *devinfo, u32 *address)
 	brcmf_dbg(PCIE, "Download random seed\n");
 
 	get_random_bytes(randbuf, BRCMF_RANDOM_SEED_LENGTH);
-	memcpy_toio(devinfo->tcm + *address, randbuf, BRCMF_RANDOM_SEED_LENGTH);
+	brcmf_pcie_copy_mem(devinfo, *address, randbuf, BRCMF_RANDOM_SEED_LENGTH,
+			    true);
 
 	return 0;
 }
@@ -2244,9 +2245,12 @@ static int brcmf_pcie_download_fw_nvram(struct brcmf_pciedev_info *devinfo,
 	/* Clear free TCM. This isn't really necessary, but it
 	 * makes debugging memory dumps a lot easier since we
 	 * don't get a bunch of junk filling up the free space.
+	 * Skip it when the BAR1 window slides: the free region can span more
+	 * than one window and a plain memset_io would run off the mapping.
 	 */
-	memset_io(devinfo->tcm + devinfo->ci->rambase + devinfo->fw_size,
-		  0, address - devinfo->fw_size - devinfo->ci->rambase);
+	if (!devinfo->tcm_bar_switch)
+		memset_io(devinfo->tcm + devinfo->ci->rambase + devinfo->fw_size,
+			  0, address - devinfo->fw_size - devinfo->ci->rambase);
 
 	sharedram_addr_written = brcmf_pcie_read_ram32(devinfo,
 						       devinfo->ci->ramsize -
