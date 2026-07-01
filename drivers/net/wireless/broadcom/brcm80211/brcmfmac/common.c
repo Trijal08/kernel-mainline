@@ -463,9 +463,12 @@ int brcmf_c_preinit_dcmds(struct brcmf_if *ifp)
 			.subcmd = cpu_to_le32(0),	/* DVFS_SUBCMD_ENABLE */
 			.data = { 0 },			/* 0 = disable DVFS */
 		};
+		int derr;
 
 		dvfs.len = cpu_to_le16(sizeof(dvfs));
-		(void)brcmf_fil_iovar_data_set(ifp, "dvfs", &dvfs, sizeof(dvfs));
+		derr = brcmf_fil_iovar_data_set(ifp, "dvfs", &dvfs, sizeof(dvfs));
+		bphy_err(drvr, "DBG dvfs disable (ENABLE=0): iovar returned %d\n",
+			 derr);
 	}
 done:
 	return err;
