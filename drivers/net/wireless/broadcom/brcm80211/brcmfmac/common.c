@@ -83,7 +83,6 @@ struct brcmf_mp_global_t brcmf_mp_global;
 
 void brcmf_c_set_joinpref_default(struct brcmf_if *ifp)
 {
-	struct brcmf_pub *drvr = ifp->drvr;
 	struct brcmf_join_pref_params join_pref_params[2];
 	int err;
 
@@ -100,7 +99,7 @@ void brcmf_c_set_joinpref_default(struct brcmf_if *ifp)
 	err = brcmf_fil_iovar_data_set(ifp, "join_pref", join_pref_params,
 				       sizeof(join_pref_params));
 	if (err)
-		bphy_err(drvr, "Set join_pref error (%d)\n", err);
+		brcmf_dbg(INFO, "Set join_pref error (%d), ignored\n", err);
 }
 
 static int brcmf_c_download(struct brcmf_if *ifp, u16 flag,
