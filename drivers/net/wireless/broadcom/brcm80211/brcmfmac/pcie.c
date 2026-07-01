@@ -298,6 +298,8 @@ static const struct brcmf_firmware_mapping brcmf_pcie_fwnames[] = {
 #define BRCMF_SHARED_HTOD_MB_DATA_ADDR_OFFSET	40
 #define BRCMF_SHARED_DTOH_MB_DATA_ADDR_OFFSET	44
 #define BRCMF_SHARED_RING_INFO_ADDR_OFFSET	48
+#define BRCMF_SHARED_HOST_SCB_ADDR_OFFSET	64
+#define BRCMF_SHARED_HOST_SCB_SIZE_OFFSET	72
 #define BRCMF_SHARED_DMA_SCRATCH_LEN_OFFSET	52
 #define BRCMF_SHARED_DMA_SCRATCH_ADDR_OFFSET	56
 #define BRCMF_SHARED_DMA_RINGUPD_LEN_OFFSET	64
@@ -445,6 +447,9 @@ struct brcmf_pciedev_info {
 	void *idxbuf;
 	u32 idxbuf_sz;
 	dma_addr_t idxbuf_dmahandle;
+	void *host_scb_buf;
+	u32 host_scb_size;
+	dma_addr_t host_scb_dmahandle;
 	u16 (*read_ptr)(struct brcmf_pciedev_info *devinfo, u32 mem_offset);
 	void (*write_ptr)(struct brcmf_pciedev_info *devinfo, u32 mem_offset,
 			  u16 value);
@@ -1975,6 +1980,48 @@ brcmf_pcie_init_share_ram_info(struct brcmf_pciedev_info *devinfo,
 	 */
 	host_cap |= BRCMF_HOSTCAP_UR_FW_NO_TRAP;
 
+	/* Host SCB offload (HSCB): when the firmware advertises it, hand it a
+	 * block of host DMA memory to hold station control blocks. This moves
+	 * the SCB storage out of the dongle's on-chip RAM, leaving more of it
+	 * for the firmware's packet (lbuf) pool -- the pool that otherwise
+	 * drains under sustained TX and trips the txq_hw_fill assert. The
+	 * vendor driver (dhd_alloc_host_scbs) does exactly this. The buffer is
+	 * kept across a warm reset; only the address is re-published each setup.
+	 */
+	if (shared->flags2 & BRCMF_PCIE_SHARED2_HSCB) {
+		u32 scb_size;
+
+		scb_size = brcmf_pcie_read_tcm32(devinfo, sharedram_addr +
+						 BRCMF_SHARED_HOST_SCB_SIZE_OFFSET);
+		if (scb_size && devinfo->host_scb_buf &&
+		    devinfo->host_scb_size < scb_size) {
+			dma_free_coherent(&devinfo->pdev->dev,
+					  devinfo->host_scb_size,
+					  devinfo->host_scb_buf,
+					  devinfo->host_scb_dmahandle);
+			devinfo->host_scb_buf = NULL;
+		}
+		if (scb_size && !devinfo->host_scb_buf) {
+			devinfo->host_scb_buf =
+				dma_alloc_coherent(&devinfo->pdev->dev, scb_size,
+						   &devinfo->host_scb_dmahandle,
+						   GFP_KERNEL);
+			if (devinfo->host_scb_buf)
+				devinfo->host_scb_size = scb_size;
+		}
+		if (devinfo->host_scb_buf) {
+			u64 addr = (u64)devinfo->host_scb_dmahandle;
+
+			brcmf_pcie_write_tcm32(devinfo, sharedram_addr +
+				BRCMF_SHARED_HOST_SCB_ADDR_OFFSET,
+				(u32)(addr & 0xffffffff));
+			brcmf_pcie_write_tcm32(devinfo, sharedram_addr +
+				BRCMF_SHARED_HOST_SCB_ADDR_OFFSET + 4,
+				(u32)(addr >> 32));
+			host_cap |= BRCMF_HOSTCAP_HSCB;
+		}
+	}
+
 	brcmf_pcie_write_tcm32(devinfo, sharedram_addr +
 			       BRCMF_SHARED_HOST_CAP_OFFSET, host_cap);
 	brcmf_pcie_write_tcm32(devinfo, sharedram_addr +
@@ -3284,6 +3331,12 @@ brcmf_pcie_remove(struct pci_dev *pdev)
 	brcmf_pcie_release_irq(devinfo);
 	brcmf_pcie_release_scratchbuffers(devinfo);
 	brcmf_pcie_release_ringbuffers(devinfo);
+	if (devinfo->host_scb_buf) {
+		dma_free_coherent(&devinfo->pdev->dev, devinfo->host_scb_size,
+				  devinfo->host_scb_buf,
+				  devinfo->host_scb_dmahandle);
+		devinfo->host_scb_buf = NULL;
+	}
 	brcmf_pcie_reset_device(devinfo);
 	brcmf_pcie_release_resource(devinfo);
 	release_firmware(devinfo->clm_fw);
