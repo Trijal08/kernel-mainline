@@ -452,6 +452,16 @@ int brcmf_c_preinit_dcmds(struct brcmf_if *ifp)
 	 */
 	bphy_err(drvr, "DBG ampdu_ba_wsize=64: iovar returned %d\n",
 		 brcmf_fil_iovar_int_set(ifp, "ampdu_ba_wsize", 64));
+
+	/* Disable BT coexistence. The komodo NVRAM enables it (btc_mode=0x1),
+	 * but when the companion Bluetooth core has no firmware loaded the WLAN
+	 * coex CPU spins on failed IPC to it ("BTCX override IPC err") and its
+	 * TX overrides leave the MAC hardware queue half-configured, faulting
+	 * txq_hw_fill (NULL deref) under sustained TX. With no BT to coexist
+	 * with, turn coex off so it stops touching the TX path.
+	 */
+	bphy_err(drvr, "DBG btc_mode=0: iovar returned %d\n",
+		 brcmf_fil_iovar_int_set(ifp, "btc_mode", 0));
 done:
 	return err;
 }
