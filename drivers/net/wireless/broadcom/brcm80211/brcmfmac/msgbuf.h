@@ -8,15 +8,14 @@
 #ifdef CONFIG_BRCMFMAC_PROTO_MSGBUF
 
 #define BRCMF_H2D_MSGRING_CONTROL_SUBMIT_MAX_ITEM	64
-/* High-throughput parts (e.g. BCM4390) advertise a max_rxbufpost far larger
- * than the legacy 1024 and post/complete at line rate; sizing these rings to
- * match the vendor driver's htput rings (8192) keeps the dongle from backing
- * up completions into its own lbuf pool and trapping under load.
+/* The D2H completion rings must match the sizes the firmware wraps at (the
+ * BCM4390 firmware reports a fixed 1024-item TX-completion ring); oversizing
+ * them makes the host read stale ring slots past the firmware's wrap point.
  */
-#define BRCMF_H2D_MSGRING_RXPOST_SUBMIT_MAX_ITEM	8192
+#define BRCMF_H2D_MSGRING_RXPOST_SUBMIT_MAX_ITEM	2048
 #define BRCMF_D2H_MSGRING_CONTROL_COMPLETE_MAX_ITEM	64
-#define BRCMF_D2H_MSGRING_TX_COMPLETE_MAX_ITEM		8192
-#define BRCMF_D2H_MSGRING_RX_COMPLETE_MAX_ITEM		8192
+#define BRCMF_D2H_MSGRING_TX_COMPLETE_MAX_ITEM		1024
+#define BRCMF_D2H_MSGRING_RX_COMPLETE_MAX_ITEM		2048
 #define BRCMF_H2D_TXFLOWRING_MAX_ITEM			512
 
 #define BRCMF_H2D_MSGRING_CONTROL_SUBMIT_ITEMSIZE	40
