@@ -1658,10 +1658,11 @@ static void brcmf_pcie_down(struct device *dev)
 	brcmf_pcie_fwcon_timer(devinfo, false);
 }
 
-/* The BCM4390 firmware posts D2H ring completions and updates the DMA
- * write index, but does not raise a host interrupt the driver can latch
- * onto (its MSI doorbell does not reach us reliably). Poll the completion
- * rings so the message-buffer protocol still makes progress.
+/* Fallback for platforms where no usable interrupt is wired: poll the D2H
+ * completion rings so the message-buffer protocol still makes progress.
+ * Only armed when MSI is unavailable (see brcmf_pcie_preinit); with MSI the
+ * interrupt thread drains the rings and this worker must not run alongside
+ * it, or the two contexts race on the ring read pointer.
  */
 static void brcmf_pcie_poll_worker(struct work_struct *work)
 {
@@ -1711,7 +1712,12 @@ static int brcmf_pcie_preinit(struct device *dev)
 	brcmf_pcie_intr_enable(devinfo);
 	brcmf_pcie_hostready(devinfo);
 
-	if (!devinfo->poll_active) {
+	/* Only fall back to polling the completion rings when no MSI is in
+	 * use.  With MSI the interrupt thread already drains the D2H rings on
+	 * every doorbell; running the poll worker in parallel would let two
+	 * contexts advance the same ring read pointer and corrupt it.
+	 */
+	if (!devinfo->have_msi && !devinfo->poll_active) {
 		devinfo->poll_active = true;
 		INIT_DELAYED_WORK(&devinfo->poll_work, brcmf_pcie_poll_worker);
 		schedule_delayed_work(&devinfo->poll_work, 0);
