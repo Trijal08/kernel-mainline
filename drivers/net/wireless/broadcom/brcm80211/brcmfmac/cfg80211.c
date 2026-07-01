@@ -6920,12 +6920,13 @@ static s32 brcmf_dongle_roam(struct brcmf_if *ifp)
 	err = brcmf_fil_cmd_data_set(ifp, BRCMF_C_SET_ROAM_TRIGGER,
 				     (void *)roamtrigger, sizeof(roamtrigger));
 	if (err)
-		bphy_err(drvr, "WLC_SET_ROAM_TRIGGER error (%d)\n", err);
+		brcmf_dbg(INFO, "WLC_SET_ROAM_TRIGGER error (%d), ignored\n",
+			  err);
 
 	err = brcmf_fil_cmd_data_set(ifp, BRCMF_C_SET_ROAM_DELTA,
 				     (void *)roam_delta, sizeof(roam_delta));
 	if (err)
-		bphy_err(drvr, "WLC_SET_ROAM_DELTA error (%d)\n", err);
+		brcmf_dbg(INFO, "WLC_SET_ROAM_DELTA error (%d), ignored\n", err);
 
 	return 0;
 
