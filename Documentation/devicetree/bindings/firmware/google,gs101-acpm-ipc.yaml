@@ -22,7 +22,11 @@ description: |
 
 properties:
   compatible:
-    const: google,gs101-acpm-ipc
+    oneOf:
+      - const: google,gs101-acpm-ipc
+      - items:
+          - const: google,zuma-acpm-ipc
+          - const: google,gs101-acpm-ipc
 
   "#clock-cells":
     const: 1
