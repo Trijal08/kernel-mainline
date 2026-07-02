@@ -72,11 +72,13 @@ EXPORT_SYMBOL(ndlc_close);
 
 int ndlc_send(struct llt_ndlc *ndlc, struct sk_buff *skb)
 {
-	/* add ndlc header */
-	u8 pcb = PCB_TYPE_DATAFRAME | PCB_DATAFRAME_RETRANSMIT_NO |
-		PCB_FRAME_CRC_INFO_NOTPRESENT;
+	/* add ndlc header, unless the chip speaks raw NCI (ST54L) */
+	if (!ndlc->raw_nci) {
+		u8 pcb = PCB_TYPE_DATAFRAME | PCB_DATAFRAME_RETRANSMIT_NO |
+			PCB_FRAME_CRC_INFO_NOTPRESENT;
 
-	*(u8 *)skb_push(skb, 1) = pcb;
+		*(u8 *)skb_push(skb, 1) = pcb;
+	}
 	skb_queue_tail(&ndlc->send_q, skb);
 
 	schedule_work(&ndlc->sm_work);
@@ -102,6 +104,11 @@ static void llt_ndlc_send_queue(struct llt_ndlc *ndlc)
 		if (r < 0) {
 			ndlc->hard_fault = r;
 			break;
+		}
+		/* raw NCI has no supervisory ACK: nothing to track/retransmit */
+		if (ndlc->raw_nci) {
+			kfree_skb(skb);
+			continue;
 		}
 		time_sent = jiffies;
 		*(unsigned long *)skb->cb = time_sent;
@@ -154,6 +161,11 @@ static void llt_ndlc_rcv_queue(struct llt_ndlc *ndlc)
 		pr_debug("rcvQlen=%d\n", ndlc->rcv_q.qlen);
 
 	while ((skb = skb_dequeue(&ndlc->rcv_q)) != NULL) {
+		/* raw NCI: no PCB to strip, hand the bare packet to the core */
+		if (ndlc->raw_nci) {
+			nci_recv_frame(ndlc->ndev, skb);
+			continue;
+		}
 		pcb = skb->data[0];
 		skb_pull(skb, 1);
 		if ((pcb & PCB_TYPE_MASK) == PCB_TYPE_SUPERVISOR) {
@@ -251,7 +263,8 @@ static void ndlc_t2_timeout(struct timer_list *t)
 
 int ndlc_probe(void *phy_id, const struct nfc_phy_ops *phy_ops,
 	       struct device *dev, int phy_headroom, int phy_tailroom,
-	       struct llt_ndlc **ndlc_id, struct st_nci_se_status *se_status)
+	       struct llt_ndlc **ndlc_id, struct st_nci_se_status *se_status,
+	       bool raw_nci)
 {
 	struct llt_ndlc *ndlc;
 
@@ -263,6 +276,7 @@ int ndlc_probe(void *phy_id, const struct nfc_phy_ops *phy_ops,
 	ndlc->phy_id = phy_id;
 	ndlc->dev = dev;
 	ndlc->powered = 0;
+	ndlc->raw_nci = raw_nci;
 
 	*ndlc_id = ndlc;
 
