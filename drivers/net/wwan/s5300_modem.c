@@ -128,12 +128,34 @@ struct s5300_modem {
 	bool			online;
 };
 
+/*
+ * Ring the doorbell with the downstream retry shape: right after a (re)train
+ * the EP's memory decode may not be settled yet, so an all-ones read-back
+ * gets the command register repaired and the write retried (downstream
+ * s51xx_pcie_send_doorbell_int() retries at 1 ms up to 100x; keep it short
+ * here because the IPC path rings from hard-IRQ context).
+ */
 static void s5300_send_doorbell(struct s5300_modem *sm, u32 val)
 {
-	writel(val, sm->doorbell);
-	/* Read-back flushes the write; only a dead link returns all-ones. */
-	if (readl(sm->doorbell) == 0xffffffff)
-		dev_warn(sm->dev, "doorbell %#x read back all-ones\n", val);
+	int try;
+	u16 cmd;
+
+	for (try = 0; try < 10; try++) {
+		writel(val, sm->doorbell);
+		if (readl(sm->doorbell) != 0xffffffff)
+			return;
+
+		pci_read_config_word(sm->pdev, PCI_COMMAND, &cmd);
+		if (cmd != 0xffff &&
+		    (cmd & (PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER)) !=
+		    (PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER))
+			pci_write_config_word(sm->pdev, PCI_COMMAND, cmd |
+					      PCI_COMMAND_MEMORY |
+					      PCI_COMMAND_MASTER);
+		udelay(100);
+	}
+
+	dev_err(sm->dev, "doorbell %#x kept reading back all-ones\n", val);
 }
 
 /* Downstream pcie_send_ap2cp_irq(): interrupt word, then the doorbell. */
@@ -158,6 +180,13 @@ static void s5300_init_control_messages(struct s5300_modem *sm)
 
 	writel(S5300_IPC_SRINFO_OFFSET, sm->ipc + S5300_IPC_SRINFO_OFS_PTR);
 	writel(S5300_IPC_CAP_BASE, sm->ipc + S5300_IPC_CAP_OFS_PTR);
+	/*
+	 * Message words included (downstream init_ctrl_msg() in power_on_cp):
+	 * stale VALID bits from a previous boot must not be readable once the
+	 * MSI handler is live.
+	 */
+	writel(0, sm->ipc + S5300_IPC_AP2CP_MSG);
+	writel(0, sm->ipc + S5300_IPC_CP2AP_MSG);
 	writel(0, sm->ipc + S5300_IPC_AP2CP_STATUS);
 	writel(0, sm->ipc + S5300_IPC_CP2AP_STATUS);
 	for (i = 0; i < S5300_IPC_CAP_WORDS; i++)
@@ -232,13 +261,14 @@ static irqreturn_t s5300_irq_handler(int irq, void *data)
 }
 
 /*
- * Force BAR0 to the doorbell page the downstream stack uses.  The value is
- * deliberately not 1M-aligned: the mask ROM's 1M BAR0 aligns it down, putting
- * the doorbell register at BAR-internal offset 0x60000, while the CP
- * bootloader's post-bounce 4K BAR0 takes it exactly, putting the doorbell at
- * offset 0 -- the same bus address decodes in both boot phases.  Written
- * behind the PCI core's back (the core saw unassignable ROM BARs anyway);
- * the modem never runs with core-managed BARs downstream either.
+ * Force BAR0 to the doorbell page the downstream stack uses.  The write is
+ * deliberately not 1M-aligned: whatever BAR0 size the current CP boot stage
+ * exposes, the hardware aligns the value down to its own size, and the
+ * doorbell register always decodes at bus address 0x14e60000 (downstream
+ * pci_db_addr; its driver likewise programs this value into BAR0 and rings
+ * that bus address through both boot phases).  Written behind the PCI core's
+ * back (the core saw unassignable ROM BARs anyway); the modem never runs
+ * with core-managed BARs downstream either.
  */
 static int s5300_setup_doorbell(struct s5300_modem *sm)
 {
@@ -336,6 +366,11 @@ static void s5300_boot_work(struct work_struct *work)
 	dev_info(sm->dev, "starting first-stage download (%#x bytes at %pap+%#x)\n",
 		 readl(sm->msi + S5300_MSI_IMG_SIZE), &sm->ipc_phys,
 		 S5300_BOOT_IMG_OFFSET);
+	/*
+	 * The image/descriptor stores above target write-combined mappings;
+	 * the writel() barrier inside send_doorbell orders them ahead of the
+	 * doorbell trigger.
+	 */
 	s5300_send_doorbell(sm, S5300_DB_MSG);
 
 	ret = s5300_poll_boot_stage(sm);
@@ -360,6 +395,12 @@ static void s5300_boot_work(struct work_struct *work)
 		return;
 	}
 	pci_restore_state(pdev);
+	/*
+	 * Downstream does not trust restore for the forced BAR: it re-reads
+	 * and rewrites it after every link-up (s51xx_pcie_restore_state()).
+	 * Unconditionally re-force it -- idempotent when restore worked.
+	 */
+	pci_write_config_dword(pdev, PCI_BASE_ADDRESS_0, sm->db_bus_addr);
 
 	s5300_send_doorbell(sm, S5300_DB_LINK_ACK);
 
@@ -433,58 +474,72 @@ static int s5300_probe(struct platform_device *pdev)
 		return dev_err_probe(dev, -EINVAL, "missing google,pcie\n");
 	rc_pdev = of_find_device_by_node(rc_node);
 	of_node_put(rc_node);
-	if (!rc_pdev || !rc_pdev->dev.driver)
+	if (!rc_pdev)
 		return -EPROBE_DEFER;
 	sm->rc_dev = &rc_pdev->dev;
+	if (!sm->rc_dev->driver) {
+		ret = -EPROBE_DEFER;
+		goto err_rc;
+	}
 
 	ret = of_property_read_u32(dev->of_node, "samsung,doorbell-addr",
 				   &sm->db_bus_addr);
-	if (ret)
-		return dev_err_probe(dev, ret, "missing samsung,doorbell-addr\n");
+	if (ret) {
+		dev_err_probe(dev, ret, "missing samsung,doorbell-addr\n");
+		goto err_rc;
+	}
 
 	sm->cp2ap_wakeup = devm_gpiod_get(dev, "cp2ap-wakeup", GPIOD_IN);
-	if (IS_ERR(sm->cp2ap_wakeup))
-		return dev_err_probe(dev, PTR_ERR(sm->cp2ap_wakeup),
-				     "failed to get CP2AP_WAKEUP\n");
+	if (IS_ERR(sm->cp2ap_wakeup)) {
+		ret = dev_err_probe(dev, PTR_ERR(sm->cp2ap_wakeup),
+				    "failed to get CP2AP_WAKEUP\n");
+		goto err_rc;
+	}
 
 	ret = s5300_map_region(sm, "ipc", &sm->ipc_phys, &sm->ipc_size,
 			       &sm->ipc);
-	if (ret)
-		return dev_err_probe(dev, ret, "failed to map IPC carveout\n");
+	if (ret) {
+		dev_err_probe(dev, ret, "failed to map IPC carveout\n");
+		goto err_rc;
+	}
 	ret = s5300_map_region(sm, "msi", &sm->msi_phys, NULL, &sm->msi);
-	if (ret)
-		return dev_err_probe(dev, ret, "failed to map MSI carveout\n");
+	if (ret) {
+		dev_err_probe(dev, ret, "failed to map MSI carveout\n");
+		goto err_rc;
+	}
 
 	if (of_property_read_string(dev->of_node, "firmware-name", &fw_name))
 		fw_name = "tegu/cp_pbl.bin";
 	ret = request_firmware(&sm->pbl, fw_name, dev);
-	if (ret)
-		return dev_err_probe(dev, ret, "failed to load %s\n", fw_name);
+	if (ret) {
+		dev_err_probe(dev, ret, "failed to load %s\n", fw_name);
+		goto err_rc;
+	}
 	if (sm->pbl->size > sm->ipc_size - S5300_BOOT_IMG_OFFSET) {
-		release_firmware(sm->pbl);
-		return dev_err_probe(dev, -EFBIG, "PBL too large\n");
+		ret = dev_err_probe(dev, -EFBIG, "PBL too large\n");
+		goto err_fw;
 	}
 
 	sm->pdev = pci_get_device(S5300_PCI_VENDOR_ID, S5300_PCI_DEVICE_ID,
 				  NULL);
 	if (!sm->pdev) {
-		release_firmware(sm->pbl);
-		return dev_err_probe(dev, -ENODEV,
-				     "CP endpoint not enumerated\n");
+		ret = dev_err_probe(dev, -ENODEV,
+				    "CP endpoint not enumerated\n");
+		goto err_fw;
 	}
 
 	/* Before MSI allocation: the EP capability must carry the carveout. */
 	ret = zumapro_pcie_set_msi_target(sm->rc_dev, sm->msi_phys);
 	if (ret)
-		goto err_fw;
+		goto err_pci;
 
 	ret = s5300_setup_doorbell(sm);
 	if (ret)
-		goto err_fw;
+		goto err_pci;
 
 	ret = pci_enable_device(sm->pdev);
 	if (ret)
-		goto err_fw;
+		goto err_pci;
 	pci_set_master(sm->pdev);
 	/* MSE by hand: BAR0 is programmed behind the PCI core's back. */
 	pci_read_config_word(sm->pdev, PCI_COMMAND, &cmd);
@@ -513,9 +568,12 @@ err_vectors:
 	pci_free_irq_vectors(sm->pdev);
 err_disable:
 	pci_disable_device(sm->pdev);
+err_pci:
+	pci_dev_put(sm->pdev);
 err_fw:
 	release_firmware(sm->pbl);
-	pci_dev_put(sm->pdev);
+err_rc:
+	put_device(sm->rc_dev);
 	return ret;
 }
 
@@ -529,6 +587,7 @@ static void s5300_remove(struct platform_device *pdev)
 	pci_free_irq_vectors(sm->pdev);
 	pci_disable_device(sm->pdev);
 	pci_dev_put(sm->pdev);
+	put_device(sm->rc_dev);
 }
 
 static const struct of_device_id s5300_of_match[] = {
