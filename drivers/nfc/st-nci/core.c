@@ -18,7 +18,18 @@
 
 static int st_nci_init(struct nci_dev *ndev)
 {
+	struct st_nci_info *info = nci_get_drvdata(ndev);
 	struct nci_mode_set_cmd cmd;
+
+	/*
+	 * The legacy ST21NFCB expects a proprietary SET_NFC_MODE before
+	 * CORE_RESET.  The NCI-2.0 ST54L does not answer it, and because the
+	 * .init op runs before CORE_RESET in nci_open_device(), that timeout
+	 * would abort the whole init; skip it and let the standard NCI
+	 * reset/init sequence drive the chip.
+	 */
+	if (info->ndlc->raw_nci)
+		return 0;
 
 	cmd.cmd_type = ST_NCI_SET_NFC_MODE;
 	cmd.mode = 1;
@@ -84,6 +95,28 @@ static int st_nci_prop_rsp_packet(struct nci_dev *ndev,
 	return 0;
 }
 
+static int st_nci_post_setup(struct nci_dev *ndev)
+{
+	struct st_nci_info *info = nci_get_drvdata(ndev);
+	/*
+	 * ST54L: the vendor HAL pushes a proprietary CORE_SET_CONFIG
+	 * (CORE_CONF_PROP) after CORE_INIT.  Without it the reader activates
+	 * cards but the ISO-DEP data exchange gets no response.  Replicate it.
+	 */
+	static const __u8 core_conf_prop[] = {
+		0x03,			/* 3 config params */
+		0xa1, 0x01, 0x1e,
+		0xa2, 0x01, 0x19,
+		0x80, 0x01, 0x01,
+	};
+
+	if (!info->ndlc->raw_nci)
+		return 0;
+
+	return nci_core_cmd(ndev, NCI_OP_CORE_SET_CONFIG_CMD,
+			    sizeof(core_conf_prop), core_conf_prop);
+}
+
 static const struct nci_driver_ops st_nci_prop_ops[] = {
 	{
 		.opcode = nci_opcode_pack(NCI_GID_PROPRIETARY,
@@ -97,6 +130,7 @@ static const struct nci_ops st_nci_ops = {
 	.open = st_nci_open,
 	.close = st_nci_close,
 	.send = st_nci_send,
+	.post_setup = st_nci_post_setup,
 	.get_rfprotocol = st_nci_get_rfprotocol,
 	.discover_se = st_nci_discover_se,
 	.enable_se = st_nci_enable_se,
