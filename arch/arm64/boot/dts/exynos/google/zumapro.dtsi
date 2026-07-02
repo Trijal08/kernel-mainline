@@ -3713,6 +3713,8 @@
 			google,pmu-intr-gen-syscon = <&pmu_intr_gen>;
 			clocks = <&ext_26m>;
 			clock-names = "clkout0";
+			/* provides the CLKOUT0/CLKOUT1 pad gates (index 0/1) */
+			#clock-cells = <1>;
 
 			poweroff: syscon-poweroff {
 				compatible = "syscon-poweroff";
