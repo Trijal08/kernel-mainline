@@ -8,6 +8,7 @@
 
 #include <linux/module.h>
 #include <linux/i2c.h>
+#include <linux/clk.h>
 #include <linux/gpio/consumer.h>
 #include <linux/acpi.h>
 #include <linux/interrupt.h>
@@ -29,13 +30,32 @@
 #define ST_NCI_DRIVER_NAME "st_nci"
 #define ST_NCI_I2C_DRIVER_NAME "st_nci_i2c"
 
+/*
+ * The ST54L is an NCI-2.0 part that speaks raw NCI over I2C rather than the
+ * NDLC link layer the ST21NFCB family uses.  Selecting it also enables the
+ * ST54L reset and init quirks (see st_nci_i2c_enable() and st_nci_init()).
+ */
+struct st_nci_i2c_of_data {
+	bool raw_nci;
+};
+
 struct st_nci_i2c_phy {
 	struct i2c_client *i2c_dev;
 	struct llt_ndlc *ndlc;
 
 	bool irq_active;
+	bool clk_enabled;
+	bool raw_nci;
 
 	struct gpio_desc *gpiod_reset;
+
+	/*
+	 * Optional RF reference clock.  On the ST54L the controller cannot
+	 * energise its RF field without it: digital NCI works but every RF
+	 * discovery cycle fails with CORE_GENERIC_ERROR 0xe6.  How the clock
+	 * is gated is a platform detail hidden behind the clock provider.
+	 */
+	struct clk *rf_clk;
 
 	struct st_nci_se_status se_status;
 };
@@ -43,11 +63,43 @@ struct st_nci_i2c_phy {
 static int st_nci_i2c_enable(void *phy_id)
 {
 	struct st_nci_i2c_phy *phy = phy_id;
+	int r;
 
-	gpiod_set_value(phy->gpiod_reset, 0);
-	usleep_range(10000, 15000);
-	gpiod_set_value(phy->gpiod_reset, 1);
-	usleep_range(80000, 85000);
+	/*
+	 * Enable the RF reference clock, if the platform gates one.  The phy
+	 * enable/disable ops are called unbalanced (ndlc_close() enables then
+	 * disables, and a spurious IRQ while powered down disables directly),
+	 * so gate the clock on its own state to keep prepare/enable balanced,
+	 * the same way @irq_active guards the interrupt below.
+	 */
+	if (!phy->clk_enabled) {
+		r = clk_prepare_enable(phy->rf_clk);
+		if (r)
+			return r;
+		phy->clk_enabled = true;
+	}
+
+	if (phy->raw_nci) {
+		/*
+		 * The ST54L powers up in "Quick boot" mode; a single reset
+		 * pulse leaves it there and it never answers NCI.  A double
+		 * reset pulse (low 20ms / high 10ms / low 20ms / high) exits
+		 * Quick boot into full NFC mode.
+		 */
+		gpiod_set_value(phy->gpiod_reset, 0);
+		msleep(20);
+		gpiod_set_value(phy->gpiod_reset, 1);
+		usleep_range(10000, 11000);
+		gpiod_set_value(phy->gpiod_reset, 0);
+		msleep(20);
+		gpiod_set_value(phy->gpiod_reset, 1);
+		usleep_range(80000, 85000);
+	} else {
+		gpiod_set_value(phy->gpiod_reset, 0);
+		usleep_range(10000, 15000);
+		gpiod_set_value(phy->gpiod_reset, 1);
+		usleep_range(80000, 85000);
+	}
 
 	if (phy->ndlc->powered == 0 && phy->irq_active == 0) {
 		enable_irq(phy->i2c_dev->irq);
@@ -63,6 +115,11 @@ static void st_nci_i2c_disable(void *phy_id)
 
 	disable_irq_nosync(phy->i2c_dev->irq);
 	phy->irq_active = false;
+
+	if (phy->clk_enabled) {
+		clk_disable_unprepare(phy->rf_clk);
+		phy->clk_enabled = false;
+	}
 }
 
 /*
@@ -110,6 +167,56 @@ static int st_nci_i2c_read(struct st_nci_i2c_phy *phy,
 	u8 len;
 	u8 buf[ST_NCI_I2C_MAX_SIZE];
 	struct i2c_client *client = phy->i2c_dev;
+
+	if (phy->ndlc->raw_nci) {
+		int idle;
+
+		/*
+		 * Raw NCI (ST54L): 3-byte NCI header (MT/GID, OID, PLEN) with
+		 * a 1-byte payload length at offset 2, no PCB byte.  The chip
+		 * may prefix the header with 0x7e idle bytes; skip them.
+		 */
+		r = i2c_master_recv(client, buf, 3);
+		if (r < 0) {  /* Retry, chip was in standby */
+			usleep_range(1000, 4000);
+			r = i2c_master_recv(client, buf, 3);
+		}
+		if (r != 3)
+			return -EREMOTEIO;
+
+		for (idle = 0; idle < 3 && buf[idle] == 0x7e; idle++)
+			;
+		if (idle == 3)		/* all idle: no frame to deliver */
+			return -EBADMSG;
+		if (idle > 0) {
+			memmove(buf, buf + idle, 3 - idle);
+			r = i2c_master_recv(client, buf + 3 - idle, idle);
+			if (r != idle)
+				return -EREMOTEIO;
+		}
+
+		len = buf[2];
+		if (len > ST_NCI_I2C_MAX_SIZE - 3) {
+			nfc_err(&client->dev, "invalid frame len\n");
+			return -EBADMSG;
+		}
+
+		*skb = alloc_skb(3 + len, GFP_KERNEL);
+		if (*skb == NULL)
+			return -ENOMEM;
+
+		skb_put_data(*skb, buf, 3);
+		if (!len)
+			return 0;
+
+		r = i2c_master_recv(client, buf, len);
+		if (r != len) {
+			kfree_skb(*skb);
+			return -EREMOTEIO;
+		}
+		skb_put_data(*skb, buf, len);
+		return 0;
+	}
 
 	r = i2c_master_recv(client, buf, ST_NCI_I2C_MIN_SIZE);
 	if (r < 0) {  /* Retry, chip was in standby */
@@ -198,6 +305,7 @@ static const struct acpi_gpio_mapping acpi_st_nci_gpios[] = {
 static int st_nci_i2c_probe(struct i2c_client *client)
 {
 	struct device *dev = &client->dev;
+	const struct st_nci_i2c_of_data *of_data;
 	struct st_nci_i2c_phy *phy;
 	int r;
 
@@ -225,6 +333,15 @@ static int st_nci_i2c_probe(struct i2c_client *client)
 		return -ENODEV;
 	}
 
+	/* Optional RF reference clock (gated by the platform on the ST54L). */
+	phy->rf_clk = devm_clk_get_optional(dev, NULL);
+	if (IS_ERR(phy->rf_clk))
+		return dev_err_probe(dev, PTR_ERR(phy->rf_clk),
+				     "Unable to get RF clock\n");
+
+	of_data = device_get_match_data(dev);
+	phy->raw_nci = of_data && of_data->raw_nci;
+
 	phy->se_status.is_ese_present =
 				device_property_read_bool(dev, "ese-present");
 	phy->se_status.is_uicc_present =
@@ -232,7 +349,7 @@ static int st_nci_i2c_probe(struct i2c_client *client)
 
 	r = ndlc_probe(phy, &i2c_phy_ops, &client->dev,
 			ST_NCI_FRAME_HEADROOM, ST_NCI_FRAME_TAILROOM,
-			&phy->ndlc, &phy->se_status);
+			&phy->ndlc, &phy->se_status, phy->raw_nci);
 	if (r < 0) {
 		nfc_err(&client->dev, "Unable to register ndlc layer\n");
 		return r;
@@ -269,10 +386,14 @@ static const struct acpi_device_id st_nci_i2c_acpi_match[] = {
 };
 MODULE_DEVICE_TABLE(acpi, st_nci_i2c_acpi_match);
 
+static const struct st_nci_i2c_of_data st_nci_i2c_ndlc = { .raw_nci = false };
+static const struct st_nci_i2c_of_data st_nci_i2c_st54l = { .raw_nci = true };
+
 static const struct of_device_id of_st_nci_i2c_match[] = {
-	{ .compatible = "st,st21nfcb-i2c" },
-	{ .compatible = "st,st21nfcb_i2c" },
-	{ .compatible = "st,st21nfcc-i2c" },
+	{ .compatible = "st,st21nfcb-i2c", .data = &st_nci_i2c_ndlc },
+	{ .compatible = "st,st21nfcb_i2c", .data = &st_nci_i2c_ndlc },
+	{ .compatible = "st,st21nfcc-i2c", .data = &st_nci_i2c_ndlc },
+	{ .compatible = "st,st54l-i2c",    .data = &st_nci_i2c_st54l },
 	{ }
 };
 MODULE_DEVICE_TABLE(of, of_st_nci_i2c_match);
