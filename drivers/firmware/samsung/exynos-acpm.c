@@ -881,10 +881,23 @@ static const struct acpm_match_data acpm_gs101 = {
 	.acpm_clk_dev_name = "gs101-acpm-clk",
 };
 
+/*
+ * zuma shares the gs101 IPC/SRAM layout but has a different ACPM DVFS clock
+ * domain map, so it registers a distinct clocks device.
+ */
+static const struct acpm_match_data acpm_zuma = {
+	.initdata_base = ACPM_GS101_INITDATA_BASE,
+	.acpm_clk_dev_name = "zuma-acpm-clk",
+};
+
 static const struct of_device_id acpm_match[] = {
 	{
 		.compatible = "google,gs101-acpm-ipc",
 		.data = &acpm_gs101,
+	},
+	{
+		.compatible = "google,zuma-acpm-ipc",
+		.data = &acpm_zuma,
 	},
 	{},
 };

@@ -91,6 +91,39 @@ static const struct acpm_clk_driver_data acpm_clk_gs101 = {
 	.mbox_chan_id = 0,
 };
 
+/*
+ * zuma inserts DSU and BCI after the CPU clusters, so G3D/G3DL2 and everything
+ * after them sit at different domain IDs than on gs101.
+ */
+static const struct acpm_clk_variant zuma_acpm_clks[] = {
+	ACPM_CLK("mif"),
+	ACPM_CLK("int"),
+	ACPM_CLK("cpucl0"),
+	ACPM_CLK("cpucl1"),
+	ACPM_CLK("cpucl2"),
+	ACPM_CLK("dsu"),
+	ACPM_CLK("bci"),
+	ACPM_CLK("g3d"),
+	ACPM_CLK("g3dl2"),
+	ACPM_CLK("tpu"),
+	ACPM_CLK("intcam"),
+	ACPM_CLK("tnr"),
+	ACPM_CLK("cam"),
+	ACPM_CLK("mfc"),
+	ACPM_CLK("disp"),
+	ACPM_CLK("aoc"),
+	ACPM_CLK("bw"),
+	ACPM_CLK("spare"),
+	ACPM_CLK("lpm"),
+	ACPM_CLK("aur"),
+};
+
+static const struct acpm_clk_driver_data acpm_clk_zuma = {
+	.clks = zuma_acpm_clks,
+	.nr_clks = ARRAY_SIZE(zuma_acpm_clks),
+	.mbox_chan_id = 0,
+};
+
 static unsigned long acpm_clk_recalc_rate(struct clk_hw *hw,
 					  unsigned long parent_rate)
 {
@@ -204,6 +237,7 @@ static int acpm_clk_probe(struct platform_device *pdev)
 static const struct platform_device_id acpm_clk_id[] = {
 	{ .name = "exynos850-acpm-clk", (kernel_ulong_t)&acpm_clk_exynos850 },
 	{ .name = "gs101-acpm-clk", (kernel_ulong_t)&acpm_clk_gs101 },
+	{ .name = "zuma-acpm-clk", (kernel_ulong_t)&acpm_clk_zuma },
 	{ }
 };
 MODULE_DEVICE_TABLE(platform, acpm_clk_id);
