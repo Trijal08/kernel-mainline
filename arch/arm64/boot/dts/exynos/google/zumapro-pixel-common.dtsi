@@ -255,6 +255,35 @@
 		compatible = "atmel,24c08";
 		reg = <0x50>;
 	};
+
+	/*
+	 * STMicroelectronics ST21NFC controller. Every zumapro phone -- caiman,
+	 * komodo, tokay, comet and tegu -- carries the same part on this same
+	 * bus with identical wiring, so it lives in the common file rather than
+	 * per board. The bus (usi9/hsi2c_9) is already enabled below for the
+	 * eUSB2 repeater; NFC is simply another client at 0x08.
+	 *
+	 * The in-kernel st-nci driver speaks NCI over ST's NDLC framing, so no
+	 * vendor firmware path is required. IRQ_N (active-high, level-triggered
+	 * read-request) and RESET_N are routed to the always-on (ALIVE) GPIO
+	 * banks gpa7/gph1 so the controller can wake the AP out of suspend.
+	 */
+	nfc: nfc@8 {
+		compatible = "st,st54l-i2c";
+		reg = <0x08>;
+
+		interrupt-parent = <&gpa7>;
+		interrupts = <5 IRQ_TYPE_LEVEL_HIGH>;
+
+		reset-gpios = <&gph1 6 GPIO_ACTIVE_HIGH>;
+
+		/*
+		 * RF reference clock: PMU clock-output pad CLKOUT1.  The
+		 * driver enables it while the controller is active; without
+		 * it RF discovery fails though digital NCI still works.
+		 */
+		clocks = <&pmu_system_controller 1>;
+	};
 };
 
 &hsi2c_10 {
