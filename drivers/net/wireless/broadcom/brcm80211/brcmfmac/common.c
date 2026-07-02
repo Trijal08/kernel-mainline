@@ -444,14 +444,25 @@ int brcmf_c_preinit_dcmds(struct brcmf_if *ifp)
 
 	(void)brcmf_fil_iovar_int_set(ifp, "bus:llr_enable", 1);
 
-	/* Cap the TX block-ack window at 64, matching the vendor driver's PCIe
-	 * throughput tuning (dhd Kbuild CUSTOM_AMPDU_BA_WSIZE=64). Left at the
-	 * firmware default (256), the BCM4390 builds A-MPDUs whose aggregate
-	 * descriptor footprint overflows the six-chunk hardware ring and traps
-	 * txq_hw_fill under sustained TX; 64 frames keep it to ~3 chunks.
+	/* Cap the A-MPDU aggregate so its hardware descriptor footprint always
+	 * fits a single 2112-byte "alfrag" chunk.
+	 *
+	 * txq_hw_fill lays each aggregate's per-MPDU descriptors into 2112-byte
+	 * alfrag pool buffers and asserts (deliberate panic, decompiled at
+	 * 0x3e5bf0) when the placement needs more alfrag chunks than it
+	 * pre-budgeted - but only once the alfrag pool is starved
+	 * (pktpool_avail + rsvpool_avail <= 5). The estimate undercounts the
+	 * real per-MPDU descriptor size, so a large aggregate under pool
+	 * pressure overruns: we captured the panic at MPDU #34 (34 * ~64 =
+	 * 2176 > 2112). Bounding the aggregate to 16 MPDUs keeps the placement
+	 * within one chunk with margin, so it can never overrun regardless of
+	 * pool state. Set both the block-ack window and the per-A-MPDU MPDU cap
+	 * (belt and suspenders - either one bounds the AQM aggregate).
 	 */
-	bphy_err(drvr, "DBG ampdu_ba_wsize=64: iovar returned %d\n",
-		 brcmf_fil_iovar_int_set(ifp, "ampdu_ba_wsize", 64));
+	bphy_err(drvr, "DBG ampdu_ba_wsize=16: iovar returned %d\n",
+		 brcmf_fil_iovar_int_set(ifp, "ampdu_ba_wsize", 16));
+	bphy_err(drvr, "DBG ampdu_mpdu=16: iovar returned %d\n",
+		 brcmf_fil_iovar_int_set(ifp, "ampdu_mpdu", 16));
 
 	/* Disable BT coexistence. The komodo NVRAM enables it (btc_mode=0x1),
 	 * but when the companion Bluetooth core has no firmware loaded the WLAN
