@@ -273,7 +273,13 @@ static irqreturn_t s5300_irq_handler(int irq, void *data)
 static int s5300_setup_doorbell(struct s5300_modem *sm)
 {
 	struct pci_bus_region region;
-	struct resource res = {};
+	/*
+	 * pcibios_bus_to_resource() matches host-bridge windows by the
+	 * resource type of the passed-in res, so it must be pre-typed MEM --
+	 * zero flags match no window and the bus address comes back
+	 * untranslated (seen on hardware as "cpu [??? 0x14e60000...]").
+	 */
+	struct resource res = { .flags = IORESOURCE_MEM };
 	int i;
 
 	/*
@@ -538,12 +544,26 @@ static int s5300_probe(struct platform_device *pdev)
 		goto err_pci;
 
 	ret = pci_enable_device(sm->pdev);
-	if (ret)
+	if (ret) {
+		dev_err(dev, "pci_enable_device: %d\n", ret);
 		goto err_pci;
+	}
 	pci_set_master(sm->pdev);
 	/* MSE by hand: BAR0 is programmed behind the PCI core's back. */
 	pci_read_config_word(sm->pdev, PCI_COMMAND, &cmd);
 	pci_write_config_word(sm->pdev, PCI_COMMAND, cmd | PCI_COMMAND_MEMORY);
+
+	/*
+	 * The core caches the MSI capability offset at enumeration time; if
+	 * the mask ROM exposed its capability list late, re-look it up so
+	 * vector allocation does not fail on a stale zero.
+	 */
+	if (!sm->pdev->msi_cap) {
+		sm->pdev->msi_cap = pci_find_capability(sm->pdev,
+							PCI_CAP_ID_MSI);
+		dev_warn(dev, "MSI capability re-lookup: %#x\n",
+			 sm->pdev->msi_cap);
+	}
 
 	/*
 	 * Downstream allocates 4 vectors: 0 = IPC message/command, 1 = TX
@@ -551,8 +571,11 @@ static int s5300_probe(struct platform_device *pdev)
 	 * until the data path exists.
 	 */
 	ret = pci_alloc_irq_vectors(sm->pdev, 1, 4, PCI_IRQ_MSI);
-	if (ret < 0)
+	if (ret < 0) {
+		dev_err(dev, "MSI alloc: %d (power state %d, msi_cap %#x)\n",
+			ret, sm->pdev->current_state, sm->pdev->msi_cap);
 		goto err_disable;
+	}
 	dev_info(dev, "%d MSI vector(s)\n", ret);
 
 	ret = request_irq(pci_irq_vector(sm->pdev, 0), s5300_irq_handler, 0,
