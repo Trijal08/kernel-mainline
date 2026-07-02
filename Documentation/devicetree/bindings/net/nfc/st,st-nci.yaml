@@ -15,9 +15,16 @@ properties:
       - st,st21nfcb-i2c
       - st,st21nfcb-spi
       - st,st21nfcc-i2c
+      - st,st54l-i2c
 
   reset-gpios:
     description: Output GPIO pin used for resetting the controller
+
+  clocks:
+    maxItems: 1
+    description:
+      RF reference clock.  The ST54L cannot energise its RF field without it;
+      the driver enables it while the controller is active.
 
   ese-present:
     type: boolean
