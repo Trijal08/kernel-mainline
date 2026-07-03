@@ -1,0 +1,90 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/soc/samsung/google,gs101-slc.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Google gs101 System Level Cache (SLC) partition manager
+
+maintainers:
+  - Tudor Ambarus <tudor.ambarus@linaro.org>
+
+description:
+  The System Level Cache on Google Tensor (gs101 and derivatives) SoCs is a
+  shared last-level cache carved into partitions. Partitions are created and
+  enabled by the APM firmware over ACPM. A bus master (e.g. the GPU) requests a
+  partition and tags its memory traffic with the partition's PBHA so that the
+  cache treats it according to the partition's policy. This node owns the SLC
+  ACPM channel and describes the available partitions as child nodes.
+
+properties:
+  compatible:
+    const: google,gs101-slc
+
+  samsung,acpm-ipc:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: Phandle to the ACPM IPC node that reaches the APM firmware.
+
+  acpm-ipc-channel:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: ACPM IPC channel used for SLC partition commands.
+
+patternProperties:
+  "^partition-":
+    type: object
+    description: A single SLC partition.
+
+    properties:
+      label:
+        description: Partition name, matched against consumer requests.
+
+      google,slc-vptid:
+        $ref: /schemas/types.yaml#/definitions/uint32
+        description: Virtual partition id programmed into the firmware.
+
+      google,slc-size-bits:
+        description: Partition size selector (0xffffffff for the maximum).
+
+      google,slc-priority:
+        $ref: /schemas/types.yaml#/definitions/uint32
+        description: Eviction priority, 0 (highest) to 15 (lowest).
+
+      google,slc-pbha:
+        $ref: /schemas/types.yaml#/definitions/uint32
+        description:
+          Page-Based Hardware Attribute value masters tag traffic with to hit
+          this partition.
+
+      google,slc-default:
+        type: boolean
+        description:
+          Enable this partition at probe time and keep it enabled. Used for the
+          bypass partition (PBHA 0) that untagged traffic relies on.
+
+    required:
+      - google,slc-vptid
+
+    additionalProperties: false
+
+required:
+  - compatible
+  - samsung,acpm-ipc
+  - acpm-ipc-channel
+
+additionalProperties: false
+
+examples:
+  - |
+    system-cache {
+        compatible = "google,gs101-slc";
+        samsung,acpm-ipc = <&acpm_ipc>;
+        acpm-ipc-channel = <10>;
+
+        partition-gpu {
+            label = "gpu_write_alloc";
+            google,slc-vptid = <40>;
+            google,slc-size-bits = <0xffffffff>;
+            google,slc-priority = <0>;
+            google,slc-pbha = <5>;
+        };
+    };
