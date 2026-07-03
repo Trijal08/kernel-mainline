@@ -326,6 +326,25 @@ enum decon_connection {
 	DECON1_OUT0_TO_DP = 1,
 };
 
+/*
+ * Per-SoC DECON register offsets (1:1-remappable registers only); see the
+ * exynos910_reg_offsets / zuma_reg_offsets tables further down for the values
+ * and the rationale.
+ */
+struct decon_reg_offsets {
+	u32 global_control;
+	u32 shadow_reg_update_req;
+	u32 interrupt_enable;
+	u32 interrupt_pending;
+	u32 extra_interrupt_enable;
+	u32 extra_interrupt_pending;
+	u32 blender_bg_image_size_0;
+	u32 outfifo_size_control_0;
+};
+
+/* Active SoC's register offsets, set from the match data in decon_probe(). */
+static const struct decon_reg_offsets *decon_regoff;
+
 static void __iomem *regs_decon[MAX_EXYNOS910_DECON];
 static inline uint32_t decon_read(u32 idx, u32 offset)
 {
@@ -676,10 +695,10 @@ static int decon_reg_reset(u32 decon_idx)
 {
 	int tries;
 
-	decon_write_mask(decon_idx, GLOBAL_CONTROL, ~0, GLOBAL_CONTROL_SRESET);
+	decon_write_mask(decon_idx, decon_regoff->global_control, ~0, GLOBAL_CONTROL_SRESET);
 	for (tries = 2000; tries; --tries) {
 		if (~decon_read(decon_idx,
-				GLOBAL_CONTROL & GLOBAL_CONTROL_SRESET))
+				decon_regoff->global_control & GLOBAL_CONTROL_SRESET))
 			break;
 		udelay(10);
 	}
@@ -698,7 +717,7 @@ static void __decon_reg_set_enable(u32 decon_idx)
 
 	val = ~0;
 	mask = (GLOBAL_CONTROL_DECON_EN | GLOBAL_CONTROL_DECON_EN_F);
-	decon_write_mask(decon_idx, GLOBAL_CONTROL, val, mask);
+	decon_write_mask(decon_idx, decon_regoff->global_control, val, mask);
 }
 
 static void __decon_reg_set_disable(u32 decon_idx)
@@ -707,12 +726,12 @@ static void __decon_reg_set_disable(u32 decon_idx)
 
 	val = 0;
 	mask = (GLOBAL_CONTROL_DECON_EN | GLOBAL_CONTROL_DECON_EN_F);
-	decon_write_mask(decon_idx, GLOBAL_CONTROL, val, mask);
+	decon_write_mask(decon_idx, decon_regoff->global_control, val, mask);
 }
 
 static void decon_reg_set_disable_per_frame(u32 decon_idx)
 {
-	decon_write_mask(decon_idx, GLOBAL_CONTROL, 0,
+	decon_write_mask(decon_idx, decon_regoff->global_control, 0,
 			 GLOBAL_CONTROL_DECON_EN_F);
 }
 
@@ -727,7 +746,7 @@ static void decon_reg_set_operation_mode(u32 decon_idx, enum decon_op_mode mode)
 	else
 		val = GLOBAL_CONTROL_OPERATION_MODE_VIDEO_F;
 
-	decon_write_mask(decon_idx, GLOBAL_CONTROL, val, mask);
+	decon_write_mask(decon_idx, decon_regoff->global_control, val, mask);
 }
 
 static void decon_reg_set_blender_bg_image_size(u32 decon_idx, u32 width,
@@ -737,14 +756,14 @@ static void decon_reg_set_blender_bg_image_size(u32 decon_idx, u32 width,
 
 	val = BLENDER_BG_HEIGHT_F(height) | BLENDER_BG_WIDTH_F(width);
 	mask = BLENDER_BG_HEIGHT_MASK | BLENDER_BG_WIDTH_MASK;
-	decon_write_mask(decon_idx, BLENDER_BG_IMAGE_SIZE_0, val, mask);
+	decon_write_mask(decon_idx, decon_regoff->blender_bg_image_size_0, val, mask);
 }
 
 static u32 decon_reg_get_run_status(u32 decon_idx)
 {
 	u32 val;
 
-	val = decon_read(decon_idx, GLOBAL_CONTROL);
+	val = decon_read(decon_idx, decon_regoff->global_control);
 	if (val & GLOBAL_CONTROL_RUN_STATUS)
 		return 1;
 
@@ -886,7 +905,7 @@ static void decon_reg_set_outfifo_size_ctl0(u32 decon_idx, u32 width,
 	/* OUTFIFO_0 */
 	val = OUTFIFO_HEIGHT_F(height) | OUTFIFO_WIDTH_F(width);
 	mask = OUTFIFO_HEIGHT_MASK | OUTFIFO_WIDTH_MASK;
-	decon_write(decon_idx, OUTFIFO_SIZE_CONTROL_0, val);
+	decon_write(decon_idx, decon_regoff->outfifo_size_control_0, val);
 
 	/* may be implemented later by considering 1/2H transfer */
 	th = OUTFIFO_TH_1H_F; /* 1H transfer */
@@ -909,10 +928,10 @@ static void decon_reg_clear_interrupt_all(u32 decon_idx)
 	u32 mask;
 
 	mask = (DPU_FRAME_DONE_INT_EN | DPU_FRAME_START_INT_EN);
-	decon_write_mask(decon_idx, INTERRUPT_PENDING, ~0, mask);
+	decon_write_mask(decon_idx, decon_regoff->interrupt_pending, ~0, mask);
 
 	mask = (DPU_RESOURCE_CONFLICT_INT_EN | DPU_TIME_OUT_INT_EN);
-	decon_write_mask(decon_idx, EXTRA_INTERRUPT_PENDING, ~0, mask);
+	decon_write_mask(decon_idx, decon_regoff->extra_interrupt_pending, ~0, mask);
 }
 
 static void decon_reg_set_dsc_path(u32 decon_idx, enum decon_dsc_path dpath)
@@ -1073,7 +1092,7 @@ static void decon_reg_set_te(u32 decon_idx, struct decon_mode mode,
 
 static void decon_reg_set_update_req_global(u32 decon_idx)
 {
-	decon_global_write_mask(decon_idx, SHADOW_REG_UPDATE_REQ, ~0,
+	decon_global_write_mask(decon_idx, decon_regoff->shadow_reg_update_req, ~0,
 				SHADOW_REG_UPDATE_REQ_GLOBAL);
 }
 
@@ -1087,21 +1106,21 @@ static void decon_reg_set_interrupt(u32 decon_idx, u32 en)
 		val = (DPU_FRAME_DONE_INT_EN | DPU_FRAME_START_INT_EN |
 		       DPU_EXTRA_INT_EN | DPU_INT_EN);
 
-		decon_write_mask(decon_idx, INTERRUPT_ENABLE, val,
+		decon_write_mask(decon_idx, decon_regoff->interrupt_enable, val,
 				 INTERRUPT_ENABLE_MASK);
 		pr_debug("decon %u, interrupt val = %x\n", decon_idx, val);
 
 		val = (DPU_RESOURCE_CONFLICT_INT_EN | DPU_TIME_OUT_INT_EN);
-		decon_write(decon_idx, EXTRA_INTERRUPT_ENABLE, val);
+		decon_write(decon_idx, decon_regoff->extra_interrupt_enable, val);
 	} else {
 		mask = (DPU_EXTRA_INT_EN | DPU_INT_EN);
-		decon_write_mask(decon_idx, INTERRUPT_ENABLE, 0, mask);
+		decon_write_mask(decon_idx, decon_regoff->interrupt_enable, 0, mask);
 	}
 }
 
 static u32 decon_reg_clear_extra_interrupt(u32 decon_idx)
 {
-	u32 reg = EXTRA_INTERRUPT_PENDING;
+	u32 reg = decon_regoff->extra_interrupt_pending;
 	u32 val = decon_read(decon_idx, reg);
 
 	if (val & DPU_RESOURCE_CONFLICT_INT_PEND) {
@@ -1130,23 +1149,23 @@ static u32 decon_reg_clear_extra_interrupt(u32 decon_idx)
 
 static u32 decon_reg_clear_interrupt(u32 decon_idx, enum decon_irq irq)
 {
-	u32 pending_val = decon_read(decon_idx, INTERRUPT_PENDING);
+	u32 pending_val = decon_read(decon_idx, decon_regoff->interrupt_pending);
 
 	if (irq == DECON_IRQ_FS && (pending_val & DPU_FRAME_START_INT_PEND)) {
 		/* Clear Interrupt */
-		decon_write(decon_idx, INTERRUPT_PENDING,
+		decon_write(decon_idx, decon_regoff->interrupt_pending,
 			    DPU_FRAME_START_INT_PEND);
 	}
 
 	if (irq == DECON_IRQ_FD && (pending_val & DPU_FRAME_DONE_INT_PEND)) {
 		/* Clear Interrupt */
-		decon_write(decon_idx, INTERRUPT_PENDING,
+		decon_write(decon_idx, decon_regoff->interrupt_pending,
 			    DPU_FRAME_DONE_INT_PEND);
 	}
 
 	if (irq == DECON_IRQ_EXT && (pending_val & DPU_EXTRA_INT_PEND)) {
 		/* Clear Interrupt */
-		decon_write(decon_idx, INTERRUPT_PENDING, DPU_EXTRA_INT_PEND);
+		decon_write(decon_idx, decon_regoff->interrupt_pending, DPU_EXTRA_INT_PEND);
 		decon_reg_clear_extra_interrupt(decon_idx);
 	}
 
@@ -1163,7 +1182,7 @@ static u32 decon_reg_get_window_update_req(u32 decon_idx, u32 win_idx)
 
 static u32 decon_reg_get_shadow_update_req(u32 decon_idx)
 {
-	return decon_global_read(decon_idx, SHADOW_REG_UPDATE_REQ);
+	return decon_global_read(decon_idx, decon_regoff->shadow_reg_update_req);
 }
 
 static void decon_reg_set_bpc(u32 decon_idx, u32 bpc)
@@ -1172,7 +1191,7 @@ static void decon_reg_set_bpc(u32 decon_idx, u32 bpc)
 
 	val = (bpc == 10) ? GLOBAL_CONTROL_TEN_BPC_MODE_F : 0;
 
-	decon_write_mask(decon_idx, GLOBAL_CONTROL, val,
+	decon_write_mask(decon_idx, decon_regoff->global_control, val,
 			 GLOBAL_CONTROL_TEN_BPC_MODE_MASK);
 }
 
@@ -1306,20 +1325,76 @@ static int decon_reg_disable(u32 decon_idx, struct decon_config config)
 	return ret;
 }
 
+/*
+ * Per-SoC DECON register offsets.
+ *
+ * The Exynos9-class DECON IP was re-laid-out between revisions: the same
+ * functional registers live at different offsets on exynos910 (Exynos Auto v9)
+ * and on the Google Tensor "zuma" family (vendor cal_9865). Rather than a
+ * single set of #define'd offsets, the offsets that are a straight 1:1 remap
+ * are looked up per-SoC through the match data (@decon_regoff).
+ *
+ * Only 1:1-remappable registers belong here. Registers whose *programming
+ * model* differs between the revisions - SRAM allocation (single
+ * SRAM_SHARE_ENABLE on exynos910 vs. the per-priority SRAM_EN_OF_PRI[] banks
+ * on zuma), the data-path and the resource-occupancy status - are not just a
+ * different offset and must be handled with SoC-specific code via
+ * decon_dev_data.cal_ops, which is a separate follow-up.
+ */
+static const struct decon_reg_offsets exynos910_reg_offsets = {
+	.global_control		 = 0x0000,
+	/*
+	 * FIXME: regs-decon9.h defines decon_regoff->shadow_reg_update_req == 0x0000, i.e. the
+	 * same offset as decon_regoff->global_control. That is almost certainly a bug in the
+	 * WIP exynos910 series; the value is preserved verbatim here so exynos910
+	 * behaviour is byte-for-byte unchanged until the exynos910 TRM confirms
+	 * the real offset.
+	 */
+	.shadow_reg_update_req	 = 0x0000,
+	.interrupt_enable	 = 0x0040,
+	.interrupt_pending	 = 0x004c,
+	.extra_interrupt_enable	 = 0x0044,
+	.extra_interrupt_pending = 0x0050,
+	.blender_bg_image_size_0 = 0x0200,
+	.outfifo_size_control_0	 = 0x0120,
+};
+
+/* Offsets from the vendor cal_9865 DECON register map (zuma/zumapro). */
+static const struct decon_reg_offsets zuma_reg_offsets = {
+	.global_control		 = 0x0020,	/* GLOBAL_CON */
+	.shadow_reg_update_req	 = 0x0050,	/* SHD_REG_UP_REQ */
+	.interrupt_enable	 = 0x0060,	/* DECON_INT_EN */
+	.interrupt_pending	 = 0x0070,	/* DECON_INT_PEND */
+	.extra_interrupt_enable	 = 0x0064,	/* DECON_INT_EN_EXTRA */
+	.extra_interrupt_pending = 0x0074,	/* DECON_INT_PEND_EXTRA */
+	.blender_bg_image_size_0 = 0x0220,	/* BLD_BG_IMG_SIZE_PRI */
+	.outfifo_size_control_0	 = 0x0290,	/* OF_SIZE_0 */
+};
+
 struct decon_dev_data {
 	const u32 nr_decon;
 	const u32 nr_win;
 	const struct decon_cal_ops *cal_ops;
+	const struct decon_reg_offsets *reg;
 };
 
 static const struct decon_dev_data exynos910_decon = {
 	.nr_decon = 2,
 	.nr_win = 8,
+	.reg = &exynos910_reg_offsets,
+};
+
+static const struct decon_dev_data zuma_decon = {
+	.nr_decon = 3,
+	.nr_win = 8,
+	.reg = &zuma_reg_offsets,
 };
 
 static const struct of_device_id decon_driver_dt_match[] = {
 	{ .compatible = "samsung,exynos910-decon",
 	  .data = (void *)&exynos910_decon },
+	{ .compatible = "google,zuma-decon",
+	  .data = (void *)&zuma_decon },
 	{},
 };
 
@@ -1707,6 +1782,7 @@ static int decon_probe(struct platform_device *pdev)
 	int ret;
 	struct decon_context *ctx;
 	struct device *dev = &pdev->dev;
+	const struct decon_dev_data *drv_data;
 	struct resource *res;
 
 	ctx = devm_kzalloc(dev, sizeof(struct decon_context), GFP_KERNEL);
@@ -1714,6 +1790,12 @@ static int decon_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	ctx->dev = dev;
+
+	drv_data = of_device_get_match_data(dev);
+	if (!drv_data)
+		return -ENODEV;
+	decon_regoff = drv_data->reg;
+
 	ctx->aclk = devm_clk_get_enabled(dev, "aclk");
 	if (IS_ERR(ctx->aclk))
 		return dev_err_probe(dev, PTR_ERR(ctx->aclk),
