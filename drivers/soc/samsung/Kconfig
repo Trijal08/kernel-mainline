@@ -49,6 +49,17 @@ config EXYNOS_PMU_ARM_DRIVERS
 	bool "Exynos PMU ARMv7-specific driver extensions" if COMPILE_TEST
 	depends on EXYNOS_PMU
 
+config EXYNOS_SLC
+	tristate "Exynos System Level Cache (SLC) partition manager"
+	depends on ARCH_EXYNOS || COMPILE_TEST
+	depends on EXYNOS_ACPM_PROTOCOL
+	help
+	  The System Level Cache on Google Tensor (gs101 and derivatives) SoCs
+	  is partitioned and managed by the APM firmware over ACPM. This driver
+	  owns the SLC ACPM channel, describes the partitions from device tree,
+	  and lets bus masters (e.g. the GPU) enable a partition and retrieve the
+	  PBHA to tag their traffic with.
+
 config SAMSUNG_PM_CHECK
 	bool "S3C2410 PM Suspend Memory CRC"
 	depends on PM && (ARCH_S3C64XX || ARCH_S5PV210)
