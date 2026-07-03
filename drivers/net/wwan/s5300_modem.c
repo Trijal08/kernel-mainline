@@ -135,12 +135,11 @@ struct s5300_modem {
 };
 
 /*
- * Program the doorbell BAR and verify it stuck.  The mask ROM's config
- * interface drops writes (hardware-observed: BAR0 read back empty well
- * after a successful-looking write; downstream reads back right after
- * writing and runs a "BAR0 value correction" pass in its restore path).
- * The ROM-phase BAR is 1M so the hardware aligns the programmed address
- * down; any base that still decodes the doorbell bus address is fine.
+ * Program the doorbell BAR and read it back, like downstream does (it
+ * computes the doorbell offset from what actually landed, and its restore
+ * path runs a "BAR0 value correction" rewrite).  The ROM-phase BAR is 1M
+ * so the hardware aligns the programmed address down; any base that still
+ * decodes the doorbell bus address is fine.
  */
 static int s5300_program_doorbell_bar(struct s5300_modem *sm)
 {
@@ -265,9 +264,8 @@ static void s5300_send_doorbell(struct s5300_modem *sm, u32 val)
 
 /*
  * The ROM derives its boot-status DMA target from the MSI message address
- * registers, and those suffer the same dropped-write disease; downstream
- * re-drives them whenever they read back zero (print_msi_register():
- * "MSI Message Reg == 0x0 - set MSI again!!!").
+ * registers; downstream re-drives them whenever they read back zero
+ * (print_msi_register(): "MSI Message Reg == 0x0 - set MSI again!!!").
  */
 static void s5300_verify_msi_target(struct s5300_modem *sm)
 {
@@ -666,13 +664,23 @@ static int s5300_probe(struct platform_device *pdev)
 		goto err_fw;
 	}
 
-	sm->pdev = pci_get_device(S5300_PCI_VENDOR_ID, S5300_PCI_DEVICE_ID,
-				  NULL);
+	/*
+	 * The zumapro root port carries the same 144d:a5a5 ID as the modem
+	 * endpoint, and it registers first -- a bare first-match lookup
+	 * returns the root port.  Match the endpoint by port type.
+	 */
+	sm->pdev = NULL;
+	while ((sm->pdev = pci_get_device(S5300_PCI_VENDOR_ID,
+					  S5300_PCI_DEVICE_ID, sm->pdev))) {
+		if (pci_pcie_type(sm->pdev) == PCI_EXP_TYPE_ENDPOINT)
+			break;
+	}
 	if (!sm->pdev) {
 		ret = dev_err_probe(dev, -ENODEV,
 				    "CP endpoint not enumerated\n");
 		goto err_fw;
 	}
+	dev_info(dev, "CP endpoint %s\n", pci_name(sm->pdev));
 
 	/*
 	 * Downstream keeps every form of link PM off for the whole CP boot
@@ -717,14 +725,9 @@ static int s5300_probe(struct platform_device *pdev)
 	}
 
 	/*
-	 * The capability walk's back-to-back sub-dword reads miss the MSI
-	 * capability: hardware-observed, the walk finds PM (0x40) and PCIe
-	 * (0x70) but reads a wrong ID byte at 0x50, while isolated reads of
-	 * the same offsets return the healthy chain.  Downstream never sees
-	 * this because its accessors pin the link awake around every config
-	 * access and it hardcodes 0x50 anyway (print_msi_register()).  Log
-	 * the in-context reads for the trace record, then verify the cap
-	 * with a dword read and install the offset directly.
+	 * Dormant belt-and-braces: if the walk still comes up empty, probe
+	 * the DW-default offset downstream hardcodes (print_msi_register())
+	 * and install it directly, logging what the raw reads see.
 	 */
 	if (!sm->pdev->msi_cap) {
 		u16 w40, w50, w52;
