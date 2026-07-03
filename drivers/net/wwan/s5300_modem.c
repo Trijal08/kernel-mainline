@@ -46,6 +46,12 @@
 #define S5300_PCI_DEVICE_ID		0xa5a5
 
 /*
+ * MSI capability offset in the mask ROM's config space (DesignWare EP
+ * default; downstream hardcodes it, print_msi_register()).
+ */
+#define S5300_ROM_MSI_CAP		0x50
+
+/*
  * The 4K MSI carveout doubles as the boot status block (downstream
  * modem_ctrl.h struct msi_reg_type).  Offset 0 is the MSI termination
  * address; the fields above it are plain DMA targets.
@@ -534,6 +540,17 @@ static int s5300_probe(struct platform_device *pdev)
 		goto err_fw;
 	}
 
+	/*
+	 * Downstream keeps every form of link PM off for the whole CP boot
+	 * (L1SS only comes on from complete_normal_boot(), and its config
+	 * accessors pin the link at L0 for each access).  The core enabled
+	 * ASPM L1 at enumeration; take it back out before poking config
+	 * space -- the mask ROM's config emulation has been seen returning
+	 * garbled completions to rapid access bursts.
+	 */
+	pci_disable_link_state(sm->pdev, PCIE_LINK_STATE_L0S |
+			       PCIE_LINK_STATE_L1 | PCIE_LINK_STATE_CLKPM);
+
 	/* Before MSI allocation: the EP capability must carry the carveout. */
 	ret = zumapro_pcie_set_msi_target(sm->rc_dev, sm->msi_phys);
 	if (ret)
@@ -563,6 +580,31 @@ static int s5300_probe(struct platform_device *pdev)
 							PCI_CAP_ID_MSI);
 		dev_warn(dev, "MSI capability re-lookup: %#x\n",
 			 sm->pdev->msi_cap);
+	}
+
+	/*
+	 * The capability walk's back-to-back sub-dword reads miss the MSI
+	 * capability: hardware-observed, the walk finds PM (0x40) and PCIe
+	 * (0x70) but reads a wrong ID byte at 0x50, while isolated reads of
+	 * the same offsets return the healthy chain.  Downstream never sees
+	 * this because its accessors pin the link awake around every config
+	 * access and it hardcodes 0x50 anyway (print_msi_register()).  Log
+	 * the in-context reads for the trace record, then verify the cap
+	 * with a dword read and install the offset directly.
+	 */
+	if (!sm->pdev->msi_cap) {
+		u16 w40, w50, w52;
+		u32 hdr;
+
+		pci_read_config_word(sm->pdev, 0x40, &w40);
+		pci_read_config_word(sm->pdev, S5300_ROM_MSI_CAP, &w50);
+		pci_read_config_word(sm->pdev, S5300_ROM_MSI_CAP + 2, &w52);
+		pci_read_config_dword(sm->pdev, S5300_ROM_MSI_CAP, &hdr);
+		dev_warn(dev,
+			 "MSI cap probe: w@0x40 %#06x w@0x50 %#06x w@0x52 %#06x dw@0x50 %#010x\n",
+			 w40, w50, w52, hdr);
+		if ((hdr & PCI_CAP_ID_MASK) == PCI_CAP_ID_MSI)
+			sm->pdev->msi_cap = S5300_ROM_MSI_CAP;
 	}
 
 	/*
