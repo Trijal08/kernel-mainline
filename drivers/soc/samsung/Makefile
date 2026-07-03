@@ -9,6 +9,8 @@ obj-$(CONFIG_EXYNOS_USI)	+= exynos-usi.o
 obj-$(CONFIG_EXYNOS_PMU)	+= exynos_pmu.o
 exynos_pmu-y			+= exynos-pmu.o gs101-pmu.o
 
+obj-$(CONFIG_EXYNOS_SLC)	+= exynos-slc.o
+
 obj-$(CONFIG_EXYNOS_PMU_ARM_DRIVERS)	+= exynos3250-pmu.o exynos4-pmu.o \
 					exynos5250-pmu.o exynos5420-pmu.o
 obj-$(CONFIG_EXYNOS_REGULATOR_COUPLER) += exynos-regulator-coupler.o
