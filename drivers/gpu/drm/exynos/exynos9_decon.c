@@ -1327,6 +1327,154 @@ static int decon_reg_disable(u32 decon_idx, struct decon_config config)
 }
 
 /*
+ * SoC-specific low-level DECON operations.
+ *
+ * The Exynos9-class DECON IP is shared in shape across revisions - the
+ * DRM/CRTC plumbing, the plane/window model and the decon_win_config layout
+ * are identical - but the register map itself was re-laid-out between
+ * exynos910 (Exynos Auto v9) and the Google Tensor "zuma" family (vendor
+ * cal_9865): the SFR block bases differ, most register offsets differ, and a
+ * few registers (SRAM allocation, data path) have a different programming
+ * model entirely, not merely a different offset.
+ *
+ * Everything that actually touches the hardware is therefore reached through
+ * this vtable, selected from the match data in decon_probe(). The generic core
+ * further down (mode_valid, atomic_begin/flush, update/disable_plane, irq
+ * dispatch, enable/disable) is SoC-independent and calls only through
+ * ctx->cal_ops, never the decon_reg_*() helpers directly.
+ */
+struct decon_cal_ops {
+	/* map the SFR blocks for this SoC's register topology */
+	int (*init)(struct decon_context *ctx, struct platform_device *pdev);
+	int (*enable)(struct decon_context *ctx);
+	int (*disable)(struct decon_context *ctx);
+	void (*set_te)(struct decon_context *ctx, enum decon_set_trig trig);
+	void (*enable_window)(struct decon_context *ctx, u32 win_idx,
+			      struct decon_win_config *config);
+	void (*disable_window)(struct decon_context *ctx, u32 win_idx);
+	void (*win_update_req)(struct decon_context *ctx, u32 win_idx);
+	u32 (*win_status)(struct decon_context *ctx, u32 win_idx);
+	u32 (*win_update_req_get)(struct decon_context *ctx, u32 win_idx);
+	void (*update_req_global)(struct decon_context *ctx);
+	u32 (*clear_interrupt)(struct decon_context *ctx, enum decon_irq irq);
+	u32 (*shadow_update_req_get)(struct decon_context *ctx);
+};
+
+/*
+ * exynos910 (Exynos Auto v9) cal_ops.
+ *
+ * These are thin wrappers over the decon_reg_*() helpers above, which encode
+ * the exynos910 register layout via @decon_regoff and the regs-decon9.h
+ * offsets. Kept as-is so exynos910 behaviour is byte-for-byte unchanged by the
+ * cal_ops indirection.
+ */
+static int exynos910_decon_init(struct decon_context *ctx,
+				struct platform_device *pdev)
+{
+	struct device *dev = ctx->dev;
+	struct resource *res;
+
+	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "main");
+	ctx->regs[0] = devm_ioremap_resource(dev, res);
+	if (IS_ERR(ctx->regs[0]))
+		return PTR_ERR(ctx->regs[0]);
+	regs_win[0] = ctx->regs[0];
+	regs_decon[0] = ctx->regs[0] + 0x8000;
+	regs_decon_con[0] = ctx->regs[0] + 0xc000;
+
+	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "sub0");
+	ctx->regs[1] = devm_ioremap_resource(dev, res);
+	if (IS_ERR(ctx->regs[1]))
+		return PTR_ERR(ctx->regs[1]);
+	regs_decon_global[0] = ctx->regs[1] + 0xa000;
+
+	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "sub1");
+	ctx->regs[2] = devm_ioremap_resource(dev, res);
+	if (IS_ERR(ctx->regs[2]))
+		return PTR_ERR(ctx->regs[2]);
+	regs_winctrl[0] = ctx->regs[2];
+
+	return 0;
+}
+
+static int exynos910_decon_enable(struct decon_context *ctx)
+{
+	return decon_reg_enable(ctx->idx, ctx->config);
+}
+
+static int exynos910_decon_disable(struct decon_context *ctx)
+{
+	return decon_reg_disable(ctx->idx, ctx->config);
+}
+
+static void exynos910_decon_set_te(struct decon_context *ctx,
+				   enum decon_set_trig trig)
+{
+	decon_reg_set_te(ctx->idx, ctx->config.mode, trig);
+}
+
+static void exynos910_decon_enable_window(struct decon_context *ctx,
+					  u32 win_idx,
+					  struct decon_win_config *config)
+{
+	decon_reg_enable_window(ctx->idx, win_idx, config);
+}
+
+static void exynos910_decon_disable_window(struct decon_context *ctx,
+					   u32 win_idx)
+{
+	decon_reg_disable_window(ctx->idx, win_idx);
+}
+
+static void exynos910_decon_win_update_req(struct decon_context *ctx,
+					   u32 win_idx)
+{
+	decon_reg_set_window_update_req(ctx->idx, win_idx);
+}
+
+static u32 exynos910_decon_win_status(struct decon_context *ctx, u32 win_idx)
+{
+	return decon_reg_get_window_status(ctx->idx, win_idx);
+}
+
+static u32 exynos910_decon_win_update_req_get(struct decon_context *ctx,
+					      u32 win_idx)
+{
+	return decon_reg_get_window_update_req(ctx->idx, win_idx);
+}
+
+static void exynos910_decon_update_req_global(struct decon_context *ctx)
+{
+	decon_reg_set_update_req_global(ctx->idx);
+}
+
+static u32 exynos910_decon_clear_interrupt(struct decon_context *ctx,
+					   enum decon_irq irq)
+{
+	return decon_reg_clear_interrupt(ctx->idx, irq);
+}
+
+static u32 exynos910_decon_shadow_update_req_get(struct decon_context *ctx)
+{
+	return decon_reg_get_shadow_update_req(ctx->idx);
+}
+
+static const struct decon_cal_ops exynos910_decon_cal_ops = {
+	.init			= exynos910_decon_init,
+	.enable			= exynos910_decon_enable,
+	.disable		= exynos910_decon_disable,
+	.set_te			= exynos910_decon_set_te,
+	.enable_window		= exynos910_decon_enable_window,
+	.disable_window		= exynos910_decon_disable_window,
+	.win_update_req		= exynos910_decon_win_update_req,
+	.win_status		= exynos910_decon_win_status,
+	.win_update_req_get	= exynos910_decon_win_update_req_get,
+	.update_req_global	= exynos910_decon_update_req_global,
+	.clear_interrupt	= exynos910_decon_clear_interrupt,
+	.shadow_update_req_get	= exynos910_decon_shadow_update_req_get,
+};
+
+/*
  * Per-SoC DECON register offsets.
  *
  * The Exynos9-class DECON IP was re-laid-out between revisions: the same
@@ -1383,6 +1531,7 @@ static const struct decon_dev_data exynos910_decon = {
 	.nr_decon = 2,
 	.nr_win = 8,
 	.reg = &exynos910_reg_offsets,
+	.cal_ops = &exynos910_decon_cal_ops,
 };
 
 static const struct decon_dev_data zuma_decon = {
@@ -1445,7 +1594,7 @@ static void decon_atomic_begin(struct exynos_drm_crtc *crtc)
 {
 	struct decon_context *ctx = crtc->ctx;
 
-	decon_reg_set_te(ctx->idx, ctx->config.mode, DECON_TRIG_MASK);
+	ctx->cal_ops->set_te(ctx, DECON_TRIG_MASK);
 }
 
 static enum decon_blend_mode to_decon_blend_mode(u16 drm_blend_mode)
@@ -1492,7 +1641,7 @@ static void decon_update_plane(struct exynos_drm_crtc *crtc,
 	dpp_update(window->dpp, 0, state);
 	dpu_dma_update(dma_ctx, 0, state);
 
-	decon_reg_enable_window(ctx->idx, window->idx, config);
+	ctx->cal_ops->enable_window(ctx, window->idx, config);
 
 	drm_dbg(ctx->drm_dev, "WINDOW-%d(%s)(%4d, %4d, %4d, %4d)", window->idx,
 		dev_name(window->dpp->dev), rect->x, rect->y, rect->w, rect->h);
@@ -1506,7 +1655,7 @@ static void decon_disable_plane(struct exynos_drm_crtc *crtc,
 
 	ctx->plane_mask |= drm_plane_mask(&plane->base);
 
-	decon_reg_disable_window(ctx->idx, window->idx);
+	ctx->cal_ops->disable_window(ctx, window->idx);
 
 	ctx->disable_mask |= (1 << window->idx);
 
@@ -1527,7 +1676,7 @@ static void decon_atomic_flush(struct exynos_drm_crtc *crtc)
 		struct decon_win *window = plane_to_decon_win(plane);
 
 		/* window update first to guarantee dma stop during dpp_disable */
-		decon_reg_set_window_update_req(ctx->idx, window->idx);
+		ctx->cal_ops->win_update_req(ctx, window->idx);
 
 		// if (ctx->disable_mask & (1 << window->idx))
 		// 	dpp_disable(window->dpp);
@@ -1535,21 +1684,20 @@ static void decon_atomic_flush(struct exynos_drm_crtc *crtc)
 		/* If at least one window is running, there is no need to set
 		 * global update
 		 */
-		if (req_global &&
-		    decon_reg_get_window_status(ctx->idx, window->idx))
+		if (req_global && ctx->cal_ops->win_status(ctx, window->idx))
 			req_global = false;
 	}
 	ctx->disable_mask = 0;
 
 	if (drm_atomic_crtc_needs_modeset(state) || req_global)
-		decon_reg_set_update_req_global(ctx->idx);
+		ctx->cal_ops->update_req_global(ctx);
 
 	/* In case of fake vblank, it make vblank after 1 vsync time(16ms) */
 	// if (ctx->fake_vblank)
 	// 	drm_crtc_handle_vblank(&crtc->base);
 	// schedule_delayed_work(&ctx->dwork, msecs_to_jiffies(16));
 
-	decon_reg_set_te(ctx->idx, ctx->config.mode, DECON_TRIG_UNMASK);
+	ctx->cal_ops->set_te(ctx, DECON_TRIG_UNMASK);
 	exynos_crtc_handle_event(crtc);
 
 	drm_dbg(ctx->drm_dev, "flushed\n");
@@ -1609,7 +1757,7 @@ static void decon_enable(struct exynos_drm_crtc *crtc)
 
 	decon_set_mode(crtc);
 
-	decon_reg_enable(ctx->idx, ctx->config);
+	ctx->cal_ops->enable(ctx);
 
 	enable_irq(ctx->irq_fd);
 
@@ -1641,12 +1789,10 @@ static const struct exynos_drm_crtc_ops decon_crtc_ops = {
 static void decon_reset(struct decon_context *ctx, int rpm_req)
 {
 	int ret;
-	struct decon_config config = { 0 };
 
-	ret = decon_reg_disable(ctx->idx, config);
-	if (ret) {
+	ret = ctx->cal_ops->disable(ctx);
+	if (ret)
 		drm_err(ctx->drm_dev, "failed to try job_abort\n");
-	}
 }
 
 static enum drm_plane_type decon_get_win_type(int win_idx, int last_idx)
@@ -1754,7 +1900,7 @@ static bool decon_get_window_update_req(struct exynos_drm_crtc *crtc)
 	drm_for_each_plane_mask(plane, ctx->drm_dev, ctx->plane_mask) {
 		u32 win_idx = plane_to_decon_win(plane)->idx;
 
-		if (decon_reg_get_window_update_req(ctx->idx, win_idx))
+		if (ctx->cal_ops->win_update_req_get(ctx, win_idx))
 			return true;
 	}
 
@@ -1765,10 +1911,10 @@ static irqreturn_t decon_irq_handler(int irq, void *dev_id)
 {
 	struct decon_context *ctx = dev_id;
 
-	// decon_reg_clear_interrupt(ctx->idx, DECON_IRQ_FS);
-	decon_reg_clear_interrupt(ctx->idx, DECON_IRQ_FD);
+	// ctx->cal_ops->clear_interrupt(ctx, DECON_IRQ_FS);
+	ctx->cal_ops->clear_interrupt(ctx, DECON_IRQ_FD);
 
-	decon_reg_get_shadow_update_req(ctx->idx);
+	ctx->cal_ops->shadow_update_req_get(ctx);
 
 	if (ctx->config.mode.op_mode == DECON_VIDEO_MODE ||
 	    !decon_get_window_update_req(ctx->crtc)) {
@@ -1784,7 +1930,6 @@ static int decon_probe(struct platform_device *pdev)
 	struct decon_context *ctx;
 	struct device *dev = &pdev->dev;
 	const struct decon_dev_data *drv_data;
-	struct resource *res;
 
 	ctx = devm_kzalloc(dev, sizeof(struct decon_context), GFP_KERNEL);
 	if (!ctx)
@@ -1796,6 +1941,9 @@ static int decon_probe(struct platform_device *pdev)
 	if (!drv_data)
 		return -ENODEV;
 	decon_regoff = drv_data->reg;
+	ctx->cal_ops = drv_data->cal_ops;
+	if (!ctx->cal_ops)
+		return -ENODEV;
 
 	ctx->aclk = devm_clk_get_enabled(dev, "aclk");
 	if (IS_ERR(ctx->aclk))
@@ -1820,20 +1968,9 @@ static int decon_probe(struct platform_device *pdev)
 	if (!ctx->win)
 		return -ENOMEM;
 
-	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "main");
-	ctx->regs[0] = devm_ioremap_resource(dev, res);
-	regs_win[0] = ctx->regs[0];
-
-	regs_decon[0] = ctx->regs[0] + 0x8000;
-	regs_decon_con[0] = ctx->regs[0] + 0xc000;
-
-	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "sub0");
-	ctx->regs[1] = devm_ioremap_resource(dev, res);
-	regs_decon_global[0] = ctx->regs[1] + 0xa000;
-
-	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "sub1");
-	ctx->regs[2] = devm_ioremap_resource(dev, res);
-	regs_winctrl[0] = ctx->regs[2];
+	ret = ctx->cal_ops->init(ctx, pdev);
+	if (ret)
+		return ret;
 
 	platform_set_drvdata(pdev, ctx);
 
