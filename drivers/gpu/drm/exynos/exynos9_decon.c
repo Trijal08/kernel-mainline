@@ -695,10 +695,11 @@ static int decon_reg_reset(u32 decon_idx)
 {
 	int tries;
 
-	decon_write_mask(decon_idx, decon_regoff->global_control, ~0, GLOBAL_CONTROL_SRESET);
+	decon_write_mask(decon_idx, decon_regoff->global_control, ~0,
+			 GLOBAL_CONTROL_SRESET);
 	for (tries = 2000; tries; --tries) {
-		if (~decon_read(decon_idx,
-				decon_regoff->global_control & GLOBAL_CONTROL_SRESET))
+		if (~decon_read(decon_idx, decon_regoff->global_control) &
+		    GLOBAL_CONTROL_SRESET)
 			break;
 		udelay(10);
 	}
