@@ -182,6 +182,10 @@ static inline bool iopte_table(arm_lpae_iopte pte, int lvl)
 	return iopte_type(pte) == ARM_LPAE_PTE_TYPE_TABLE;
 }
 
+/* Architectural page-based hardware attribute (PBHA) field, descriptor bits [62:59]. */
+#define ARM_LPAE_PTE_PBHA_SHIFT		59
+#define ARM_LPAE_PTE_PBHA_MASK		GENMASK_ULL(62, 59)
+
 static arm_lpae_iopte paddr_to_iopte(phys_addr_t paddr,
 				     struct arm_lpae_io_pgtable *data)
 {
@@ -381,6 +385,15 @@ static void __arm_lpae_init_pte(struct arm_lpae_io_pgtable *data,
 		pte |= ARM_LPAE_PTE_TYPE_PAGE;
 	else
 		pte |= ARM_LPAE_PTE_TYPE_BLOCK;
+
+	/*
+	 * Tag data pages with the page-based hardware attribute (PBHA), which a
+	 * downstream cache (e.g. a system-level cache) uses to pick a partition.
+	 * Only leaf (data) entries take the PBHA; table descriptors are left at
+	 * PBHA 0 so pagetable walks use the default (bypass) partition.
+	 */
+	if (cfg->pbha)
+		pte |= (arm_lpae_iopte)cfg->pbha << ARM_LPAE_PTE_PBHA_SHIFT;
 
 	for (i = 0; i < num_entries; i++)
 		ptep[i] = pte | paddr_to_iopte(paddr + i * sz, data);
