@@ -51,10 +51,16 @@ struct acpm_tmu_ops {
 	int (*resume)(struct acpm_handle *handle, unsigned int acpm_chan_id);
 };
 
+struct acpm_slc_ops {
+	int (*request)(struct acpm_handle *handle, unsigned int acpm_chan_id,
+		       u32 command, u32 arg, u32 arg1, u32 reply[8]);
+};
+
 struct acpm_ops {
 	struct acpm_dvfs_ops dvfs;
 	struct acpm_pmic_ops pmic;
 	struct acpm_tmu_ops tmu;
+	struct acpm_slc_ops slc;
 };
 
 /**
@@ -70,5 +76,7 @@ struct device;
 struct acpm_handle *devm_acpm_get_by_node(struct device *dev,
 					  struct device_node *np);
 struct acpm_handle *devm_acpm_get_by_phandle(struct device *dev);
+
+int acpm_get_chan_by_id(struct acpm_handle *handle, unsigned int fw_chan_id);
 
 #endif /* __EXYNOS_ACPM_PROTOCOL_H */
