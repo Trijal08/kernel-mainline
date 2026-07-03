@@ -170,6 +170,68 @@ static int s5300_program_doorbell_bar(struct s5300_modem *sm)
 }
 
 /*
+ * Memory TLPs are address-routed: the root port only forwards them
+ * downstream inside its type-1 memory window, and because the doorbell BAR
+ * is programmed behind the PCI core's back (no child resource was ever
+ * assigned) the core leaves that window closed -- every doorbell access
+ * dies at the root port with the EP config-reachable but memory-dead.
+ * Downstream opens it implicitly by routing its 4K BAR through
+ * pci_assign_resource(); open it explicitly over the doorbell's 1M-aligned
+ * range instead.  The root port is the RC's own DBI, not the flaky ROM, so
+ * a single verified write suffices.
+ */
+static int s5300_open_bridge_window(struct s5300_modem *sm)
+{
+	struct pci_dev *bridge = pci_upstream_bridge(sm->pdev);
+	u32 base = sm->db_bus_addr & ~(SZ_1M - 1);
+	u32 limit = base + SZ_1M - 1;
+	u32 want = (((limit >> 16) & 0xfff0) << 16) | ((base >> 16) & 0xfff0);
+	u32 val;
+	u16 cmd;
+
+	if (!bridge)
+		return -ENODEV;
+
+	pci_read_config_dword(bridge, PCI_MEMORY_BASE, &val);
+	if (val != want) {
+		dev_info(sm->dev,
+			 "opening root-port memory window %#x-%#x (was %#010x)\n",
+			 base, limit, val);
+		pci_write_config_dword(bridge, PCI_MEMORY_BASE, want);
+		pci_read_config_dword(bridge, PCI_MEMORY_BASE, &val);
+		if (val != want) {
+			dev_err(sm->dev,
+				"root-port window won't hold (%#010x)\n", val);
+			return -EIO;
+		}
+	}
+
+	/*
+	 * The core re-assigns the root port's own (dummy, dw_pcie_setup_rc
+	 * zeroes it) BAR0 into the bottom of the translation window at
+	 * enumeration; TLPs matching an RP BAR are consumed by the port,
+	 * not forwarded, so evict it from the doorbell range.
+	 */
+	pci_read_config_dword(bridge, PCI_BASE_ADDRESS_0, &val);
+	if ((val & PCI_BASE_ADDRESS_MEM_MASK) >= base &&
+	    (val & PCI_BASE_ADDRESS_MEM_MASK) <= limit) {
+		dev_info(sm->dev,
+			 "evicting root-port BAR0 (%#010x) from the doorbell window\n",
+			 val);
+		pci_write_config_dword(bridge, PCI_BASE_ADDRESS_0, 0);
+		pci_write_config_dword(bridge, PCI_BASE_ADDRESS_1, 0);
+	}
+
+	pci_read_config_word(bridge, PCI_COMMAND, &cmd);
+	if ((cmd & (PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER)) !=
+	    (PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER))
+		pci_write_config_word(bridge, PCI_COMMAND, cmd |
+				      PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER);
+
+	return 0;
+}
+
+/*
  * Ring the doorbell with the downstream retry shape: right after a (re)train
  * the EP's memory decode may not be settled yet, so an all-ones read-back
  * gets the command register and doorbell BAR repaired and the write retried
@@ -194,6 +256,7 @@ static void s5300_send_doorbell(struct s5300_modem *sm, u32 val)
 					      PCI_COMMAND_MEMORY |
 					      PCI_COMMAND_MASTER);
 		s5300_program_doorbell_bar(sm);
+		s5300_open_bridge_window(sm);
 		udelay(100);
 	}
 
@@ -364,6 +427,10 @@ static int s5300_setup_doorbell(struct s5300_modem *sm)
 	if (ret)
 		return ret;
 
+	ret = s5300_open_bridge_window(sm);
+	if (ret)
+		return ret;
+
 	region.start = sm->db_bus_addr;
 	region.end = sm->db_bus_addr + SZ_4K - 1;
 	pcibios_bus_to_resource(sm->pdev->bus, &res, &region);
@@ -475,9 +542,10 @@ static void s5300_boot_work(struct work_struct *work)
 	/*
 	 * Downstream does not trust restore for the forced BAR: it re-reads
 	 * and rewrites it after every link-up (s51xx_pcie_restore_state()).
-	 * Re-verify both the BAR and the MSI target on the fresh link.
+	 * Re-verify the BAR, bridge window and MSI target on the fresh link.
 	 */
 	s5300_program_doorbell_bar(sm);
+	s5300_open_bridge_window(sm);
 	s5300_verify_msi_target(sm);
 
 	s5300_send_doorbell(sm, S5300_DB_LINK_ACK);
