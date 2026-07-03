@@ -112,6 +112,17 @@ struct io_pgtable_cfg {
 	struct device			*iommu_dev;
 
 	/**
+	 * @pbha: Page-Based Hardware Attributes (ARM LPAE only).
+	 *
+	 * Some SoCs (e.g. Google Tensor) use the architectural PBHA field in
+	 * descriptor bits [62:59] as a sideband to steer traffic into a
+	 * system-level cache partition. When non-zero, this 4-bit value is OR'd
+	 * into those bits of leaf (data) descriptors; table descriptors are left
+	 * at PBHA 0 so pagetable walks use the default partition.
+	 */
+	u8				pbha;
+
+	/**
 	 * @alloc: Custom page allocator.
 	 *
 	 * Optional hook used to allocate page tables. If this function is NULL,
