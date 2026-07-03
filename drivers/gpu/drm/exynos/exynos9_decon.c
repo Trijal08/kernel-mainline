@@ -19,6 +19,7 @@
 #include <drm/drm_fourcc.h>
 #include <drm/drm_atomic.h>
 #include <drm/drm_framebuffer.h>
+#include <drm/drm_print.h>
 #include <video/videomode.h>
 
 #include "exynos_drm_fb.h"
