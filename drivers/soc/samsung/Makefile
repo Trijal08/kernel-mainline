@@ -10,6 +10,7 @@ obj-$(CONFIG_EXYNOS_PMU)	+= exynos_pmu.o
 exynos_pmu-y			+= exynos-pmu.o gs101-pmu.o
 
 obj-$(CONFIG_EXYNOS_SLC)	+= exynos-slc.o
+obj-$(CONFIG_EXYNOS_S2MPU)	+= exynos-s2mpu.o
 
 obj-$(CONFIG_EXYNOS_PMU_ARM_DRIVERS)	+= exynos3250-pmu.o exynos4-pmu.o \
 					exynos5250-pmu.o exynos5420-pmu.o
