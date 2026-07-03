@@ -60,6 +60,16 @@ config EXYNOS_SLC
 	  and lets bus masters (e.g. the GPU) enable a partition and retrieve the
 	  PBHA to tag their traffic with.
 
+config EXYNOS_S2MPU
+	tristate "Exynos Stage-2 Memory Protection Unit (S2MPU) driver"
+	depends on ARCH_EXYNOS || ((ARM || ARM64) && COMPILE_TEST)
+	help
+	  The S2MPU is a bus-master firewall in front of a device's DMA path
+	  on Exynos/Google (gs101 and derivatives) SoCs. Out of reset it blocks
+	  the master until its protection table is programmed. This driver puts
+	  the unit into passthrough so the master (e.g. the GPU) can reach
+	  memory, which is required to bring such masters up on these SoCs.
+
 config SAMSUNG_PM_CHECK
 	bool "S3C2410 PM Suspend Memory CRC"
 	depends on PM && (ARCH_S3C64XX || ARCH_S5PV210)
