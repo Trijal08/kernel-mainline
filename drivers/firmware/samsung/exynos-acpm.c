@@ -32,6 +32,7 @@
 #include "exynos-acpm.h"
 #include "exynos-acpm-dvfs.h"
 #include "exynos-acpm-pmic.h"
+#include "exynos-acpm-slc.h"
 #include "exynos-acpm-tmu.h"
 
 #define ACPM_PROTOCOL_SEQNUM		GENMASK(21, 16)
@@ -515,6 +516,32 @@ int acpm_do_xfer(struct acpm_handle *handle, const struct acpm_xfer *xfer)
 }
 
 /**
+ * acpm_get_chan_by_id() - map a firmware channel id to its array index.
+ * @handle:	pointer to the acpm handle.
+ * @fw_chan_id:	channel identifier as advertised by the firmware (and referenced
+ *		from device tree via "acpm-ipc-channel").
+ *
+ * The transfer helpers address channels by their position in the channel array,
+ * which is not guaranteed to match the firmware's channel id. Consumers that
+ * know a channel by its firmware id (e.g. from device tree) use this to obtain
+ * the index to pass to the protocol ops.
+ *
+ * Return: the channel array index on success, -ENOENT if no channel matches.
+ */
+int acpm_get_chan_by_id(struct acpm_handle *handle, unsigned int fw_chan_id)
+{
+	struct acpm_info *acpm = handle_to_acpm_info(handle);
+	u32 i;
+
+	for (i = 0; i < acpm->num_chans; i++)
+		if (acpm->chans[i].id == fw_chan_id)
+			return i;
+
+	return -ENOENT;
+}
+EXPORT_SYMBOL_GPL(acpm_get_chan_by_id);
+
+/**
  * acpm_set_xfer() - initialize an ACPM IPC transfer structure.
  * @xfer:	pointer to the ACPM transfer structure that is being initialized.
  * @cmd:	pointer to the buffer containing the command to be transmitted
@@ -695,6 +722,10 @@ static const struct acpm_ops exynos_acpm_driver_ops = {
 		.clear_tz_irq = acpm_tmu_clear_tz_irq,
 		.suspend = acpm_tmu_suspend,
 		.resume = acpm_tmu_resume,
+	},
+
+	.slc = {
+		.request = acpm_slc_request,
 	},
 };
 
