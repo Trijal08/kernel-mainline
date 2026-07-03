@@ -135,11 +135,46 @@ struct s5300_modem {
 };
 
 /*
+ * Program the doorbell BAR and verify it stuck.  The mask ROM's config
+ * interface drops writes (hardware-observed: BAR0 read back empty well
+ * after a successful-looking write; downstream reads back right after
+ * writing and runs a "BAR0 value correction" pass in its restore path).
+ * The ROM-phase BAR is 1M so the hardware aligns the programmed address
+ * down; any base that still decodes the doorbell bus address is fine.
+ */
+static int s5300_program_doorbell_bar(struct s5300_modem *sm)
+{
+	u32 val = 0, base;
+	int try;
+
+	for (try = 0; try < 10; try++) {
+		pci_write_config_dword(sm->pdev, PCI_BASE_ADDRESS_0,
+				       sm->db_bus_addr);
+		pci_write_config_dword(sm->pdev, PCI_BASE_ADDRESS_1, 0);
+		pci_read_config_dword(sm->pdev, PCI_BASE_ADDRESS_0, &val);
+		base = val & PCI_BASE_ADDRESS_MEM_MASK;
+		if (base && base <= sm->db_bus_addr &&
+		    sm->db_bus_addr - base < SZ_1M) {
+			if (try)
+				dev_warn(sm->dev,
+					 "doorbell BAR stuck after %d retries (%#x)\n",
+					 try, val);
+			return 0;
+		}
+		udelay(100);
+	}
+
+	dev_err(sm->dev, "doorbell BAR won't hold %#x (reads %#x)\n",
+		sm->db_bus_addr, val);
+	return -EIO;
+}
+
+/*
  * Ring the doorbell with the downstream retry shape: right after a (re)train
  * the EP's memory decode may not be settled yet, so an all-ones read-back
- * gets the command register repaired and the write retried (downstream
- * s51xx_pcie_send_doorbell_int() retries at 1 ms up to 100x; keep it short
- * here because the IPC path rings from hard-IRQ context).
+ * gets the command register and doorbell BAR repaired and the write retried
+ * (downstream s51xx_pcie_send_doorbell_int() retries at 1 ms up to 100x;
+ * keep it short here because the IPC path rings from hard-IRQ context).
  */
 static void s5300_send_doorbell(struct s5300_modem *sm, u32 val)
 {
@@ -158,10 +193,35 @@ static void s5300_send_doorbell(struct s5300_modem *sm, u32 val)
 			pci_write_config_word(sm->pdev, PCI_COMMAND, cmd |
 					      PCI_COMMAND_MEMORY |
 					      PCI_COMMAND_MASTER);
+		s5300_program_doorbell_bar(sm);
 		udelay(100);
 	}
 
 	dev_err(sm->dev, "doorbell %#x kept reading back all-ones\n", val);
+}
+
+/*
+ * The ROM derives its boot-status DMA target from the MSI message address
+ * registers, and those suffer the same dropped-write disease; downstream
+ * re-drives them whenever they read back zero (print_msi_register():
+ * "MSI Message Reg == 0x0 - set MSI again!!!").
+ */
+static void s5300_verify_msi_target(struct s5300_modem *sm)
+{
+	u32 lo = 0;
+	int try;
+
+	for (try = 0; try < 5; try++) {
+		pci_read_config_dword(sm->pdev,
+				      sm->pdev->msi_cap + PCI_MSI_ADDRESS_LO,
+				      &lo);
+		if (lo == lower_32_bits(sm->msi_phys))
+			return;
+		dev_warn(sm->dev, "MSI address reads %#x, re-driving\n", lo);
+		pci_restore_msi_state(sm->pdev);
+	}
+
+	dev_err(sm->dev, "MSI address won't hold %pap\n", &sm->msi_phys);
 }
 
 /* Downstream pcie_send_ap2cp_irq(): interrupt word, then the doorbell. */
@@ -286,7 +346,7 @@ static int s5300_setup_doorbell(struct s5300_modem *sm)
 	 * untranslated (seen on hardware as "cpu [??? 0x14e60000...]").
 	 */
 	struct resource res = { .flags = IORESOURCE_MEM };
-	int i;
+	int i, ret;
 
 	/*
 	 * The PCI core could not place the mask ROM's six 1M BARs in the
@@ -300,7 +360,9 @@ static int s5300_setup_doorbell(struct s5300_modem *sm)
 		sm->pdev->resource[i].end = 0;
 		sm->pdev->resource[i].flags = 0;
 	}
-	pci_write_config_dword(sm->pdev, PCI_BASE_ADDRESS_0, sm->db_bus_addr);
+	ret = s5300_program_doorbell_bar(sm);
+	if (ret)
+		return ret;
 
 	region.start = sm->db_bus_addr;
 	region.end = sm->db_bus_addr + SZ_4K - 1;
@@ -372,6 +434,9 @@ static void s5300_boot_work(struct work_struct *work)
 	release_firmware(sm->pbl);
 	sm->pbl = NULL;
 
+	/* The ROM reads these on the doorbell; make sure the writes stuck. */
+	s5300_verify_msi_target(sm);
+
 	/* Config state (forced BAR0, MSI capability) must survive the bounce. */
 	pci_save_state(pdev);
 
@@ -410,9 +475,10 @@ static void s5300_boot_work(struct work_struct *work)
 	/*
 	 * Downstream does not trust restore for the forced BAR: it re-reads
 	 * and rewrites it after every link-up (s51xx_pcie_restore_state()).
-	 * Unconditionally re-force it -- idempotent when restore worked.
+	 * Re-verify both the BAR and the MSI target on the fresh link.
 	 */
-	pci_write_config_dword(pdev, PCI_BASE_ADDRESS_0, sm->db_bus_addr);
+	s5300_program_doorbell_bar(sm);
+	s5300_verify_msi_target(sm);
 
 	s5300_send_doorbell(sm, S5300_DB_LINK_ACK);
 
