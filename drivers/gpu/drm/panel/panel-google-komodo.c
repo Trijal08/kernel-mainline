@@ -351,9 +351,11 @@ static int komodo_panel_probe(struct mipi_dsi_device *dsi)
 	/*
 	 * Per-lane HS bit rate of the bootloader-trained link. The DSIM host
 	 * reads this (instead of hardcoding it) to size the command-mode TE
-	 * transfer window.
+	 * transfer window and compute the PLL for a cold link bring-up.
 	 */
 	dsi->hs_rate = 1368000000;
+	/* publish the DSC config so the DSIM/DECON can program compression */
+	dsi->dsc = (struct drm_dsc_config *)&komodo_dsc_cfg;
 	/*
 	 * The komodo panel runs in MIPI command mode (LTPO OLED); the DECON is
 	 * hardware-triggered from the panel TE. If a given unit's bootloader
