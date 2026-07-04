@@ -115,10 +115,10 @@ int exynos_drm_register_dma(struct drm_device *drm, struct device *dev,
 		if (!mapping) {
 			/*
 			 * On arm64 (CONFIG_IOMMU_DMA) a NULL domain means the
-			 * master is not behind an IOMMU - e.g. the zuma DPU,
-			 * whose v9 SysMMU has no mainline driver. Such a master
-			 * uses contiguous buffers instead of an IOMMU mapping,
-			 * so leave priv->mapping NULL and carry on.
+			 * master is not behind an IOMMU (no iommus phandle, or its
+			 * SysMMU failed to bind). Such a master uses contiguous
+			 * buffers instead of an IOMMU mapping, so leave
+			 * priv->mapping NULL and carry on.
 			 */
 			if (IS_ENABLED(CONFIG_IOMMU_DMA))
 				return 0;
