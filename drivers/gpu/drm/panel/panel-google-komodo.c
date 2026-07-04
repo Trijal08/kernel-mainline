@@ -48,12 +48,15 @@ struct komodo_panel {
 };
 
 /*
- * komodo (google,gs-km4) WQHD DSC configuration, copied verbatim from the
- * vendor panel driver's wqhd_pps_config. This is the compression the DECON
- * emits; the panel's own DSC decoder must be programmed to match it, which is
- * what enable() sends (the vendor km4_enable(): DCS 0x9D 0x01 + this PPS).
+ * komodo (google,gs-km4) DSC configurations, copied verbatim from the vendor
+ * panel driver's wqhd_pps_config / fhd_pps_config. This is the compression the
+ * DECON emits; the panel's own DSC decoder must be programmed to match, which
+ * is what enable() sends (the vendor km4_enable(): DCS 0x9D 0x01 + this PPS).
+ *
+ * Both resolutions run two slices, 8 bpc, 8.0 bpp; only the geometry-derived
+ * fields (slice/picture width, delays, the scale/slice bpg offsets) differ.
  */
-static const struct drm_dsc_config komodo_dsc_cfg = {
+static const struct drm_dsc_config komodo_wqhd_dsc = {
 	.line_buf_depth = 9,
 	.bits_per_component = 8,
 	.convert_rgb = true,
@@ -99,43 +102,113 @@ static const struct drm_dsc_config komodo_dsc_cfg = {
 	.dsc_version_major = 1,
 };
 
+static const struct drm_dsc_config komodo_fhd_dsc = {
+	.line_buf_depth = 9,
+	.bits_per_component = 8,
+	.convert_rgb = true,
+	.slice_width = 504,
+	.slice_height = 34,
+	.slice_count = 2,
+	.simple_422 = false,
+	.pic_width = 1008,
+	.pic_height = 2244,
+	.rc_tgt_offset_high = 3,
+	.rc_tgt_offset_low = 3,
+	.bits_per_pixel = 128,
+	.rc_edge_factor = 6,
+	.rc_quant_incr_limit1 = 11,
+	.rc_quant_incr_limit0 = 11,
+	.initial_xmit_delay = 512,
+	.initial_dec_delay = 508,
+	.block_pred_enable = true,
+	.first_line_bpg_offset = 12,
+	.initial_offset = 6144,
+	.rc_buf_thresh = {
+		14, 28, 42, 56, 70, 84, 98, 105,
+		112, 119, 121, 123, 125, 126
+	},
+	.rc_range_params = {
+		{ 0, 4, 2 }, { 0, 4, 0 }, { 1, 5, 0 }, { 1, 6, 62 },
+		{ 3, 7, 60 }, { 3, 7, 58 }, { 3, 7, 56 }, { 3, 8, 56 },
+		{ 3, 9, 56 }, { 3, 10, 54 }, { 5, 11, 54 }, { 5, 12, 52 },
+		{ 5, 13, 52 }, { 7, 13, 52 }, { 13, 15, 52 }
+	},
+	.rc_model_size = 8192,
+	.flatness_min_qp = 3,
+	.flatness_max_qp = 12,
+	.initial_scale_value = 32,
+	.scale_decrement_interval = 7,
+	.scale_increment_interval = 810,
+	.nfl_bpg_offset = 745,
+	.slice_bpg_offset = 821,
+	.final_offset = 4336,
+	.vbr_enable = false,
+	.slice_chunk_size = 504,
+	.dsc_version_minor = 2,
+	.dsc_version_major = 1,
+};
+
 static inline struct komodo_panel *to_komodo_panel(struct drm_panel *panel)
 {
 	return container_of(panel, struct komodo_panel, panel);
 }
 
 /*
- * Native 60 Hz timing for the komodo (google,gs-km4) panel, taken verbatim
- * from the vendor panel driver:
+ * A komodo display mode: a DRM timing plus the per-resolution DDIC programming
+ * (its matching DSC config and the DCS image-size / bit-depth selectors) that
+ * enable() must send. The refresh rate is carried by the timing itself.
+ *
+ * Timings are taken verbatim from the vendor panel driver, e.g. WQHD 60 Hz:
  *   DRM_MODE_TIMING(60, 1344, 80, 24, 42, 2992, 12, 4, 22)
- * i.e. hfp=80 hsa=24 hbp=42 (htotal 1490), vfp=12 vsa=4 vbp=22 (vtotal 3030).
- * Only hdisplay/vdisplay reach the DECON; the DSIM retains the bootloader
- * blanking. The link is dual-DSC compressed (8.0bpp, 2x 672-wide slices).
+ * i.e. hfp=80 hsa=24 hbp=42, vfp=12 vsa=4 vbp=22. Only hdisplay/vdisplay reach
+ * the DECON; the DSIM retains the bootloader blanking. Both resolutions run the
+ * same dual-DSC 8.0bpp link at 60/120 Hz.
  */
-#define KOMODO_MODE(hz, flags)						\
-	{								\
-		.clock = 1490 * 3030 * (hz) / 1000,			\
-		.hdisplay = 1344,					\
-		.hsync_start = 1344 + 80,				\
-		.hsync_end = 1344 + 80 + 24,				\
-		.htotal = 1344 + 80 + 24 + 42,				\
-		.vdisplay = 2992,					\
-		.vsync_start = 2992 + 12,				\
-		.vsync_end = 2992 + 12 + 4,				\
-		.vtotal = 2992 + 12 + 4 + 22,				\
+struct komodo_mode {
+	struct drm_display_mode mode;
+	const struct drm_dsc_config *dsc;
+	u8 image_conf;		/* DCS 0xC3: image-size select */
+	u8 depth_conf;		/* DCS 0xF2: bit-depth select */
+};
+
+#define KOMODO_MODE(w, hfp, hsa, hbp, h, vfp, vsa, vbp, hz, flags)	\
+	.mode = {							\
+		.clock = ((w) + (hfp) + (hsa) + (hbp)) *		\
+			 ((h) + (vfp) + (vsa) + (vbp)) * (hz) / 1000,	\
+		.hdisplay = (w),					\
+		.hsync_start = (w) + (hfp),				\
+		.hsync_end = (w) + (hfp) + (hsa),			\
+		.htotal = (w) + (hfp) + (hsa) + (hbp),			\
+		.vdisplay = (h),					\
+		.vsync_start = (h) + (vfp),				\
+		.vsync_end = (h) + (vfp) + (vsa),			\
+		.vtotal = (h) + (vfp) + (vsa) + (vbp),			\
 		.width_mm = 70,						\
 		.height_mm = 156,					\
 		.type = DRM_MODE_TYPE_DRIVER | (flags),			\
 	}
 
 /*
- * The panel runs the same DSC link and blanking at both rates; only the panel's
- * operating frequency (DCS 0x60) and the DSIM TE timeout differ. 120 Hz is the
- * preferred/default; 60 Hz is selectable via a modeset.
+ * WQHD (1344x2992) and FHD (1008x2244), each selectable at 60/120 Hz. WQHD
+ * 120 Hz is the preferred/default; the others are reachable via a modeset. The
+ * DDIC switches resolution through the image-size (0xC3) and bit-depth (0xF2)
+ * selectors and a matching DSC PPS, all carried per-mode here.
  */
-static const struct drm_display_mode komodo_modes[] = {
-	KOMODO_MODE(120, DRM_MODE_TYPE_PREFERRED),
-	KOMODO_MODE(60, 0),
+static const struct komodo_mode komodo_modes[] = {
+	{
+		KOMODO_MODE(1344, 80, 24, 42, 2992, 12, 4, 22,
+			    120, DRM_MODE_TYPE_PREFERRED),
+		.dsc = &komodo_wqhd_dsc, .image_conf = 0x0C, .depth_conf = 0x01,
+	}, {
+		KOMODO_MODE(1344, 80, 24, 42, 2992, 12, 4, 22, 60, 0),
+		.dsc = &komodo_wqhd_dsc, .image_conf = 0x0C, .depth_conf = 0x01,
+	}, {
+		KOMODO_MODE(1008, 80, 24, 38, 2244, 12, 4, 20, 120, 0),
+		.dsc = &komodo_fhd_dsc, .image_conf = 0x0D, .depth_conf = 0x81,
+	}, {
+		KOMODO_MODE(1008, 80, 24, 38, 2244, 12, 4, 20, 60, 0),
+		.dsc = &komodo_fhd_dsc, .image_conf = 0x0D, .depth_conf = 0x81,
+	},
 };
 
 /* Panel is already powered and streaming from the bootloader: keep it as-is. */
@@ -186,14 +259,18 @@ static int komodo_panel_disable(struct drm_panel *panel)
 	mipi_dsi_dcs_write_buffer((dsi), (const u8[]){ seq },                  \
 				  sizeof((const u8[]){ seq }))
 
-static int komodo_cur_vrefresh(struct komodo_panel *ctx);
+static const struct komodo_mode *komodo_cur_mode(struct komodo_panel *ctx);
 
 static int komodo_panel_enable(struct drm_panel *panel)
 {
 	struct komodo_panel *ctx = to_komodo_panel(panel);
 	struct mipi_dsi_device *dsi = ctx->dsi;
+	const struct komodo_mode *km = komodo_cur_mode(ctx);
+	const struct drm_display_mode *mode = &km->mode;
 	struct drm_dsc_picture_parameter_set pps;
 	static const u8 dsc_en[] = { 0x9D, 0x01 };
+	u16 xe = mode->hdisplay - 1;
+	u16 ye = mode->vdisplay - 1;
 	int ret;
 
 	/*
@@ -206,7 +283,7 @@ static int komodo_panel_enable(struct drm_panel *panel)
 
 	/* DSC: enable + PPS (vendor: 0x9D 0x01 + gs_dcs_write_dsc_config()) */
 	mipi_dsi_dcs_write_buffer(dsi, dsc_en, sizeof(dsc_en));
-	drm_dsc_pps_payload_pack(&pps, &komodo_dsc_cfg);
+	drm_dsc_pps_payload_pack(&pps, km->dsc);
 	ret = mipi_dsi_picture_parameter_set(dsi, &pps);
 	if (ret < 0)
 		dev_err(&dsi->dev, "failed to send DSC PPS: %d\n", ret);
@@ -219,8 +296,8 @@ static int komodo_panel_enable(struct drm_panel *panel)
 	km4_feat(dsi, MIPI_DCS_EXIT_SLEEP_MODE);
 	msleep(120);
 	km4_feat(dsi, MIPI_DCS_SET_TEAR_ON);
-	km4_feat(dsi, 0x2A, 0x00, 0x00, 0x05, 0x3F);		/* CASET 0-1343 */
-	km4_feat(dsi, 0x2B, 0x00, 0x00, 0x0B, 0xAF);		/* PASET 0-2991 */
+	km4_feat(dsi, 0x2A, 0x00, 0x00, xe >> 8, xe & 0xFF);	/* CASET */
+	km4_feat(dsi, 0x2B, 0x00, 0x00, ye >> 8, ye & 0xFF);	/* PASET */
 	km4_feat(dsi, 0xF0, 0x5A, 0x5A);			/* unlock */
 	km4_feat(dsi, 0xB0, 0x00, 0x36, 0xC5);			/* FFC 1368Mbps */
 	km4_feat(dsi, 0xC5, 0x10, 0x10, 0x50, 0x05, 0x4D, 0x31, 0x40,
@@ -235,11 +312,11 @@ static int komodo_panel_enable(struct drm_panel *panel)
 	km4_feat(dsi, 0xF7, 0x0F);				/* freq update */
 	km4_feat(dsi, 0xF0, 0xA5, 0xA5);			/* lock */
 
-	/* Resolution / bit-depth config block (WQHD, 8-bit) */
+	/* Resolution / bit-depth config block (per-mode image + depth select) */
 	km4_feat(dsi, 0xF0, 0x5A, 0x5A);				/* unlock */
-	km4_feat(dsi, 0xC3, 0x0C);					/* WQHD */
+	km4_feat(dsi, 0xC3, km->image_conf);			/* image size */
 	km4_feat(dsi, 0xB0, 0x00, 0x01, 0xF2);
-	km4_feat(dsi, 0xF2, 0x01);					/* 8-bit */
+	km4_feat(dsi, 0xF2, km->depth_conf);			/* bit depth */
 	km4_feat(dsi, 0xF0, 0xA5, 0xA5);				/* lock */
 
 	/*
@@ -284,7 +361,7 @@ static int komodo_panel_enable(struct drm_panel *panel)
 	km4_feat(dsi, 0xB9, 0x02);
 	/* frequency: manual HS - 0x60 selects the rate (0x00 = 120Hz, 0x01 = 60Hz) */
 	km4_feat(dsi, 0xBD, 0x21);
-	km4_feat(dsi, 0x60, komodo_cur_vrefresh(ctx) == 120 ? 0x00 : 0x01);
+	km4_feat(dsi, 0x60, drm_mode_vrefresh(mode) == 120 ? 0x00 : 0x01);
 	km4_feat(dsi, 0xF7, 0x0F);					/* freq update */
 	km4_feat(dsi, 0xF0, 0xA5, 0xA5);				/* lock */
 
@@ -308,7 +385,7 @@ static int komodo_panel_get_modes(struct drm_panel *panel,
 	for (i = 0; i < ARRAY_SIZE(komodo_modes); i++) {
 		struct drm_display_mode *mode;
 
-		mode = drm_mode_duplicate(connector->dev, &komodo_modes[i]);
+		mode = drm_mode_duplicate(connector->dev, &komodo_modes[i].mode);
 		if (!mode)
 			return i ? i : -ENOMEM;
 
@@ -316,26 +393,35 @@ static int komodo_panel_get_modes(struct drm_panel *panel,
 		drm_mode_probed_add(connector, mode);
 	}
 
-	connector->display_info.width_mm = komodo_modes[0].width_mm;
-	connector->display_info.height_mm = komodo_modes[0].height_mm;
+	connector->display_info.width_mm = komodo_modes[0].mode.width_mm;
+	connector->display_info.height_mm = komodo_modes[0].mode.height_mm;
 
 	return ARRAY_SIZE(komodo_modes);
 }
 
 /*
- * Read the active mode's refresh rate. drm_panel has no mode_set, so reach the
- * committed mode through the cached connector's atomic state (valid during the
- * enable phase of a modeset). Defaults to 60 Hz if the state is not available.
+ * Find the descriptor for the active mode. drm_panel has no mode_set, so reach
+ * the committed mode through the cached connector's atomic state (valid during
+ * the enable phase of a modeset) and match it against the mode table. Defaults
+ * to the preferred mode (index 0) if the state is not available.
  */
-static int komodo_cur_vrefresh(struct komodo_panel *ctx)
+static const struct komodo_mode *komodo_cur_mode(struct komodo_panel *ctx)
 {
 	struct drm_connector *conn = ctx->connector;
+	const struct drm_display_mode *cur;
+	unsigned int i;
 
-	if (conn && conn->state && conn->state->crtc &&
-	    conn->state->crtc->state)
-		return drm_mode_vrefresh(&conn->state->crtc->state->adjusted_mode);
+	if (!conn || !conn->state || !conn->state->crtc ||
+	    !conn->state->crtc->state)
+		return &komodo_modes[0];
 
-	return 60;
+	cur = &conn->state->crtc->state->adjusted_mode;
+	for (i = 0; i < ARRAY_SIZE(komodo_modes); i++)
+		if (drm_mode_match(cur, &komodo_modes[i].mode,
+				   DRM_MODE_MATCH_TIMINGS))
+			return &komodo_modes[i];
+
+	return &komodo_modes[0];
 }
 
 static const struct drm_panel_funcs komodo_panel_funcs = {
@@ -425,7 +511,7 @@ static int komodo_panel_probe(struct mipi_dsi_device *dsi)
 	 */
 	dsi->hs_rate = 1368000000;
 	/* publish the DSC config so the DSIM/DECON can program compression */
-	dsi->dsc = (struct drm_dsc_config *)&komodo_dsc_cfg;
+	dsi->dsc = (struct drm_dsc_config *)&komodo_wqhd_dsc;
 	/*
 	 * The komodo panel runs in MIPI command mode (LTPO OLED); the DECON is
 	 * hardware-triggered from the panel TE. If a given unit's bootloader
