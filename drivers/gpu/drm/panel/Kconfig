@@ -370,6 +370,19 @@ config DRM_PANEL_JADARD_JD9365DA_H3
 	  WXGA MIPI DSI panel. The panel support TFT dot matrix LCD with
 	  800RGBx1280 dots at maximum.
 
+config DRM_PANEL_GOOGLE_KOMODO
+	tristate "Google Pixel 9 Pro XL (komodo) boot-handoff panel"
+	depends on OF
+	depends on DRM_MIPI_DSI
+	depends on BACKLIGHT_CLASS_DEVICE
+	help
+	  Say Y here to enable the boot-handoff panel driver for the komodo
+	  (Pixel 9 Pro XL, google,gs-km4) MIPI-DSI command-mode display. The
+	  bootloader powers and lights the panel; this driver adopts the running
+	  DCPHY link, (re)runs the panel's DSC + operating-mode configuration for
+	  the active refresh rate (60 or 120 Hz), and exposes DCS brightness
+	  control, so the exynos9 DECON can take over scanning out.
+
 config DRM_PANEL_JDI_LPM102A188A
 	tristate "JDI LPM102A188A DSI panel"
 	depends on GPIOLIB
