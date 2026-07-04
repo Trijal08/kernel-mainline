@@ -349,6 +349,12 @@ static int komodo_panel_probe(struct mipi_dsi_device *dsi)
 	dsi->lanes = 4;
 	dsi->format = MIPI_DSI_FMT_RGB888;
 	/*
+	 * Per-lane HS bit rate of the bootloader-trained link. The DSIM host
+	 * reads this (instead of hardcoding it) to size the command-mode TE
+	 * transfer window.
+	 */
+	dsi->hs_rate = 1368000000;
+	/*
 	 * The komodo panel runs in MIPI command mode (LTPO OLED); the DECON is
 	 * hardware-triggered from the panel TE. If a given unit's bootloader
 	 * left the link in video mode instead, add MIPI_DSI_MODE_VIDEO here.
