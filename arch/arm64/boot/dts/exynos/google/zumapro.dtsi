@@ -3811,13 +3811,10 @@
 			clock-names = "aclk";
 			power-domains = <&pd_dpuf0>;
 			/*
-			 * The zuma DPU SysMMU is v9 (samsung-sysmmu-v9), which
-			 * the mainline exynos-iommu driver does not support -
-			 * attaching a master to it faults. Until a v9 IOMMU
-			 * driver lands, leave the DPU un-translated and rely on
-			 * contiguous CMA framebuffers (exynos DRM falls back to
-			 * contiguous GEM when there is no IOMMU mapping).
-			 * iommus = <&sysmmu_dpuf0 0>;
+			 * The DECON is the CRTC/blender/output block; it issues no
+			 * framebuffer DMA of its own. Memory reads are done by the
+			 * IDMA (see dpu_dma), which is the SysMMU master, so no
+			 * iommus phandle is needed here.
 			 */
 			status = "disabled";
 
@@ -3847,14 +3844,14 @@
 			clock-names = "aclk";
 			power-domains = <&pd_dpuf0>;
 			/*
-			 * The zuma DPU SysMMU is v9 (samsung-sysmmu-v9), which
-			 * the mainline exynos-iommu driver does not support -
-			 * attaching a master to it faults. Until a v9 IOMMU
-			 * driver lands, leave the DPU un-translated and rely on
-			 * contiguous CMA framebuffers (exynos DRM falls back to
-			 * contiguous GEM when there is no IOMMU mapping).
-			 * iommus = <&sysmmu_dpuf0 0>;
+			 * The IDMA is the DPU's memory master. Route it through the
+			 * v9 DPU SysMMUs (mainline exynos-iommu gained v9 support),
+			 * so exynos DRM maps framebuffers into the IOMMU instead of
+			 * requiring physically contiguous CMA. Both DPUF SysMMUs are
+			 * listed because the IDMA channels span the two DPU fetch
+			 * blocks; #iommu-cells is 0 so no stream id is encoded here.
 			 */
+			iommus = <&sysmmu_dpuf0>, <&sysmmu_dpuf1>;
 			status = "disabled";
 		};
 
@@ -3931,6 +3928,25 @@
 
 			clocks = <&ext_24_5m>;
 			clock-names = "oscclk";
+		};
+		
+		/*
+		 * DPU DMA firewalls. Out of reset (and as the bootloader leaves
+		 * them for its own splash buffer) these block the DPU's DMA to
+		 * any other physical range, so the DECON starves on the CMA
+		 * framebuffer and stalls mid-frame. The driver installs an
+		 * allow-all MPT so the DPP DMA can fetch our framebuffer.
+		 */
+		s2mpu_s0_dpuf0: s2mpu@19870000 {
+			compatible = "google,s2mpu-v9";
+			reg = <0x19870000 0x10000>;
+			power-domains = <&pd_dpuf0>;
+		};
+
+		s2mpu_s0_dpuf1: s2mpu@19c70000 {
+			compatible = "google,s2mpu-v9";
+			reg = <0x19c70000 0x10000>;
+			power-domains = <&pd_dpuf1>;
 		};
 		
 		gpu: gpu@1f000000 {
