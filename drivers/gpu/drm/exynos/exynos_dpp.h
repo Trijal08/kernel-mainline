@@ -45,6 +45,8 @@
 #define DPP_IRQ_ENABLE (1 << 0)
 #define DPP_ALL_IRQ (DPP_CONFIG_ERROR | DPP_STATUS_FRAMEDONE_IRQ)
 
+/* DPP block common I/O control: pixel format + BPC live here (not 0x0008) */
+#define DPP_COM_IO_CON 0x0038
 #define DPP_IN_CON 0x0008
 #define DPP_CSC_TYPE(_v) ((_v) << 18)
 #define DPP_CSC_TYPE_MASK (3 << 18)
@@ -68,11 +70,13 @@
 #define DPP_IMG_FORMAT_YUV422_P210 (6 << 0)
 #define DPP_IMG_FORMAT_YUV422_8P2 (7 << 0)
 
+/* DPP block image size lives at DPP_COM_IMG_SIZE (0x003c), not 0x0018 */
+#define DPP_COM_IMG_SIZE 0x003c
 #define DPP_IMG_SIZE 0x0018
 #define DPP_IMG_HEIGHT(_v) ((_v) << 16)
-#define DPP_IMG_HEIGHT_MASK (0x1FFF << 16)
+#define DPP_IMG_HEIGHT_MASK (0x3FFF << 16)
 #define DPP_IMG_WIDTH(_v) ((_v) << 0)
-#define DPP_IMG_WIDTH_MASK (0x1FFF << 0)
+#define DPP_IMG_WIDTH_MASK (0x3FFF << 0)
 enum dpp_attr {
 	DPP_ATTR_AFBC = 0,
 	DPP_ATTR_SAJC = 0,
