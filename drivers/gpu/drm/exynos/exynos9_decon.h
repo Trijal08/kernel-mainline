@@ -137,10 +137,6 @@ struct decon_context {
 	/* device ops */
 	const struct decon_cal_ops *cal_ops;
 
-	bool is_colormap;
-
-	bool fake_vblank;
-	struct delayed_work dwork;
 	void __iomem *regs[3]; /* main, sub0, sub1*/
 };
 
@@ -175,7 +171,6 @@ struct decon_cal_ops {
 	u32 (*win_update_req_get)(struct decon_context *ctx, u32 win_idx);
 	void (*update_req_global)(struct decon_context *ctx);
 	u32 (*clear_interrupt)(struct decon_context *ctx, enum decon_irq irq);
-	u32 (*shadow_update_req_get)(struct decon_context *ctx);
 };
 
 extern const struct decon_cal_ops zuma_decon_cal_ops;

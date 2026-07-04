@@ -1066,11 +1066,6 @@ static u32 decon_reg_get_window_update_req(u32 decon_idx, u32 win_idx)
 				 UPDATE_REQ_WIN, SHD_UP_REQ);
 }
 
-static u32 decon_reg_get_shadow_update_req(u32 decon_idx)
-{
-	return decon_global_read(decon_idx, decon_regoff->shadow_reg_update_req);
-}
-
 static void decon_reg_set_bpc(u32 decon_idx, u32 bpc)
 {
 	u32 val;
@@ -1305,11 +1300,6 @@ static u32 exynos910_decon_clear_interrupt(struct decon_context *ctx,
 	return decon_reg_clear_interrupt(ctx->idx, irq);
 }
 
-static u32 exynos910_decon_shadow_update_req_get(struct decon_context *ctx)
-{
-	return decon_reg_get_shadow_update_req(ctx->idx);
-}
-
 static const struct decon_cal_ops exynos910_decon_cal_ops = {
 	.init			= exynos910_decon_init,
 	.enable			= exynos910_decon_enable,
@@ -1322,7 +1312,6 @@ static const struct decon_cal_ops exynos910_decon_cal_ops = {
 	.win_update_req_get	= exynos910_decon_win_update_req_get,
 	.update_req_global	= exynos910_decon_update_req_global,
 	.clear_interrupt	= exynos910_decon_clear_interrupt,
-	.shadow_update_req_get	= exynos910_decon_shadow_update_req_get,
 };
 
 /*
@@ -1359,18 +1348,6 @@ static const struct decon_reg_offsets exynos910_reg_offsets = {
 	.outfifo_size_control_0	 = 0x0120,
 };
 
-/* Offsets from the vendor cal_9865 DECON register map (zuma/zumapro). */
-static const struct decon_reg_offsets zuma_reg_offsets = {
-	.global_control		 = 0x0020,	/* GLOBAL_CON */
-	.shadow_reg_update_req	 = 0x0050,	/* SHD_REG_UP_REQ */
-	.interrupt_enable	 = 0x0060,	/* DECON_INT_EN */
-	.interrupt_pending	 = 0x0070,	/* DECON_INT_PEND */
-	.extra_interrupt_enable	 = 0x0064,	/* DECON_INT_EN_EXTRA */
-	.extra_interrupt_pending = 0x0074,	/* DECON_INT_PEND_EXTRA */
-	.blender_bg_image_size_0 = 0x0220,	/* BLD_BG_IMG_SIZE_PRI */
-	.outfifo_size_control_0	 = 0x0290,	/* OF_SIZE_0 */
-};
-
 struct decon_dev_data {
 	const u32 nr_decon;
 	const u32 nr_win;
@@ -1388,7 +1365,10 @@ static const struct decon_dev_data exynos910_decon = {
 static const struct decon_dev_data zuma_decon = {
 	.nr_decon = 3,
 	.nr_win = 8,
-	.reg = &zuma_reg_offsets,
+	/* zuma drives the hardware through its own cal_ops back-end, not the
+	 * exynos910 decon_regoff offset table, so .reg is intentionally unset.
+	 */
+	.cal_ops = &zuma_decon_cal_ops,
 };
 
 static const struct of_device_id decon_driver_dt_match[] = {
@@ -1406,8 +1386,8 @@ static struct decon_win *plane_to_decon_win(struct drm_plane *e)
 	return container_of(to_exynos_plane(e), struct decon_win, plane);
 }
 
-/* ARGB value */
-#define COLOR_MAP_VALUE 0x00ff0000
+/* ARGB value - opaque red (alpha 0xff, else the window blends to transparent) */
+#define COLOR_MAP_VALUE 0xffff0000
 
 static void decon_set_win_color_map(struct decon_win *window, bool en)
 {
@@ -1487,7 +1467,12 @@ static void decon_update_plane(struct exynos_drm_crtc *crtc,
 	config->blend_mode = to_decon_blend_mode(state->base.pixel_blend_mode);
 	config->dpp_type = window->dpp->type;
 
-	decon_set_win_color_map(window, ctx->is_colormap);
+	/*
+	 * Feed the window from the real framebuffer via IDMA/DPP (colormap off).
+	 * The solid-colour map path proved the DECON blender -> DSC -> OUTFIFO ->
+	 * DSIM -> panel chain works; now drive actual pixels through the DPP.
+	 */
+	decon_set_win_color_map(window, false);
 
 	dpp_update(window->dpp, 0, state);
 	dpu_dma_update(dma_ctx, 0, state);
@@ -1517,9 +1502,7 @@ static void decon_disable_plane(struct exynos_drm_crtc *crtc,
 static void decon_atomic_flush(struct exynos_drm_crtc *crtc)
 {
 	struct decon_context *ctx = crtc->ctx;
-	struct drm_crtc_state *state = crtc->base.state;
 	struct drm_plane *plane;
-	bool req_global = true;
 
 	synchronize_irq(ctx->irq_fd);
 
@@ -1528,30 +1511,20 @@ static void decon_atomic_flush(struct exynos_drm_crtc *crtc)
 
 		/* window update first to guarantee dma stop during dpp_disable */
 		ctx->cal_ops->win_update_req(ctx, window->idx);
-
-		// if (ctx->disable_mask & (1 << window->idx))
-		// 	dpp_disable(window->dpp);
-
-		/* If at least one window is running, there is no need to set
-		 * global update
-		 */
-		if (req_global && ctx->cal_ops->win_status(ctx, window->idx))
-			req_global = false;
 	}
 	ctx->disable_mask = 0;
 
-	if (drm_atomic_crtc_needs_modeset(state) || req_global)
-		ctx->cal_ops->update_req_global(ctx);
-
-	/* In case of fake vblank, it make vblank after 1 vsync time(16ms) */
-	// if (ctx->fake_vblank)
-	// 	drm_crtc_handle_vblank(&crtc->base);
-	// schedule_delayed_work(&ctx->dwork, msecs_to_jiffies(16));
+	/*
+	 * Always request a global shadow-update latch. Skipping it while a window
+	 * is already running (the old req_global optimisation) leaves a freshly
+	 * reprogrammed window unlatched, so in command mode the DECON keeps
+	 * scanning out the previously-latched (bootloader) window - the vendor
+	 * issues the shadow request unconditionally every frame.
+	 */
+	ctx->cal_ops->update_req_global(ctx);
 
 	ctx->cal_ops->set_te(ctx, DECON_TRIG_UNMASK);
 	exynos_crtc_handle_event(crtc);
-
-	drm_dbg(ctx->drm_dev, "flushed\n");
 }
 
 static void decon_config_print(struct decon_config *config)
@@ -1582,16 +1555,37 @@ static void decon_set_mode(struct exynos_drm_crtc *crtc)
 {
 	struct decon_context *ctx = crtc->ctx;
 	struct decon_mode *mode = &(ctx->config.mode);
-	enum decon_out_type out_type = 0;
+	enum decon_out_type out_type = DECON_OUT_DSI0;
 	struct drm_encoder *encoder;
 
+	/*
+	 * Derive the output interface from the attached encoder. DisplayPort
+	 * presents as a TMDS encoder; everything else (the exynos DSIM) drives
+	 * a MIPI-DSI panel, which is the default.
+	 * TODO: read the port number to distinguish DSI0/DSI1 and DP SSTs.
+	 */
 	drm_for_each_encoder_mask(encoder, crtc->base.dev,
-				  crtc->base.state->encoder_mask)
-		// TODO: make read port number and get it.
-		out_type = DECON_OUT_DP0_SST1;
+				  crtc->base.state->encoder_mask) {
+		if (encoder->encoder_type == DRM_MODE_ENCODER_TMDS)
+			out_type = DECON_OUT_DP0_SST1;
+	}
 
 	if (out_type & DECON_OUT_DP)
 		mode->op_mode = DECON_VIDEO_MODE;
+	else
+		mode->op_mode = crtc->i80_mode ? DECON_MIPI_COMMAND_MODE :
+						 DECON_VIDEO_MODE;
+
+	/*
+	 * Command mode: drive frames from the panel's hardware TE. The DECON
+	 * latches the shadow config and emits a frame on each TE edge; the SW
+	 * trigger does not reliably latch on this DECON (the shadow-update
+	 * request was never consumed and the DECON sat idle). TE is confirmed
+	 * reaching the DECON (HW_TE_CNT increments), and the TE pad is routed to
+	 * DDI0, so use HW trigger as the vendor does for command mode.
+	 */
+	if (mode->op_mode == DECON_MIPI_COMMAND_MODE)
+		mode->te_mode = DECON_HW_TRIG;
 
 	ctx->config.out_type = out_type;
 }
@@ -1636,16 +1630,6 @@ static const struct exynos_drm_crtc_ops decon_crtc_ops = {
 	.atomic_flush = decon_atomic_flush,
 };
 
-/* H/W goes to stop or reset state when OS restarting during h/w operation */
-static void decon_reset(struct decon_context *ctx, int rpm_req)
-{
-	int ret;
-
-	ret = ctx->cal_ops->disable(ctx);
-	if (ret)
-		drm_err(ctx->drm_dev, "failed to try job_abort\n");
-}
-
 static enum drm_plane_type decon_get_win_type(int win_idx, int last_idx)
 {
 	if (win_idx == 0)
@@ -1664,21 +1648,6 @@ static const u32 dpp_gf_formats[] = {
 	DRM_FORMAT_RGBA1010102, DRM_FORMAT_BGRA1010102,
 };
 
-static bool exynos_crtc_handle_vblank(struct exynos_drm_crtc *exynos_crtc)
-{
-	return drm_crtc_handle_vblank(&exynos_crtc->base);
-}
-
-static void exynos_crtc_delayed_vblank(struct work_struct *work)
-{
-	struct delayed_work *delayed_work =
-		container_of(work, struct delayed_work, work);
-	struct decon_context *ctx =
-		container_of(delayed_work, struct decon_context, dwork);
-
-	exynos_crtc_handle_vblank(ctx->crtc);
-}
-
 static int decon_bind(struct device *dev, struct device *master, void *data)
 {
 	struct decon_context *ctx = dev_get_drvdata(dev);
@@ -1688,8 +1657,14 @@ static int decon_bind(struct device *dev, struct device *master, void *data)
 
 	int i, ret = 0;
 
-	/* Release a pm_runtime opposite to xxx_reset */
-	decon_reset(ctx, RPM_REQ_SUSPEND);
+	/*
+	 * Bootloader handover: do NOT reset the DECON here. The bootloader
+	 * leaves it running (driving the splash through the DSIM to the panel);
+	 * resetting it now would desync the still-running DSIM/panel. The
+	 * running DECON is reconfigured in place at enable, matching the vendor
+	 * DECON_STATE_HANDOVER path (_decon_reinit_locked + decon_reg_init, no
+	 * decon_reg_stop/SRESET).
+	 */
 
 	ctx->drm_dev = drm_dev;
 
@@ -1718,10 +1693,9 @@ static int decon_bind(struct device *dev, struct device *master, void *data)
 		// 	cursor_plane = &win->plane.base;
 	}
 
-	ctx->crtc = exynos_drm_crtc_create(drm_dev, primary_plane, 0,
+	ctx->crtc = exynos_drm_crtc_create(drm_dev, primary_plane,
+					   EXYNOS_DISPLAY_TYPE_LCD,
 					   &decon_crtc_ops, ctx);
-
-	INIT_DELAYED_WORK(&ctx->dwork, exynos_crtc_delayed_vblank);
 
 	if (IS_ERR(ctx->crtc))
 		return PTR_ERR(ctx->crtc);
@@ -1762,15 +1736,16 @@ static irqreturn_t decon_irq_handler(int irq, void *dev_id)
 {
 	struct decon_context *ctx = dev_id;
 
-	// ctx->cal_ops->clear_interrupt(ctx, DECON_IRQ_FS);
 	ctx->cal_ops->clear_interrupt(ctx, DECON_IRQ_FD);
 
-	ctx->cal_ops->shadow_update_req_get(ctx);
-
+	/*
+	 * In command mode a completed frame (frame-done) is the vblank; only
+	 * signal it once the shadow update has been latched so page-flips are
+	 * not reported early.
+	 */
 	if (ctx->config.mode.op_mode == DECON_VIDEO_MODE ||
-	    !decon_get_window_update_req(ctx->crtc)) {
+	    !decon_get_window_update_req(ctx->crtc))
 		drm_crtc_handle_vblank(&ctx->crtc->base);
-	}
 
 	return IRQ_HANDLED;
 }
@@ -1804,7 +1779,7 @@ static int decon_probe(struct platform_device *pdev)
 	ctx->irq_fd = platform_get_irq(pdev, 0);
 	irq_set_status_flags(ctx->irq_fd, IRQ_NOAUTOEN);
 	ret = devm_request_irq(dev, ctx->irq_fd, decon_irq_handler,
-			       IRQF_ONESHOT, dev_name(dev), ctx);
+			       0, dev_name(dev), ctx);
 	if (ret)
 		return dev_err_probe(&pdev->dev, ret,
 				     "Failed to register interrupt handler\n");
