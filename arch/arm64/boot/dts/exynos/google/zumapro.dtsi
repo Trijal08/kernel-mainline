@@ -3889,6 +3889,8 @@
 			clocks = <&cmu_dpu CLK_GOUT_DPU_PCLK>;
 			clock-names = "bus_clk";
 			power-domains = <&pd_dpuf0>;
+			/* DPU SYSREG: DCPHY reset control for cold link bring-up */
+			samsung,disp-sysreg = <&sysreg_dpu>;
 			#address-cells = <1>;
 			#size-cells = <0>;
 			status = "disabled";
