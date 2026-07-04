@@ -27,6 +27,12 @@ properties:
     maxItems: 1
     description: DSI virtual channel
 
+  reset-gpios:
+    maxItems: 1
+    description:
+      DDIC reset line, used for a cold power-on. Not required on a board that
+      only ever adopts a bootloader-lit panel (boot handover).
+
   port: true
 
 required:
