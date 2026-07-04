@@ -557,7 +557,13 @@ static void zuma_dsim_set_config(struct zuma_dsim *dsim)
 {
 	const struct drm_dsc_config *dsc = dsim->dsc;
 	u32 slice_cnt = dsc ? dsc->slice_count : 1;
-	u32 slice_px = dsc ? DIV_ROUND_UP(dsc->slice_width *
+	/*
+	 * Derive the slice width from the active mode rather than dsc->slice_width
+	 * so a single attached DSC config (slice_count/bpc are resolution-agnostic)
+	 * serves every resolution the panel advertises (e.g. komodo WQHD and FHD).
+	 */
+	u32 slice_w = dsc ? DIV_ROUND_UP(dsim->hactive, slice_cnt) : 0;
+	u32 slice_px = dsc ? DIV_ROUND_UP(slice_w *
 					  dsc->bits_per_component, 8) : 0;
 	u32 comp_w = dsc ? DIV_ROUND_UP(slice_px, 6) * 2 : 0;
 	u32 width = dsc ? comp_w * slice_cnt : dsim->hactive;
@@ -601,8 +607,8 @@ static void zuma_dsim_set_config(struct zuma_dsim *dsim)
 		writel(DSIM_CPRS_CTRL_MULI_SLICE_PACKET(1) |
 		       DSIM_CPRS_CTRL_NUM_OF_SLICE(slice_cnt),
 		       dsim->regs + DSIM_CPRS_CTRL);
-		writel(DSIM_SLICE01_SIZE_OF_SLICE0(dsc->slice_width) |
-		       DSIM_SLICE01_SIZE_OF_SLICE1(slice_cnt > 1 ? dsc->slice_width : 0),
+		writel(DSIM_SLICE01_SIZE_OF_SLICE0(slice_w) |
+		       DSIM_SLICE01_SIZE_OF_SLICE1(slice_cnt > 1 ? slice_w : 0),
 		       dsim->regs + DSIM_SLICE01);
 	}
 	dsim_rmw(dsim, DSIM_CMD_CONFIG, 0, DSIM_CMD_CONFIG_PKT_GO_EN);
