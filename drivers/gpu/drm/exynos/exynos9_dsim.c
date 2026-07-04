@@ -18,8 +18,9 @@
  * abnormal command transfers (DSIM_INTSRC.ABNORMAL_CMD_ST) that the panel
  * drops, leaving the bootloader image on screen.
  *
- * The command-mode DSC parameters are those of the komodo (google,gs-km4)
- * panel, the only zuma DSI panel wired today.
+ * All panel-specific parameters are taken from the DRM mode (resolution,
+ * refresh rate) and the attached MIPI-DSI device (lane count, HS bit rate),
+ * so the encoder itself carries no panel constants.
  */
 
 #include <linux/clk.h>
@@ -29,7 +30,6 @@
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
-#include <linux/workqueue.h>
 
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_bridge.h>
@@ -41,15 +41,8 @@
 #include "exynos_drm_drv.h"
 #include "regs-dsim-zuma.h"
 
-/* komodo (gs-km4) command-mode DSC parameters */
-#define KM4_HACTIVE		1344
-#define KM4_VACTIVE		2992
-#define KM4_VREFRESH		60
-#define KM4_LANES		4
-#define KM4_DSC_SLICE_COUNT	2
-#define KM4_DSC_SLICE_WIDTH	672
-#define KM4_DSC_COMP_WIDTH	224	/* per-slice compressed width */
-#define KM4_HS_CLK_MBPS		1368
+/* fallback refresh rate until the first mode_set (any sane value works) */
+#define DSIM_DEFAULT_VREFRESH	60
 
 struct zuma_dsim {
 	struct device *dev;
@@ -63,6 +56,8 @@ struct zuma_dsim {
 	unsigned int lanes;
 	unsigned int format;
 	unsigned long mode_flags;
+	unsigned int hs_clk_mbps;	/* per-lane HS bit rate (from the panel) */
+	unsigned int hactive;		/* active width (from mode_set) */
 	unsigned int vrefresh;		/* active refresh rate (from mode_set) */
 };
 
@@ -84,29 +79,23 @@ static inline void dsim_rmw(struct zuma_dsim *dsim, u32 off, u32 val, u32 mask)
 }
 
 /*
- * Bootloader handover: leave the DSIM ENTIRELY in the bootloader's state - do
- * not reconfigure the link at all.
+ * Bootloader handover: the bootloader owns the DCPHY/PLL and lane training, so
+ * this only touches the SFR side of the command-mode transfer and never the
+ * D-PHY - the live HS link survives.
  *
- * The bootloader brings up the DCPHY/PLL, trains the lanes, programs the
- * command-mode DSC transfer registers and streams the splash; the DECON's
- * autorefresh (TRIG_CON HW trigger on TE) re-pushes the framebuffer over that
- * live link. This is exactly what the downstream simplefb path relies on: it
- * pokes only the DECON TRIG_CON (0x3061) and touches the DSIM not at all, and
- * the panel updates.
- *
- * Every attempt to (re)program the DSIM here - the full vendor
- * dsim_reg_set_config() subset - desynced the running link instead: it parked
- * the D-PHY lanes in LP-11 (DPHY_STATUS 0x10f) and raised ABNORMAL_CMD_ST, so
- * the DECON's frames stopped reaching the panel. A correct reconfiguration
- * would need the full dsim_reg_init() DCPHY bring-up, which the handover
- * deliberately avoids. So touch nothing; just sample state for debug.
+ * A full (re)program of the link (the vendor dsim_reg_set_config() subset)
+ * would need the complete dsim_reg_init() DCPHY bring-up, which the handover
+ * deliberately avoids; doing the SFR half alone desyncs the running link
+ * (parks the D-PHY in LP-11 and raises ABNORMAL_CMD_ST). So program only the
+ * TE transfer window and re-arm the transfer.
  */
 static void zuma_dsim_configure(struct zuma_dsim *dsim)
 {
 	u32 stable_vfp, te_protect, te_tout;
-	u32 vrefresh = dsim->vrefresh ? dsim->vrefresh : KM4_VREFRESH;
+	u32 vrefresh = dsim->vrefresh ? dsim->vrefresh : DSIM_DEFAULT_VREFRESH;
+	u32 hs_mbps = dsim->hs_clk_mbps;
 
-	if (!dsim->regs)
+	if (!dsim->regs || !hs_mbps || !dsim->hactive)
 		return;
 
 	/*
@@ -119,12 +108,10 @@ static void zuma_dsim_configure(struct zuma_dsim *dsim)
 	 */
 	dsim_rmw(dsim, DSIM_OPTION_SUITE, DSIM_OPTION_SUITE_OPT_TE_ON_CMD_ALLOW,
 		 DSIM_OPTION_SUITE_OPT_TE_ON_CMD_ALLOW);
-	stable_vfp = KM4_HACTIVE * DSIM_STABLE_VFP_VALUE / 100;
+	stable_vfp = dsim->hactive * DSIM_STABLE_VFP_VALUE / 100;
 	/* TE protect/timeout windows scale with the frame period (vrefresh) */
-	te_protect = KM4_HS_CLK_MBPS * (100 - DSIM_TE_MARGIN) * 100 /
-		     vrefresh / 16;
-	te_tout = KM4_HS_CLK_MBPS * (100 + DSIM_TE_MARGIN * 2) * 100 /
-		  vrefresh / 16;
+	te_protect = hs_mbps * (100 - DSIM_TE_MARGIN) * 100 / vrefresh / 16;
+	te_tout = hs_mbps * (100 + DSIM_TE_MARGIN * 2) * 100 / vrefresh / 16;
 	writel(DSIM_CMD_TE_CTRL0_TIME_STABLE_VFP(stable_vfp),
 	       dsim->regs + DSIM_CMD_TE_CTRL0);
 	writel(DSIM_CMD_TE_CTRL1_TIME_TE_PROTECT_ON(te_protect) |
@@ -169,7 +156,10 @@ static void zuma_dsim_bridge_mode_set(struct drm_bridge *bridge,
 				      const struct drm_display_mode *mode,
 				      const struct drm_display_mode *adjusted)
 {
-	bridge_to_dsim(bridge)->vrefresh = drm_mode_vrefresh(adjusted);
+	struct zuma_dsim *dsim = bridge_to_dsim(bridge);
+
+	dsim->hactive = adjusted->hdisplay;
+	dsim->vrefresh = drm_mode_vrefresh(adjusted);
 }
 
 static const struct drm_bridge_funcs zuma_dsim_bridge_funcs = {
@@ -195,6 +185,7 @@ static int zuma_dsim_host_attach(struct mipi_dsi_host *host,
 	dsim->lanes = device->lanes;
 	dsim->format = device->format;
 	dsim->mode_flags = device->mode_flags;
+	dsim->hs_clk_mbps = device->hs_rate / 1000000;
 
 	bridge = devm_drm_of_get_bridge(dsim->dev, dsim->dev->of_node, 1, 0);
 	if (IS_ERR(bridge))
