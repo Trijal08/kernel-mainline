@@ -36,6 +36,8 @@
 static unsigned int channel_map[] = { 5, 1, 7, 2, 6, 3, 8, 4 };
 
 #define IDMA_ENABLE 0x0000
+#define IDMA_ASSIGNED_MO(_v) ((_v) << 24)
+#define IDMA_ASSIGNED_MO_MASK (0xffU << 24)
 #define IDMA_IRQ 0x0004
 #define IDMA_AFBC_CONFLICT_IRQ BIT(25)
 #define IDMA_VR_CONFLICT_IRQ BIT(24)
@@ -63,29 +65,55 @@ static unsigned int channel_map[] = { 5, 1, 7, 2, 6, 3, 8, 4 };
 #define IDMA_IRQ_ENABLE BIT(0)
 
 #define IDMA_IN_CON 0x0008
-#define IDMA_IMG_FORMAT(_v) ((_v) << 11)
-#define IDMA_IMG_FORMAT_MASK (0x3f << 11)
-#define IDMA_IMG_FORMAT_ARGB8888 (0)
+#define IDMA_ALPHA(_v) ((_v) << 24)
+#define IDMA_ALPHA_MASK (0xffU << 24)
+#define IDMA_IC_MAX(_v) ((_v) << 16)
+#define IDMA_IC_MAX_MASK (0xff << 16)
+#define IDMA_IMG_FORMAT(_v) ((_v) << 8)
+#define IDMA_IMG_FORMAT_MASK (0x3f << 8)
+/*
+ * DRM fourccs are little-endian (DRM_FORMAT_XRGB8888 = 0xXXRRGGBB stored as
+ * bytes B,G,R,X), so the IDMA format that consumes those bytes in order is the
+ * one Samsung names "BGRX8888" - not "XRGB8888". Confirmed on hardware: fmt 7
+ * leaks the X byte into blue, fmt 4 renders correctly.
+ */
+#define IDMA_IMG_FORMAT_BGRX8888 (4)
 
 #define IDMA_BLOCK_EN BIT(3)
 
-#define IDMA_SRC_SIZE 0x0010
-#define IDMA_SRC_HEIGHT(_v) ((_v) << 16)
-#define IDMA_SRC_HEIGHT_MASK (0x3FFF << 16)
-#define IDMA_SRC_WIDTH(_v) ((_v) << 0)
-#define IDMA_SRC_WIDTH_MASK (0xFFFF << 0)
+#define IDMA_QOS_LUT_LOW 0x0130
+#define IDMA_QOS_LUT_HIGH 0x0134
+#define IDMA_DYNAMIC_GATING_EN 0x0140
+#define IDMA_SRAM_CG_EN BIT(31)
+#define IDMA_DG_EN_ALL (0x7fffffff << 0)
 
-#define IDMA_SRC_OFFSET 0x0014
+/*
+ * zuma/zumapro (cal_9865) split the source geometry across four standalone
+ * registers - SRC_WIDTH/SRC_HEIGHT are 24-bit width-only/height-only, offset
+ * and img-size are separate. The older gs101-era layout packed height|width
+ * into one register; using that map here left SRC_HEIGHT and IMG_SIZE at 0, so
+ * the IDMA fetched an initial burst then never delivered a full frame (no
+ * error, no frame-done - the DECON blender starved mid-frame).
+ */
+#define IDMA_SRC_WIDTH 0x0010
+#define IDMA_SRC_WIDTH_F(_v) ((_v) << 0)
+#define IDMA_SRC_WIDTH_MASK (0xFFFFFF << 0)
+
+#define IDMA_SRC_HEIGHT 0x0014
+#define IDMA_SRC_HEIGHT_F(_v) ((_v) << 0)
+#define IDMA_SRC_HEIGHT_MASK (0xFFFFFF << 0)
+
+#define IDMA_SRC_OFFSET 0x0018
 #define IDMA_SRC_OFFSET_Y(_v) ((_v) << 16)
-#define IDMA_SRC_OFFSET_Y_MASK (0x1FFF << 16)
+#define IDMA_SRC_OFFSET_Y_MASK (0xFFFF << 16)
 #define IDMA_SRC_OFFSET_X(_v) ((_v) << 0)
-#define IDMA_SRC_OFFSET_X_MASK (0x1FFF << 0)
+#define IDMA_SRC_OFFSET_X_MASK (0xFFFF << 0)
 
-#define IDMA_IMG_SIZE 0x0018
+#define IDMA_IMG_SIZE 0x001C
 #define IDMA_IMG_HEIGHT(_v) ((_v) << 16)
-#define IDMA_IMG_HEIGHT_MASK (0x1FFF << 16)
+#define IDMA_IMG_HEIGHT_MASK (0xFFFF << 16)
 #define IDMA_IMG_WIDTH(_v) ((_v) << 0)
-#define IDMA_IMG_WIDTH_MASK (0x1FFF << 0)
+#define IDMA_IMG_WIDTH_MASK (0xFFFF << 0)
 
 #define IDMA_BLOCK_OFFSET 0x0024
 #define IDMA_BLK_OFFSET_Y(_v) ((_v) << 16)
@@ -207,11 +235,34 @@ static u32 idma_reg_get_irq_and_clear(struct exynos_dpu_dma_context *ctx,
 	return val;
 }
 
+/* Per-channel IDMA bring-up, ported from the vendor dpp_reg_init() (cal_9865). */
 static void dma_reg_init(struct exynos_dpu_dma_context *ctx, u32 id,
 			 const unsigned long attr)
 {
+	/* unmask + enable IRQs */
 	dma_write_mask(ctx, id, IDMA_IRQ, 0, IDMA_ALL_IRQ_MASK);
 	dma_write_mask(ctx, id, IDMA_IRQ, ~0, IDMA_IRQ_ENABLE);
+
+	/* QoS look-up tables */
+	dma_write(ctx, id, IDMA_QOS_LUT_LOW, 0x44444444);
+	dma_write(ctx, id, IDMA_QOS_LUT_HIGH, 0x44444444);
+
+	/* leave SRAM + dynamic clock gating off for bring-up */
+	dma_write_mask(ctx, id, IDMA_DYNAMIC_GATING_EN, 0,
+		       IDMA_SRAM_CG_EN | IDMA_DG_EN_ALL);
+
+	/* opaque frame alpha + internal-cache max */
+	dma_write_mask(ctx, id, IDMA_IN_CON, IDMA_ALPHA(0xff), IDMA_ALPHA_MASK);
+	dma_write_mask(ctx, id, IDMA_IN_CON, IDMA_IC_MAX(0x40),
+		       IDMA_IC_MAX_MASK);
+
+	/*
+	 * Assigned max-outstanding. This is mandatory: with MO left at its
+	 * reset value of 0 the IDMA issues no AXI read bursts, so the DECON
+	 * blender never receives pixels and stalls mid-frame.
+	 */
+	dma_write_mask(ctx, id, IDMA_ENABLE, IDMA_ASSIGNED_MO(0x40),
+		       IDMA_ASSIGNED_MO_MASK);
 }
 
 static irqreturn_t dma_irq_handler(int irq, void *priv)
@@ -233,21 +284,24 @@ int dpu_dma_update(struct exynos_dpu_dma_context *ctx, unsigned int channel,
 {
 	struct drm_framebuffer *fb = state->base.fb;
 	unsigned int idma = channel_map[channel];
+	dma_addr_t addr = exynos_drm_fb_dma_addr(fb, 0);
 
 	dma_reg_init(ctx, idma, 0);
-	dma_write(ctx, idma, IDMA_IN_BASE_ADDR_Y,
-		  exynos_drm_fb_dma_addr(fb, 0));
+	dma_write(ctx, idma, IDMA_IN_BASE_ADDR_Y, addr);
+	/* full source buffer: width from the pitch, height from the fb */
+	dma_write(ctx, idma, IDMA_SRC_WIDTH,
+		  IDMA_SRC_WIDTH_F(fb->pitches[0] / fb->format->cpp[0]));
+	dma_write(ctx, idma, IDMA_SRC_HEIGHT,
+		  IDMA_SRC_HEIGHT_F(fb->height));
 	dma_write(ctx, idma, IDMA_SRC_OFFSET,
 		  IDMA_SRC_OFFSET_Y(state->src.y) |
 			  IDMA_SRC_OFFSET_X(state->src.x));
-	dma_write(ctx, idma, IDMA_SRC_SIZE,
-		  IDMA_SRC_HEIGHT(fb->height) |
-			  IDMA_SRC_WIDTH(fb->pitches[0] / fb->format->cpp[0]));
+	/* fetched region delivered to the blender */
 	dma_write(ctx, idma, IDMA_IMG_SIZE,
 		  IDMA_IMG_HEIGHT(state->src.h) | IDMA_IMG_WIDTH(state->src.w));
 
 	dma_write_mask(ctx, idma, IDMA_IN_CON,
-		       IDMA_IMG_FORMAT(IDMA_IMG_FORMAT_ARGB8888),
+		       IDMA_IMG_FORMAT(IDMA_IMG_FORMAT_BGRX8888),
 		       IDMA_IMG_FORMAT_MASK);
 
 	return 0;
@@ -257,6 +311,10 @@ static int dma_bind(struct device *dev, struct device *master, void *data)
 {
 	struct exynos_dpu_dma_context *ctx = dev_get_drvdata(dev);
 	struct drm_device *drm_dev = data;
+	struct exynos_drm_private *priv = drm_dev->dev_private;
+
+	/* the CRTC reaches the DMA context through priv->dma_dev */
+	priv->dma_dev = dev;
 
 	return exynos_drm_register_dma(drm_dev, dev, &ctx->dma_priv);
 };
