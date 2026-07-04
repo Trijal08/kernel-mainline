@@ -1,0 +1,117 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/display/samsung/google,zuma-dsim.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Google Zuma/Zumapro SoC MIPI DSIM
+
+maintainers:
+  - Trijal Saha <trijalsaha2012@gmail.com>
+
+description:
+  The MIPI-DSIM host on the Google Tensor "zuma"/"zumapro" SoCs. It is a new IP
+  (DSIM_LINK + DCPHY) distinct from the earlier samsung-dsim. This binding
+  describes the boot-handoff use, where the bootloader trains the DCPHY link
+  and the driver adopts it to drive a command-mode DSC panel.
+
+allOf:
+  - $ref: /schemas/display/dsi-controller.yaml#
+
+properties:
+  compatible:
+    const: google,zuma-dsim
+
+  reg:
+    items:
+      - description: DSIM link registers
+      - description: DCPHY registers
+      - description: DCPHY extra registers
+
+  reg-names:
+    items:
+      - const: dsi
+      - const: dphy
+      - const: dphy-extra
+
+  interrupts:
+    maxItems: 1
+
+  clocks:
+    maxItems: 1
+
+  clock-names:
+    items:
+      - const: bus_clk
+
+  power-domains:
+    maxItems: 1
+
+  te-gpios:
+    maxItems: 1
+    description:
+      Panel tearing-effect GPIO routed into the DECON hardware trigger for
+      command-mode operation.
+
+  ports:
+    $ref: /schemas/graph.yaml#/properties/ports
+    properties:
+      port@0:
+        $ref: /schemas/graph.yaml#/properties/port
+        description: Input from the DECON.
+      port@1:
+        $ref: /schemas/graph.yaml#/properties/port
+        description: Output to the panel.
+
+    required:
+      - port@0
+
+required:
+  - compatible
+  - reg
+  - reg-names
+  - interrupts
+  - clocks
+  - clock-names
+  - power-domains
+  - ports
+
+unevaluatedProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/interrupt-controller/arm-gic.h>
+
+    dsi@19440000 {
+        compatible = "google,zuma-dsim";
+        reg = <0x19440000 0x300>,
+              <0x19450000 0x300>,
+              <0x19460000 0x300>;
+        reg-names = "dsi", "dphy", "dphy-extra";
+        interrupts = <GIC_SPI 252 IRQ_TYPE_LEVEL_HIGH 0>;
+        clocks = <&cmu_dpu 5>;
+        clock-names = "bus_clk";
+        power-domains = <&pd_dpuf0>;
+        te-gpios = <&gpp0 3 0>;
+        #address-cells = <1>;
+        #size-cells = <0>;
+
+        ports {
+            #address-cells = <1>;
+            #size-cells = <0>;
+
+            port@0 {
+                reg = <0>;
+                dsim0_in: endpoint {
+                    remote-endpoint = <&decon0_out>;
+                };
+            };
+
+            port@1 {
+                reg = <1>;
+                dsim0_out: endpoint {
+                    remote-endpoint = <&panel_in>;
+                };
+            };
+        };
+    };

@@ -1,0 +1,114 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/display/samsung/google,zuma-decon.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Google Zuma/Zumapro SoC Display and Enhancement Controller (DECON)
+
+maintainers:
+  - Trijal Saha <trijalsaha2012@gmail.com>
+
+description:
+  DECON (Display and Enhancement Controller) is the display controller on the
+  Google Tensor "zuma"/"zumapro" (G3/G4) SoCs. It reads a framebuffer, blends
+  the enabled windows, optionally DSC-compresses the result and drives it to a
+  MIPI-DSI (DSIM) output. It is programmed through the same Exynos9 core as
+  Exynos Auto v9 but has a re-laid-out register map (four SFR blocks).
+
+properties:
+  compatible:
+    const: google,zuma-decon
+
+  reg:
+    items:
+      - description: DECON_MAIN register block
+      - description: DECON_WIN (window control) register block
+      - description: DECON_SUB (DSC / DSIMIF) register block
+      - description: DECON_WINCON (window configuration) register block
+
+  reg-names:
+    items:
+      - const: main
+      - const: win
+      - const: sub
+      - const: wincon
+
+  interrupts:
+    minItems: 1
+    items:
+      - description: frame done
+      - description: frame start
+      - description: resource-conflict / timeout (extra)
+
+  interrupt-names:
+    minItems: 1
+    items:
+      - const: frame_done
+      - const: frame_start
+      - const: extra
+
+  clocks:
+    maxItems: 1
+
+  clock-names:
+    items:
+      - const: aclk
+
+  power-domains:
+    maxItems: 1
+
+  ports:
+    $ref: /schemas/graph.yaml#/properties/ports
+    properties:
+      port@0:
+        $ref: /schemas/graph.yaml#/properties/port
+        description: Output to the DSIM (MIPI-DSI) encoder.
+
+    required:
+      - port@0
+
+required:
+  - compatible
+  - reg
+  - reg-names
+  - interrupts
+  - interrupt-names
+  - clocks
+  - clock-names
+  - power-domains
+  - ports
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/interrupt-controller/arm-gic.h>
+
+    decon0: decon@19470000 {
+        compatible = "google,zuma-decon";
+        reg = <0x19470000 0x6000>,
+              <0x19480000 0xe000>,
+              <0x19490000 0x10000>,
+              <0x194a0000 0xe000>;
+        reg-names = "main", "win", "sub", "wincon";
+        interrupts = <GIC_SPI 242 IRQ_TYPE_LEVEL_HIGH 0>,
+                     <GIC_SPI 243 IRQ_TYPE_LEVEL_HIGH 0>,
+                     <GIC_SPI 241 IRQ_TYPE_LEVEL_HIGH 0>;
+        interrupt-names = "frame_done", "frame_start", "extra";
+        clocks = <&cmu_dpu 12>;
+        clock-names = "aclk";
+        power-domains = <&pd_dpuf0>;
+
+        ports {
+            #address-cells = <1>;
+            #size-cells = <0>;
+
+            port@0 {
+                reg = <0>;
+                decon0_out: endpoint {
+                    remote-endpoint = <&dsim0_in>;
+                };
+            };
+        };
+    };
