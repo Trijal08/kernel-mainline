@@ -72,6 +72,8 @@
 	panel0: panel@0 {
 		compatible = "google,komodo-panel";
 		reg = <0>;
+		/* DDIC reset for cold power-on (unused on boot handover) */
+		reset-gpios = <&gpp0 0 GPIO_ACTIVE_HIGH>;
 
 		port {
 			panel0_in: endpoint {
