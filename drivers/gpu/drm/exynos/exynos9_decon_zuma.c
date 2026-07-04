@@ -42,7 +42,7 @@
  * mainline-clean path is for the panel/connector to advertise its
  * drm_dsc_config and the DECON to read it; that is a follow-up.
  */
-static const struct drm_dsc_config komodo_dsc_cfg = {
+static const struct drm_dsc_config komodo_wqhd_dsc = {
 	.line_buf_depth = 9,
 	.bits_per_component = 8,
 	.convert_rgb = true,
@@ -84,6 +84,53 @@ static const struct drm_dsc_config komodo_dsc_cfg = {
 	.final_offset = 4336,
 	.vbr_enable = false,
 	.slice_chunk_size = 672,
+	.dsc_version_minor = 2,
+	.dsc_version_major = 1,
+};
+
+/* komodo FHD (1008x2244) DSC; see the panel driver for the shared derivation. */
+static const struct drm_dsc_config komodo_fhd_dsc = {
+	.line_buf_depth = 9,
+	.bits_per_component = 8,
+	.convert_rgb = true,
+	.slice_width = 504,
+	.slice_height = 34,
+	.slice_count = 2,
+	.simple_422 = false,
+	.pic_width = 1008,
+	.pic_height = 2244,
+	.rc_tgt_offset_high = 3,
+	.rc_tgt_offset_low = 3,
+	.bits_per_pixel = 128,
+	.rc_edge_factor = 6,
+	.rc_quant_incr_limit1 = 11,
+	.rc_quant_incr_limit0 = 11,
+	.initial_xmit_delay = 512,
+	.initial_dec_delay = 508,
+	.block_pred_enable = true,
+	.first_line_bpg_offset = 12,
+	.initial_offset = 6144,
+	.rc_buf_thresh = {
+		14, 28, 42, 56, 70, 84, 98, 105,
+		112, 119, 121, 123, 125, 126
+	},
+	.rc_range_params = {
+		{ 0, 4, 2 }, { 0, 4, 0 }, { 1, 5, 0 }, { 1, 6, 62 },
+		{ 3, 7, 60 }, { 3, 7, 58 }, { 3, 7, 56 }, { 3, 8, 56 },
+		{ 3, 9, 56 }, { 3, 10, 54 }, { 5, 11, 54 }, { 5, 12, 52 },
+		{ 5, 13, 52 }, { 7, 13, 52 }, { 13, 15, 52 }
+	},
+	.rc_model_size = 8192,
+	.flatness_min_qp = 3,
+	.flatness_max_qp = 12,
+	.initial_scale_value = 32,
+	.scale_decrement_interval = 7,
+	.scale_increment_interval = 810,
+	.nfl_bpg_offset = 745,
+	.slice_bpg_offset = 821,
+	.final_offset = 4336,
+	.vbr_enable = false,
+	.slice_chunk_size = 504,
 	.dsc_version_minor = 2,
 	.dsc_version_major = 1,
 };
@@ -665,10 +712,18 @@ static int zuma_decon_init(struct decon_context *ctx,
 static const struct drm_dsc_config *
 zuma_decon_dsc(const struct decon_config *cfg)
 {
-	if ((cfg->out_type & DECON_OUT_DSI) &&
-	    cfg->image_width == komodo_dsc_cfg.pic_width &&
-	    cfg->image_height == komodo_dsc_cfg.pic_height)
-		return &komodo_dsc_cfg;
+	static const struct drm_dsc_config *const dscs[] = {
+		&komodo_wqhd_dsc, &komodo_fhd_dsc,
+	};
+	unsigned int i;
+
+	if (!(cfg->out_type & DECON_OUT_DSI))
+		return NULL;
+
+	for (i = 0; i < ARRAY_SIZE(dscs); i++)
+		if (cfg->image_width == dscs[i]->pic_width &&
+		    cfg->image_height == dscs[i]->pic_height)
+			return dscs[i];
 
 	return NULL;
 }
