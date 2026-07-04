@@ -15,22 +15,22 @@
 	compatible = "google,tokay", "google,zumapro-tokay", "google,zumapro";
 };
 
-&cont_splash_mem {
-	// reg = <0x0 0xfac00000 (1440 * 3120 * 4)>;
-	reg = <0x0 0xfac00000 (1080 * 2424 * 4)>;
-	status = "okay";
-};
+// &cont_splash_mem {
+// 	// reg = <0x0 0xfac00000 (1440 * 3120 * 4)>;
+// 	reg = <0x0 0xfac00000 (1080 * 2424 * 4)>;
+// 	status = "okay";
+// };
 
-&framebuffer0 {
-	// width = <1440>;
-	// height = <3120>;
-	// stride = <(1440 * 4)>;
-	width = <1080>;
-	height = <2424>;
-	stride = <(1080 * 4)>;
-	format = "a8r8g8b8";
-	status = "okay";
-};
+// &framebuffer0 {
+// 	// width = <1440>;
+// 	// height = <3120>;
+// 	// stride = <(1440 * 4)>;
+// 	width = <1080>;
+// 	height = <2424>;
+// 	stride = <(1080 * 4)>;
+// 	format = "a8r8g8b8";
+// 	status = "okay";
+// };
 
 &spitouch {
 	st,dchip_id = /bits/ 8 <0x36 0x48>;
