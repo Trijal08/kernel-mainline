@@ -6,21 +6,14 @@
  *
  * The zuma DSIM is a newer IP generation than the mainline samsung-dsim
  * bridge (DSIM_LINK + integrated DCPHY, VERSION 0x02090100), so it needs its
- * own encoder. The bootloader brings up the DCPHY PLL, trains the lanes and
- * powers the panel (the splash streams over the link), so this driver leaves
- * the PHY/PLL alone - like the vendor's DSIM_STATE_HANDOVER path, which skips
- * dsim_reg_init when the PLL is stable.
- *
- * It does, however, run the command-mode link config + start (the vendor
- * dsim_reg_set_config()/dsim_reg_start() subset) on enable, because the
- * bootloader configures the DSIM for its own splash write path, not the
- * DECON-driven video-through-command DSC path - without this the DSIM emits
- * abnormal command transfers (DSIM_INTSRC.ABNORMAL_CMD_ST) that the panel
- * drops, leaving the bootloader image on screen.
+ * own encoder. On every enable it brings the whole link up from scratch
+ * (vendor dsim_reg_init): DCPHY PLL, lane training and the command-mode DSC
+ * link config - it owns the link and does not depend on the bootloader having
+ * configured it, so it works from a cold boot and across suspend/resume.
  *
  * All panel-specific parameters are taken from the DRM mode (resolution,
- * refresh rate) and the attached MIPI-DSI device (lane count, HS bit rate),
- * so the encoder itself carries no panel constants.
+ * refresh rate) and the attached MIPI-DSI device (lane count, HS bit rate,
+ * DSC config), so the encoder itself carries no panel constants.
  */
 
 #include <linux/clk.h>
@@ -68,7 +61,6 @@ struct zuma_dsim {
 	unsigned int vactive;		/* active height (from mode_set) */
 	unsigned int vrefresh;		/* active refresh rate (from mode_set) */
 	const struct drm_dsc_config *dsc;	/* DSC config (from the panel) */
-	bool needs_cold_init;		/* link was torn down (suspend): re-init */
 };
 
 static inline struct zuma_dsim *host_to_dsim(struct mipi_dsi_host *h)
@@ -657,11 +649,6 @@ static int zuma_dsim_cold_init(struct zuma_dsim *dsim)
 	return 0;
 }
 
-static bool zuma_dsim_pll_is_stable(struct zuma_dsim *dsim)
-{
-	return readl(dsim->phy_regs + DSIM_PHY_PLL_STAT0) &
-	       DSIM_PHY_PLL_STAT0_PLL_LOCK;
-}
 
 static void zuma_dsim_configure(struct zuma_dsim *dsim)
 {
@@ -672,17 +659,8 @@ static void zuma_dsim_configure(struct zuma_dsim *dsim)
 	if (!dsim->regs || !hs_mbps || !dsim->hactive)
 		return;
 
-	/*
-	 * Take the handover path only on the initial boot, where the bootloader
-	 * left the DCPHY PLL running: adopt the live link and just re-arm the
-	 * command-mode transfer below. After a suspend/disable (needs_cold_init),
-	 * or a cold boot with no splash (PLL down), bring the whole
-	 * DCPHY/PLL/lanes + link config up from scratch - matching the panel,
-	 * which does a full cold power-on in the same cases.
-	 */
-	if (dsim->needs_cold_init || !zuma_dsim_pll_is_stable(dsim))
-		zuma_dsim_cold_init(dsim);
-	dsim->needs_cold_init = false;
+	/* Own the link: always bring the DCPHY/PLL/lanes up from scratch. */
+	zuma_dsim_cold_init(dsim);
 
 	/*
 	 * Command-mode transfer TE timing (vendor dsim_reg_set_config subset).
@@ -738,18 +716,6 @@ static void zuma_dsim_bridge_pre_enable(struct drm_bridge *bridge,
 	zuma_dsim_configure(bridge_to_dsim(bridge));
 }
 
-static void zuma_dsim_bridge_post_disable(struct drm_bridge *bridge,
-					  struct drm_atomic_commit *state)
-{
-	/*
-	 * The link is being torn down (e.g. system suspend). Force the next
-	 * enable to do a full cold DCPHY bring-up rather than adopting whatever
-	 * stale PLL state survives, keeping the DSIM in step with the panel's
-	 * cold power-on.
-	 */
-	bridge_to_dsim(bridge)->needs_cold_init = true;
-}
-
 static void zuma_dsim_bridge_mode_set(struct drm_bridge *bridge,
 				      const struct drm_display_mode *mode,
 				      const struct drm_display_mode *adjusted)
@@ -765,7 +731,6 @@ static const struct drm_bridge_funcs zuma_dsim_bridge_funcs = {
 	.attach = zuma_dsim_bridge_attach,
 	.mode_set = zuma_dsim_bridge_mode_set,
 	.atomic_pre_enable = zuma_dsim_bridge_pre_enable,
-	.atomic_post_disable = zuma_dsim_bridge_post_disable,
 	.atomic_duplicate_state = drm_atomic_helper_bridge_duplicate_state,
 	.atomic_destroy_state = drm_atomic_helper_bridge_destroy_state,
 	.atomic_reset = drm_atomic_helper_bridge_reset,
