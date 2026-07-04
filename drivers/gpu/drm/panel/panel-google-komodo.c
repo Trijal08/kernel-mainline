@@ -19,8 +19,12 @@
  */
 
 #include <linux/backlight.h>
+#include <linux/delay.h>
+#include <linux/gpio/consumer.h>
 #include <linux/module.h>
 #include <linux/of.h>
+
+#include <video/mipi_display.h>
 
 #include <drm/display/drm_dsc.h>
 #include <drm/display/drm_dsc_helper.h>
@@ -40,6 +44,13 @@ struct komodo_panel {
 	 * mode_set callback.
 	 */
 	struct drm_connector *connector;
+	struct gpio_desc *reset_gpio;
+	/*
+	 * false at boot (the bootloader lit the panel: adopt it - handover).
+	 * Set true on disable() so the next enable does a full cold power-on
+	 * (reset + sleep-out + init cmdset), e.g. on resume.
+	 */
+	bool needs_hw_init;
 };
 
 /*
@@ -139,6 +150,38 @@ static int komodo_panel_noop(struct drm_panel *panel)
 	return 0;
 }
 
+/* vendor gs_panel_reset_helper timing: H 5ms, L 5ms, H 10ms */
+static void komodo_reset(struct komodo_panel *ctx)
+{
+	gpiod_set_value_cansleep(ctx->reset_gpio, 1);
+	usleep_range(5000, 5100);
+	gpiod_set_value_cansleep(ctx->reset_gpio, 0);
+	usleep_range(5000, 5100);
+	gpiod_set_value_cansleep(ctx->reset_gpio, 1);
+	usleep_range(10000, 10100);
+}
+
+/* Hardware-reset the panel on a cold power-on; handover keeps it live. */
+static int komodo_panel_prepare(struct drm_panel *panel)
+{
+	struct komodo_panel *ctx = to_komodo_panel(panel);
+
+	if (ctx->needs_hw_init && ctx->reset_gpio)
+		komodo_reset(ctx);
+	return 0;
+}
+
+/* Sleep the panel down; the next enable must fully re-initialise it. */
+static int komodo_panel_disable(struct drm_panel *panel)
+{
+	struct komodo_panel *ctx = to_komodo_panel(panel);
+
+	mipi_dsi_dcs_set_display_off(ctx->dsi);
+	mipi_dsi_dcs_enter_sleep_mode(ctx->dsi);
+	ctx->needs_hw_init = true;
+	return 0;
+}
+
 /*
  * The bootloader powered the panel and ran its full init, but the DECON now
  * drives a freshly-programmed dual-DSC command stream. (Re)program the panel's
@@ -177,6 +220,32 @@ static int komodo_panel_enable(struct drm_panel *panel)
 	ret = mipi_dsi_picture_parameter_set(dsi, &pps);
 	if (ret < 0)
 		dev_err(&dsi->dev, "failed to send DSC PPS: %d\n", ret);
+
+	/*
+	 * Cold power-on only (needs_hw_init): sleep-out + the vendor km4_init
+	 * cmdset (TE on, full-screen CASET/PASET, FFC for 1368 Mbps, OPEC, PMIC
+	 * fast-discharge off). On handover the bootloader already did this.
+	 */
+	if (ctx->needs_hw_init) {
+		km4_feat(dsi, MIPI_DCS_EXIT_SLEEP_MODE);
+		msleep(120);
+		km4_feat(dsi, MIPI_DCS_SET_TEAR_ON);
+		km4_feat(dsi, 0x2A, 0x00, 0x00, 0x05, 0x3F);	/* CASET 0-1343 */
+		km4_feat(dsi, 0x2B, 0x00, 0x00, 0x0B, 0xAF);	/* PASET 0-2991 */
+		km4_feat(dsi, 0xF0, 0x5A, 0x5A);		/* unlock */
+		km4_feat(dsi, 0xB0, 0x00, 0x36, 0xC5);		/* FFC 1368Mbps */
+		km4_feat(dsi, 0xC5, 0x10, 0x10, 0x50, 0x05, 0x4D, 0x31, 0x40,
+			 0x00, 0x40, 0x00, 0x40, 0x00, 0x4D, 0x31, 0x40, 0x00,
+			 0x40, 0x00, 0x40, 0x00, 0x4D, 0x31, 0x40, 0x00, 0x40,
+			 0x00, 0x40, 0x00, 0x4D, 0x31, 0x40, 0x00, 0x40, 0x00,
+			 0x40, 0x00);
+		km4_feat(dsi, 0xB0, 0x00, 0x1D, 0x63);		/* OPEC enable */
+		km4_feat(dsi, 0x63, 0x02, 0x18);
+		km4_feat(dsi, 0xB0, 0x00, 0x13, 0xB1);		/* PMIC FD off */
+		km4_feat(dsi, 0xB1, 0x80);
+		km4_feat(dsi, 0xF7, 0x0F);			/* freq update */
+		km4_feat(dsi, 0xF0, 0xA5, 0xA5);		/* lock */
+	}
 
 	/* Resolution / bit-depth config block (WQHD, 8-bit) */
 	km4_feat(dsi, 0xF0, 0x5A, 0x5A);				/* unlock */
@@ -234,6 +303,16 @@ static int komodo_panel_enable(struct drm_panel *panel)
 	/* WRCTRLD: enable brightness control (vendor km4_write_display_mode) */
 	km4_feat(dsi, 0x53, 0x20);
 
+	/*
+	 * On a cold power-on the bootloader did not send Display On, so we do -
+	 * and clear the flag now that the panel is fully re-initialised. On
+	 * handover Display On is already active and is left untouched.
+	 */
+	if (ctx->needs_hw_init) {
+		mipi_dsi_dcs_set_display_on(dsi);
+		ctx->needs_hw_init = false;
+	}
+
 	return 0;
 }
 
@@ -280,10 +359,10 @@ static int komodo_cur_vrefresh(struct komodo_panel *ctx)
 }
 
 static const struct drm_panel_funcs komodo_panel_funcs = {
-	.prepare = komodo_panel_noop,
+	.prepare = komodo_panel_prepare,
 	.unprepare = komodo_panel_noop,
 	.enable = komodo_panel_enable,
-	.disable = komodo_panel_noop,
+	.disable = komodo_panel_disable,
 	.get_modes = komodo_panel_get_modes,
 };
 
@@ -345,6 +424,16 @@ static int komodo_panel_probe(struct mipi_dsi_device *dsi)
 
 	ctx->dsi = dsi;
 	mipi_dsi_set_drvdata(dsi, ctx);
+
+	/*
+	 * Reset line for cold power-on. Requested OUT_HIGH (the panel's run
+	 * state) so a boot-handover panel keeps streaming; it is only pulsed on
+	 * a cold enable. Optional: a handover-only board may omit it.
+	 */
+	ctx->reset_gpio = devm_gpiod_get_optional(dev, "reset", GPIOD_OUT_HIGH);
+	if (IS_ERR(ctx->reset_gpio))
+		return dev_err_probe(dev, PTR_ERR(ctx->reset_gpio),
+				     "failed to get reset gpio\n");
 
 	dsi->lanes = 4;
 	dsi->format = MIPI_DSI_FMT_RGB888;
