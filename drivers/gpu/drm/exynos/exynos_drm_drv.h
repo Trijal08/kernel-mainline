@@ -255,6 +255,7 @@ extern struct platform_driver exynos5433_decon_driver;
 extern struct platform_driver decon_driver;
 extern struct platform_driver dp_driver;
 extern struct platform_driver dsi_driver;
+extern struct platform_driver zuma_dsim_driver;
 extern struct platform_driver mixer_driver;
 extern struct platform_driver hdmi_driver;
 extern struct platform_driver vidi_driver;
