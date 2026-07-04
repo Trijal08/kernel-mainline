@@ -27,9 +27,11 @@
 #include <linux/component.h>
 #include <linux/io.h>
 #include <linux/iopoll.h>
+#include <linux/mfd/syscon.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
+#include <linux/regmap.h>
 
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_bridge.h>
@@ -51,7 +53,10 @@ struct zuma_dsim {
 	struct mipi_dsi_host dsi_host;
 	struct drm_bridge *panel_bridge;
 	struct clk *bus_clk;
-	void __iomem *regs;
+	void __iomem *regs;		/* "dsi" link registers */
+	void __iomem *phy_regs;		/* "dphy" DCPHY PLL/lane/timing */
+	void __iomem *phy_extra_regs;	/* "dphy-extra" DCPHY bias */
+	struct regmap *sysreg;		/* DPU SYSREG (DPHY reset control) */
 
 	unsigned int lanes;
 	unsigned int format;
@@ -332,6 +337,27 @@ static int zuma_dsim_probe(struct platform_device *pdev)
 	dsim->regs = devm_platform_ioremap_resource_byname(pdev, "dsi");
 	if (IS_ERR(dsim->regs))
 		return PTR_ERR(dsim->regs);
+
+	/*
+	 * The integrated DCPHY (PLL/lane/timing + bias) and the DPU SYSREG DPHY
+	 * reset control are needed for a cold link bring-up. They are unused on
+	 * the boot-handover path (bootloader owns the DCPHY), so absence is not
+	 * fatal here.
+	 */
+	dsim->phy_regs = devm_platform_ioremap_resource_byname(pdev, "dphy");
+	if (IS_ERR(dsim->phy_regs))
+		return PTR_ERR(dsim->phy_regs);
+
+	dsim->phy_extra_regs =
+		devm_platform_ioremap_resource_byname(pdev, "dphy-extra");
+	if (IS_ERR(dsim->phy_extra_regs))
+		return PTR_ERR(dsim->phy_extra_regs);
+
+	dsim->sysreg = syscon_regmap_lookup_by_phandle(dev->of_node,
+						       "samsung,disp-sysreg");
+	if (IS_ERR(dsim->sysreg))
+		return dev_err_probe(dev, PTR_ERR(dsim->sysreg),
+				     "failed to get disp-sysreg\n");
 
 	/* keep the DSIM block clocked+powered; the bootloader link stays up */
 	dsim->bus_clk = devm_clk_get_optional_enabled(dev, "bus_clk");
