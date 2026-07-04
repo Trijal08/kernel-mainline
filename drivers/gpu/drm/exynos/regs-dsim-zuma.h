@@ -4,9 +4,9 @@
  * Copyright (c) Google LLC
  *
  * Register map for the Google Tensor "zuma"/"zumapro" MIPI-DSIM link,
- * derived from the vendor cal_9865 DSIM register definitions. Only the
- * command-mode DSC "set_config"/"start" subset used by the boot-handoff
- * encoder is described here; the DCPHY/PLL/lanes are left to the bootloader.
+ * derived from the vendor cal_9865 DSIM register definitions. Covers the DSIM
+ * link registers, the integrated DCPHY (PLL / clock lane / data lanes / bias)
+ * and the DPU SYSREG bit needed for a full cold-init DCPHY bring-up.
  */
 
 #ifndef _REGS_DSIM_ZUMA_H_
@@ -31,6 +31,8 @@
 #define DSIM_CLK_CTRL_ESCCLK_EN			(1 << 16)
 #define DSIM_CLK_CTRL_LANE_ESCCLK_EN(x)		((x) << 8)
 #define DSIM_CLK_CTRL_LANE_ESCCLK_EN_MASK	(0x1f << 8)
+#define DSIM_CLK_CTRL_ESC_PRESCALER(x)		((x) << 0)
+#define DSIM_CLK_CTRL_ESC_PRESCALER_MASK	(0xff << 0)
 
 /* clock lane + N data lanes; komodo uses 4 data lanes -> 0x1f */
 #define DSIM_LANE_CLOCK				(1 << 0)
@@ -126,8 +128,100 @@
 #define DSIM_CMD_TE_CTRL1_TIME_TE_PROTECT_ON(x)	((x) << 16)
 #define DSIM_CMD_TE_CTRL1_TIME_TE_TOUT(x)	((x) << 0)
 
+#define DSIM_INTSRC_PLL_STABLE			(1 << 31)
+
+#define DSIM_SLICE23			0x007c
+#define DSIM_SLICE23_SIZE_OF_SLICE3(x)		((x) << 16)
+#define DSIM_SLICE23_SIZE_OF_SLICE2(x)		((x) << 0)
+
+#define DSIM_CMD_CONFIG_PKT_GO_RDY		(1 << 17)
+#define DSIM_CMD_CONFIG_MULTI_CMD_PKT_EN	(1 << 8)
+
 #define DSIM_OPTION_SUITE		0x010c
 #define DSIM_OPTION_SUITE_OPT_TE_ON_CMD_ALLOW	(1 << 10)
+
+/* ---- integrated DCPHY: PLL / clock lane / data lanes (reg-names "dphy") ---- */
+#define DSIM_PHY_PLL_CON(i)		(0x0000 + 4 * (i))
+#define DSIM_PHY_PLL_CON0		0x0000
+#define DSIM_PHY_PLL_CON0_PLL_EN		(1 << 12)
+#define DSIM_PHY_PLL_CON0_PMS_S(x)		((x) << 8)
+#define DSIM_PHY_PLL_CON0_PMS_S_MASK		(0x7 << 8)
+#define DSIM_PHY_PLL_CON0_PMS_P(x)		((x) << 0)
+#define DSIM_PHY_PLL_CON0_PMS_P_MASK		(0x3f << 0)
+#define DSIM_PHY_PLL_CON1		0x0004
+#define DSIM_PHY_PLL_CON1_PMS_K(x)		((x) << 0)
+#define DSIM_PHY_PLL_CON1_PMS_K_MASK		(0xffff << 0)
+#define DSIM_PHY_PLL_CON2		0x0008
+#define DSIM_PHY_PLL_CON2_PMS_M(x)		((x) << 0)
+#define DSIM_PHY_PLL_CON2_PMS_M_MASK		(0x3ff << 0)
+#define DSIM_PHY_PLL_CON5		0x0014
+#define DSIM_PHY_PLL_CON5_DITHER_SEL_VCO	(1 << 2)
+#define DSIM_PHY_PLL_CON6		0x0018
+#define DSIM_PHY_PLL_CON6_WCLK_BUF_SFT_CNT(x)	((x) << 8)
+#define DSIM_PHY_PLL_CON6_WCLK_BUF_SFT_CNT_MASK	(0xf << 8)
+#define DSIM_PHY_PLL_CON7		0x001c
+#define DSIM_PHY_PLL_CON7_PLL_LOCK_CNT(x)	((x) << 0)
+#define DSIM_PHY_PLL_STAT0		0x0040
+#define DSIM_PHY_PLL_STAT0_PLL_LOCK		(1 << 0)
+
+/* clock lane (MC) */
+#define DSIM_PHY_MC_GNR_CON0		0x0200
+#define DSIM_PHY_MC_GNR_CON1		0x0204
+#define DSIM_PHY_MC_ANA_CON0		0x0208
+#define DSIM_PHY_MC_ANA_CON1		0x020c
+#define DSIM_PHY_MC_ANA_CON2		0x0210
+#define DSIM_PHY_MC_ANA_CON3		0x0214
+#define DSIM_PHY_MC_TIME_CON0		0x0230
+#define DSIM_PHY_MC_TIME_CON1		0x0234
+#define DSIM_PHY_MC_TIME_CON2		0x0238
+#define DSIM_PHY_MC_TIME_CON3		0x023c
+#define DSIM_PHY_MC_TIME_CON4		0x0240
+#define DSIM_PHY_MC_DESKEW_CON0		0x0250
+
+/* data lanes (MD), x = 0..3 */
+#define DSIM_PHY_MD_OFFSET(x)		(0x0300 + 0x100 * (x))
+#define DSIM_PHY_MD_GNR_CON0(x)		(DSIM_PHY_MD_OFFSET(x) + 0x00)
+#define DSIM_PHY_MD_GNR_CON1(x)		(DSIM_PHY_MD_OFFSET(x) + 0x04)
+#define DSIM_PHY_MD_ANA_CON0(x)		(DSIM_PHY_MD_OFFSET(x) + 0x08)
+#define DSIM_PHY_MD_ANA_CON1(x)		(DSIM_PHY_MD_OFFSET(x) + 0x0c)
+#define DSIM_PHY_MD_ANA_CON2(x)		(DSIM_PHY_MD_OFFSET(x) + 0x10)
+#define DSIM_PHY_MD_ANA_CON3(x)		(DSIM_PHY_MD_OFFSET(x) + 0x14)
+#define DSIM_PHY_MD_TIME_CON0(x)	(DSIM_PHY_MD_OFFSET(x) + 0x30)
+#define DSIM_PHY_MD_TIME_CON1(x)	(DSIM_PHY_MD_OFFSET(x) + 0x34)
+#define DSIM_PHY_MD_TIME_CON2(x)	(DSIM_PHY_MD_OFFSET(x) + 0x38)
+#define DSIM_PHY_MD_TIME_CON3(x)	(DSIM_PHY_MD_OFFSET(x) + 0x3c)
+#define DSIM_PHY_MD_TIME_CON4(x)	(DSIM_PHY_MD_OFFSET(x) + 0x40)
+
+/* lane general-control bits (shared MC/MD GNR_CON0) */
+#define DSIM_PHY_GNR_PHY_READY			(1 << 1)
+#define DSIM_PHY_GNR_PHY_ENABLE			(1 << 0)
+
+/* D-PHY HS timing field packing (shared MC/MD) */
+#define DSIM_PHY_TIME_CON0_HSTX_CLK_SEL		(1 << 12)
+#define DSIM_PHY_TIME_CON0_TLPX(x)		((x) << 4)
+#define DSIM_PHY_MC_TIME_CON1_TCLK_ZERO(x)	((x) << 8)
+#define DSIM_PHY_MC_TIME_CON1_TCLK_PREPARE(x)	((x) << 0)
+#define DSIM_PHY_MC_TIME_CON2_THS_EXIT(x)	((x) << 8)
+#define DSIM_PHY_MC_TIME_CON2_TCLK_TRAIL(x)	((x) << 0)
+#define DSIM_PHY_MC_TIME_CON3_TCLK_POST(x)	((x) << 0)
+#define DSIM_PHY_MD_TIME_CON1_THS_ZERO(x)	((x) << 8)
+#define DSIM_PHY_MD_TIME_CON1_THS_PREPARE(x)	((x) << 0)
+#define DSIM_PHY_MD_TIME_CON2_THS_EXIT(x)	((x) << 8)
+#define DSIM_PHY_MD_TIME_CON2_THS_TRAIL(x)	((x) << 0)
+#define DSIM_PHY_MD_TIME_CON3_TTA_GET(x)	((x) << 4)
+#define DSIM_PHY_TIME_CON4_ULPS_EXIT(x)		((x) << 0)
+
+/* ---- DCPHY bias (reg-names "dphy-extra", shared by DSIM0/1) ---- */
+#define DSIM_PHY_BIAS_CON(i)		(0x0000 + 4 * (i))
+
+/*
+ * DPU SYSREG DPHY reset control. The register lives in the DPU sysreg
+ * (google,gs101-dpu-sysreg) at absolute 0x19421008, i.e. offset 0x1008 from
+ * the sysreg base - accessed through a syscon phandle (samsung,disp-sysreg).
+ */
+#define DISP_DPU_MIPI_PHY_CON		0x1008
+#define DISP_DPU_SEL_RESET_DPHY(v)		(1 << (4 + (v)))
+#define DISP_DPU_M_RESETN_M0			(1 << 0)
 
 /* vendor constants (cal_9865 dsim_reg.c) */
 #define DSIM_PIXEL_FORMAT_RGB24		0x3e
