@@ -22,6 +22,8 @@ config DRM_EXYNOS9_DECON
 	bool "DECON on Exynos9"
 	default DRM_EXYNOS
 	select EXYNOS_IOMMU
+	select DRM_DISPLAY_HELPER
+	select DRM_DISPLAY_DSC_HELPER
 	help
 	  Choose this option if you want to use Exynos DECON for DRM.
 
