@@ -45,12 +45,6 @@ struct komodo_panel {
 	 */
 	struct drm_connector *connector;
 	struct gpio_desc *reset_gpio;
-	/*
-	 * false at boot (the bootloader lit the panel: adopt it - handover).
-	 * Set true on disable() so the next enable does a full cold power-on
-	 * (reset + sleep-out + init cmdset), e.g. on resume.
-	 */
-	bool needs_hw_init;
 };
 
 /*
@@ -161,24 +155,23 @@ static void komodo_reset(struct komodo_panel *ctx)
 	usleep_range(10000, 10100);
 }
 
-/* Hardware-reset the panel on a cold power-on; handover keeps it live. */
+/* Hardware-reset the panel before every power-on (the driver owns the DDIC). */
 static int komodo_panel_prepare(struct drm_panel *panel)
 {
 	struct komodo_panel *ctx = to_komodo_panel(panel);
 
-	if (ctx->needs_hw_init && ctx->reset_gpio)
+	if (ctx->reset_gpio)
 		komodo_reset(ctx);
 	return 0;
 }
 
-/* Sleep the panel down; the next enable must fully re-initialise it. */
+/* Sleep the panel down; the next enable fully re-initialises it. */
 static int komodo_panel_disable(struct drm_panel *panel)
 {
 	struct komodo_panel *ctx = to_komodo_panel(panel);
 
 	mipi_dsi_dcs_set_display_off(ctx->dsi);
 	mipi_dsi_dcs_enter_sleep_mode(ctx->dsi);
-	ctx->needs_hw_init = true;
 	return 0;
 }
 
@@ -204,14 +197,11 @@ static int komodo_panel_enable(struct drm_panel *panel)
 	int ret;
 
 	/*
-	 * Replicate the vendor km4_enable() handover path 1:1 (needs_reset =
-	 * false: the bootloader already lit the panel, so the reset / sleep-out /
-	 * init_cmdset are skipped). The panel is re-pointed at the driver's
-	 * freshly-programmed dual-DSC command stream and put into continuous
-	 * 60Hz HS operation (early-exit OFF, manual FI OFF) so it accepts the
-	 * DECON-driven write_memory instead of self-refreshing its splash GRAM.
-	 * Since the bootloader already sent Display On, we do NOT re-send it
-	 * (matching the vendor, whose 0x29 is gated on needs_reset || BLANK).
+	 * Full power-on (vendor km4_enable, needs_reset path): the panel was just
+	 * hardware-reset in prepare(), so program its DSC decoder, sleep it out,
+	 * run the init cmdset and put it into continuous HS operation (early-exit
+	 * OFF, manual FI OFF) so it accepts the DECON-driven write_memory, then
+	 * send Display On.
 	 */
 
 	/* DSC: enable + PPS (vendor: 0x9D 0x01 + gs_dcs_write_dsc_config()) */
@@ -222,30 +212,28 @@ static int komodo_panel_enable(struct drm_panel *panel)
 		dev_err(&dsi->dev, "failed to send DSC PPS: %d\n", ret);
 
 	/*
-	 * Cold power-on only (needs_hw_init): sleep-out + the vendor km4_init
-	 * cmdset (TE on, full-screen CASET/PASET, FFC for 1368 Mbps, OPEC, PMIC
-	 * fast-discharge off). On handover the bootloader already did this.
+	 * Sleep-out + the vendor km4_init cmdset (TE on, full-screen CASET/PASET,
+	 * FFC for 1368 Mbps, OPEC, PMIC fast-discharge off). The panel was just
+	 * hardware-reset in prepare(), so it starts from a known state.
 	 */
-	if (ctx->needs_hw_init) {
-		km4_feat(dsi, MIPI_DCS_EXIT_SLEEP_MODE);
-		msleep(120);
-		km4_feat(dsi, MIPI_DCS_SET_TEAR_ON);
-		km4_feat(dsi, 0x2A, 0x00, 0x00, 0x05, 0x3F);	/* CASET 0-1343 */
-		km4_feat(dsi, 0x2B, 0x00, 0x00, 0x0B, 0xAF);	/* PASET 0-2991 */
-		km4_feat(dsi, 0xF0, 0x5A, 0x5A);		/* unlock */
-		km4_feat(dsi, 0xB0, 0x00, 0x36, 0xC5);		/* FFC 1368Mbps */
-		km4_feat(dsi, 0xC5, 0x10, 0x10, 0x50, 0x05, 0x4D, 0x31, 0x40,
-			 0x00, 0x40, 0x00, 0x40, 0x00, 0x4D, 0x31, 0x40, 0x00,
-			 0x40, 0x00, 0x40, 0x00, 0x4D, 0x31, 0x40, 0x00, 0x40,
-			 0x00, 0x40, 0x00, 0x4D, 0x31, 0x40, 0x00, 0x40, 0x00,
-			 0x40, 0x00);
-		km4_feat(dsi, 0xB0, 0x00, 0x1D, 0x63);		/* OPEC enable */
-		km4_feat(dsi, 0x63, 0x02, 0x18);
-		km4_feat(dsi, 0xB0, 0x00, 0x13, 0xB1);		/* PMIC FD off */
-		km4_feat(dsi, 0xB1, 0x80);
-		km4_feat(dsi, 0xF7, 0x0F);			/* freq update */
-		km4_feat(dsi, 0xF0, 0xA5, 0xA5);		/* lock */
-	}
+	km4_feat(dsi, MIPI_DCS_EXIT_SLEEP_MODE);
+	msleep(120);
+	km4_feat(dsi, MIPI_DCS_SET_TEAR_ON);
+	km4_feat(dsi, 0x2A, 0x00, 0x00, 0x05, 0x3F);		/* CASET 0-1343 */
+	km4_feat(dsi, 0x2B, 0x00, 0x00, 0x0B, 0xAF);		/* PASET 0-2991 */
+	km4_feat(dsi, 0xF0, 0x5A, 0x5A);			/* unlock */
+	km4_feat(dsi, 0xB0, 0x00, 0x36, 0xC5);			/* FFC 1368Mbps */
+	km4_feat(dsi, 0xC5, 0x10, 0x10, 0x50, 0x05, 0x4D, 0x31, 0x40,
+		 0x00, 0x40, 0x00, 0x40, 0x00, 0x4D, 0x31, 0x40, 0x00,
+		 0x40, 0x00, 0x40, 0x00, 0x4D, 0x31, 0x40, 0x00, 0x40,
+		 0x00, 0x40, 0x00, 0x4D, 0x31, 0x40, 0x00, 0x40, 0x00,
+		 0x40, 0x00);
+	km4_feat(dsi, 0xB0, 0x00, 0x1D, 0x63);			/* OPEC enable */
+	km4_feat(dsi, 0x63, 0x02, 0x18);
+	km4_feat(dsi, 0xB0, 0x00, 0x13, 0xB1);			/* PMIC FD off */
+	km4_feat(dsi, 0xB1, 0x80);
+	km4_feat(dsi, 0xF7, 0x0F);				/* freq update */
+	km4_feat(dsi, 0xF0, 0xA5, 0xA5);			/* lock */
 
 	/* Resolution / bit-depth config block (WQHD, 8-bit) */
 	km4_feat(dsi, 0xF0, 0x5A, 0x5A);				/* unlock */
@@ -303,15 +291,7 @@ static int komodo_panel_enable(struct drm_panel *panel)
 	/* WRCTRLD: enable brightness control (vendor km4_write_display_mode) */
 	km4_feat(dsi, 0x53, 0x20);
 
-	/*
-	 * On a cold power-on the bootloader did not send Display On, so we do -
-	 * and clear the flag now that the panel is fully re-initialised. On
-	 * handover Display On is already active and is left untouched.
-	 */
-	if (ctx->needs_hw_init) {
-		mipi_dsi_dcs_set_display_on(dsi);
-		ctx->needs_hw_init = false;
-	}
+	mipi_dsi_dcs_set_display_on(dsi);
 
 	return 0;
 }
@@ -426,9 +406,10 @@ static int komodo_panel_probe(struct mipi_dsi_device *dsi)
 	mipi_dsi_set_drvdata(dsi, ctx);
 
 	/*
-	 * Reset line for cold power-on. Requested OUT_HIGH (the panel's run
-	 * state) so a boot-handover panel keeps streaming; it is only pulsed on
-	 * a cold enable. Optional: a handover-only board may omit it.
+	 * DDIC reset, pulsed on every prepare() to bring the panel up from a
+	 * known state. Requested OUT_HIGH (the panel's run state) so the brief
+	 * window before the first prepare does not disturb a bootloader-lit
+	 * panel. Optional, but required in practice for a cold power-on.
 	 */
 	ctx->reset_gpio = devm_gpiod_get_optional(dev, "reset", GPIOD_OUT_HIGH);
 	if (IS_ERR(ctx->reset_gpio))
