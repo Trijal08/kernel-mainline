@@ -3785,6 +3785,143 @@
 			clocks = <&cmu_dpu CLK_GOUT_DPU_SYSREG_DPU_PCLK>;
 		};
 
+		/*
+		 * Display Processing Unit (DPU): DECON0 + one DPP/DPU-DMA plane,
+		 * driven by the exynos9 DECON (google,zuma-decon) and the
+		 * exynosautov9 DPP/DPU-DMA drivers. See drivers/gpu/drm/exynos/
+		 * exynos9_decon*.c and exynos_dpp.c / exynos_dpu_dma.c.
+		 *
+		 * The DECON is split into four SFR blocks, each its own reg
+		 * region: DECON_MAIN, DECON_WIN, DECON_SUB (DSIM/DP interface
+		 * select) and DECON0_WINCON.
+		 */
+		decon0: decon@19470000 {
+			compatible = "google,zuma-decon";
+			reg = <0x19470000 0x6000>,	/* main   */
+			      <0x19480000 0xe000>,	/* win    */
+			      <0x19490000 0x10000>,	/* sub    */
+			      <0x194a0000 0xe000>;	/* wincon */
+			reg-names = "main", "win", "sub", "wincon";
+			/* index 0 is the frame-done interrupt used by the driver */
+			interrupts = <GIC_SPI 242 IRQ_TYPE_LEVEL_HIGH 0>, /* frame_done */
+				     <GIC_SPI 243 IRQ_TYPE_LEVEL_HIGH 0>, /* frame_start */
+				     <GIC_SPI 241 IRQ_TYPE_LEVEL_HIGH 0>; /* extra */
+			interrupt-names = "frame_done", "frame_start", "extra";
+			clocks = <&cmu_dpu CLK_GOUT_DPU_DECON0_ACLK>;
+			clock-names = "aclk";
+			power-domains = <&pd_dpuf0>;
+			/*
+			 * The zuma DPU SysMMU is v9 (samsung-sysmmu-v9), which
+			 * the mainline exynos-iommu driver does not support -
+			 * attaching a master to it faults. Until a v9 IOMMU
+			 * driver lands, leave the DPU un-translated and rely on
+			 * contiguous CMA framebuffers (exynos DRM falls back to
+			 * contiguous GEM when there is no IOMMU mapping).
+			 * iommus = <&sysmmu_dpuf0 0>;
+			 */
+			status = "disabled";
+
+			ports {
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				port@0 {
+					reg = <0>;
+					decon0_out: endpoint {
+						remote-endpoint = <&dsim0_in>;
+					};
+				};
+			};
+		};
+
+		/*
+		 * DPU IDMA channel array (channels at 0x1000 stride from the
+		 * base). The exynosautov9 DPU-DMA driver drives the GF0 channel
+		 * (channel_map[0] = 5 -> base + 0x5000 = 0x19905000).
+		 */
+		dpu_dma: dma-controller@19900000 {
+			compatible = "samsung,exynosauto-dpu-dma";
+			reg = <0x19900000 0x9000>;
+			interrupts = <GIC_SPI 261 IRQ_TYPE_LEVEL_HIGH 0>; /* IDMA GF0 (ch5) */
+			clocks = <&cmu_dpu CLK_GOUT_DPU_DECON0_ACLK>;
+			clock-names = "aclk";
+			power-domains = <&pd_dpuf0>;
+			/*
+			 * The zuma DPU SysMMU is v9 (samsung-sysmmu-v9), which
+			 * the mainline exynos-iommu driver does not support -
+			 * attaching a master to it faults. Until a v9 IOMMU
+			 * driver lands, leave the DPU un-translated and rely on
+			 * contiguous CMA framebuffers (exynos DRM falls back to
+			 * contiguous GEM when there is no IOMMU mapping).
+			 * iommus = <&sysmmu_dpuf0 0>;
+			 */
+			status = "disabled";
+		};
+
+		/*
+		 * DPP processing block for the GF0 channel. The driver accesses
+		 * regs + 0x1000, so the region base is one channel stride below
+		 * the GF0 DPP block (0x19935000) to land on it.
+		 */
+		dpp0: dpp@19934000 {
+			compatible = "samsung,exynosauto-dpp";
+			reg = <0x19934000 0x2000>;
+			clocks = <&cmu_dpu CLK_GOUT_DPU_DECON0_ACLK>;
+			clock-names = "aclk";
+			power-domains = <&pd_dpuf0>;
+			status = "disabled";
+		};
+
+		/*
+		 * MIPI-DSI host (DSIM0), driven by the minimal boot-handoff
+		 * encoder in drivers/gpu/drm/exynos/exynos9_dsim.c. The
+		 * bootloader initialises the DCPHY/link/panel; this node only
+		 * needs the DSIM block kept clocked+powered so that running link
+		 * survives, plus the OF-graph to the DECON and the panel.
+		 */
+		dsim0: dsi@19440000 {
+			compatible = "google,zuma-dsim";
+			reg = <0x19440000 0x300>,	/* dsi         */
+			      <0x19460100 0x700>,	/* dphy        */
+			      <0x19460000 0x100>;	/* dphy-extra  */
+			reg-names = "dsi", "dphy", "dphy-extra";
+			interrupts = <GIC_SPI 252 IRQ_TYPE_LEVEL_HIGH 0>;
+			clocks = <&cmu_dpu CLK_GOUT_DPU_PCLK>;
+			clock-names = "bus_clk";
+			power-domains = <&pd_dpuf0>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "disabled";
+
+			/*
+			 * Panel tearing-effect (TE): the pad gpp0-3 muxed to
+			 * EINT routes the panel's TE into the DECON's DDI0
+			 * hardware trigger (te_from = 0), which is what clocks
+			 * out each frame in command mode. Applied as the default
+			 * state so the mux is established at probe.
+			 */
+			pinctrl-names = "default";
+			pinctrl-0 = <&disp_te_pri_on>;
+			te-gpio = <&gpp0 3 0>;
+
+			/*
+			 * port@0 is the DECON input. The panel output (port@1)
+			 * and the panel child node are board-specific and are
+			 * added by the board DTS (see zumapro-komodo.dts).
+			 */
+			ports {
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				port@0 {
+					reg = <0>;
+					dsim0_in: endpoint {
+						remote-endpoint = <&decon0_out>;
+					};
+				};
+			};
+		};
+
 		cmu_top: clock-controller@26040000 {
 			compatible = "google,zuma-cmu-top";
 			reg = <0x26040000 0x10000>;
