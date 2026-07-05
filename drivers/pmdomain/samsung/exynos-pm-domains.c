@@ -391,6 +391,17 @@ static int exynos_pd_probe(struct platform_device *pdev)
 		(pd->needs_secure_transition && !(readl_relaxed(pd->base + 0x4) &
 		 pd->local_pwr_cfg)) ? " [OVERRIDE: HW says OFF!]" : "");
 
+	/*
+	 * A domain flagged samsung,always-on adopts the state the bootloader
+	 * handed over and is never gated by genpd.  The Tensor G3D domains rely
+	 * on this: their secure power-OFF handshake (the CMU sequence the
+	 * downstream pmucal runs around the transition) is not replicated here,
+	 * so letting genpd_power_off_unused or the GPU's runtime PM drive an
+	 * off->on cycle wedges the secure transition and resets the SoC.
+	 */
+	if (of_property_read_bool(np, "samsung,always-on"))
+		pd->pd.flags |= GENPD_FLAG_ALWAYS_ON;
+
 	pm_genpd_init(&pd->pd, NULL, !on);
 
 	/*
