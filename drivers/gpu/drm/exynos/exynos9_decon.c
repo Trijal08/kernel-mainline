@@ -1724,21 +1724,6 @@ static const struct component_ops decon_component_ops = {
 	.unbind = decon_unbind,
 };
 
-static bool decon_get_window_update_req(struct exynos_drm_crtc *crtc)
-{
-	struct decon_context *ctx = crtc->ctx;
-	struct drm_plane *plane;
-
-	drm_for_each_plane_mask(plane, ctx->drm_dev, ctx->plane_mask) {
-		u32 win_idx = plane_to_decon_win(plane)->idx;
-
-		if (ctx->cal_ops->win_update_req_get(ctx, win_idx))
-			return true;
-	}
-
-	return false;
-}
-
 static irqreturn_t decon_irq_handler(int irq, void *dev_id)
 {
 	struct decon_context *ctx = dev_id;
@@ -1746,13 +1731,16 @@ static irqreturn_t decon_irq_handler(int irq, void *dev_id)
 	ctx->cal_ops->clear_interrupt(ctx, DECON_IRQ_FD);
 
 	/*
-	 * In command mode a completed frame (frame-done) is the vblank; only
-	 * signal it once the shadow update has been latched so page-flips are
-	 * not reported early.
+	 * A completed frame (frame-done) is the vblank in both video and command
+	 * mode: the HW TE trigger latches the shadow config on the TE edge before
+	 * the frame is emitted, so by frame-done the new content is already being
+	 * scanned out.  Signal it unconditionally, as the canonical exynos5433
+	 * DECON does.  Gating on the per-window shadow-update-req bit wedged
+	 * page-flips - the HW-trigger path never clears that SW request, so
+	 * drm_crtc_handle_vblank() was never called and every atomic commit timed
+	 * out (flip_done / vblank wait).
 	 */
-	if (ctx->config.mode.op_mode == DECON_VIDEO_MODE ||
-	    !decon_get_window_update_req(ctx->crtc))
-		drm_crtc_handle_vblank(&ctx->crtc->base);
+	drm_crtc_handle_vblank(&ctx->crtc->base);
 
 	return IRQ_HANDLED;
 }
