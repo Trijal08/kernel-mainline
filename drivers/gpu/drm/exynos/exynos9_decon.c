@@ -1640,12 +1640,19 @@ static enum drm_plane_type decon_get_win_type(int win_idx, int last_idx)
 		return DRM_PLANE_TYPE_OVERLAY;
 };
 
+/*
+ * 8-bit RGB + 565 only.  The IDMA can read the 10-bit (2101010/1010102)
+ * orders, but the DPP block / DECON output bit-depth path is not wired for
+ * 10bpc, so a 10-bit scanout buffer (e.g. KWin's AR30/ARGB2101010) renders as
+ * garbage.  Advertising 8-bit only makes the compositor fall back to a format
+ * that scans out correctly; re-add the 10-bit orders once the 10bpc pipe
+ * (DECON output + DSC) is implemented.
+ */
 static const u32 dpp_gf_formats[] = {
 	DRM_FORMAT_ARGB8888,	DRM_FORMAT_ABGR8888,	DRM_FORMAT_RGBA8888,
 	DRM_FORMAT_BGRA8888,	DRM_FORMAT_XRGB8888,	DRM_FORMAT_XBGR8888,
 	DRM_FORMAT_RGBX8888,	DRM_FORMAT_BGRX8888,	DRM_FORMAT_RGB565,
-	DRM_FORMAT_BGR565,	DRM_FORMAT_ARGB2101010, DRM_FORMAT_ABGR2101010,
-	DRM_FORMAT_RGBA1010102, DRM_FORMAT_BGRA1010102,
+	DRM_FORMAT_BGR565,
 };
 
 static int decon_bind(struct device *dev, struct device *master, void *data)
@@ -1677,7 +1684,7 @@ static int decon_bind(struct device *dev, struct device *master, void *data)
 			continue;
 
 		win->plane_config.pixel_formats = dpp_gf_formats;
-		win->plane_config.num_pixel_formats = 14;
+		win->plane_config.num_pixel_formats = ARRAY_SIZE(dpp_gf_formats);
 		win->plane_config.zpos = i;
 		win->plane_config.type =
 			decon_get_win_type(i, ctx->win_cnt - 1);
