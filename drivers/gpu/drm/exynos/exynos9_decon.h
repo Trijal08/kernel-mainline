@@ -133,6 +133,7 @@ struct decon_context {
 	struct clk *aclk;
 
 	u32 irq_fd; /* frame done */
+	int te_irq; /* panel hardware TE, drives vblank in command mode */
 
 	/* device ops */
 	const struct decon_cal_ops *cal_ops;
