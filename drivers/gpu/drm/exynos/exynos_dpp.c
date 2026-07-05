@@ -41,15 +41,30 @@ static const struct of_device_id dpp_of_match[] = {
 void dpp_update(struct exynos_dpp_context *dpp, unsigned int channel,
 		const struct exynos_drm_plane_state *state)
 {
+	const struct drm_framebuffer *fb = state->base.fb;
+	u32 fmt;
+
 	/*
 	 * DPP block: the pixel format lives in DPP_COM_IO_CON and the image size
 	 * in DPP_COM_IMG_SIZE (the vendor dpp_reg_set_format()/set_img_size()).
 	 * Writing the old 0x0008/0x0018 offsets left the block's size at 0, so it
 	 * produced no pixels and the DECON channel-5 read starved (OF_LEVEL=0).
-	 * The DPP takes 8bpc RGB (ARGB8888); X-vs-A is the IDMA's concern.
+	 * The DPP block only needs the bit depth - 8bpc vs 10bpc RGB; the
+	 * component order (X-vs-A, RGB-vs-BGR) is the IDMA's concern.
 	 */
-	writel(DPP_IMG_FORMAT(DPP_IMG_FORMAT_ARGB8888),
-	       dpp->regs + 0x1000 + DPP_COM_IO_CON);
+	switch (fb->format->format) {
+	case DRM_FORMAT_ARGB2101010:
+	case DRM_FORMAT_ABGR2101010:
+	case DRM_FORMAT_RGBA1010102:
+	case DRM_FORMAT_BGRA1010102:
+		fmt = DPP_IMG_FORMAT_ARGB8101010;
+		break;
+	default:
+		fmt = DPP_IMG_FORMAT_ARGB8888;
+		break;
+	}
+
+	writel(DPP_IMG_FORMAT(fmt), dpp->regs + 0x1000 + DPP_COM_IO_CON);
 	writel(DPP_IMG_HEIGHT(state->src.h) | DPP_IMG_WIDTH(state->src.w),
 	       dpp->regs + 0x1000 + DPP_COM_IMG_SIZE);
 }
