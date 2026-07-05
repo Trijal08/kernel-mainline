@@ -25,6 +25,8 @@
 #include <linux/regulator/consumer.h>
 #include <linux/module.h>
 
+#include <linux/pcie-zumapro.h>
+
 #include "pcie-designware.h"
 
 #define to_exynos_pcie(x)	dev_get_drvdata((x)->dev)
@@ -703,6 +705,64 @@ static const struct of_device_id exynos_pcie_of_match[] = {
 	},
 	{ },
 };
+
+/*
+ * Bring-up hooks for the Exynos Modem 5300 boot driver (see
+ * <linux/pcie-zumapro.h>). The modem's mask ROM needs its MSI target moved
+ * into the CP's carveout and a mid-boot link bounce; both are RC-internal
+ * operations the WWAN driver reaches through the RC's DT phandle.
+ */
+static struct exynos_pcie *zumapro_pcie_from_dev(struct device *rc_dev)
+{
+	if (!rc_dev->driver ||
+	    rc_dev->driver->of_match_table != exynos_pcie_of_match)
+		return NULL;
+
+	return dev_get_drvdata(rc_dev);
+}
+
+int zumapro_pcie_set_msi_target(struct device *rc_dev, phys_addr_t target)
+{
+	struct exynos_pcie *ep = zumapro_pcie_from_dev(rc_dev);
+
+	if (!ep)
+		return -ENODEV;
+
+	ep->pci.pp.msi_data = target;
+	dw_pcie_writel_dbi(&ep->pci, PCIE_MSI_ADDR_LO, lower_32_bits(target));
+	dw_pcie_writel_dbi(&ep->pci, PCIE_MSI_ADDR_HI, upper_32_bits(target));
+
+	dev_info(rc_dev, "MSI target moved to %pap\n", &target);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(zumapro_pcie_set_msi_target);
+
+int zumapro_pcie_modem_link_down(struct device *rc_dev)
+{
+	struct exynos_pcie *ep = zumapro_pcie_from_dev(rc_dev);
+
+	if (!ep)
+		return -ENODEV;
+
+	exynos_pcie_writel(ep->pci.elbi_base, 0, PCIE_ZUMA_APP_LTSSM_ENABLE);
+	gpiod_set_value_cansleep(ep->perst_gpio, 1);
+	usleep_range(1000, 2000);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(zumapro_pcie_modem_link_down);
+
+int zumapro_pcie_modem_link_up(struct device *rc_dev)
+{
+	struct exynos_pcie *ep = zumapro_pcie_from_dev(rc_dev);
+
+	if (!ep)
+		return -ENODEV;
+
+	gpiod_set_value_cansleep(ep->perst_gpio, 0);
+	usleep_range(ep->perst_delay_us, ep->perst_delay_us + 2000);
+	return exynos_zuma_pcie_start_link(&ep->pci);
+}
+EXPORT_SYMBOL_GPL(zumapro_pcie_modem_link_up);
 
 static struct platform_driver exynos_pcie_driver = {
 	.probe		= exynos_pcie_probe,
