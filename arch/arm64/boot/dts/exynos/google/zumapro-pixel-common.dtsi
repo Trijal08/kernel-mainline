@@ -388,7 +388,7 @@
 	};
 
 	fuel-gauge@36 {
-		compatible = "maxim,max77759-fg", "google,zuma-fuel-gauge";
+		compatible = "maxim,max77779fg";
 		reg = <0x36>;
 
 		pinctrl-0 = <&if_pmic_fg_int>;
