@@ -77,7 +77,20 @@ static unsigned int channel_map[] = { 5, 1, 7, 2, 6, 3, 8, 4 };
  * one Samsung names "BGRX8888" - not "XRGB8888". Confirmed on hardware: fmt 7
  * leaks the X byte into blue, fmt 4 renders correctly.
  */
+#define IDMA_IMG_FORMAT_BGRA8888 (0)
+#define IDMA_IMG_FORMAT_RGBA8888 (1)
+#define IDMA_IMG_FORMAT_ABGR8888 (2)
+#define IDMA_IMG_FORMAT_ARGB8888 (3)
 #define IDMA_IMG_FORMAT_BGRX8888 (4)
+#define IDMA_IMG_FORMAT_RGBX8888 (5)
+#define IDMA_IMG_FORMAT_XBGR8888 (6)
+#define IDMA_IMG_FORMAT_XRGB8888 (7)
+#define IDMA_IMG_FORMAT_BGR565 (8)
+#define IDMA_IMG_FORMAT_RGB565 (9)
+#define IDMA_IMG_FORMAT_BGRA1010102 (16)
+#define IDMA_IMG_FORMAT_RGBA1010102 (17)
+#define IDMA_IMG_FORMAT_ABGR2101010 (18)
+#define IDMA_IMG_FORMAT_ARGB2101010 (19)
 
 #define IDMA_BLOCK_EN BIT(3)
 
@@ -279,6 +292,36 @@ static irqreturn_t dma_irq_handler(int irq, void *priv)
 	return IRQ_HANDLED;
 }
 
+/*
+ * The IDMA format field names the component order the block reads out of
+ * memory; a DRM fourcc names a little-endian packed word, so the matching
+ * IDMA format is the byte-reversed fourcc (DRM_FORMAT_XRGB8888 -> bytes
+ * B,G,R,X -> IDMA BGRX8888).  Hardcoding one format only worked because the
+ * fbdev console happens to be XRGB8888; a compositor picking any other format
+ * (ARGB8888, a 10-bit XRGB2101010, ...) was read with the wrong channel order
+ * or bit depth, which shows as garbage on screen.
+ */
+static u32 idma_img_format(u32 fourcc)
+{
+	switch (fourcc) {
+	case DRM_FORMAT_ARGB8888:	return IDMA_IMG_FORMAT_BGRA8888;
+	case DRM_FORMAT_ABGR8888:	return IDMA_IMG_FORMAT_RGBA8888;
+	case DRM_FORMAT_RGBA8888:	return IDMA_IMG_FORMAT_ABGR8888;
+	case DRM_FORMAT_BGRA8888:	return IDMA_IMG_FORMAT_ARGB8888;
+	case DRM_FORMAT_XRGB8888:	return IDMA_IMG_FORMAT_BGRX8888;
+	case DRM_FORMAT_XBGR8888:	return IDMA_IMG_FORMAT_RGBX8888;
+	case DRM_FORMAT_RGBX8888:	return IDMA_IMG_FORMAT_XBGR8888;
+	case DRM_FORMAT_BGRX8888:	return IDMA_IMG_FORMAT_XRGB8888;
+	case DRM_FORMAT_RGB565:		return IDMA_IMG_FORMAT_BGR565;
+	case DRM_FORMAT_BGR565:		return IDMA_IMG_FORMAT_RGB565;
+	case DRM_FORMAT_ARGB2101010:	return IDMA_IMG_FORMAT_BGRA1010102;
+	case DRM_FORMAT_ABGR2101010:	return IDMA_IMG_FORMAT_RGBA1010102;
+	case DRM_FORMAT_RGBA1010102:	return IDMA_IMG_FORMAT_ABGR2101010;
+	case DRM_FORMAT_BGRA1010102:	return IDMA_IMG_FORMAT_ARGB2101010;
+	default:			return IDMA_IMG_FORMAT_BGRX8888;
+	}
+}
+
 int dpu_dma_update(struct exynos_dpu_dma_context *ctx, unsigned int channel,
 		   struct exynos_drm_plane_state *state)
 {
@@ -301,7 +344,7 @@ int dpu_dma_update(struct exynos_dpu_dma_context *ctx, unsigned int channel,
 		  IDMA_IMG_HEIGHT(state->src.h) | IDMA_IMG_WIDTH(state->src.w));
 
 	dma_write_mask(ctx, idma, IDMA_IN_CON,
-		       IDMA_IMG_FORMAT(IDMA_IMG_FORMAT_BGRX8888),
+		       IDMA_IMG_FORMAT(idma_img_format(fb->format->format)),
 		       IDMA_IMG_FORMAT_MASK);
 
 	return 0;
