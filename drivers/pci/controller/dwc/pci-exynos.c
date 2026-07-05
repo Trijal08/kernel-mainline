@@ -120,6 +120,13 @@ struct exynos_pcie {
 	struct gpio_desc		*wlan_gpio;
 	u32				pmu_offset;
 	u32				perst_delay_us;
+	/* modem (CH0) CP rail-sequencing lines; see exynos_pcie_cp_power_on() */
+	struct gpio_desc		*cp_pda_active;
+	struct gpio_desc		*cp_wakeup;
+	struct gpio_desc		*cp_pm_wrst;
+	struct gpio_desc		*cp_pwr;
+	struct gpio_desc		*cp_nreset;
+	struct gpio_desc		*cp_wrst;
 };
 
 static void exynos_pcie_writel(void __iomem *base, u32 val, u32 reg)
@@ -561,6 +568,68 @@ static const struct exynos_pcie_drvdata zuma_pcie_drvdata = {
 	.zuma		= true,
 };
 
+/*
+ * Modem (CH0) CP rail sequencing. When the RC hosts the Exynos modem it owns
+ * the AP2CP power/reset lines and must cold-cycle the CP into its boot ROM
+ * before link training. The lines are optional: a non-modem RC (WiFi CH1) has
+ * none and skips this. Sequence and delays mirror the downstream
+ * s5100_poweron() cold path.
+ */
+static void exynos_pcie_cp_power_on(struct exynos_pcie *ep)
+{
+	dev_info(ep->pci.dev, "powering on the CP (modem) endpoint\n");
+
+	gpiod_direction_output(ep->cp_pda_active, 1);
+
+	/* power-off half: reach a clean cold state */
+	gpiod_direction_output(ep->cp_wakeup, 1);
+	msleep(10);
+	gpiod_set_value_cansleep(ep->cp_wakeup, 0);
+	gpiod_direction_output(ep->cp_nreset, 0);
+	gpiod_direction_output(ep->cp_wrst, 0);
+	gpiod_direction_output(ep->cp_pwr, 0);
+	msleep(30);
+	gpiod_direction_output(ep->cp_pm_wrst, 0);
+	msleep(50);
+
+	/* power-on half */
+	gpiod_set_value_cansleep(ep->cp_pm_wrst, 1);
+	msleep(10);
+	gpiod_set_value_cansleep(ep->cp_pwr, 1);
+	msleep(10);
+	gpiod_set_value_cansleep(ep->cp_nreset, 1);
+	msleep(10);
+	gpiod_set_value_cansleep(ep->cp_wrst, 1);
+
+	/* ROM settle before link training */
+	msleep(200);
+}
+
+static int exynos_pcie_cp_get_gpios(struct exynos_pcie *ep)
+{
+	struct device *dev = ep->pci.dev;
+
+	ep->cp_pwr = devm_gpiod_get_optional(dev, "google,cp-pwr", GPIOD_ASIS);
+	if (IS_ERR(ep->cp_pwr))
+		return PTR_ERR(ep->cp_pwr);
+	if (!ep->cp_pwr)
+		return 0;	/* not a modem RC */
+
+	ep->cp_pda_active = devm_gpiod_get(dev, "google,cp-pda-active",
+					   GPIOD_ASIS);
+	ep->cp_wakeup = devm_gpiod_get(dev, "google,cp-wakeup", GPIOD_ASIS);
+	ep->cp_pm_wrst = devm_gpiod_get(dev, "google,cp-pm-wrst", GPIOD_ASIS);
+	ep->cp_nreset = devm_gpiod_get(dev, "google,cp-nreset", GPIOD_ASIS);
+	ep->cp_wrst = devm_gpiod_get(dev, "google,cp-wrst", GPIOD_ASIS);
+	if (IS_ERR(ep->cp_pda_active) || IS_ERR(ep->cp_wakeup) ||
+	    IS_ERR(ep->cp_pm_wrst) || IS_ERR(ep->cp_nreset) ||
+	    IS_ERR(ep->cp_wrst))
+		return -EINVAL;
+
+	exynos_pcie_cp_power_on(ep);
+	return 0;
+}
+
 static int exynos_pcie_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -628,6 +697,11 @@ static int exynos_pcie_probe(struct platform_device *pdev)
 	}
 
 	platform_set_drvdata(pdev, ep);
+
+	/* Cold-power the modem CP (no-op for a non-modem RC) before training. */
+	ret = exynos_pcie_cp_get_gpios(ep);
+	if (ret < 0)
+		goto fail_probe;
 
 	ret = exynos_add_pcie_port(ep, pdev);
 	if (ret < 0)
