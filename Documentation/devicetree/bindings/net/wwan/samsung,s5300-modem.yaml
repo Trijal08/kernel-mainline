@@ -1,0 +1,76 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/net/wwan/samsung,s5300-modem.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Samsung Exynos Modem 5300 (PCIe)
+
+maintainers:
+  - Steffen Deusch <steffen@deusch.me>
+
+description:
+  Discrete Samsung Exynos Modem 5300 companion chip attached over PCIe, as
+  found on Google Tensor G4 (zumapro) boards.  The AP stages the first-stage
+  CP bootloader in a DRAM carveout, publishes it through a second carveout
+  that doubles as the PCIe MSI target, and completes a shared-memory command
+  handshake.  Bring-up binding; the PCIe root-complex phandle and doorbell
+  address will move behind generic abstractions as the driver grows up.
+
+properties:
+  compatible:
+    const: samsung,s5300-modem
+
+  memory-region:
+    items:
+      - description: IPC shared-memory carveout (boot image staging, command
+          words and message queues)
+      - description: MSI carveout the CP reports boot progress into
+
+  memory-region-names:
+    items:
+      - const: ipc
+      - const: msi
+
+  firmware-name:
+    maxItems: 1
+    description: First-stage CP bootloader (the BOOT entry of the vendor
+      modem image TOC).
+
+  google,pcie:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: PCIe root complex the modem is attached to.
+
+  samsung,doorbell-addr:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: PCI bus address programmed into the endpoint's BAR0; the
+      doorbell register decodes there in both boot phases.
+
+  cp2ap-wakeup-gpios:
+    maxItems: 1
+    description: CP-driven line signalling the CP is awake / ready to
+      re-link.
+
+required:
+  - compatible
+  - memory-region
+  - memory-region-names
+  - google,pcie
+  - samsung,doorbell-addr
+  - cp2ap-wakeup-gpios
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/gpio/gpio.h>
+
+    modem {
+        compatible = "samsung,s5300-modem";
+        memory-region = <&cp_rmem>, <&cp_msi_rmem>;
+        memory-region-names = "ipc", "msi";
+        firmware-name = "tegu/cp_pbl.bin";
+        google,pcie = <&pcie0>;
+        samsung,doorbell-addr = <0x14e60000>;
+        cp2ap-wakeup-gpios = <&gpa5 1 GPIO_ACTIVE_HIGH>;
+    };
