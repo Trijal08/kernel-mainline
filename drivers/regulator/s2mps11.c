@@ -1784,8 +1784,11 @@ static const struct regulator_desc s2mps15_regulators[] = {
 /* voltage range for s2mpg14 BUCK 7 */
 S2MPG10_VOLTAGE_RANGE(s2mpg14_buck, 1, 200000, 450000, 1300000, STEP_6_25_MV);
 
-/* voltage range for s2mpg14 LDO 5 */
+/* voltage range for s2mpg14 LDO 5, 25 (group 4: offset at sel 0 = 0.7 V) */
 S2MPG10_VOLTAGE_RANGE(s2mpg14_ldo, 5, 700000, 1600000, 1950000, STEP_25_MV);
+
+/* voltage range for s2mpg14 LDO 4 (group 5: offset at sel 0 = 1.8 V, TS_AVDD) */
+S2MPG10_VOLTAGE_RANGE(s2mpg14_ldo, 4, 1800000, 1800000, 3300000, STEP_25_MV);
 
 /* voltage range for s2mpg15 BUCK 2, 8, 11 */
 S2MPG10_VOLTAGE_RANGE(s2mpg15_buck, 1, 200000, 450000, 1300000, STEP_6_25_MV);
@@ -1812,7 +1815,13 @@ S2MPG10_VOLTAGE_RANGE(s2mpg15_ldo, 1, 300000, 700000, 1300000, STEP_12_5_MV);
 	.ramp_delay	= 12500,					\
 }
 
-#define regulator_desc_s2mpg14_ldo(_num, _supply, _range) {		\
+/*
+ * S2MPG14 LDO enable fields are not uniform: most LDOs gate on the two-bit
+ * [7:6] mode field, but a few (e.g. the touchscreen rails LDO4/LDO25) use a
+ * single enable bit [7] with bit 6 reserved for another function, so the
+ * enable mask is passed per-descriptor rather than hard-coded.
+ */
+#define regulator_desc_s2mpg14_ldo(_num, _supply, _range, _emask) {	\
 	.name		= "ldo"#_num"m",				\
 	.supply_name	= _supply,					\
 	.of_match	= of_match_ptr("ldo"#_num"m"),			\
@@ -1827,7 +1836,7 @@ S2MPG10_VOLTAGE_RANGE(s2mpg15_ldo, 1, 300000, 700000, 1300000, STEP_12_5_MV);
 	.vsel_reg	= S2MPG14_PMIC_L##_num##M_CTRL,			\
 	.vsel_mask	= GENMASK(5, 0),				\
 	.enable_reg	= S2MPG14_PMIC_L##_num##M_CTRL,			\
-	.enable_mask	= GENMASK(7, 6),				\
+	.enable_mask	= _emask,					\
 }
 
 #define regulator_desc_s2mpg15_buck(_num, _supply, _range) {		\
@@ -1869,7 +1878,9 @@ S2MPG10_VOLTAGE_RANGE(s2mpg15_ldo, 1, 300000, 700000, 1300000, STEP_12_5_MV);
 
 static const struct regulator_desc s2mpg14_regulators[] = {
 	regulator_desc_s2mpg14_buck(7, "vinb7m", s2mpg14_buck_vranges1),
-	regulator_desc_s2mpg14_ldo(5, "vinl5m", s2mpg14_ldo_vranges5),
+	regulator_desc_s2mpg14_ldo(4, "vinl4m", s2mpg14_ldo_vranges4, BIT(7)),
+	regulator_desc_s2mpg14_ldo(5, "vinl5m", s2mpg14_ldo_vranges5, GENMASK(7, 6)),
+	regulator_desc_s2mpg14_ldo(25, "vinl25m", s2mpg14_ldo_vranges5, BIT(7)),
 };
 
 static const struct regulator_desc s2mpg15_regulators[] = {
