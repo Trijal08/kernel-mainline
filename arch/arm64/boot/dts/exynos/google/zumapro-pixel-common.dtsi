@@ -149,6 +149,20 @@
 				regulator-max-microvolt = <1950000>;
 				regulator-always-on;
 			};
+
+			m_ldo4_reg: ldo4m {
+				/* L4M_TS_AVDD: touchscreen analog 3.3V */
+				regulator-name = "vdd_ts_avdd";
+				regulator-min-microvolt = <3300000>;
+				regulator-max-microvolt = <3300000>;
+			};
+
+			m_ldo25_reg: ldo25m {
+				/* L25M_TSP_DVDD: touchscreen digital 1.8V */
+				regulator-name = "vdd_ts_dvdd";
+				regulator-min-microvolt = <1800000>;
+				regulator-max-microvolt = <1800000>;
+			};
 		};
 
 		s2mpg14_gpio: gpio {
@@ -540,12 +554,6 @@
 };
 
 &pinctrl_peric1 {
-	ts_reset: ts-reset {
-		samsung,pins = "gpp21-2";
-		samsung,pin-pud = <GS101_PIN_PULL_NONE>;
-		samsung,pin-con-pdn = <GS101_PIN_PDN_PREV>;
-		samsung,pin-pud-pdn = <GS101_PIN_PULL_NONE>;
-	};
 	// ap2aoc: ap2aoc {
 	// 	samsung,pins = "gpp26-1";
 	// 	samsung,pin-pud = <GS101_PIN_PULL_NONE>;
@@ -757,18 +765,36 @@
 	#address-cells = <1>;
 	#size-cells = <0>;
 	status = "okay";
-	pinctrl-0 = <>;
-	cs-gpios = <&gpp23 3 GPIO_ACTIVE_LOW>;
+	/*
+	 * Bus on gpp4-0/1/2 with native chip-select on gpp4-3 (spi2_cs_func,
+	 * FUNC_3). No cs-gpios: TouchComm needs the native manual chip-select
+	 * held across the header -> continuation reads, and s3c64xx only takes
+	 * that path when the CS is not a GPIO descriptor.
+	 */
+	pinctrl-names = "default";
+	pinctrl-0 = <&spi2_bus &spi2_cs_func>;
 	num-cs = <1>;
+
 	spitouch: touchscreen@0 {
-		compatible = "st,spi";
+		compatible = "syna,tcm-spi";
 		status = "okay";
 		spi-max-frequency = <10000000>;
 		reg = <0>;
-		pinctrl-names = "ts_active";
-		pinctrl-0 = <&ts_irq &ts_reset
-			     &spi11_bus &spi11_cs>;
-		// vdd-supply = <&m_ldo25_reg>;
-		// avdd-supply = <&m_ldo26_reg>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&ts_irq>;
+		/* TSP_INT on gpn0-0 (direct-to-GIC EINT), active low */
+		interrupts-extended = <&gpn0 0 IRQ_TYPE_LEVEL_LOW>;
+		/* TSP_RESET on gpp1-1 (peric0), asserted low */
+		reset-gpios = <&gpp1 1 GPIO_ACTIVE_LOW>;
+		/* vdd = L25M_TSP_DVDD (1.8V), avdd = L4M_TS_AVDD (3.3V) */
+		vdd-supply = <&m_ldo25_reg>;
+		avdd-supply = <&m_ldo4_reg>;
+
+		/* Native manual CS (mode 0) with a 2us setup delay, per vendor */
+		controller-data {
+			samsung,spi-feedback-delay = <0>;
+			samsung,spi-chip-select-mode = <0>;
+			cs-clock-delay = <2>;
+		};
 	};
 };
