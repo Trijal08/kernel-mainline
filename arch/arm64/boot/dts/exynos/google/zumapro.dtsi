@@ -937,12 +937,13 @@
 			skip-idle-ip;
 		};
 		pd_hsi1: pd-hsi1@15462B00 {
-			compatible = "samsung,exynos5433-pd";
+			/* BLK_HSI1: modem PCIe CH0 root complex (Gen3 x2) */
+			compatible = "google,gs101-pd";
 			reg = <0x15462B00 0x20>;
 			cal_id = <0xB1380019>;
 			need_smc = <0x12010204>;
 			cmu_id = <0x12000000>;
-			status = "disabled";
+			status = "okay";
 			#power-domain-cells = <0>;
 		};
 
@@ -3386,6 +3387,25 @@
 			interrupts = <GIC_SPI 413 IRQ_TYPE_LEVEL_HIGH 0>;
 		};
 
+		cmu_hsi1: clock-controller@12000000 {
+			/* CMU for BLK_HSI1 (modem PCIe CH0) */
+			compatible = "google,zuma-cmu-hsi1";
+			reg = <0x12000000 0x10000>;
+			#clock-cells = <1>;
+			clocks = <&ext_24_5m>,
+				 <&cmu_top CLK_DOUT_CMU_HSI1_BUS>,
+				 <&cmu_top CLK_DOUT_CMU_HSI1_PCIE>;
+			clock-names = "oscclk", "bus", "pcie";
+			samsung,sysreg = <&sysreg_hsi1>;
+			power-domains = <&pd_hsi1>;
+		};
+
+		sysreg_hsi1: syscon@12020000 {
+			compatible = "google,gs101-hsi1-sysreg", "syscon";
+			reg = <0x12020000 0x2000>;
+			clocks = <&cmu_hsi1 CLK_GOUT_HSI1_SYSREG_HSI1_PCLK>;
+		};
+
 		cmu_hsi2: clock-controller@13000000 {
 			compatible = "google,zuma-cmu-hsi2";
 			reg = <0x13000000 0x10000>;
@@ -3419,6 +3439,62 @@
 			clocks = <&cmu_hsi2 CLK_GOUT_HSI2_GPIO_HSI2_PCLK>;
 			clock-names = "pclk";
 			interrupts = <GIC_SPI 433 IRQ_TYPE_LEVEL_HIGH 0>;
+		};
+
+		/*
+		 * PCIe CH0 (HSI1) root complex + PHY for the Tensor modem
+		 * (Gen3 x2). Same google,zuma-pcie / google,zuma-pcie-phy
+		 * drivers as the CH1 WiFi link; num-lanes=2 selects the PHY's
+		 * two-lane sequences. The outbound window is non-identity
+		 * (PCI 0x14e00000 -> CPU 0x40000000). Kept disabled at SoC
+		 * level; the board enables it once the modem CP power-on
+		 * sequencing is in place.
+		 */
+		pcie_0_phy: phy@12140000 {
+			compatible = "google,zuma-pcie-phy";
+			reg = <0x12140000 0x3000>,
+			      <0x12120000 0x5000>,
+			      <0x12110000 0x5000>,
+			      <0x12130000 0xd000>;
+			reg-names = "phy", "pcs", "soc", "udbg";
+			samsung,pmu-syscon = <&pmu_system_controller>;
+			samsung,pmu-offset = <0x3ec4>;
+			num-lanes = <2>;
+			#phy-cells = <0>;
+			status = "disabled";
+		};
+
+		pcie_0: pcie@12100000 {
+			compatible = "google,zuma-pcie";
+			reg = <0x12100000 0x2000>,
+			      <0x12400000 0x381000>,
+			      <0x40ffe000 0x2000>;
+			reg-names = "elbi", "dbi", "config";
+			interrupts = <GIC_SPI 414 IRQ_TYPE_LEVEL_HIGH 0>;
+			#address-cells = <3>;
+			#size-cells = <2>;
+			#interrupt-cells = <1>;
+			interrupt-map-mask = <0 0 0 0>;
+			interrupt-map = <0 0 0 0 &gic GIC_SPI 414 IRQ_TYPE_LEVEL_HIGH 0>;
+			device_type = "pci";
+			ranges = <0x82000000 0 0x14e00000 0x40000000 0 0x00ff0000>;
+			bus-range = <0x00 0xff>;
+			num-lanes = <2>;
+			max-link-speed = <3>;
+			clocks = <&cmu_hsi1 CLK_GOUT_HSI1_PCIE_GEN3_0_DBI_ACLK>,
+				 <&cmu_hsi1 CLK_GOUT_HSI1_PCIE_GEN3_0_MSTR_ACLK>,
+				 <&cmu_hsi1 CLK_GOUT_HSI1_PCIE_GEN3_0_SLV_ACLK>,
+				 <&cmu_hsi1 CLK_GOUT_HSI1_PCIE_GEN3_0_DRIVER_APB_CLK>,
+				 <&cmu_hsi1 CLK_GOUT_HSI1_PCIE_GEN3_0_PHY_REFCLK_IN>,
+				 <&cmu_hsi1 CLK_GOUT_HSI1_PCIE_GEN3_0_UDBG_APB_PCLK>,
+				 <&cmu_hsi1 CLK_GOUT_HSI1_PCIE_GEN3_0_PIPE_PAL_APB_PCLK>;
+			phys = <&pcie_0_phy>;
+			phy-names = "pcie-phy";
+			samsung,pmu-syscon = <&pmu_system_controller>;
+			samsung,pmu-offset = <0x3ec4>;
+			samsung,perst-delay-us = <15000>;
+			power-domains = <&pd_hsi1>;
+			status = "disabled";
 		};
 
 		pcie_1_phy: phy@13160000 {
