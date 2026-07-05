@@ -515,6 +515,11 @@
 			#clock-cells = <1>;
 			mboxes = <&ap2apm_mailbox>;
 			shmem = <&apm_sram>;
+
+			acpm_tmu: thermal-sensor {
+				compatible = "google,zumapro-acpm-tmu";
+				#thermal-sensor-cells = <1>;
+			};
 		};
 
 		trng {
@@ -547,6 +552,75 @@
 	psci {
 		compatible = "arm,psci-1.0";
 		method = "smc";
+	};
+
+	/*
+	 * The TMU is owned by the ACPM firmware and read over IPC via the
+	 * acpm_tmu sensor.  On a bare mainline boot the firmware only measures;
+	 * active throttling would need cpufreq cooling, so for now each CPU-
+	 * cluster zone carries only a critical trip that triggers an orderly
+	 * shutdown before the die reaches a damaging temperature.  The GPU/ISP/
+	 * TPU/AUR zones are monitor-only (polling-delay = 0, read on demand).
+	 */
+	thermal-zones {
+		big-thermal {
+			polling-delay = <250>;
+			thermal-sensors = <&acpm_tmu 0>;
+
+			trips {
+				big_crit: critical {
+					temperature = <115000>;
+					hysteresis = <1000>;
+					type = "critical";
+				};
+			};
+		};
+
+		mid-thermal {
+			polling-delay = <250>;
+			thermal-sensors = <&acpm_tmu 1>;
+
+			trips {
+				mid_crit: critical {
+					temperature = <115000>;
+					hysteresis = <1000>;
+					type = "critical";
+				};
+			};
+		};
+
+		little-thermal {
+			polling-delay = <250>;
+			thermal-sensors = <&acpm_tmu 2>;
+
+			trips {
+				little_crit: critical {
+					temperature = <115000>;
+					hysteresis = <1000>;
+					type = "critical";
+				};
+			};
+		};
+
+		g3d-thermal {
+			polling-delay = <0>;
+			thermal-sensors = <&acpm_tmu 3>;
+		};
+
+		isp-thermal {
+			polling-delay = <0>;
+			thermal-sensors = <&acpm_tmu 4>;
+		};
+
+		tpu-thermal {
+			polling-delay = <0>;
+			thermal-sensors = <&acpm_tmu 5>;
+		};
+
+		aur-thermal {
+			polling-delay = <0>;
+			thermal-sensors = <&acpm_tmu 6>;
+		};
 	};
 
 	reserved_memory: reserved-memory {
