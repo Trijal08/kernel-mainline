@@ -171,10 +171,19 @@ static const struct exynos_pcie_phy_drvdata exynos5433_pcie_phy_drvdata = {
 #define ZUMA_PHY_CDR_LOCK		0x15C0	/* bit 4 */
 #define ZUMA_PHY_OC_DONE		0x140C	/* bit 7 */
 
-#define ZUMA_UDBG_EXT_PLL		0xC700
+#define ZUMA_UDBG_EXT_PLL		0xC700	/* x1: bit0 init; both: bit1 resetb */
 #define ZUMA_UDBG_EXT_PLL_INIT		BIT(0)
 #define ZUMA_UDBG_EXT_PLL_RESETB	BIT(1)
-#define ZUMA_UDBG_EXT_PLL_LOCK		0xC734	/* bit 2 */
+#define ZUMA_UDBG_EXT_PLL_LOCK		0xC734	/* x1: bit 2 */
+/*
+ * The two-lane GEN3X2 instance (HSI1, modem) uses a different external-PLL
+ * control/lock register pair: init on 0xC710 bit1 (0xC700 bit1 still does the
+ * shared RESETB override), lock on 0xC704 bit3.
+ */
+#define ZUMA_UDBG_EXT_PLL_X2		0xC710	/* x2: bit1 init, bits[9:8] L2 gate */
+#define ZUMA_UDBG_EXT_PLL_X2_INIT	BIT(1)
+#define ZUMA_UDBG_EXT_PLL_LOCK_X2	0xC704	/* x2: bit 3 */
+#define ZUMA_UDBG_PLL_PWR_GATING	0xC800	/* power-gating / state monitor */
 
 #define ZUMA_SOC_PHY_PWR		0x4000	/* all-power-down clear */
 #define ZUMA_SOC_PHY_PWR_ON		0x15
@@ -211,6 +220,25 @@ static const struct zuma_phy_reg zuma_pma_common[] = {
 	{ 0x0644, 0x23 }, { 0x0624, 0x11 },
 	/* PLL margin for ERIO (Gen1 & Gen2) */
 	{ 0x0630, 0x0F }, { 0x06D0, 0x53 },
+};
+
+/*
+ * PMA common block for the two-lane GEN3X2 (modem) instance. Identical to the
+ * x1 list above except for an early 0x0510 = 0x81 (later overwritten to 0x80 in
+ * the lane-common part), matching the downstream 2-lane ("else") branch.
+ */
+static const struct zuma_phy_reg zuma_pma_common_x2[] = {
+	{ 0x0000, 0x88 }, { 0x001C, 0x66 }, { 0x01F4, 0x00 }, { 0x0510, 0x81 },
+	{ 0x0514, 0x59 }, { 0x051C, 0x11 }, { 0x062C, 0x0E }, { 0x0644, 0x22 },
+	{ 0x0688, 0x03 }, { 0x06D4, 0x28 }, { 0x0788, 0x64 }, { 0x078C, 0x64 },
+	{ 0x0790, 0x50 }, { 0x0794, 0x50 }, { 0x0944, 0x05 }, { 0x0948, 0x05 },
+	{ 0x094C, 0x05 }, { 0x0950, 0x05 }, { 0x0590, 0x02 }, { 0x07F8, 0xB0 },
+	{ 0x0730, 0x08 }, { 0x0344, 0xC0 }, { 0x0040, 0x04 }, { 0x0204, 0x03 },
+	{ 0x02D4, 0x1F }, { 0x0358, 0x10 }, { 0x0018, 0x01 },
+	/* lane/CDR common */
+	{ 0x0514, 0x5B }, { 0x0608, 0x0C }, { 0x060C, 0x0F }, { 0x0610, 0x0F },
+	{ 0x0614, 0x0F }, { 0x0618, 0x0F }, { 0x0510, 0x80 }, { 0x0688, 0x03 },
+	{ 0x0644, 0x23 }, { 0x0624, 0x11 }, { 0x0630, 0x0F }, { 0x06D0, 0x53 },
 };
 
 /* Per-lane configuration (applied at "phy" base + lane * 0x1000). */
@@ -285,13 +313,31 @@ static int zuma_pcie_phy_reset(struct phy *phy)
 	/* ungate the PHY input clock */
 	writel(ZUMA_PHY_INPUT_CLK_UNGATE, p + ZUMA_PHY_INPUT_CLK);
 
-	/* release external PLL, override its RESETB, wait for lock */
-	val = readl(ep->udbg_base + ZUMA_UDBG_EXT_PLL) | ZUMA_UDBG_EXT_PLL_INIT;
-	writel(val, ep->udbg_base + ZUMA_UDBG_EXT_PLL);
+	/*
+	 * Release the external PLL, override its RESETB, and wait for lock. The
+	 * two-lane modem instance initialises a different PLL (0xC710 bit1
+	 * cleared) and locks on 0xC704 bit3; the 0xC700 bit1 RESETB override is
+	 * shared with the single-lane instance.
+	 */
+	if (ep->num_lanes > 1) {
+		val = readl(ep->udbg_base + ZUMA_UDBG_EXT_PLL_X2) &
+		      ~ZUMA_UDBG_EXT_PLL_X2_INIT;
+		writel(val, ep->udbg_base + ZUMA_UDBG_EXT_PLL_X2);
+	} else {
+		val = readl(ep->udbg_base + ZUMA_UDBG_EXT_PLL) |
+		      ZUMA_UDBG_EXT_PLL_INIT;
+		writel(val, ep->udbg_base + ZUMA_UDBG_EXT_PLL);
+	}
 	val = readl(ep->udbg_base + ZUMA_UDBG_EXT_PLL) & ~ZUMA_UDBG_EXT_PLL_RESETB;
 	writel(val, ep->udbg_base + ZUMA_UDBG_EXT_PLL);
-	if (!zuma_phy_wait_bit(ep->udbg_base, ZUMA_UDBG_EXT_PLL_LOCK, 2))
-		dev_warn(&phy->dev, "external PLL lock timeout\n");
+
+	if (ep->num_lanes > 1) {
+		if (!zuma_phy_wait_bit(ep->udbg_base, ZUMA_UDBG_EXT_PLL_LOCK_X2, 3))
+			dev_warn(&phy->dev, "external PLL lock timeout\n");
+	} else {
+		if (!zuma_phy_wait_bit(ep->udbg_base, ZUMA_UDBG_EXT_PLL_LOCK, 2))
+			dev_warn(&phy->dev, "external PLL lock timeout\n");
+	}
 
 	/* select the external PLL as the PHY input clock */
 	/*
@@ -314,22 +360,36 @@ static int zuma_pcie_phy_init(struct phy *phy)
 	void __iomem *p = ep->base;
 	u32 lane, val;
 
-	/* PMA: common block then each lane */
-	zuma_phy_write_table(p, zuma_pma_common, ARRAY_SIZE(zuma_pma_common));
+	/* PMA: common block (per-instance) then each lane */
+	if (ep->num_lanes > 1)
+		zuma_phy_write_table(p, zuma_pma_common_x2,
+				     ARRAY_SIZE(zuma_pma_common_x2));
+	else
+		zuma_phy_write_table(p, zuma_pma_common,
+				     ARRAY_SIZE(zuma_pma_common));
 	for (lane = 0; lane < ep->num_lanes; lane++)
 		zuma_phy_write_table(p + lane * ZUMA_PCS_PER_LANE,
 				     zuma_pma_lane, ARRAY_SIZE(zuma_pma_lane));
 
-	/* BCM Wi-Fi endpoint (komodo) tuning on lane 0 */
-	zuma_phy_write_table(p, zuma_pma_lane_bcm, ARRAY_SIZE(zuma_pma_lane_bcm));
-
-	val = readl(p + 0x1350) | BIT(0);
-	writel(val, p + 0x1350);
+	/*
+	 * BCM Wi-Fi endpoint (komodo) tuning is specific to the single-lane
+	 * GEN3A_1 instance; the two-lane modem instance has no endpoint tweaks.
+	 */
+	if (ep->num_lanes == 1) {
+		zuma_phy_write_table(p, zuma_pma_lane_bcm,
+				     ARRAY_SIZE(zuma_pma_lane_bcm));
+		val = readl(p + 0x1350) | BIT(0);
+		writel(val, p + 0x1350);
+	}
 
 	/* PCS */
 	zuma_phy_write_table(ep->pcs_base, zuma_pcs_cfg, ARRAY_SIZE(zuma_pcs_cfg));
-	writel(0x00000700, ep->pcs_base + 0x17c);	/* BCM Wi-Fi */
-	writel(0x01600202, ep->pcs_base + 0x110);	/* BCM Wi-Fi */
+	if (ep->num_lanes > 1) {
+		writel(0x00000010, ep->pcs_base + 0x17c);	/* modem */
+	} else {
+		writel(0x00000700, ep->pcs_base + 0x17c);	/* BCM Wi-Fi */
+		writel(0x01600202, ep->pcs_base + 0x110);	/* BCM Wi-Fi */
+	}
 
 	return 0;
 }
@@ -337,6 +397,7 @@ static int zuma_pcie_phy_init(struct phy *phy)
 static int zuma_pcie_phy_power_on(struct phy *phy)
 {
 	struct exynos_pcie_phy *ep = phy_get_drvdata(phy);
+	u32 val;
 
 	/* the controller has released the PMA reset by now: check the locks */
 	if (!zuma_phy_wait_bit(ep->base, ZUMA_PHY_PLL_LOCK, 0))
@@ -345,6 +406,26 @@ static int zuma_pcie_phy_power_on(struct phy *phy)
 		dev_warn(&phy->dev, "PHY CDR lock timeout\n");
 	if (!zuma_phy_wait_bit(ep->base, ZUMA_PHY_OC_DONE, 7))
 		dev_warn(&phy->dev, "PHY offset-calibration timeout\n");
+
+	/*
+	 * Two-lane modem instance: poll the lane-1 CDR/offset-cal at the +0x1000
+	 * stride, warn-only so a first-boot GEN1 x1 link (lane 0 only) is not
+	 * blocked on lane-1 calibration, then run the x2 udbg epilogue (gate the
+	 * external PLL clock at L2, clear the power-gating state monitor).
+	 */
+	if (ep->num_lanes > 1) {
+		void __iomem *lane1 = ep->base + ZUMA_PCS_PER_LANE;
+
+		if (!zuma_phy_wait_bit(lane1, ZUMA_PHY_CDR_LOCK, 4))
+			dev_warn(&phy->dev, "lane1 CDR lock timeout\n");
+		if (!zuma_phy_wait_bit(lane1, ZUMA_PHY_OC_DONE, 7))
+			dev_warn(&phy->dev, "lane1 offset-calibration timeout\n");
+
+		val = readl(ep->udbg_base + ZUMA_UDBG_EXT_PLL_X2) | (0x3 << 8);
+		writel(val, ep->udbg_base + ZUMA_UDBG_EXT_PLL_X2);
+		val = readl(ep->udbg_base + ZUMA_UDBG_PLL_PWR_GATING) & ~(0x3 << 5);
+		writel(val, ep->udbg_base + ZUMA_UDBG_PLL_PWR_GATING);
+	}
 
 	/* re-gate the PHY input clock */
 	writel(0x0, ep->base + ZUMA_PHY_INPUT_CLK);
