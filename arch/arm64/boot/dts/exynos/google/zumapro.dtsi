@@ -81,7 +81,7 @@
 			reg = <0x0000>;
 			clocks = <&acpm_ipc GS101_CLK_ACPM_DVFS_CPUCL0>;
 			enable-method = "psci";
-			// cpu-idle-states = <&hayes_cpu_sleep>;
+			cpu-idle-states = <&hayes_cpu_sleep>;
 			capacity-dmips-mhz = <449>;
 			dynamic-power-coefficient = <176>;
 			operating-points-v2 = <&cpucl0_opp_table>;
@@ -94,7 +94,7 @@
 			reg = <0x0100>;
 			clocks = <&acpm_ipc GS101_CLK_ACPM_DVFS_CPUCL0>;
 			enable-method = "psci";
-			// cpu-idle-states = <&hayes_cpu_sleep>;
+			cpu-idle-states = <&hayes_cpu_sleep>;
 			capacity-dmips-mhz = <449>;
 			dynamic-power-coefficient = <176>;
 			operating-points-v2 = <&cpucl0_opp_table>;
@@ -107,7 +107,7 @@
 			reg = <0x0200>;
 			clocks = <&acpm_ipc GS101_CLK_ACPM_DVFS_CPUCL0>;
 			enable-method = "psci";
-			// cpu-idle-states = <&hayes_cpu_sleep>;
+			cpu-idle-states = <&hayes_cpu_sleep>;
 			capacity-dmips-mhz = <449>;
 			dynamic-power-coefficient = <176>;
 			operating-points-v2 = <&cpucl0_opp_table>;
@@ -120,7 +120,7 @@
 			reg = <0x0300>;
 			clocks = <&acpm_ipc GS101_CLK_ACPM_DVFS_CPUCL0>;
 			enable-method = "psci";
-			// cpu-idle-states = <&hayes_cpu_sleep>;
+			cpu-idle-states = <&hayes_cpu_sleep>;
 			capacity-dmips-mhz = <449>;
 			dynamic-power-coefficient = <176>;
 			operating-points-v2 = <&cpucl0_opp_table>;
@@ -133,7 +133,7 @@
 			reg = <0x0400>;
 			clocks = <&acpm_ipc GS101_CLK_ACPM_DVFS_CPUCL1>;
 			enable-method = "psci";
-			// cpu-idle-states = <&hunter_cpu_sleep>;
+			cpu-idle-states = <&hunter_cpu_sleep>;
 			capacity-dmips-mhz = <850>;
 			dynamic-power-coefficient = <325>;
 			operating-points-v2 = <&cpucl1_opp_table>;
@@ -146,7 +146,7 @@
 			reg = <0x0500>;
 			clocks = <&acpm_ipc GS101_CLK_ACPM_DVFS_CPUCL1>;
 			enable-method = "psci";
-			// cpu-idle-states = <&hunter_cpu_sleep>;
+			cpu-idle-states = <&hunter_cpu_sleep>;
 			capacity-dmips-mhz = <850>;
 			dynamic-power-coefficient = <325>;
 			operating-points-v2 = <&cpucl1_opp_table>;
@@ -159,7 +159,7 @@
 			reg = <0x0600>;
 			clocks = <&acpm_ipc GS101_CLK_ACPM_DVFS_CPUCL2>;
 			enable-method = "psci";
-			// cpu-idle-states = <&hunter_cpu_sleep>;
+			cpu-idle-states = <&hunter_cpu_sleep>;
 			capacity-dmips-mhz = <850>;
 			dynamic-power-coefficient = <325>;
 			operating-points-v2 = <&cpucl1_opp_table>;
@@ -172,7 +172,7 @@
 			reg = <0x0700>;
 			clocks = <&acpm_ipc GS101_CLK_ACPM_DVFS_CPUCL2>;
 			enable-method = "psci";
-			// cpu-idle-states = <&hunterelp_cpu_sleep>;
+			cpu-idle-states = <&hunterelp_cpu_sleep>;
 			capacity-dmips-mhz = <1024>;
 			dynamic-power-coefficient = <748>;
 			operating-points-v2 = <&cpucl2_opp_table>;
@@ -2194,6 +2194,13 @@
 			clocks = <&cmu_misc CLK_GOUT_MISC_SYSREG_MISC_PCLK>;
 		};
 
+		/*
+		 * The legacy exynos4210-mct block is left disabled: on Zumapro its
+		 * global/local comparator SPIs are actually driven by the v3 MCT
+		 * (mct_v3@100d0000) below, and the exynos4210-mct driver stalls both
+		 * deep idle (its broadcast never wakes) and SMP bring-up (the local
+		 * timers never tick).  Keep the node for reference but disabled.
+		 */
 		timer@10050000 {
 			compatible = "google,gs101-mct",
 				     "samsung,exynos4210-mct";
@@ -2212,6 +2219,30 @@
 				     <GIC_SPI 763 IRQ_TYPE_LEVEL_HIGH 0>,
 				     <GIC_SPI 764 IRQ_TYPE_LEVEL_HIGH 0>,
 				     <GIC_SPI 765 IRQ_TYPE_LEVEL_HIGH 0>;
+			status = "disabled";
+		};
+
+		/*
+		 * v3 MCT: a free-running counter plus per-CPU comparators.  It is
+		 * the broadcast tick used while a CPU sits in c2 with its ARM
+		 * architected timer stopped (local-timer-stop).  The nine SPIs are
+		 * the free-running-counter IRQ followed by one comparator per CPU.
+		 */
+		mct_v3: timer@100d0000 {
+			compatible = "samsung,exynos-mct-v3";
+			reg = <0x100d0000 0x800>;
+			clocks = <&ext_24_5m>, <&cmu_misc CLK_GOUT_MISC_MCT_PCLK>;
+			clock-names = "fin_pll", "mct";
+			interrupts = <GIC_SPI 758 IRQ_TYPE_LEVEL_HIGH 0>,
+				     <GIC_SPI 759 IRQ_TYPE_LEVEL_HIGH 0>,
+				     <GIC_SPI 760 IRQ_TYPE_LEVEL_HIGH 0>,
+				     <GIC_SPI 761 IRQ_TYPE_LEVEL_HIGH 0>,
+				     <GIC_SPI 762 IRQ_TYPE_LEVEL_HIGH 0>,
+				     <GIC_SPI 763 IRQ_TYPE_LEVEL_HIGH 0>,
+				     <GIC_SPI 764 IRQ_TYPE_LEVEL_HIGH 0>,
+				     <GIC_SPI 765 IRQ_TYPE_LEVEL_HIGH 0>,
+				     <GIC_SPI 766 IRQ_TYPE_LEVEL_HIGH 0>;
+			div = <1>;
 		};
 
 		watchdog_cl0: watchdog@10060000 {
@@ -3708,7 +3739,7 @@
 		};
 
 		pmu_system_controller: system-controller@15460000 {
-			compatible = "google,gs101-pmu";
+			compatible = "google,zumapro-pmu", "google,gs101-pmu";
 			reg = <0x15460000 0x10000>;
 			google,pmu-intr-gen-syscon = <&pmu_intr_gen>;
 			clocks = <&ext_26m>;
