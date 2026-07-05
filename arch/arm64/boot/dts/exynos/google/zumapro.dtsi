@@ -737,6 +737,15 @@
 		ranges = <0x0 0x0 0x0 0x40000000>,
 			 /* PCIe (HSI2) outbound MEM window + config space */
 			 <0x60000000 0x0 0x60000000 0x01000000>;
+		/*
+		 * The bootloader hands the GPU over fully powered.  The secure
+		 * power-OFF handshake for the G3D domains (the CMU sequence the
+		 * downstream pmucal runs around the transition) is not replicated
+		 * in exynos-pm-domains yet, so an off->on cycle driven by genpd or
+		 * panthor's runtime PM wedges the secure transition and resets the
+		 * SoC.  Mark both always-on to adopt the live state until the
+		 * off-sequence is implemented.
+		 */
 		pd_g3d: pd-g3d@15461A80 {
 			compatible = "google,gs101-pd";
 			reg = <0x15461A80 0x20>;
@@ -745,6 +754,7 @@
 			cmu_id = <0x1EE00000>;
 			status = "okay";
 			skip-idle-ip;
+			samsung,always-on;
 			#power-domain-cells = <0>;
 		};
 		pd_embedded_g3d: pd-embedded_g3d@15461C80 {
@@ -753,6 +763,7 @@
 			cal_id = <0xB1380001>;
 			status = "okay";
 			power-domains = <&pd_g3d>;
+			samsung,always-on;
 			#power-domain-cells = <0>;
 		};
 		pd_dpub: pd-dpub@15461D00 {
