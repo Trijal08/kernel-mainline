@@ -3,6 +3,8 @@
 #include <linux/clk.h>
 #include <linux/component.h>
 #include <linux/console.h>
+#include <linux/gpio/consumer.h>
+#include <linux/interrupt.h>
 #include <linux/kernel.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
@@ -1620,9 +1622,44 @@ static void decon_disable(struct exynos_drm_crtc *crtc)
 	disable_irq(ctx->irq_fd);
 }
 
+static irqreturn_t decon_te_irq_handler(int irq, void *dev_id)
+{
+	struct decon_context *ctx = dev_id;
+
+	/*
+	 * The panel's hardware tearing-effect edge is the command-mode vblank:
+	 * continuous (every panel refresh) and synced to the panel, independent
+	 * of whether the DECON emitted a frame this cycle.
+	 */
+	if (ctx->crtc)
+		drm_crtc_handle_vblank(&ctx->crtc->base);
+
+	return IRQ_HANDLED;
+}
+
+static int decon_enable_vblank(struct exynos_drm_crtc *crtc)
+{
+	struct decon_context *ctx = crtc->ctx;
+
+	if (ctx->te_irq > 0)
+		enable_irq(ctx->te_irq);
+
+	return 0;
+}
+
+static void decon_disable_vblank(struct exynos_drm_crtc *crtc)
+{
+	struct decon_context *ctx = crtc->ctx;
+
+	if (ctx->te_irq > 0)
+		disable_irq_nosync(ctx->te_irq);
+}
+
 static const struct exynos_drm_crtc_ops decon_crtc_ops = {
 	.atomic_enable = decon_enable,
 	.atomic_disable = decon_disable,
+	.enable_vblank = decon_enable_vblank,
+	.disable_vblank = decon_disable_vblank,
 	.mode_valid = decon_mode_valid,
 	.atomic_begin = decon_atomic_begin,
 	.update_plane = decon_update_plane,
@@ -1731,16 +1768,14 @@ static irqreturn_t decon_irq_handler(int irq, void *dev_id)
 	ctx->cal_ops->clear_interrupt(ctx, DECON_IRQ_FD);
 
 	/*
-	 * A completed frame (frame-done) is the vblank in both video and command
-	 * mode: the HW TE trigger latches the shadow config on the TE edge before
-	 * the frame is emitted, so by frame-done the new content is already being
-	 * scanned out.  Signal it unconditionally, as the canonical exynos5433
-	 * DECON does.  Gating on the per-window shadow-update-req bit wedged
-	 * page-flips - the HW-trigger path never clears that SW request, so
-	 * drm_crtc_handle_vblank() was never called and every atomic commit timed
-	 * out (flip_done / vblank wait).
+	 * In command mode the panel's hardware TE drives vblank (see
+	 * decon_te_irq_handler): it is continuous and panel-synced, so page-flips
+	 * complete and no-op commits (e.g. framebuffer removal, which emit no new
+	 * frame) still observe a vblank instead of timing out.  In video mode
+	 * there is no panel TE, so frame-done is the vblank.
 	 */
-	drm_crtc_handle_vblank(&ctx->crtc->base);
+	if (ctx->config.mode.op_mode == DECON_VIDEO_MODE)
+		drm_crtc_handle_vblank(&ctx->crtc->base);
 
 	return IRQ_HANDLED;
 }
@@ -1751,6 +1786,7 @@ static int decon_probe(struct platform_device *pdev)
 	struct decon_context *ctx;
 	struct device *dev = &pdev->dev;
 	const struct decon_dev_data *drv_data;
+	struct device_node *dsi_np;
 
 	ctx = devm_kzalloc(dev, sizeof(struct decon_context), GFP_KERNEL);
 	if (!ctx)
@@ -1778,6 +1814,31 @@ static int decon_probe(struct platform_device *pdev)
 	if (ret)
 		return dev_err_probe(&pdev->dev, ret,
 				     "Failed to register interrupt handler\n");
+
+	/*
+	 * Command-mode vblank source: the panel's hardware TE.  The te-gpio lives
+	 * in the DSIM node (the DECON's OF-graph peer, muxed to EINT), so grab it
+	 * there and use it as a continuous, panel-synced vblank.  Leave it
+	 * disabled until enable_vblank(); HW trigger still drives the frame latch.
+	 */
+	dsi_np = of_graph_get_remote_node(dev->of_node, 0, 0);
+	if (dsi_np) {
+		struct gpio_desc *te_gpiod;
+
+		te_gpiod = devm_fwnode_gpiod_get(dev, of_fwnode_handle(dsi_np),
+						 "te", GPIOD_IN, "TE");
+		of_node_put(dsi_np);
+		if (!IS_ERR(te_gpiod))
+			ctx->te_irq = gpiod_to_irq(te_gpiod);
+	}
+	if (ctx->te_irq > 0) {
+		irq_set_status_flags(ctx->te_irq, IRQ_NOAUTOEN);
+		ret = devm_request_irq(dev, ctx->te_irq, decon_te_irq_handler,
+				       IRQF_TRIGGER_RISING, "decon-te", ctx);
+		if (ret)
+			return dev_err_probe(dev, ret,
+					     "Failed to request TE irq\n");
+	}
 
 	ctx->type = 0;
 	ctx->win_max = 8;
