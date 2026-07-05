@@ -84,3 +84,50 @@
 		};
 	};
 };
+
+/*
+ * Tensor modem (Exynos Modem 5300) on PCIe CH0 / HSI1. The AP2CP rail and
+ * CP2AP wakeup lines match the vendor wiring in ../fdt.dts (gpio_ap2cp_*:
+ * cp_pwr_on gpp12-2, cp_nreset_n gpp12-3, pm_wrst_n gpp8-3, cp_wrst_n
+ * gpp16-3, wake_up gpp16-0, pda_active gpp16-2; cp2ap wake_up gpa5-1).
+ */
+&pcie_0_phy {
+	status = "okay";
+};
+
+&pcie_0 {
+	status = "okay";
+	google,cp-pwr-gpios = <&gpp12 2 GPIO_ACTIVE_HIGH>;
+	google,cp-nreset-gpios = <&gpp12 3 GPIO_ACTIVE_HIGH>;
+	google,cp-pm-wrst-gpios = <&gpp8 3 GPIO_ACTIVE_HIGH>;
+	google,cp-wrst-gpios = <&gpp16 3 GPIO_ACTIVE_HIGH>;
+	google,cp-wakeup-gpios = <&gpp16 0 GPIO_ACTIVE_HIGH>;
+	google,cp-pda-active-gpios = <&gpp16 2 GPIO_ACTIVE_HIGH>;
+};
+
+/ {
+	reserved-memory {
+		/* CP IPC + boot-image staging (../fdt.dts cp_rmem) */
+		cp_rmem_reserved: cp-rmem@ea400000 {
+			reg = <0x0 0xea400000 0xc00000>;
+			no-map;
+		};
+
+		/* CP MSI status page (../fdt.dts cp_msi_rmem) */
+		cp_msi_rmem_reserved: cp-msi-rmem@f6200000 {
+			reg = <0x0 0xf6200000 0x1000>;
+			no-map;
+		};
+	};
+
+	modem {
+		compatible = "samsung,s5300-modem";
+		memory-region = <&cp_rmem_reserved>, <&cp_msi_rmem_reserved>;
+		memory-region-names = "ipc", "msi";
+		/* CP firmware blob (place under firmware_class.path=/vendor/firmware) */
+		firmware-name = "google/komodo/cp.bin";
+		google,pcie = <&pcie_0>;
+		samsung,doorbell-addr = <0x14e60000>;
+		cp2ap-wakeup-gpios = <&gpa5 1 GPIO_ACTIVE_HIGH>;
+	};
+};
