@@ -71,6 +71,10 @@
 #define PCIE_ZUMA_DEVICE_TYPE		0x0080
 #define   PCIE_ZUMA_DEVICE_TYPE_RC	0x4
 #define PCIE_ZUMA_SOFT_PWR_RESET	0x03a4
+#define   SOFT_RESET_ALL		0xf
+#define   SOFT_RESET_PWR_PULSE		0xd	/* SOFT_RESET_ALL with PWR bit low */
+#define   SOFT_PWR_RESET		BIT(1)	/* active-low: 1 released, 0 asserted */
+#define   SOFT_NON_STICKY_RESET		BIT(3)	/* active-low, as above */
 #define PCIE_ZUMA_PMA_RST_PCS		0x1400
 #define PCIE_ZUMA_PMA_RST_PHY		0x1404
 #define PCIE_ZUMA_PMA_RST_CMN		0x1408
@@ -93,7 +97,24 @@
 #define   LTSSM_ENABLE			BIT(0)
 #define PCIE_ZUMA_RDLH_LINKUP		0x02c8
 #define   LTSSM_STATE_MASK		0x3f
+#define   LTSSM_STATE_RCVRY_LOCK	0x0d
 #define   LTSSM_STATE_L0		0x11
+#define   LTSSM_STATE_L1_IDLE		0x14
+#define   LTSSM_STATE_L2_IDLE		0x15
+/* Orderly-L2 power-down handshake (modem runtime PM; downstream poweroff_pcie) */
+#define PCIE_APP_REQ_EXIT_L1		0x006c	/* L1-exit request trigger */
+#define PCIE_XMIT_PME_TURNOFF		0x0118
+#define   IRQ_RADM_PM_TO_ACK		BIT(29)	/* PM_Turn_Off_Ack in PCIE_IRQ_PULSE */
+#define PCIE_L2_ENTER_WAIT_US		20000
+#define PCIE_L2_ENTER_WAIT_STEP_US	10
+/* Runtime relink retrains from L2 -- the first attempt can fail; retry with a
+ * full re-config each time (downstream establish_link retries the same way). */
+#define PCIE_MODEM_RELINK_RETRIES	10
+#define PCIE_LINK_WAIT_US		50000
+#define PCIE_LINK_WAIT_STEP_US		10
+#define PCIE_PERST_DELAY_US		20000
+#define PCIE_GEN3_RELATED		0x890	/* DBI: GEN3 EQ control */
+#define   GEN3_EQ_OFF			0x12000	/* skip Gen3 EQ phases 2/3 */
 /* PMU PCIE_PHY control bit set during link bring-up */
 #define PCIE_ZUMA_PMU_PHY_CTRL		BIT(10)
 /* Auxiliary-clock frequency (drives the LTSSM timers) */
@@ -128,6 +149,13 @@ struct exynos_pcie {
 	struct gpio_desc		*cp_pwr;
 	struct gpio_desc		*cp_nreset;
 	struct gpio_desc		*cp_wrst;
+	/* modem runtime-relink state (downstream establish_link) */
+	bool				cp_phy_off;	/* PHY left powered off by link_down */
+	bool				msi_saved;
+	u32				saved_msi_enable;
+	u32				saved_msi_mask;
+	u32				saved_msi_addr_lo;
+	u32				saved_msi_addr_hi;
 };
 
 static void exynos_pcie_writel(void __iomem *base, u32 val, u32 reg)
@@ -840,46 +868,201 @@ int zumapro_pcie_reserve_msi_base(struct device *rc_dev, unsigned int count)
 }
 EXPORT_SYMBOL_GPL(zumapro_pcie_reserve_msi_base);
 
+/*
+ * Controller soft-reset pulse used per runtime-relink attempt (downstream
+ * establish_link / controller_reset_pulse).  A bare PERST retrain out of the
+ * orderly-L2 park parks the LTSSM in Polling; pulsing SOFT_PWR_RESET then
+ * SOFT_NON_STICKY_RESET (both active-low) re-arms the MAC so training completes.
+ */
+static void exynos_zuma_controller_reset_pulse(struct exynos_pcie *ep)
+{
+	void __iomem *elbi = ep->pci.elbi_base;
+	u32 val;
+
+	val = exynos_pcie_readl(elbi, PCIE_ZUMA_SOFT_PWR_RESET);
+	val &= ~SOFT_PWR_RESET;
+	exynos_pcie_writel(elbi, val, PCIE_ZUMA_SOFT_PWR_RESET);
+	mdelay(1);
+	val |= SOFT_PWR_RESET;
+	exynos_pcie_writel(elbi, val, PCIE_ZUMA_SOFT_PWR_RESET);
+
+	exynos_pcie_writel(elbi, PCIE_ZUMA_DEVICE_TYPE_RC, PCIE_ZUMA_DEVICE_TYPE);
+
+	val = exynos_pcie_readl(elbi, PCIE_ZUMA_SOFT_PWR_RESET);
+	val |= SOFT_NON_STICKY_RESET;
+	exynos_pcie_writel(elbi, val, PCIE_ZUMA_SOFT_PWR_RESET);
+	usleep_range(10, 12);
+	val &= ~SOFT_NON_STICKY_RESET;
+	exynos_pcie_writel(elbi, val, PCIE_ZUMA_SOFT_PWR_RESET);
+	mdelay(1);
+	val |= SOFT_NON_STICKY_RESET;
+	exynos_pcie_writel(elbi, val, PCIE_ZUMA_SOFT_PWR_RESET);
+}
+
+/* ELBI runtime-relink config (downstream config_elbi): L1-exit disable, L1 mode
+ * + master NAK, manual link-down reset, transfer-pending fence, Q-channel clock
+ * ungated, and master-port NAK. */
+static void exynos_zuma_config_elbi(struct exynos_pcie *ep)
+{
+	void __iomem *elbi = ep->pci.elbi_base;
+	u32 val;
+
+	exynos_pcie_writel(elbi, DBI_L1_EXIT_DISABLE, PCIE_ZUMA_DBI_L1_EXIT_DISABLE);
+
+	val = exynos_pcie_readl(elbi, PCIE_ZUMA_APP_REQ_EXIT_L1);
+	val |= APP_REQ_EXIT_L1_MODE | L1_REQ_NAK_CTRL_MASTER;
+	exynos_pcie_writel(elbi, val, PCIE_ZUMA_APP_REQ_EXIT_L1);
+
+	exynos_pcie_writel(elbi, LINKDOWN_RST_MANUAL, PCIE_ZUMA_LINKDOWN_RST_CTRL);
+	exynos_pcie_writel(elbi, 1, PCIE_ZUMA_APP_XFER_PENDING);
+
+	val = exynos_pcie_readl(elbi, PCIE_ZUMA_QCH_SEL);
+	val &= ~(CLOCK_GATING_PMU_MASK | CLOCK_GATING_APB_MASK |
+		 CLOCK_GATING_AXI_MASK);
+	exynos_pcie_writel(elbi, val, PCIE_ZUMA_QCH_SEL);
+
+	exynos_pcie_writel(elbi, NACK_ENABLE, PCIE_ZUMA_MSTR_PEND_SEL_NAK);
+}
+
+/* Wait for the retrained modem link to reach an up state (Recovery..L1_IDLE),
+ * downstream wait_link_up -- broader than link_up()'s strict L0 so an L1-parked
+ * link (the CP idles fast) still counts as trained. */
+static int exynos_zuma_modem_wait_link(struct exynos_pcie *ep)
+{
+	u32 state;
+
+	return readl_poll_timeout(ep->pci.elbi_base + PCIE_ZUMA_RDLH_LINKUP,
+				  state,
+				  (state & LTSSM_STATE_MASK) >=
+				  LTSSM_STATE_RCVRY_LOCK &&
+				  (state & LTSSM_STATE_MASK) <=
+				  LTSSM_STATE_L1_IDLE,
+				  PCIE_LINK_WAIT_STEP_US, PCIE_LINK_WAIT_US);
+}
+
 int zumapro_pcie_modem_link_down(struct device *rc_dev)
 {
 	struct exynos_pcie *ep = zumapro_pcie_from_dev(rc_dev);
 	void __iomem *elbi;
+	u32 val, mode;
+	int ret;
 
 	if (!ep)
 		return -ENODEV;
 	elbi = ep->pci.elbi_base;
 
 	/*
+	 * Keep the CP's PCIe refclk alive across the bounce: the PMA lanes are
+	 * power-cycled (so the link retrains), but the PHY is NOT isolated, so the
+	 * external PLL that clocks the discrete CP keeps running.  Without this the
+	 * CP loses its reference clock during the relink and the retrain parks in
+	 * Polling (ltssm 0x3).  Cleared in modem_link_up() once the link is back.
+	 */
+	exynos_pcie_phy_keep_refclk(ep->phy, true);
+
+	/*
 	 * Re-establishing the CP link needs a full PHY re-cal (a light bounce
-	 * leaves the LTSSM stuck at PRE_DETECT_QUIET), but tearing the PHY down
-	 * live is what deadlocks the SoC: a stray master access to the dead link
-	 * -- an MSI handler ringing the doorbell, a late config read -- stalls
-	 * the AXI fabric.  Fence the master port first, exactly as the vendor
-	 * exynos_pcie_rc_poweroff() does: make the RC NAK AXI requests instead
-	 * of stalling, hold transfers pending, and mask the RC IRQ so its MSI
-	 * demux cannot touch DBI or the doorbell during the teardown.  Only then
-	 * drop the link, reset the endpoint and power the PHY down for re-cal.
-	 * AP2CP_WAKEUP low tells the CP the AP intends the link to be down.
+	 * leaves the LTSSM stuck at PRE_DETECT_QUIET).  Park the link the way the
+	 * downstream establish_link teardown does: drop AP2CP_WAKEUP (tell the CP
+	 * the AP intends the link down), take the link orderly to L2, snapshot the
+	 * integrated-MSI receiver (the controller reset zeroes it), assert PERST,
+	 * switch the PHY sub-block clock to the safe OSC, then soft-reset the
+	 * controller and power the PHY off.  link_up() reverses each step per
+	 * retrain attempt.
 	 */
 	gpiod_set_value_cansleep(ep->cp_wakeup, 0);
-	exynos_pcie_writel(elbi, NACK_ENABLE, PCIE_ZUMA_MSTR_PEND_SEL_NAK);
-	exynos_pcie_writel(elbi, 1, PCIE_ZUMA_APP_XFER_PENDING);
-	disable_irq(ep->pci.pp.irq);
+	usleep_range(5000, 6000);
+
+	/*
+	 * Orderly L2 power-down BEFORE PERST: PME_Turn_Off -> wait PM_TO_ACK ->
+	 * wait for the link to reach L2_IDLE, mirroring the vendor
+	 * exynos_pcie_rc_send_pme_turn_off().  At runtime (CP-driven PM) the CP's
+	 * inbound doorbell decode survives an orderly L2 entry but NOT a surprise
+	 * PERST-at-L1, so MAIN keeps its runtime IPC armed across the relink; a
+	 * bare PERST here would drop MAIN.  Only run it while the link is up (LTSSM
+	 * in the recovery..L1 range); ELBI access is safe -- the EP still drives
+	 * CLKREQ#.  Proceed on timeout (like downstream) but log the reached state.
+	 */
+	val = exynos_pcie_readl(elbi, PCIE_ZUMA_RDLH_LINKUP) & LTSSM_STATE_MASK;
+	if (val >= LTSSM_STATE_RCVRY_LOCK && val <= LTSSM_STATE_L1_IDLE) {
+		/* PCIE_IRQ_PULSE is write-1-to-clear; clear any stale PM_TO_ACK. */
+		val = exynos_pcie_readl(elbi, PCIE_IRQ_PULSE);
+		exynos_pcie_writel(elbi, val, PCIE_IRQ_PULSE);
+
+		exynos_pcie_writel(elbi, 1, PCIE_APP_REQ_EXIT_L1);
+		mode = exynos_pcie_readl(elbi, PCIE_ZUMA_APP_REQ_EXIT_L1);
+		mode &= ~APP_REQ_EXIT_L1_MODE;
+		mode |= L1_REQ_NAK_CTRL_MASTER;
+		exynos_pcie_writel(elbi, mode, PCIE_ZUMA_APP_REQ_EXIT_L1);
+
+		exynos_pcie_writel(elbi, 1, PCIE_XMIT_PME_TURNOFF);
+		ret = readl_poll_timeout(elbi + PCIE_IRQ_PULSE, val,
+					 val & IRQ_RADM_PM_TO_ACK,
+					 PCIE_L2_ENTER_WAIT_STEP_US,
+					 PCIE_L2_ENTER_WAIT_US);
+		if (ret)
+			dev_warn(ep->pci.dev,
+				 "no PM_TO_ACK from CP (irq %#x)\n", val);
+		udelay(10);
+		exynos_pcie_writel(elbi, 0, PCIE_XMIT_PME_TURNOFF);
+
+		ret = readl_poll_timeout(elbi + PCIE_ZUMA_RDLH_LINKUP, val,
+					 (val & LTSSM_STATE_MASK) ==
+					 LTSSM_STATE_L2_IDLE,
+					 PCIE_L2_ENTER_WAIT_STEP_US,
+					 PCIE_L2_ENTER_WAIT_US);
+		if (ret)
+			dev_warn(ep->pci.dev,
+				 "link did not reach L2_IDLE before PERST (ltssm %#x)\n",
+				 val & LTSSM_STATE_MASK);
+		else
+			dev_dbg(ep->pci.dev, "link reached L2_IDLE, orderly down\n");
+	}
+
+	/*
+	 * Snapshot the integrated-MSI receiver before the controller reset zeroes
+	 * it.  SOFT_RESET clears the MSI enable/mask/target registers, and
+	 * dw_pcie_setup_rc() on the relink does not re-arm the RC's own receiver,
+	 * so without this the CP's post-relink MSI (message 4 = INIT_START) is
+	 * silently dropped.  link_up() restores it after setup_rc.
+	 */
+	ep->saved_msi_addr_lo = dw_pcie_readl_dbi(&ep->pci, PCIE_MSI_ADDR_LO);
+	ep->saved_msi_addr_hi = dw_pcie_readl_dbi(&ep->pci, PCIE_MSI_ADDR_HI);
+	ep->saved_msi_enable = dw_pcie_readl_dbi(&ep->pci, PCIE_MSI_INTR0_ENABLE);
+	ep->saved_msi_mask = dw_pcie_readl_dbi(&ep->pci, PCIE_MSI_INTR0_MASK);
+	ep->msi_saved = true;
+
+	gpiod_set_value_cansleep(ep->perst_gpio, 0);	/* assert PERST */
+
+	/*
+	 * With the link down the CP stops driving CLKREQ#, so the external-PLL
+	 * PHY clock is gated -- an ELBI access on it would stall the interconnect.
+	 * Switch the PHY sub-block clock to the safe OSC before the soft reset.
+	 */
+	exynos_pcie_phy_safe_clk(ep->phy, true);
 
 	exynos_pcie_writel(elbi, 0, PCIE_ZUMA_APP_LTSSM_ENABLE);
-	gpiod_set_value_cansleep(ep->perst_gpio, 0);	/* assert PERST */
+
 	/*
-	 * Fully power the PHY down (isolate + drop both refcounts) so link_up()
-	 * re-runs the complete PHY power-on cal, matching the vendor
-	 * phy_all_pwrdn() -- a partial teardown (phy_exit only) retrains the
-	 * link but leaves the CP endpoint's doorbell dead after the relink.
-	 * phy_power_off() isolates the PHY (PMU bit0=0), which would hang the
-	 * first ELBI access; link_up() un-isolates with phy_reset() before it
-	 * touches the controller, so this is safe.
+	 * Controller soft reset (downstream link_down): pulse SOFT_RESET with the
+	 * power bit low, then assert all.  Clears the half-dead MAC state so the
+	 * next link_up re-config trains cleanly.
+	 */
+	exynos_pcie_writel(elbi, SOFT_RESET_PWR_PULSE, PCIE_ZUMA_SOFT_PWR_RESET);
+	udelay(20);
+	exynos_pcie_writel(elbi, SOFT_RESET_ALL, PCIE_ZUMA_SOFT_PWR_RESET);
+
+	/*
+	 * Power the PHY down (isolate) but keep it INIT'd -- link_up() cycles only
+	 * the PHY power + PMA reset per retrain attempt, matching the downstream
+	 * establish_link path, and re-running phy_init() each attempt would leak
+	 * the init refcount across the repeated runtime relinks.  phy_power_off()
+	 * isolates the PHY (PMU bit0=0), which would hang the first ELBI access;
+	 * link_up() un-isolates with phy_reset() before it touches the controller.
 	 */
 	phy_power_off(ep->phy);
-	phy_exit(ep->phy);
-	usleep_range(10000, 12000);
+	ep->cp_phy_off = true;
+	usleep_range(1000, 2000);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(zumapro_pcie_modem_link_down);
@@ -949,43 +1132,190 @@ EXPORT_SYMBOL_GPL(zumapro_pcie_modem_gen3);
 int zumapro_pcie_modem_link_up(struct device *rc_dev)
 {
 	struct exynos_pcie *ep = zumapro_pcie_from_dev(rc_dev);
-	struct dw_pcie_rp *pp;
-	int ret;
+	struct dw_pcie *pci;
+	int ret = -ETIMEDOUT, try;
 
 	if (!ep)
 		return -ENODEV;
-	pp = &ep->pci.pp;
+	pci = &ep->pci;
 
-	/*
-	 * Full re-establish (vendor exynos_pcie_rc_poweron): re-cal the PHY via
-	 * the host_init sequence, re-setup the root complex, then retrain and
-	 * WAIT for the link before the caller touches config space.  start_link()
-	 * re-applies the NAK/transfer-pending fence and releases PERST; the fence
-	 * set in link_down() stays up across the whole window.  AP2CP_WAKEUP high
-	 * first: the CP bootloader gates re-link on it.
-	 */
+	/* AP2CP_WAKEUP high: the CP gates its link participation on it. */
 	gpiod_set_value_cansleep(ep->cp_wakeup, 1);
-	/*
-	 * link_down() isolated the PHY (phy_power_off).  Un-isolate it first --
-	 * phy_reset() takes the PHY out of PMU isolation and re-locks the input
-	 * clock before host_init() issues its first ELBI access, so the full
-	 * PHY power-off/on cal below does not hang the controller.
-	 */
-	phy_reset(ep->phy);
-	ep->drvdata->host_ops->init(pp);
-	dw_pcie_setup_rc(pp);
-	ret = exynos_zuma_pcie_start_link(&ep->pci);
-	if (!ret)
-		ret = dw_pcie_wait_for_link(&ep->pci);
-	if (!ret)
-		exynos_zuma_pcie_gen3(&ep->pci);
 
-	/* Link back (or failed cleanly): drop the fence, re-enable the RC IRQ. */
-	exynos_pcie_writel(ep->pci.elbi_base, 0, PCIE_ZUMA_APP_XFER_PENDING);
-	enable_irq(ep->pci.pp.irq);
-	return ret;
+	/*
+	 * The post-PBL CP endpoint is 2-lane and gates its IPC start on a Gen3 x2
+	 * link, so re-link at x2/Gen3 -- dw_pcie_setup_rc() arms the directed speed
+	 * change, so training completes at Gen1 and upshifts.
+	 */
+	pci->num_lanes = 2;
+	pci->max_link_speed = 3;
+
+	/*
+	 * Runtime relink retrain loop, ported wholesale from the downstream
+	 * establish_link path (steffan-modem): retraining out of the orderly-L2
+	 * park parks the LTSSM in Polling on the first PERST cycle, and a bare
+	 * retry wedges the half-dead core, so re-run the FULL re-config -- PHY
+	 * power cycle + PMA re-config + controller soft-reset pulse + ELBI
+	 * re-config + PERST cycle + RC re-setup + Gen3-EQ-off -- on EVERY attempt.
+	 *
+	 * Crucially the PMA reset wipes the PHY's PMA/PCS configuration, which
+	 * this driver programs in the PHY .init op (zuma_pcie_phy_init), so the
+	 * tables MUST be re-written between the assert and release of the PMA
+	 * reset -- exactly the cold host_init order (phy_reset, assert_pma,
+	 * phy_init, release_pma, phy_power_on).  phy_init() is refcounted and
+	 * would no-op on the second call, so drop the init count first with
+	 * phy_exit(); the exit/init pair nets to zero across the bounce (the
+	 * downstream PHY instead carries these table writes in its power_on, which
+	 * its power_off/on cycle re-runs -- same effect, different split).  Without
+	 * the re-write the PMA comes up unconfigured and the link parks in Polling.
+	 *
+	 * link_down() left the PHY powered off + PERST asserted, so the first pass
+	 * skips the extra phy_power_off().
+	 */
+	for (try = 0; try < PCIE_MODEM_RELINK_RETRIES; try++) {
+		gpiod_set_value_cansleep(ep->perst_gpio, 0);	/* assert PERST */
+		usleep_range(1000, 2000);
+
+		/*
+		 * link_down() already parked the clock safe and powered the PHY
+		 * off (cp_phy_off), so the first pass skips it; a retry re-enters
+		 * with the PHY powered, so park + power it off before re-cal.
+		 */
+		if (!ep->cp_phy_off) {
+			exynos_pcie_phy_safe_clk(ep->phy, true);
+			phy_power_off(ep->phy);
+		}
+		ep->cp_phy_off = false;
+
+		phy_exit(ep->phy);		/* drop init count so phy_init re-runs */
+		phy_reset(ep->phy);		/* un-isolate PHY (PMU), re-lock clk */
+
+		/* PMU PCIE_PHY/WAKE control (bit10) so the CP's PHY re-enables. */
+		regmap_update_bits(ep->pmureg, ep->pmu_offset,
+				   PCIE_ZUMA_PMU_PHY_CTRL, PCIE_ZUMA_PMU_PHY_CTRL);
+
+		exynos_zuma_assert_pma_reset(ep);
+		phy_init(ep->phy);		/* re-write PMA/PCS config tables */
+		exynos_zuma_release_pma_reset(ep);
+		ret = phy_power_on(ep->phy);
+		if (ret)
+			return ret;
+		phy_calibrate(ep->phy);
+
+		exynos_zuma_controller_reset_pulse(ep);
+		exynos_zuma_config_elbi(ep);
+
+		gpiod_set_value_cansleep(ep->perst_gpio, 1);	/* deassert PERST */
+		usleep_range(PCIE_PERST_DELAY_US, PCIE_PERST_DELAY_US + 2000);
+
+		dw_pcie_setup_rc(&pci->pp);
+
+		/*
+		 * Restore the integrated-MSI receiver the controller reset zeroed
+		 * (link_down snapshot); setup_rc does not re-arm the RC's own
+		 * enable/mask/target, so the CP's post-relink MSI would otherwise
+		 * be dropped.
+		 */
+		if (ep->msi_saved) {
+			dw_pcie_writel_dbi(pci, PCIE_MSI_ADDR_LO,
+					   ep->saved_msi_addr_lo);
+			dw_pcie_writel_dbi(pci, PCIE_MSI_ADDR_HI,
+					   ep->saved_msi_addr_hi);
+			dw_pcie_writel_dbi(pci, PCIE_MSI_INTR0_ENABLE,
+					   ep->saved_msi_enable);
+			dw_pcie_writel_dbi(pci, PCIE_MSI_INTR0_MASK,
+					   ep->saved_msi_mask);
+		}
+
+		/* setup_rc reset the RC's integrated-MSI summary routing; re-arm it
+		 * so the CP's post-link MSI (INIT_START etc.) still reaches us. */
+		if (IS_ENABLED(CONFIG_PCI_MSI)) {
+			u32 v = exynos_pcie_readl(pci->elbi_base,
+						  PCIE_ZUMA_IRQ2_EN);
+
+			exynos_pcie_writel(pci->elbi_base, v | PCIE_ZUMA_IRQ2_MSI,
+					   PCIE_ZUMA_IRQ2_EN);
+		}
+
+		/* Gen3 EQ off: this PHY trains Gen3 without EQ phases 2/3. */
+		dw_pcie_dbi_ro_wr_en(pci);
+		dw_pcie_writel_dbi(pci, PCIE_GEN3_RELATED, GEN3_EQ_OFF);
+		dw_pcie_dbi_ro_wr_dis(pci);
+
+		exynos_pcie_writel(pci->elbi_base, LTSSM_ENABLE,
+				   PCIE_ZUMA_APP_LTSSM_ENABLE);
+		usleep_range(1000, 1500);
+
+		ret = exynos_zuma_modem_wait_link(ep);
+		if (!ret) {
+			u8 exp = dw_pcie_find_capability(pci, PCI_CAP_ID_EXP);
+			u16 lnksta;
+
+			/*
+			 * Let the directed speed change settle, then confirm
+			 * Gen3: the post-PBL CP gates its IPC start on a Gen3 x2
+			 * link.  A retrain out of the orderly-L2 park can train
+			 * but stick below Gen3, so redo the full re-config
+			 * (downstream establish_link retries the whole sequence).
+			 */
+			usleep_range(2800, 3000);
+			lnksta = dw_pcie_readw_dbi(pci, exp + PCI_EXP_LNKSTA);
+			if ((lnksta & PCI_EXP_LNKSTA_CLS) !=
+			    PCI_EXP_LNKSTA_CLS_8_0GB &&
+			    try < PCIE_MODEM_RELINK_RETRIES - 1) {
+				dev_warn(pci->dev,
+					 "modem relink below Gen3 (LNKSTA %#x), retrying\n",
+					 lnksta);
+				ret = -EAGAIN;
+				continue;
+			}
+			dev_info(pci->dev, "modem link up (LNKSTA %#x)\n", lnksta);
+			ret = 0;
+			break;
+		}
+		dev_warn(pci->dev,
+			 "modem relink attempt %d/%d failed (%d, ltssm %#x)\n",
+			 try + 1, PCIE_MODEM_RELINK_RETRIES, ret,
+			 exynos_pcie_readl(pci->elbi_base, PCIE_ZUMA_RDLH_LINKUP) &
+			 LTSSM_STATE_MASK);
+	}
+
+	if (ret) {
+		/*
+		 * Every attempt failed: stop holding the refclk, park the PHY
+		 * clock on the safe OSC so the RC stays touchable.
+		 */
+		exynos_pcie_phy_keep_refclk(ep->phy, false);
+		exynos_pcie_phy_safe_clk(ep->phy, true);
+		return ret;
+	}
+
+	/* Link back: drop the refclk hold and the transfer-pending fence. */
+	exynos_pcie_phy_keep_refclk(ep->phy, false);
+	exynos_pcie_writel(pci->elbi_base, 0, PCIE_ZUMA_APP_XFER_PENDING);
+	return 0;
 }
 EXPORT_SYMBOL_GPL(zumapro_pcie_modem_link_up);
+
+/*
+ * Nudge AP2CP_WAKEUP so a parked CP raises CP2AP_WAKEUP and the modem driver's
+ * wakeup IRQ can relink (downstream s5100_try_gpio_cp_wakeup(), the AP-initiated
+ * half of pcie_send_ap2cp_irq()).  Only the GPIO edge is driven here -- the
+ * actual relink runs from zumapro_pcie_modem_link_up() once the CP answers --
+ * so this is a cheap, non-blocking poke the modem send path can issue while the
+ * link is parked.  Uses the non-sleeping accessor: the send path reaches this
+ * from the MSI hard-IRQ handler and cp_wakeup is a memory-mapped SoC GPIO.
+ */
+int zumapro_pcie_modem_wake(struct device *rc_dev)
+{
+	struct exynos_pcie *ep = zumapro_pcie_from_dev(rc_dev);
+
+	if (!ep)
+		return -ENODEV;
+	gpiod_set_value(ep->cp_wakeup, 1);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(zumapro_pcie_modem_wake);
 
 static struct platform_driver exynos_pcie_driver = {
 	.probe		= exynos_pcie_probe,
