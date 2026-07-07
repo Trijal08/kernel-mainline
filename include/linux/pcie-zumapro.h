@@ -17,11 +17,18 @@ struct device;
 
 #if IS_ENABLED(CONFIG_PCI_EXYNOS)
 int zumapro_pcie_set_msi_target(struct device *rc_dev, phys_addr_t target);
+int zumapro_pcie_reserve_msi_base(struct device *rc_dev, unsigned int count);
 int zumapro_pcie_modem_link_down(struct device *rc_dev);
 int zumapro_pcie_modem_link_up(struct device *rc_dev);
+int zumapro_pcie_modem_gen3(struct device *rc_dev);
 #else
 static inline int zumapro_pcie_set_msi_target(struct device *rc_dev,
 					      phys_addr_t target)
+{
+	return -ENODEV;
+}
+static inline int zumapro_pcie_reserve_msi_base(struct device *rc_dev,
+						unsigned int count)
 {
 	return -ENODEV;
 }
@@ -30,6 +37,10 @@ static inline int zumapro_pcie_modem_link_down(struct device *rc_dev)
 	return -ENODEV;
 }
 static inline int zumapro_pcie_modem_link_up(struct device *rc_dev)
+{
+	return -ENODEV;
+}
+static inline int zumapro_pcie_modem_gen3(struct device *rc_dev)
 {
 	return -ENODEV;
 }
