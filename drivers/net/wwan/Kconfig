@@ -132,7 +132,7 @@ config S5300_MODEM
 	  and data ports are not implemented yet.
 
 	  To compile this driver as a module, choose M here: the module will
-	  be called s5300_modem.
+	  be called s5xxx_modem.
 
 	  If unsure, say N.
 
