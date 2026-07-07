@@ -435,8 +435,12 @@ static void s5300_send_ipc_irq(struct s5300_modem *sm, u32 val)
 	}
 	spin_unlock_irqrestore(&sm->lock, flags);
 
-	if (wake)
+	if (wake) {
+		dev_info(sm->dev,
+			 "ctrl tx while parked: staged msg %#x, nudging AP2CP_WAKEUP\n",
+			 val);
 		zumapro_pcie_modem_wake(sm->rc_dev);
+	}
 }
 
 /*
@@ -519,7 +523,10 @@ static irqreturn_t s5300_cp2ap_wakeup_irq(int irq, void *data)
 	 * workqueue can read it, so reading the GPIO in pm_work misses a brief park.
 	 * cp2ap_wakeup is a memory-mapped SoC GPIO, so gpiod_get_value never sleeps.
 	 */
-	WRITE_ONCE(sm->cp_wants_up, gpiod_get_value(sm->cp2ap_wakeup));
+	int up = gpiod_get_value(sm->cp2ap_wakeup);
+
+	WRITE_ONCE(sm->cp_wants_up, up);
+	dev_info(sm->dev, "CP2AP_WAKEUP irq: level %d\n", up);
 	queue_work(sm->pm_wq, &sm->pm_work);
 	return IRQ_HANDLED;
 }
