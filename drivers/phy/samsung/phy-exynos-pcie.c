@@ -13,6 +13,7 @@
 #include <linux/iopoll.h>
 #include <linux/mfd/syscon.h>
 #include <linux/of_platform.h>
+#include <linux/pcie-zumapro.h>
 #include <linux/platform_device.h>
 #include <linux/phy/phy.h>
 #include <linux/regmap.h>
@@ -59,6 +60,14 @@ struct exynos_pcie_phy {
 	struct regmap *fsysreg;		/* Exynos5433 only */
 	u32 pmu_offset;			/* PHY isolation control (zuma) */
 	u32 num_lanes;
+	/*
+	 * When set, power_off keeps the PHY out of PMU isolation so the external
+	 * PLL (and the refclk it feeds a discrete endpoint -- the modem CP) stays
+	 * alive across a runtime link bounce.  Without it the CP loses its PCIe
+	 * reference clock during the relink and the retrain parks in Polling.
+	 * Set by the RC modem-relink path (exynos_pcie_phy_keep_refclk).
+	 */
+	bool keep_refclk;
 };
 
 static void exynos_pcie_phy_writel(void __iomem *base, u32 val, u32 offset)
@@ -421,7 +430,15 @@ static int zuma_pcie_phy_power_on(struct phy *phy)
 		if (!zuma_phy_wait_bit(lane1, ZUMA_PHY_OC_DONE, 7))
 			dev_warn(&phy->dev, "lane1 offset-calibration timeout\n");
 
-		val = readl(ep->udbg_base + ZUMA_UDBG_EXT_PLL_X2) | (0x3 << 8);
+		/*
+		 * Do NOT L2-gate the external PLL (bits[9:8]) on this 2-lane
+		 * instance: the discrete modem CP runs off this PHY's refclk and
+		 * must keep it when the link parks in L2, or its PHY dies and a
+		 * relink retrain parks in Polling.  The downstream/steffan-modem PHY
+		 * never gates it here -- clear the field to match.  (The WiFi 1-lane
+		 * instance never reaches this block.)
+		 */
+		val = readl(ep->udbg_base + ZUMA_UDBG_EXT_PLL_X2) & ~(0x3 << 8);
 		writel(val, ep->udbg_base + ZUMA_UDBG_EXT_PLL_X2);
 		val = readl(ep->udbg_base + ZUMA_UDBG_PLL_PWR_GATING) & ~(0x3 << 5);
 		writel(val, ep->udbg_base + ZUMA_UDBG_PLL_PWR_GATING);
@@ -436,10 +453,52 @@ static int zuma_pcie_phy_power_off(struct phy *phy)
 {
 	struct exynos_pcie_phy *ep = phy_get_drvdata(phy);
 
-	/* put the PHY back into isolation */
-	regmap_update_bits(ep->pmureg, ep->pmu_offset, BIT(0), 0);
+	/*
+	 * Put the PHY back into isolation -- but NOT during a modem runtime
+	 * relink (keep_refclk), where isolating the PHY cuts the external PLL
+	 * that clocks the discrete CP.  The RC clears keep_refclk once the link
+	 * is back up (or has failed for good), and phy_exit() still isolates on
+	 * teardown, so the PHY is not left un-isolated across a real power-down.
+	 */
+	if (!ep->keep_refclk)
+		regmap_update_bits(ep->pmureg, ep->pmu_offset, BIT(0), 0);
 	return 0;
 }
+
+/*
+ * Keep the external PLL / CP reference clock alive across a runtime link bounce
+ * (downstream/steffan-modem zumapro_pcie_phy_keep_refclk).  The discrete modem
+ * CP runs off this PHY's refclk; isolating the PHY in power_off would drop it
+ * and the CP's PHY would die, so the retrain parks in Polling.  The RC sets this
+ * before modem_link_down and clears it once modem_link_up succeeds or gives up.
+ */
+void exynos_pcie_phy_keep_refclk(struct phy *phy, bool keep)
+{
+	struct exynos_pcie_phy *ep = phy_get_drvdata(phy);
+
+	ep->keep_refclk = keep;
+}
+EXPORT_SYMBOL_GPL(exynos_pcie_phy_keep_refclk);
+
+/*
+ * Switch the SoC PHY sub-block clock onto the OSC ("safe") during a link
+ * teardown/retrain or back to the external-PLL path (downstream
+ * zumapro_pcie_phy_safe_clk): with the link down the CP may stop driving
+ * CLKREQ#, and an ELBI access on the gated PLL clock stalls the interconnect.
+ * The RC modem-relink path calls this around each PHY power cycle.
+ */
+void exynos_pcie_phy_safe_clk(struct phy *phy, bool safe)
+{
+	struct exynos_pcie_phy *ep = phy_get_drvdata(phy);
+	u32 val;
+
+	val = readl(ep->soc_base + ZUMA_SOC_PHY_PWR);
+	if (safe)
+		writel(val & ~0x3, ep->soc_base + ZUMA_SOC_PHY_PWR);
+	else
+		writel(ZUMA_SOC_PHY_PWR_ON, ep->soc_base + ZUMA_SOC_PHY_PWR);
+}
+EXPORT_SYMBOL_GPL(exynos_pcie_phy_safe_clk);
 
 static const struct phy_ops zuma_phy_ops = {
 	.reset		= zuma_pcie_phy_reset,
