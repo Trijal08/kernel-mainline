@@ -735,7 +735,9 @@
 		#address-cells = <1>;
 		#size-cells = <1>;
 		ranges = <0x0 0x0 0x0 0x40000000>,
-			 /* PCIe (HSI2) outbound MEM window + config space */
+			 /* PCIe CH0 (HSI1, modem) outbound MEM window + config */
+			 <0x40000000 0x0 0x40000000 0x01000000>,
+			 /* PCIe CH1 (HSI2, WiFi) outbound MEM window + config */
 			 <0x60000000 0x0 0x60000000 0x01000000>;
 		/*
 		 * The bootloader hands the GPU over fully powered.  The secure
@@ -3445,10 +3447,11 @@
 		 * PCIe CH0 (HSI1) root complex + PHY for the Tensor modem
 		 * (Gen3 x2). Same google,zuma-pcie / google,zuma-pcie-phy
 		 * drivers as the CH1 WiFi link; num-lanes=2 selects the PHY's
-		 * two-lane sequences. The outbound window is non-identity
-		 * (PCI 0x14e00000 -> CPU 0x40000000). Kept disabled at SoC
-		 * level; the board enables it once the modem CP power-on
-		 * sequencing is in place.
+		 * two-lane sequences. The outbound window maps CPU 0x40000000
+		 * -> PCI 0x14e00000 (non-identity) so the CP doorbell BAR at
+		 * PCI 0x14e60000 is reachable at CPU 0x40060000; the soc@0
+		 * bus must translate CPU 0x40000000 (its ranges do). Kept
+		 * disabled at SoC level; the board enables it.
 		 */
 		pcie_0_phy: phy@12140000 {
 			compatible = "google,zuma-pcie-phy";
