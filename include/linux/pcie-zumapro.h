@@ -14,6 +14,19 @@
 #include <linux/types.h>
 
 struct device;
+struct phy;
+
+/*
+ * Switch the modem PCIe PHY sub-block clock to the safe OSC (or back to the
+ * external PLL) during a runtime link bounce (implemented in phy-exynos-pcie.c).
+ */
+#if IS_ENABLED(CONFIG_PHY_EXYNOS_PCIE)
+void exynos_pcie_phy_safe_clk(struct phy *phy, bool safe);
+void exynos_pcie_phy_keep_refclk(struct phy *phy, bool keep);
+#else
+static inline void exynos_pcie_phy_safe_clk(struct phy *phy, bool safe) { }
+static inline void exynos_pcie_phy_keep_refclk(struct phy *phy, bool keep) { }
+#endif
 
 #if IS_ENABLED(CONFIG_PCI_EXYNOS)
 int zumapro_pcie_set_msi_target(struct device *rc_dev, phys_addr_t target);
@@ -21,6 +34,7 @@ int zumapro_pcie_reserve_msi_base(struct device *rc_dev, unsigned int count);
 int zumapro_pcie_modem_link_down(struct device *rc_dev);
 int zumapro_pcie_modem_link_up(struct device *rc_dev);
 int zumapro_pcie_modem_gen3(struct device *rc_dev);
+int zumapro_pcie_modem_wake(struct device *rc_dev);
 #else
 static inline int zumapro_pcie_set_msi_target(struct device *rc_dev,
 					      phys_addr_t target)
@@ -41,6 +55,10 @@ static inline int zumapro_pcie_modem_link_up(struct device *rc_dev)
 	return -ENODEV;
 }
 static inline int zumapro_pcie_modem_gen3(struct device *rc_dev)
+{
+	return -ENODEV;
+}
+static inline int zumapro_pcie_modem_wake(struct device *rc_dev)
 {
 	return -ENODEV;
 }
