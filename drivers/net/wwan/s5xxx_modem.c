@@ -44,9 +44,11 @@
 #include <linux/pcie-zumapro.h>
 #include <linux/platform_device.h>
 #include <linux/sizes.h>
+#include <linux/skbuff.h>
 #include <linux/slab.h>
 #include <linux/unaligned.h>
 #include <linux/workqueue.h>
+#include <linux/wwan.h>
 
 #define S5300_PCI_VENDOR_ID		0x144d
 #define S5300_PCI_DEVICE_ID		0xa5a5
@@ -126,6 +128,23 @@
 #define S5300_CMD_CRASH_EXIT		0x9
 #define S5300_CMD_PIF_INIT_DONE		0xd
 
+/*
+ * Runtime data-notification masks in ap2cp/cp2ap_msg (downstream
+ * link_device_memory.h): once ONLINE the CP raises these (with INT_VALID, no
+ * CMD_VALID) to say a ring has data, and the AP ORs them when it sends a frame.
+ */
+#define S5300_INT_SEND_FMT		BIT(1)	/* MASK_SEND_FMT: FMT ring */
+#define S5300_INT_SEND_RAW		BIT(0)	/* MASK_SEND_RAW: NORM_RAW ring */
+
+/*
+ * Exynos link-header channel IDs (downstream exynos-cpif.h).  Runtime control
+ * channels are multiplexed over the shared rings and demuxed by the ch_id byte
+ * in the 12-byte header: FMT (245) = umts_ipc0 RIL control on the FMT ring;
+ * AT (21, EXYNOS_CH_ID_BT_DUN) = umts_router AT commands on the NORM_RAW ring.
+ */
+#define S5300_CH_FMT			245
+#define S5300_CH_AT			21
+
 /* Doorbell values: bit 16 triggers, low bits select the mailbox index. */
 #define S5300_DB_TRIGGER		BIT(16)
 #define S5300_DB_MSG			(S5300_DB_TRIGGER | 0x0)	/* int_ap2cp_msg */
@@ -159,6 +178,7 @@
 #define S5300_RAW_TXQ_BUFF		0x3000
 #define S5300_RAW_TXQ_SIZE		0x1fd000
 #define S5300_RAW_RXQ_BUFF		0x200000
+#define S5300_RAW_RXQ_SIZE		0x200000
 /* legacy FMT queue (DT legacy_fmt_*): the CP posts control messages here. */
 #define S5300_FMT_RXQ_HEAD		0x10		/* CP advances */
 #define S5300_FMT_RXQ_TAIL		0x14		/* AP advances */
@@ -206,6 +226,12 @@ struct s5300_modem {
 	struct completion	init_done;
 	spinlock_t		lock;	/* orders ap2cp_msg word + doorbell */
 	bool			online;
+
+	/* Runtime control channel: umts_router AT commands over the RAW ring. */
+	struct wwan_port	*at_port;
+	struct work_struct	rx_work;	/* drain the RX rings (process ctx) */
+	spinlock_t		tx_lock;	/* serialises RAW txq producers */
+	u8			at_ch_seq;	/* per-channel header sequence */
 };
 
 /*
@@ -417,15 +443,204 @@ static void s5300_init_ipc_queues(struct s5300_modem *sm)
 			magic, access);
 }
 
+/* --- runtime control channel: umts_router AT commands over the RAW ring --- */
+
+static u32 s5300_circ_space(u32 size, u32 in, u32 out)
+{
+	return (in >= out) ? size - (in - out) - 1 : out - in - 1;
+}
+
+static u32 s5300_circ_usage(u32 size, u32 in, u32 out)
+{
+	return (in >= out) ? in - out : size - (out - in);
+}
+
+/* Copy @len bytes into the ring buffer at byte offset @off, wrapping at @size. */
+static void s5300_circ_write(void __iomem *buff, u32 size, u32 off,
+			     const void *src, u32 len)
+{
+	u32 first = min(len, size - off);
+
+	memcpy_toio(buff + off, src, first);
+	if (first < len)
+		memcpy_toio(buff, src + first, len - first);
+}
+
+/* Copy @len bytes out of the ring buffer at byte offset @off, wrapping at @size. */
+static void s5300_circ_read(void *dst, void __iomem *buff, u32 size, u32 off,
+			    u32 len)
+{
+	u32 first = min(len, size - off);
+
+	memcpy_fromio(dst, buff + off, first);
+	if (first < len)
+		memcpy_fromio(dst + first, buff, len - first);
+}
+
+/*
+ * Frame a control message with the 12-byte exynos link header for channel @ch,
+ * push it into the NORM_RAW TX ring and signal the CP (ap2cp_msg SEND_RAW +
+ * doorbell).  Single-frame only -- control messages are well under 2 KB.
+ */
+static int s5300_ipc_tx(struct s5300_modem *sm, u8 ch, const u8 *data, u32 len)
+{
+	u32 flen = ALIGN(S5300_SIT_HDR + len, 8);
+	void __iomem *buff = sm->ipc + S5300_RAW_TXQ_BUFF;
+	unsigned long flags;
+	u8 hdr[S5300_SIT_HDR];
+	u32 in, out;
+
+	if (S5300_SIT_HDR + len > 2048)
+		return -EMSGSIZE;
+
+	spin_lock_irqsave(&sm->tx_lock, flags);
+
+	in = readl(sm->ipc + S5300_RAW_TXQ_HEAD);
+	out = readl(sm->ipc + S5300_RAW_TXQ_TAIL);
+	if (s5300_circ_space(S5300_RAW_TXQ_SIZE, in, out) < flen) {
+		spin_unlock_irqrestore(&sm->tx_lock, flags);
+		return -EAGAIN;
+	}
+
+	put_unaligned_le16(S5300_SIT_SYNC, hdr + 0);
+	put_unaligned_le16(sm->frame_seq++, hdr + 2);
+	put_unaligned_le16(S5300_SIT_CFG_SINGLE, hdr + 4);
+	put_unaligned_le16(S5300_SIT_HDR + len, hdr + 6);
+	hdr[8] = ch;
+	hdr[9] = ++sm->at_ch_seq;
+	hdr[10] = 0;
+	hdr[11] = 0;
+
+	s5300_circ_write(buff, S5300_RAW_TXQ_SIZE, in, hdr, S5300_SIT_HDR);
+	s5300_circ_write(buff, S5300_RAW_TXQ_SIZE,
+			 (in + S5300_SIT_HDR) % S5300_RAW_TXQ_SIZE, data, len);
+	/* the CP polls the head; order the payload ahead of the advance */
+	dma_wmb();
+	writel((in + flen) % S5300_RAW_TXQ_SIZE, sm->ipc + S5300_RAW_TXQ_HEAD);
+
+	spin_unlock_irqrestore(&sm->tx_lock, flags);
+
+	s5300_send_ipc_irq(sm, S5300_INT_VALID | S5300_INT_SEND_RAW);
+	return 0;
+}
+
+static int s5300_wwan_start(struct wwan_port *port)
+{
+	return 0;
+}
+
+static void s5300_wwan_stop(struct wwan_port *port)
+{
+}
+
+static int s5300_wwan_tx(struct wwan_port *port, struct sk_buff *skb)
+{
+	struct s5300_modem *sm = wwan_port_get_drvdata(port);
+	int ret;
+
+	if (!sm->online)
+		return -ENODEV;
+	ret = s5300_ipc_tx(sm, S5300_CH_AT, skb->data, skb->len);
+	if (ret)
+		return ret;
+	consume_skb(skb);
+	return 0;
+}
+
+static const struct wwan_port_ops s5300_wwan_ops = {
+	.start	= s5300_wwan_start,
+	.stop	= s5300_wwan_stop,
+	.tx	= s5300_wwan_tx,
+};
+
+/*
+ * Drain one RX ring: parse each 12-byte-framed message, hand AT-channel (ch 21)
+ * payloads to the WWAN port, and advance the tail past everything consumed.
+ * Frames for channels we don't handle yet are skipped (dropped).
+ */
+static void s5300_rx_ring(struct s5300_modem *sm, u32 head_off, u32 tail_off,
+			  u32 buff_off, u32 size)
+{
+	void __iomem *buff = sm->ipc + buff_off;
+	u32 in, out;
+
+	in = readl(sm->ipc + head_off);
+	out = readl(sm->ipc + tail_off);
+
+	while (in != out) {
+		u32 usage = s5300_circ_usage(size, in, out);
+		u8 hdr[S5300_SIT_HDR];
+		u32 flen, total, plen;
+		u8 ch;
+
+		if (usage < S5300_SIT_HDR)
+			break;
+		s5300_circ_read(hdr, buff, size, out, S5300_SIT_HDR);
+		if (get_unaligned_le16(hdr) != S5300_SIT_SYNC) {
+			dev_err_ratelimited(sm->dev, "rx bad sync %#x; flushing\n",
+					    get_unaligned_le16(hdr));
+			out = in;
+			break;
+		}
+		flen = get_unaligned_le16(hdr + 6);	/* header + payload */
+		total = ALIGN(flen, 8);
+		if (flen < S5300_SIT_HDR || total > usage)
+			break;			/* partial frame; wait for more */
+		ch = hdr[8];
+		plen = flen - S5300_SIT_HDR;
+
+		if (ch == S5300_CH_AT && sm->at_port && plen) {
+			struct sk_buff *skb = alloc_skb(plen, GFP_KERNEL);
+
+			if (skb) {
+				s5300_circ_read(skb_put(skb, plen), buff, size,
+						(out + S5300_SIT_HDR) % size, plen);
+				wwan_port_rx(sm->at_port, skb);
+			}
+		}
+		out = (out + total) % size;
+	}
+
+	/* order the payload reads ahead of the tail advance the CP watches */
+	dma_wmb();
+	writel(out, sm->ipc + tail_off);
+}
+
+static void s5300_rx_work(struct work_struct *work)
+{
+	struct s5300_modem *sm = container_of(work, struct s5300_modem, rx_work);
+
+	if (!sm->at_port)
+		return;			/* port not up yet; retry on next IRQ */
+	s5300_rx_ring(sm, S5300_RAW_RXQ_HEAD, S5300_RAW_RXQ_TAIL,
+		      S5300_RAW_RXQ_BUFF, S5300_RAW_RXQ_SIZE);
+}
+
+/* Expose the runtime control channel once the CP is ONLINE (process context). */
+static void s5300_online(struct s5300_modem *sm)
+{
+	if (sm->at_port)
+		return;
+	sm->at_port = wwan_create_port(sm->dev, WWAN_PORT_AT, &s5300_wwan_ops,
+				       NULL, sm);
+	if (IS_ERR(sm->at_port)) {
+		dev_err(sm->dev, "failed to create AT port: %ld\n",
+			PTR_ERR(sm->at_port));
+		sm->at_port = NULL;
+		return;
+	}
+	dev_info(sm->dev, "AT control port up (umts_router, ch %u)\n",
+		 S5300_CH_AT);
+	/* Drain anything the CP queued while the port was coming up. */
+	schedule_work(&sm->rx_work);
+}
+
 static irqreturn_t s5300_irq_handler(int irq, void *data)
 {
 	struct s5300_modem *sm = data;
 	u32 val, cmd;
 
 	sm->irq_count++;
-	/* std_dl acks ride the NORM_RAW rxq; consume them so the CP keeps going. */
-	writel(readl(sm->ipc + S5300_RAW_RXQ_HEAD),
-	       sm->ipc + S5300_RAW_RXQ_TAIL);
 	val = readl(sm->ipc + S5300_IPC_CP2AP_MSG);
 	/* Surface interrupt-value changes so post-bounce MSI liveness is visible. */
 	if (val != sm->last_cp2ap) {
@@ -436,7 +651,14 @@ static irqreturn_t s5300_irq_handler(int irq, void *data)
 		return IRQ_HANDLED;
 
 	if (!(val & S5300_CMD_VALID)) {
-		/* Plain data notification (SEND_FMT/SEND_RAW); no consumers yet. */
+		/* Data notification (SEND_FMT/SEND_RAW), no command. */
+		if (sm->online)
+			/* Runtime: parse the RX rings in process context. */
+			schedule_work(&sm->rx_work);
+		else
+			/* Boot: std_dl acks; consume so the CP keeps draining. */
+			writel(readl(sm->ipc + S5300_RAW_RXQ_HEAD),
+			       sm->ipc + S5300_RAW_RXQ_TAIL);
 		return IRQ_HANDLED;
 	}
 
@@ -1194,6 +1416,7 @@ static void s5300_boot_work(struct work_struct *work)
 
 online:
 	dev_info(sm->dev, "CP is ONLINE\n");
+	s5300_online(sm);
 	return;
 
 out_fw:
@@ -1251,8 +1474,10 @@ static int s5300_probe(struct platform_device *pdev)
 
 	sm->dev = dev;
 	spin_lock_init(&sm->lock);
+	spin_lock_init(&sm->tx_lock);
 	init_completion(&sm->init_done);
 	INIT_WORK(&sm->boot_work, s5300_boot_work);
+	INIT_WORK(&sm->rx_work, s5300_rx_work);
 	platform_set_drvdata(pdev, sm);
 
 	rc_node = of_parse_phandle(dev->of_node, "google,pcie", 0);
@@ -1445,8 +1670,11 @@ static void s5300_remove(struct platform_device *pdev)
 	struct s5300_modem *sm = platform_get_drvdata(pdev);
 
 	cancel_work_sync(&sm->boot_work);
-	release_firmware(sm->pbl);
 	free_irq(pci_irq_vector(sm->pdev, 0), sm);
+	cancel_work_sync(&sm->rx_work);
+	if (sm->at_port)
+		wwan_remove_port(sm->at_port);
+	release_firmware(sm->pbl);
 	pci_free_irq_vectors(sm->pdev);
 	pci_disable_device(sm->pdev);
 	pci_dev_put(sm->pdev);
