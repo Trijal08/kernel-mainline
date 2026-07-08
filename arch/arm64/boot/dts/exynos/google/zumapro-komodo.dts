@@ -121,12 +121,26 @@
 			reg = <0x0 0xf6200000 0x1000>;
 			no-map;
 		};
+
+		/*
+		 * CP PKTPROC carveout (../fdt.dts cp_rmem_1).  The CP DMAs its
+		 * downlink packet-processor descriptor/buffer rings here; the AP
+		 * publishes the DL info region so MAIN can complete its runtime-IPC
+		 * bring-up (without a valid DL info region the pktproc-class CP never
+		 * arms its legacy FMT/RAW control rings).  CP-side aperture base is
+		 * pktproc_cp_base 0x20000000.
+		 */
+		cp_pktproc_rmem_reserved: cp-pktproc-rmem@e8000000 {
+			reg = <0x0 0xe8000000 0x2000000>;
+			no-map;
+		};
 	};
 
 	modem {
 		compatible = "samsung,s5300-modem";
-		memory-region = <&cp_rmem_reserved>, <&cp_msi_rmem_reserved>;
-		memory-region-names = "ipc", "msi";
+		memory-region = <&cp_rmem_reserved>, <&cp_msi_rmem_reserved>,
+				<&cp_pktproc_rmem_reserved>;
+		memory-region-names = "ipc", "msi", "pktproc";
 		/*
 		 * The unmodified vendor CP image (ntn_modem/modem.bin); the
 		 * driver parses its TOC and stages the BOOT section. Keyed on
