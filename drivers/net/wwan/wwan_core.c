@@ -350,6 +350,14 @@ static const struct {
 		.devsuf = "mipc",
 	},
 	/* WWAN_PORT_NMEA is exported via the GNSS subsystem */
+	[WWAN_PORT_SIT] = {
+		.name = "SIT",
+		.devsuf = "sit",
+	},
+	[WWAN_PORT_RFS] = {
+		.name = "RFS",
+		.devsuf = "rfs",
+	},
 };
 
 static ssize_t type_show(struct device *dev, struct device_attribute *attr,
