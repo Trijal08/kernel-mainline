@@ -622,6 +622,13 @@ static void exynos_pcie_cp_power_on(struct exynos_pcie *ep)
 	gpiod_direction_output(ep->cp_pda_active, 1);
 	gpiod_direction_output(ep->cp_pwr, 1);
 	gpiod_direction_output(ep->cp_nreset, 1);
+	/*
+	 * AP2CP_WAKEUP is an output too (start low = link not requested).  The
+	 * other rail lines above prove this GPIOD_ASIS + direction_output pattern
+	 * physically drives on this board; cp_wakeup was the one line that never
+	 * got its direction set, so its runtime wake nudge went nowhere.
+	 */
+	gpiod_direction_output(ep->cp_wakeup, 0);
 
 	gpiod_direction_output(ep->cp_wrst, 0);
 	gpiod_direction_output(ep->cp_pm_wrst, 0);
@@ -646,7 +653,14 @@ static int exynos_pcie_cp_get_gpios(struct exynos_pcie *ep)
 
 	ep->cp_pda_active = devm_gpiod_get(dev, "google,cp-pda-active",
 					   GPIOD_ASIS);
-	ep->cp_wakeup = devm_gpiod_get(dev, "google,cp-wakeup", GPIOD_ASIS);
+	/*
+	 * AP2CP_WAKEUP is an output: the AP drives it high to ask a parked CP to
+	 * re-raise CP2AP_WAKEUP so the runtime link can come back up.  Request it
+	 * as an output (start low = link not requested); GPIOD_ASIS would leave
+	 * the pad in its reset-default input direction and every gpiod_set_value()
+	 * on it -- the wake nudge included -- would be a silent no-op.
+	 */
+	ep->cp_wakeup = devm_gpiod_get(dev, "google,cp-wakeup", GPIOD_OUT_LOW);
 	ep->cp_pm_wrst = devm_gpiod_get(dev, "google,cp-pm-wrst", GPIOD_ASIS);
 	ep->cp_nreset = devm_gpiod_get(dev, "google,cp-nreset", GPIOD_ASIS);
 	ep->cp_wrst = devm_gpiod_get(dev, "google,cp-wrst", GPIOD_ASIS);
@@ -984,6 +998,7 @@ int zumapro_pcie_modem_link_down(struct device *rc_dev)
 	 * CLKREQ#.  Proceed on timeout (like downstream) but log the reached state.
 	 */
 	val = exynos_pcie_readl(elbi, PCIE_ZUMA_RDLH_LINKUP) & LTSSM_STATE_MASK;
+	dev_info(ep->pci.dev, "link_down: entry ltssm %#x\n", val);
 	if (val >= LTSSM_STATE_RCVRY_LOCK && val <= LTSSM_STATE_L1_IDLE) {
 		/* PCIE_IRQ_PULSE is write-1-to-clear; clear any stale PM_TO_ACK. */
 		val = exynos_pcie_readl(elbi, PCIE_IRQ_PULSE);
@@ -1012,11 +1027,11 @@ int zumapro_pcie_modem_link_down(struct device *rc_dev)
 					 PCIE_L2_ENTER_WAIT_STEP_US,
 					 PCIE_L2_ENTER_WAIT_US);
 		if (ret)
-			dev_warn(ep->pci.dev,
-				 "link did not reach L2_IDLE before PERST (ltssm %#x)\n",
+			dev_info(ep->pci.dev,
+				 "link_down: did NOT reach L2_IDLE (ltssm %#x)\n",
 				 val & LTSSM_STATE_MASK);
 		else
-			dev_dbg(ep->pci.dev, "link reached L2_IDLE, orderly down\n");
+			dev_info(ep->pci.dev, "link_down: reached L2_IDLE\n");
 	}
 
 	/*
@@ -1313,9 +1328,44 @@ int zumapro_pcie_modem_wake(struct device *rc_dev)
 	if (!ep)
 		return -ENODEV;
 	gpiod_set_value(ep->cp_wakeup, 1);
+	dev_info(ep->pci.dev, "AP2CP_WAKEUP nudged, reads back %d\n",
+		 gpiod_get_value(ep->cp_wakeup));
 	return 0;
 }
 EXPORT_SYMBOL_GPL(zumapro_pcie_modem_wake);
+
+/*
+ * Warm-reset the CP back into its boot ROM and wait for its endpoint to
+ * re-link, so the modem driver can (re-)run its boot sequence from scratch.
+ *
+ * At cold boot the controller probe already reset the CP (exynos_pcie_cp_power_on
+ * before link training).  But on a bare modem-module reload (rmmod/insmod with no
+ * reboot) nothing else resets it, so BL1 would land on a still-running MAIN and
+ * boot_stage never advances.  The modem driver calls this at the top of its probe
+ * -- after it has found the (already-enumerated) endpoint but before it programs
+ * MSI/BAR0 -- so both the cold and the reload path continue against a fresh boot
+ * ROM.  cp_pwr stays on (MAIN survives in the CP's self-powered DRAM), only the
+ * baseband is pulsed, then we wait for the Gen1 boot-ROM link to re-train; the
+ * caller reprograms the endpoint's config (MSI target, doorbell BAR) afterwards.
+ */
+int zumapro_pcie_modem_reset(struct device *rc_dev)
+{
+	struct exynos_pcie *ep = zumapro_pcie_from_dev(rc_dev);
+	int ret;
+
+	if (!ep)
+		return -ENODEV;
+
+	exynos_pcie_cp_power_on(ep);
+
+	ret = dw_pcie_wait_for_link(&ep->pci);
+	if (ret)
+		dev_warn(ep->pci.dev,
+			 "CP endpoint did not re-link after warm reset (%d)\n",
+			 ret);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(zumapro_pcie_modem_reset);
 
 static struct platform_driver exynos_pcie_driver = {
 	.probe		= exynos_pcie_probe,
