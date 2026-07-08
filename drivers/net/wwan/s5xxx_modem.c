@@ -109,10 +109,82 @@
 #define S5300_IPC_CAP_OFS_PTR		0x70
 #define S5300_IPC_CAP_BASE		0xa0
 #define S5300_IPC_CAP_WORDS		4	/* AP cap x2, CP cap x2 */
+#define S5300_IPC_CAP_AP0		(S5300_IPC_CAP_BASE + 0x0)
+#define S5300_IPC_CAP_AP1		(S5300_IPC_CAP_BASE + 0x8)
+/*
+ * AP capability part 0 (downstream set_ap_capabilities()), published at
+ * INIT_START before PIF_INIT_DONE.  Bit0 PKTPROC_UL, bit1 CH_EXTENSION
+ * (modem_v1.h).  CH_EXTENSION is a no-op on the AP side (pure protocol-format
+ * flag); PKTPROC_UL is the only bit that arms real memory (pktproc_init_ul) --
+ * setting it makes the CP DMA into UL descriptor memory that does not exist yet
+ * and drops the link.  So keep bit0 clear.  The gate that actually lets MAIN arm
+ * its runtime IPC is the DL pktproc info region (below), NOT this word.
+ */
+#define S5300_AP_CAPABILITY_0		0x2
+
+/*
+ * Downlink pktproc info region (downstream pktproc_init(), link_rx_pktproc.c).
+ * This is a pktproc-class CP: at INIT_START the vendor publishes a
+ * struct pktproc_info_v2 at pktproc_base + info_rgn_offset describing where the
+ * CP DMAs downlink packets.  MAIN reads it to finish its runtime-IPC bring-up;
+ * with the region left zero MAIN never arms and never services the legacy
+ * FMT/RAW control rings (AT/SIT/RFS) -- the "reaches ONLINE but the rings stay
+ * dead" symptom.  We publish a minimal-but-valid single-queue DL region pointing
+ * into the reserved pktproc carveout so MAIN arms; we do not consume DL data
+ * (control channels ride the legacy rings, only rmnet uses pktproc).
+ *
+ * All CP-visible pointers use the CP aperture base (pktproc_cp_base), which the
+ * CP's outbound path maps back onto the same physical carveout the AP maps at
+ * pktproc_phys.  Values/offsets are the komodo s5400 DT (fdt.dts modem node).
+ */
+/*
+ * Geometry taken verbatim from the vendor cpif boot log (cpif_full.txt
+ * pktproc_create / pktproc_create_ul).  DL info at pktproc base, UL info at
+ * base + 0x1c00000 (the cp_rmem_1 carveout holds both).  All *_PBASE values are
+ * the CP aperture view (pktproc_cp_base + offset).
+ */
+#define S5300_PKTPROC_CP_BASE		0x20000000	/* pktproc_cp_base */
+#define S5300_PKTPROC_DESC_SKTBUF_SZ	16		/* sizeof(pktproc_desc_sktbuf) */
+#define S5300_PKTPROC_DESC_UL_SZ	32		/* sizeof(pktproc_desc_ul) */
+
+/* DL: 4 queues, sktbuf, true_packet_size 2048, 3456 desc/queue */
+#define S5300_PKTPROC_DL_INFO_OFS	0x0
+#define S5300_PKTPROC_DL_DESC_OFS	0x1000
+#define S5300_PKTPROC_DL_BUFF_OFS	0x100000
+#define S5300_PKTPROC_DL_MAX_PKT	0x630		/* 1584 */
+#define S5300_PKTPROC_DL_TRUE_PKT	2048
+#define S5300_PKTPROC_DL_DESC_MODE	1		/* DESC_MODE_SKTBUF */
+#define S5300_PKTPROC_DL_NUM_QUEUE	4
+#define S5300_PKTPROC_DL_NUM_DESC	3456
+#define S5300_PKTPROC_DL_Q_DESC_SZ	(S5300_PKTPROC_DL_NUM_DESC * \
+					 S5300_PKTPROC_DESC_SKTBUF_SZ)	/* 0xd800 */
+#define S5300_PKTPROC_DL_Q_BUFF_SZ	(S5300_PKTPROC_DL_NUM_DESC * \
+					 S5300_PKTPROC_DL_TRUE_PKT)	/* 0x6c0000 */
+
+/* UL: 2 queues, 32-byte descriptors, into the second carveout at base+0x1c00000 */
+#define S5300_PKTPROC_UL_INFO_OFS	0x1c00000
+#define S5300_PKTPROC_UL_DESC_OFS	0x1c01000
+#define S5300_PKTPROC_UL_BUFF_OFS	0x1c90000
+#define S5300_PKTPROC_UL_MAX_PKT	2048
+#define S5300_PKTPROC_UL_NUM_QUEUE	2
+#define S5300_PKTPROC_UL_Q0_NUM_DESC	1760
+#define S5300_PKTPROC_UL_Q1_NUM_DESC	880
 #define S5300_IPC_AP2CP_MSG		0x800
 #define S5300_IPC_CP2AP_MSG		0x804
 #define S5300_IPC_AP2CP_STATUS		0x808
 #define S5300_IPC_CP2AP_STATUS		0x80c
+/*
+ * Handover block (downstream ap2cp_handover_block_info = <0x02 0x82c>): a
+ * 161-byte struct t_handover_block_info the AP stages before BL1, carrying the
+ * modem's HW/RF configuration (project/revision/rf_config/rf_sub...), the two
+ * IMEIs and the CP signature.  MAIN reads it to configure itself; with the
+ * region left zero it reaches ONLINE but never arms its runtime IPC.  Loaded
+ * from firmware (device-specific: IMEIs + signature), staged in
+ * s5300_init_control_messages().  cbd sends it via IOCTL_HANDOVER_BLOCK_INFO.
+ */
+#define S5300_IPC_HANDOVER_OFS		0x82c
+#define S5300_HANDOVER_SIZE		161
+#define S5300_HANDOVER_FW		"google/s5400/cp_handover.bin"
 /*
  * ap2cp_united_status ds_det field (downstream sbi_ds_det_pos=14, mask 0x3;
  * get_ds_detect() returns 1 on this device, so the live modem reads 0x4000).
@@ -146,6 +218,10 @@
  */
 #define S5300_INT_SEND_FMT		BIT(1)	/* MASK_SEND_FMT: FMT ring */
 #define S5300_INT_SEND_RAW		BIT(0)	/* MASK_SEND_RAW: NORM_RAW ring */
+#define S5300_INT_REQ_ACK_FMT		0x0020	/* CP wants the AP to ack an FMT rx */
+#define S5300_INT_RES_ACK_FMT		0x0008	/* AP's ack that it drained an FMT rx */
+#define S5300_INT_REQ_ACK_RAW		0x0010	/* CP wants the AP to ack a RAW rx */
+#define S5300_INT_RES_ACK_RAW		0x0004	/* AP's ack that it drained a RAW rx */
 
 /*
  * Exynos link-header channel IDs (downstream exynos-cpif.h).  Runtime control
@@ -155,6 +231,13 @@
  */
 #define S5300_CH_FMT			245
 #define S5300_CH_AT			21
+/*
+ * RFS file channel (EXYNOS_CH_ID_RFS_0, umts_rfs0) on the NORM_RAW ring: once
+ * ONLINE the modem pulls its carrier config and persists NV over it, and rejects
+ * SETUP_DATA_CALL ("no carrier config") until an AP-side RFS server answers.
+ */
+#define S5300_CH_RFS			0x29
+#define S5300_RFS_MAX			SZ_4K
 
 /* Doorbell values: bit 16 triggers, low bits select the mailbox index. */
 #define S5300_DB_TRIGGER		BIT(16)
@@ -190,10 +273,21 @@
 #define S5300_RAW_TXQ_SIZE		0x1fd000
 #define S5300_RAW_RXQ_BUFF		0x200000
 #define S5300_RAW_RXQ_SIZE		0x200000
-/* legacy FMT queue (DT legacy_fmt_*): the CP posts control messages here. */
+/*
+ * Legacy FMT queue (DT legacy_fmt_*): the runtime SIT control channel
+ * (umts_ipc0, ch 0xF5).  head/tail block at IPC+0x08 (TXQ head/tail then RXQ
+ * head/tail); the FMT buffers start at IPC+0x1000 (legacy_fmt_buffer_offset) --
+ * TX buffer at 0x1000, RX buffer at 0x1000+txq_size=0x2000, both 4K.  The CP
+ * gates its secondary channels (umts_router AT on the RAW ring) on this control
+ * plane being alive and its REQ_ACK_FMT round-trips answered.
+ */
+#define S5300_FMT_TXQ_HEAD		0x08		/* AP advances */
+#define S5300_FMT_TXQ_TAIL		0x0c		/* CP advances (drain) */
 #define S5300_FMT_RXQ_HEAD		0x10		/* CP advances */
 #define S5300_FMT_RXQ_TAIL		0x14		/* AP advances */
-#define S5300_FMT_RXQ_BUFF		0x1000
+#define S5300_FMT_TXQ_BUFF		0x1000
+#define S5300_FMT_TXQ_SIZE		0x1000
+#define S5300_FMT_RXQ_BUFF		0x2000
 #define S5300_FMT_RXQ_SIZE		0x1000
 
 /* Exynos SIT link header (12B) + Samsung std_dl download header (12B). */
@@ -222,6 +316,9 @@ struct s5300_modem {
 	void __iomem		*ipc;
 	phys_addr_t		msi_phys;
 	void __iomem		*msi;
+	phys_addr_t		pktproc_phys;
+	resource_size_t		pktproc_size;
+	void __iomem		*pktproc;
 
 	u32			db_bus_addr;
 	void __iomem		*doorbell;
@@ -234,6 +331,8 @@ struct s5300_modem {
 	u32			irq_count;	/* MSI interrupts seen (debug) */
 	u32			last_cp2ap;	/* last CP2AP_MSG value (debug) */
 	struct work_struct	boot_work;
+	struct delayed_work	selftest_work;	/* debug: probe rings post-ONLINE */
+	int			selftest_iter;
 	struct completion	init_done;
 	spinlock_t		lock;	/* orders ap2cp_msg word + doorbell */
 	bool			online;
@@ -251,12 +350,25 @@ struct s5300_modem {
 	bool			link_up;	/* RC link powered on (sm->lock) */
 	bool			db_reserved;	/* doorbell deferred to wake (sm->lock) */
 	bool			cp_wants_up;	/* CP2AP_WAKEUP level latched at edge */
+	bool			main_armed;	/* MAIN took a link-up ISR (services rings) */
 
 	/* Runtime control channel: umts_router AT commands over the RAW ring. */
 	struct wwan_port	*at_port;
-	struct work_struct	rx_work;	/* drain the RX rings (process ctx) */
 	spinlock_t		tx_lock;	/* serialises RAW txq producers */
 	u8			at_ch_seq;	/* per-channel header sequence */
+
+	/*
+	 * SIT control plane on the FMT ring (umts_ipc0, ch 0xF5).  The CP gates
+	 * its secondary channels on this being serviced + acked; exposed as its
+	 * own port so a userspace RIL can drive the modem init handshake.
+	 */
+	struct wwan_port	*ctrl_port;
+	u16			fmt_frame_seq;	/* FMT SIT frame counter */
+	u8			fmt_ch_seq;	/* FMT per-channel sequence */
+
+	/* RFS file channel (umts_rfs0, ch 0x29) on the NORM_RAW ring. */
+	struct wwan_port	*rfs_port;
+	u8			rfs_ch_seq;	/* RFS per-channel sequence */
 };
 
 /*
@@ -361,8 +473,12 @@ static int s5300_open_bridge_window(struct s5300_modem *sm)
  * gets the command register and doorbell BAR repaired and the write retried
  * (downstream s51xx_pcie_send_doorbell_int() retries at 1 ms up to 100x;
  * keep it short here because the IPC path rings from hard-IRQ context).
+ * Returns true if the write took.  If config space itself reads 0xffff the link
+ * is *physically* down (the CP parked it): reprogramming BARs cannot revive that
+ * and hammering it can wedge the CP, so bail and let the caller escalate to a
+ * relink.
  */
-static void s5300_send_doorbell(struct s5300_modem *sm, u32 val)
+static bool s5300_send_doorbell(struct s5300_modem *sm, u32 val)
 {
 	int try;
 	u16 cmd;
@@ -370,11 +486,15 @@ static void s5300_send_doorbell(struct s5300_modem *sm, u32 val)
 	for (try = 0; try < 10; try++) {
 		writel(val, sm->doorbell);
 		if (readl(sm->doorbell) != 0xffffffff)
-			return;
+			return true;
 
 		pci_read_config_word(sm->pdev, PCI_COMMAND, &cmd);
-		if (cmd != 0xffff &&
-		    (cmd & (PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER)) !=
+		if (cmd == 0xffff) {
+			dev_dbg(sm->dev, "doorbell %#x: link down, need relink\n",
+				val);
+			return false;
+		}
+		if ((cmd & (PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER)) !=
 		    (PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER))
 			pci_write_config_word(sm->pdev, PCI_COMMAND, cmd |
 					      PCI_COMMAND_MEMORY |
@@ -385,6 +505,7 @@ static void s5300_send_doorbell(struct s5300_modem *sm, u32 val)
 	}
 
 	dev_err(sm->dev, "doorbell %#x kept reading back all-ones\n", val);
+	return false;
 }
 
 /*
@@ -426,10 +547,18 @@ static void s5300_send_ipc_irq(struct s5300_modem *sm, u32 val)
 
 	spin_lock_irqsave(&sm->lock, flags);
 	writel(val, sm->ipc + S5300_IPC_AP2CP_MSG);
-	if (sm->link_up) {
+	if (sm->link_up && s5300_send_doorbell(sm, S5300_DB_MSG)) {
 		sm->db_reserved = false;
-		s5300_send_doorbell(sm, S5300_DB_MSG);
 	} else {
+		/*
+		 * The CP has parked (link_up already false) or the link is
+		 * physically down despite link_up (doorbell read back all-ones,
+		 * e.g. the CP dropped the link mid-transfer without the GPIO park
+		 * handshake).  Either way clear link_up so s5300_pm_work() relinks,
+		 * keep the doorbell reserved, and nudge AP2CP_WAKEUP so the CP
+		 * answers on CP2AP_WAKEUP; the relink then flushes it.
+		 */
+		sm->link_up = false;
 		sm->db_reserved = true;
 		wake = true;
 	}
@@ -439,6 +568,15 @@ static void s5300_send_ipc_irq(struct s5300_modem *sm, u32 val)
 		dev_info(sm->dev,
 			 "ctrl tx while parked: staged msg %#x, nudging AP2CP_WAKEUP\n",
 			 val);
+		/*
+		 * AP-initiated wake, mirroring downstream pcie_send_ap2cp_irq() ->
+		 * s5100_try_gpio_cp_wakeup(): drive AP2CP_WAKEUP high and RETURN.  Do
+		 * NOT relink here -- the parked CP has to bring its own PHY back up
+		 * first, which it signals by raising CP2AP_WAKEUP.  Retraining before
+		 * that ack parks the LTSSM in Polling (0x3).  The CP2AP_WAKEUP rising
+		 * edge drives s5300_pm_work(), which relinks and flushes the reserved
+		 * doorbell -- exactly the CP-initiated wake path.
+		 */
 		zumapro_pcie_modem_wake(sm->rc_dev);
 	}
 }
@@ -462,6 +600,70 @@ static void s5300_relink_restore(struct s5300_modem *sm)
 	s5300_verify_msi_target(sm);
 }
 
+/* Diagnostic: dump every legacy ring pointer + the interrupt words. */
+static void s5300_dump_rings(struct s5300_modem *sm, const char *tag)
+{
+	dev_info(sm->dev,
+		 "%s: fmt tx %#x/%#x rx %#x/%#x | raw tx %#x/%#x rx %#x/%#x | db_rsv %d ap2cp %#x cp2ap %#x\n",
+		 tag,
+		 readl(sm->ipc + S5300_FMT_TXQ_HEAD),
+		 readl(sm->ipc + S5300_FMT_TXQ_TAIL),
+		 readl(sm->ipc + S5300_FMT_RXQ_HEAD),
+		 readl(sm->ipc + S5300_FMT_RXQ_TAIL),
+		 readl(sm->ipc + S5300_RAW_TXQ_HEAD),
+		 readl(sm->ipc + S5300_RAW_TXQ_TAIL),
+		 readl(sm->ipc + S5300_RAW_RXQ_HEAD),
+		 readl(sm->ipc + S5300_RAW_RXQ_TAIL),
+		 sm->db_reserved,
+		 readl(sm->ipc + S5300_IPC_AP2CP_MSG),
+		 readl(sm->ipc + S5300_IPC_CP2AP_MSG));
+}
+
+#define S5300_PARK_SETTLE_MS	30
+
+/*
+ * Debug: when set, never park the runtime PCIe link -- keep it in L0 after
+ * ONLINE even when the CP requests deep sleep.  Lets us test the FMT/RAW
+ * control path (AT/SIT/RFS) with the link permanently up, isolating a
+ * ring-servicing bug from the parked-CP GPIO wake handshake.
+ */
+static bool s5300_no_park;
+module_param_named(no_park, s5300_no_park, bool, 0644);
+MODULE_PARM_DESC(no_park, "keep the runtime PCIe link up (skip CP deep-sleep park)");
+
+/*
+ * Debug: publish ds_det=1 so the CP runs deep-sleep link PM (default).  Set 0 to
+ * leave ds_det clear so the CP never parks the runtime link -- isolates MAIN's
+ * runtime-IPC arming from the (separately broken) parked-CP wake handshake.
+ */
+static bool s5300_ds_det = true;
+module_param_named(ds_det, s5300_ds_det, bool, 0644);
+MODULE_PARM_DESC(ds_det, "publish ds_det=1 for CP deep-sleep link PM (0 = link stays up)");
+
+/*
+ * AP capability part 0 advertised at INIT_START.  Vendor value is 0x3
+ * (PKTPROC_UL|CH_EXTENSION, cpif_full.txt).  Bit0 PKTPROC_UL makes the CP DMA
+ * uplink from the UL pktproc rings, so it is only safe once we publish a valid
+ * UL info region (we do).  Knob so we can prove bit0 is the arming gate.
+ */
+static uint s5300_ap_cap = 0x3;		/* vendor value (cpif_full.txt) */
+module_param_named(ap_cap, s5300_ap_cap, uint, 0644);
+MODULE_PARM_DESC(ap_cap, "AP capability[0] published at INIT_START (vendor 0x3)");
+
+/*
+ * True while the CP still owes us: any legacy txq (FMT or RAW) with head != tail
+ * is an AP->CP frame the CP has not yet consumed.  Mirrors downstream
+ * check_mem_link_tx_pending() / check_legacy_tx_pending().  readl() only, so it
+ * is safe to call under sm->lock.
+ */
+static bool s5300_tx_pending(struct s5300_modem *sm)
+{
+	return readl(sm->ipc + S5300_FMT_TXQ_HEAD) !=
+			readl(sm->ipc + S5300_FMT_TXQ_TAIL) ||
+	       readl(sm->ipc + S5300_RAW_TXQ_HEAD) !=
+			readl(sm->ipc + S5300_RAW_TXQ_TAIL);
+}
+
 /*
  * Reconcile the RC link power with what the CP asks for on CP2AP_WAKEUP,
  * mirroring downstream s5100_poweron_pcie()/s5100_poweroff_pcie() driven from
@@ -477,41 +679,116 @@ static void s5300_pm_work(struct work_struct *work)
 	bool want_up = READ_ONCE(sm->cp_wants_up);
 	unsigned long flags;
 
+	/*
+	 * Relink ONLY when the CP is actually asking for the link (CP2AP_WAKEUP
+	 * high), mirroring downstream s5100_poweron_pcie()'s guard "skip pci power
+	 * on: condition not met" when CP2AP_WAKEUP == 0 (modem_ctrl_s5100.c).  An
+	 * AP-initiated tx while parked nudges AP2CP_WAKEUP and waits for the CP to
+	 * answer with a CP2AP_WAKEUP rising edge, which re-enters this work with
+	 * want_up=true; relinking before that answer trains into a dead endpoint
+	 * (LTSSM parks in Polling, 0x3).  Re-check the live GPIO under the onoff
+	 * lock in case the edge that queued us has already fallen again.
+	 */
 	mutex_lock(&sm->pcie_onoff_lock);
 
-	if (want_up && !sm->link_up) {
+	if (want_up && !sm->link_up &&
+	    gpiod_get_value_cansleep(sm->cp2ap_wakeup)) {
 		if (zumapro_pcie_modem_link_up(sm->rc_dev) == 0) {
 			s5300_relink_restore(sm);
 			spin_lock_irqsave(&sm->lock, flags);
 			sm->link_up = true;
+			/*
+			 * This is MAIN's link-up ISR: it (re)arms its runtime IPC
+			 * here, so from now on the vendor tx-pending park debounce
+			 * is meaningful (MAIN will actually drain in-flight tx).
+			 */
+			sm->main_armed = true;
 			spin_unlock_irqrestore(&sm->lock, flags);
-			dev_info(sm->dev, "CP wakeup: link up\n");
+			dev_info(sm->dev, "CP wakeup: link up (MAIN armed)\n");
 		} else {
 			dev_err(sm->dev, "CP wakeup: relink failed\n");
 		}
-	} else if (!want_up && sm->link_up) {
+	} else if (!want_up && sm->link_up && s5300_no_park) {
 		/*
-		 * Clear link_up *before* the teardown so a concurrent
-		 * s5300_send_ipc_irq() reserves its doorbell instead of ringing it
-		 * into an endpoint that is about to be held in PERST.
+		 * Debug knob: the CP asked to park (CP2AP_WAKEUP low) but we keep the
+		 * link in L0 so MAIN stays serviceable.  Isolates "does the runtime
+		 * FMT/RAW ring path work with the link up?" from the parked-CP wake
+		 * handshake -- with no_park set, an AT write should get an OK without
+		 * any relink at all.
 		 */
-		spin_lock_irqsave(&sm->lock, flags);
-		sm->link_up = false;
-		spin_unlock_irqrestore(&sm->lock, flags);
-		pci_set_power_state(sm->pdev, PCI_D3hot);
-		zumapro_pcie_modem_link_down(sm->rc_dev);
-		dev_info(sm->dev, "CP sleep: link down\n");
+		dev_info(sm->dev, "no_park: CP requested park, keeping link up\n");
+	} else if (!want_up && sm->link_up) {
+		bool park;
+
+		/*
+		 * Don't park while the CP still owes us -- port of downstream
+		 * s5100_poweroff_pcie(force_off=false): settle, then abort the
+		 * teardown if the CP re-asserted CP2AP_WAKEUP, an AP->CP frame is
+		 * still un-drained (txq head != tail), or a doorbell is reserved.
+		 * Tearing down (full PERST + PHY off) on the CP2AP_WAKEUP falling
+		 * edge with a request in flight drops it -- the source of the
+		 * control-channel flakiness.  A later falling edge retries the park;
+		 * under ds_det=1 the CP cycles CP2AP_WAKEUP continuously, so the
+		 * link is never stranded up (worst case power-only, never a hang).
+		 *
+		 * Read the (possibly sleeping) GPIO outside sm->lock; commit
+		 * link_up=false only under the lock and only when actually parking,
+		 * so a concurrent send either rings while the link is genuinely up
+		 * or reserves once we've decided to tear down.
+		 */
+		msleep(S5300_PARK_SETTLE_MS);
+
+		if (gpiod_get_value_cansleep(sm->cp2ap_wakeup)) {
+			dev_info(sm->dev, "CP sleep: park deferred (CP re-asserted)\n");
+		} else {
+			spin_lock_irqsave(&sm->lock, flags);
+			/*
+			 * Until MAIN has taken its first link-up ISR (main_armed),
+			 * it is NOT servicing the runtime rings -- so any AP->CP
+			 * frames (e.g. ModemManager's port probes) will never drain
+			 * and s5300_tx_pending() is permanently true.  Honouring the
+			 * vendor tx-pending defer here would keep the link up forever
+			 * and MAIN would never get the park->wake cycle that arms it.
+			 * So before MAIN is armed, honour the CP's self-park request
+			 * unconditionally; once armed, fall back to the vendor debounce
+			 * (keep the link up for genuinely in-flight tx).
+			 */
+			park = !s5300_tx_pending(sm) && !sm->db_reserved;
+			if (park)
+				sm->link_up = false;
+			spin_unlock_irqrestore(&sm->lock, flags);
+
+			if (park) {
+				zumapro_pcie_modem_link_down(sm->rc_dev);
+				dev_info(sm->dev, "CP sleep: link down (parked)\n");
+			} else {
+				s5300_dump_rings(sm, "park deferred");
+			}
+		}
 	}
 
 	mutex_unlock(&sm->pcie_onoff_lock);
 
-	/* Flush a doorbell a tx deferred while the link was parked. */
 	spin_lock_irqsave(&sm->lock, flags);
-	if (sm->link_up && sm->db_reserved) {
+	if (sm->db_reserved && sm->link_up &&
+	    s5300_send_doorbell(sm, S5300_DB_MSG)) {
+		/* Link is up -- delivered the doorbell a tx had reserved. */
 		sm->db_reserved = false;
-		s5300_send_doorbell(sm, S5300_DB_MSG);
+		spin_unlock_irqrestore(&sm->lock, flags);
+	} else if (sm->db_reserved) {
+		/*
+		 * Either parked (link_up false) or the relink came back but the
+		 * doorbell still read all-ones (link_up stale-true, physically
+		 * down).  Clear link_up so the next wake actually relinks instead
+		 * of retrying a dead BAR, and re-drive AP2CP_WAKEUP so the CP
+		 * answers and the next pm_work flushes the still-reserved doorbell.
+		 */
+		sm->link_up = false;
+		spin_unlock_irqrestore(&sm->lock, flags);
+		zumapro_pcie_modem_wake(sm->rc_dev);
+	} else {
+		spin_unlock_irqrestore(&sm->lock, flags);
 	}
-	spin_unlock_irqrestore(&sm->lock, flags);
 }
 
 static irqreturn_t s5300_cp2ap_wakeup_irq(int irq, void *data)
@@ -536,8 +813,11 @@ static irqreturn_t s5300_cp2ap_wakeup_irq(int irq, void *data)
  * offsets and zero the status/capability words before the CP boots.  The
  * AP capability words stay zero (tegu DT: ap_capability_0/1 = 0).
  */
+static void s5300_pktproc_fill_desc(struct s5300_modem *sm);
+
 static void s5300_init_control_messages(struct s5300_modem *sm)
 {
+	const struct firmware *fw;
 	int i;
 
 	writel(S5300_IPC_SRINFO_OFFSET, sm->ipc + S5300_IPC_SRINFO_OFS_PTR);
@@ -550,16 +830,193 @@ static void s5300_init_control_messages(struct s5300_modem *sm)
 	writel(0, sm->ipc + S5300_IPC_AP2CP_MSG);
 	writel(0, sm->ipc + S5300_IPC_CP2AP_MSG);
 	/*
-	 * Publish ds_det=1 (0x4000): load-bearing for runtime IPC.  It makes the
-	 * CP run its deep-sleep link handshake -- park the link when idle and
-	 * cycle CP2AP_WAKEUP -- and each wake relink (s5300_pm_work) re-arms MAIN's
-	 * runtime IPC so the FMT/RAW control queues get drained.  With ds_det=0 the
-	 * CP never takes a link-up ISR and the queues stay stuck.
+	 * ds_det=1 (0x4000) tells the CP to run its deep-sleep link PM (park the
+	 * link when idle, cycle CP2AP_WAKEUP).  Debug knob s5300_ds_det=0 leaves it
+	 * clear so the CP keeps the runtime link permanently up -- lets us exercise
+	 * the FMT/RAW control path with no park/wake handshake at all (the wake is
+	 * separately broken), isolating whether MAIN arms its runtime IPC.
 	 */
-	writel(S5300_IPC_DS_DET, sm->ipc + S5300_IPC_AP2CP_STATUS);
+	writel(s5300_ds_det ? S5300_IPC_DS_DET : 0,
+	       sm->ipc + S5300_IPC_AP2CP_STATUS);
 	writel(0, sm->ipc + S5300_IPC_CP2AP_STATUS);
 	for (i = 0; i < S5300_IPC_CAP_WORDS; i++)
 		writel(0, sm->ipc + S5300_IPC_CAP_BASE + 4 * i);
+
+	/*
+	 * Stage the handover block (HW/RF config + IMEIs + signature) MAIN reads
+	 * to configure itself -- the vendor's IOCTL_HANDOVER_BLOCK_INFO, which the
+	 * bare boot handshake otherwise omits, leaving MAIN unable to arm.  Loaded
+	 * from firmware because it is device-specific; absent, warn and continue
+	 * (like cbd), the modem still reaches ONLINE but may not service the rings.
+	 */
+	if (request_firmware_direct(&fw, S5300_HANDOVER_FW, sm->dev) == 0) {
+		if (fw->size == S5300_HANDOVER_SIZE) {
+			memcpy_toio(sm->ipc + S5300_IPC_HANDOVER_OFS,
+				    fw->data, fw->size);
+			dev_info(sm->dev, "staged handover block (%zu bytes)\n",
+				 fw->size);
+		} else {
+			dev_warn(sm->dev,
+				 "%s wrong size %zu (want %d); skipping\n",
+				 S5300_HANDOVER_FW, fw->size, S5300_HANDOVER_SIZE);
+		}
+		release_firmware(fw);
+	} else {
+		dev_warn(sm->dev,
+			 "no %s; MAIN may reach ONLINE but not arm\n",
+			 S5300_HANDOVER_FW);
+	}
+
+	/*
+	 * Fill the pktproc DL descriptor rings here (process context, before BL1)
+	 * -- 13.8k iomem writes, far too much for the INIT_START hard IRQ.  The
+	 * small info-region headers are published later, at their vendor phases:
+	 * DL at INIT_START, UL at PHONE_START.
+	 */
+	s5300_pktproc_fill_desc(sm);
+}
+
+/*
+ * pktproc bring-up matched to the vendor sequence.  The vendor sets up the DL
+ * rings at INIT_START (pktproc_init) and the UL rings at PHONE_START, inside the
+ * capability handshake -- so we mirror that split.  Geometry is copied verbatim
+ * from the vendor cpif boot log (4 DL queues sktbuf, 2 UL queues) so the CP DMAs
+ * into exactly the layout it expects.  We do not move pktproc data (control
+ * rides the legacy rings, only rmnet uses pktproc) -- the regions just have to
+ * be valid so MAIN arms and the CP's DL/UL DMA lands in the reserved carveout.
+ *
+ * s5300_pktproc_fill_desc() does the heavy sktbuf-descriptor fill (13.8k iomem
+ * writes) once at boot in process context; the two publish helpers write only
+ * the small info-region headers + q_info, so they are safe to call from the
+ * INIT_START / PHONE_START hard-IRQ handlers.
+ */
+static void s5300_pktproc_fill_desc(struct s5300_modem *sm)
+{
+	void __iomem *desc;
+	u32 cp_buff;
+	int q, j;
+
+	if (!sm->pktproc)
+		return;
+
+	/* zero both info regions so a later publish writes onto clean state */
+	memset_io(sm->pktproc + S5300_PKTPROC_DL_INFO_OFS, 0, SZ_4K);
+	memset_io(sm->pktproc + S5300_PKTPROC_UL_INFO_OFS, 0, SZ_4K);
+
+	/*
+	 * DL sktbuf descriptors: cp_data_paddr is the low 36 bits of the first
+	 * u64 (32-bit addr fits the low word).  Point each at its own
+	 * true_packet_size slot so any CP downlink DMA lands in-carveout.
+	 */
+	for (q = 0; q < S5300_PKTPROC_DL_NUM_QUEUE; q++) {
+		cp_buff = S5300_PKTPROC_CP_BASE + S5300_PKTPROC_DL_BUFF_OFS +
+			  q * S5300_PKTPROC_DL_Q_BUFF_SZ;
+		desc = sm->pktproc + S5300_PKTPROC_DL_DESC_OFS +
+		       q * S5300_PKTPROC_DL_Q_DESC_SZ;
+		memset_io(desc, 0, S5300_PKTPROC_DL_Q_DESC_SZ);
+		for (j = 0; j < S5300_PKTPROC_DL_NUM_DESC; j++)
+			writel(cp_buff + j * S5300_PKTPROC_DL_TRUE_PKT,
+			       desc + j * S5300_PKTPROC_DESC_SKTBUF_SZ);
+	}
+}
+
+/* DL info region (struct pktproc_info_v2), published at INIT_START. */
+static void s5300_pktproc_publish_dl(struct s5300_modem *sm)
+{
+	void __iomem *info, *qinfo;
+	u32 cp_desc, cp_buff, hdr;
+	int q;
+
+	if (!sm->pktproc) {
+		dev_warn(sm->dev,
+			 "no pktproc carveout; MAIN may reach ONLINE but not arm\n");
+		return;
+	}
+
+	info = sm->pktproc + S5300_PKTPROC_DL_INFO_OFS;
+	for (q = 0; q < S5300_PKTPROC_DL_NUM_QUEUE; q++) {
+		cp_desc = S5300_PKTPROC_CP_BASE + S5300_PKTPROC_DL_DESC_OFS +
+			  q * S5300_PKTPROC_DL_Q_DESC_SZ;
+		cp_buff = S5300_PKTPROC_CP_BASE + S5300_PKTPROC_DL_BUFF_OFS +
+			  q * S5300_PKTPROC_DL_Q_BUFF_SZ;
+		/* q_info[q] at info + 4 (after the 4-byte header), 20 bytes each */
+		qinfo = info + 4 + q * 20;
+		writel(cp_desc, qinfo + 0);
+		writel(S5300_PKTPROC_DL_NUM_DESC, qinfo + 4);
+		writel(cp_buff, qinfo + 8);
+		writel(0, qinfo + 12);		/* fore_ptr (AP consumer) */
+		writel(0, qinfo + 16);		/* rear_ptr (CP producer) */
+	}
+	/* header last: num_queues:4 | desc_mode:2 | irq_mode:2 | max_packet_size:16 */
+	hdr = (S5300_PKTPROC_DL_NUM_QUEUE & 0xf) |
+	      ((S5300_PKTPROC_DL_DESC_MODE & 0x3) << 4) |
+	      ((0u & 0x3) << 6) |
+	      ((S5300_PKTPROC_DL_MAX_PKT & 0xffff) << 8);
+	writel(hdr, info);
+	dev_info(sm->dev, "published DL pktproc: %d queues\n",
+		 S5300_PKTPROC_DL_NUM_QUEUE);
+}
+
+/* UL info region (struct pktproc_info_ul), published at PHONE_START. */
+static void s5300_pktproc_publish_ul(struct s5300_modem *sm)
+{
+	void __iomem *info, *qinfo;
+	u32 cp_desc, cp_buff, hdr;
+	int q, ndesc;
+
+	if (!sm->pktproc)
+		return;
+
+	info = sm->pktproc + S5300_PKTPROC_UL_INFO_OFS;
+	for (q = 0; q < S5300_PKTPROC_UL_NUM_QUEUE; q++) {
+		/* vendor UL queue geometry (asymmetric), 32-byte descriptors */
+		if (q == 0) {
+			ndesc = S5300_PKTPROC_UL_Q0_NUM_DESC;
+			cp_desc = S5300_PKTPROC_CP_BASE + S5300_PKTPROC_UL_DESC_OFS;
+			cp_buff = S5300_PKTPROC_CP_BASE + S5300_PKTPROC_UL_BUFF_OFS;
+		} else {
+			ndesc = S5300_PKTPROC_UL_Q1_NUM_DESC;
+			cp_desc = S5300_PKTPROC_CP_BASE + S5300_PKTPROC_UL_DESC_OFS +
+				  S5300_PKTPROC_UL_Q0_NUM_DESC *
+				  S5300_PKTPROC_DESC_UL_SZ;
+			cp_buff = S5300_PKTPROC_CP_BASE + S5300_PKTPROC_UL_BUFF_OFS +
+				  S5300_PKTPROC_UL_Q0_NUM_DESC *
+				  1024 /* q0 max_packet_size */;
+		}
+		/*
+		 * struct pktproc_info_ul: header u32 + cp_quota u32, then
+		 * q_info_ul[] -> q_info[q] at info + 8 + q*20.
+		 */
+		qinfo = info + 8 + q * 20;
+		writel(cp_desc, qinfo + 0);
+		writel(ndesc, qinfo + 4);
+		writel(cp_buff, qinfo + 8);
+		writel(0, qinfo + 12);		/* fore_ptr (AP producer) */
+		writel(0, qinfo + 16);		/* rear_ptr (CP consumer) */
+	}
+	/* header: num_queues:4 | mode:4 | max_packet_size:16 | end_bit_owner:1 */
+	hdr = (S5300_PKTPROC_UL_NUM_QUEUE & 0xf) |
+	      ((S5300_PKTPROC_UL_MAX_PKT & 0xffff) << 8);
+	writel(hdr, info);
+	/* cp_quota (info + 4) is CP-owned -- do NOT write it (it zeroed at boot). */
+	dev_info(sm->dev, "published UL pktproc: %d queues\n",
+		 S5300_PKTPROC_UL_NUM_QUEUE);
+}
+
+/*
+ * Downstream set_ap_capabilities(): publish the AP capability words at
+ * INIT_START, before answering PIF_INIT_DONE, so the CP reads them as it comes
+ * up.  Load-bearing: the CP only begins servicing the runtime IPC (the FMT/SIT
+ * control channel and its unsolicited identity burst) once it sees a non-zero
+ * AP capability; with the words left at zero the CP stays silent on FMT and the
+ * SIT control port never round-trips.
+ */
+static void s5300_set_ap_capabilities(struct s5300_modem *sm)
+{
+	writel(s5300_ap_cap, sm->ipc + S5300_IPC_CAP_AP0);
+	writel(0, sm->ipc + S5300_IPC_CAP_AP1);
+	dev_info(sm->dev, "AP capability part0 %#x, CP part0 %#x\n", s5300_ap_cap,
+		 readl(sm->ipc + S5300_IPC_CAP_BASE + 0x4));
 }
 
 /*
@@ -570,6 +1027,11 @@ static void s5300_init_ipc_queues(struct s5300_modem *sm)
 {
 	u32 magic, access;
 	int i;
+
+	sm->fmt_frame_seq = 0;
+	sm->fmt_ch_seq = 0;
+	sm->at_ch_seq = 0;
+	sm->rfs_ch_seq = 0;
 
 	writel(0, sm->ipc + S5300_IPC_MAGIC);
 	writel(0, sm->ipc + S5300_IPC_ACCESS);
@@ -662,6 +1124,9 @@ static int s5300_ipc_tx(struct s5300_modem *sm, u8 ch, const u8 *data, u32 len)
 
 	spin_unlock_irqrestore(&sm->tx_lock, flags);
 
+	dev_info(sm->dev, "raw tx: ch %u len %u, txq head %#x->%#x tail %#x\n",
+		 ch, len, in, (in + flen) % S5300_RAW_TXQ_SIZE,
+		 readl(sm->ipc + S5300_RAW_TXQ_TAIL));
 	s5300_send_ipc_irq(sm, S5300_INT_VALID | S5300_INT_SEND_RAW);
 	return 0;
 }
@@ -683,9 +1148,20 @@ static int s5300_wwan_tx(struct wwan_port *port, struct sk_buff *skb)
 	if (!sm->online)
 		return -ENODEV;
 	ret = s5300_ipc_tx(sm, S5300_CH_AT, skb->data, skb->len);
-	if (ret)
+	if (ret) {
+		dev_info(sm->dev, "AT tx failed: %d\n", ret);
 		return ret;
+	}
 	consume_skb(skb);
+	/*
+	 * DEBUG: snapshot the rings immediately and again after MAIN has had
+	 * time to consume the tx and post a reply.  Delta on RAW_TXQ_TAIL means
+	 * MAIN dequeued our frame; delta on RAW_RXQ_HEAD (+ an IPC irq) means it
+	 * replied.  Neither moving = MAIN is not servicing the runtime raw ring.
+	 */
+	s5300_dump_rings(sm, "AT tx: just pushed");
+	msleep(200);
+	s5300_dump_rings(sm, "AT tx: +200ms");
 	return 0;
 }
 
@@ -696,30 +1172,225 @@ static const struct wwan_port_ops s5300_wwan_ops = {
 };
 
 /*
- * Drain one RX ring: parse each 12-byte-framed message, hand AT-channel (ch 21)
- * payloads to the WWAN port, and advance the tail past everything consumed.
- * Frames for channels we don't handle yet are skipped (dropped).
+ * DEBUG self-test (no_park only): fire an "AT" onto the RAW ring from the driver
+ * itself at a few post-ONLINE delays, before the CP tears the link down, and
+ * dump the rings around it.  Deterministic replacement for racing a userspace AT
+ * write against the ~120ms-after-ONLINE self-park: if the RAW_TXQ_TAIL advances
+ * here MAIN is dequeuing (armed); if it never moves while the link is up, MAIN
+ * is not servicing the ring.  Runs in process context (can sleep + ring).
  */
-static void s5300_rx_ring(struct s5300_modem *sm, u32 head_off, u32 tail_off,
-			  u32 buff_off, u32 size)
+static int s5300_fmt_tx(struct s5300_modem *sm, const u8 *data, u32 len);
+
+static void s5300_selftest_work(struct work_struct *work)
 {
-	void __iomem *buff = sm->ipc + buff_off;
+	struct s5300_modem *sm = container_of(to_delayed_work(work),
+					      struct s5300_modem, selftest_work);
+	static const u8 at[] = { 'A', 'T', '\r' };
+	bool link_up;
+	u32 cpq = 0;
+
+	spin_lock(&sm->lock);
+	link_up = sm->link_up;
+	spin_unlock(&sm->lock);
+
+	/*
+	 * cp_quota in the UL info region is written by the CP once MAIN engages
+	 * its pktproc UL init (vendor "CP quota set to 65535").  Non-zero here is
+	 * direct proof MAIN read our pktproc region and is running -- separating
+	 * "MAIN never armed" from "MAIN armed but ignores this ring".
+	 */
+	if (sm->pktproc)
+		cpq = readl(sm->pktproc + S5300_PKTPROC_UL_INFO_OFS + 4);
+
+	dev_info(sm->dev, "selftest #%d (link_up=%d) cp_quota=%#x:\n",
+		 sm->selftest_iter, link_up, cpq);
+	s5300_dump_rings(sm, "selftest before");
+
+	if (link_up) {
+		/* probe BOTH planes: FMT (umts_ipc0, the RIL's channel) and RAW (AT) */
+		if (s5300_fmt_tx(sm, at, sizeof(at)))
+			dev_info(sm->dev, "selftest FMT tx failed\n");
+		if (s5300_ipc_tx(sm, S5300_CH_AT, at, sizeof(at)))
+			dev_info(sm->dev, "selftest AT tx failed\n");
+		msleep(200);
+		s5300_dump_rings(sm, "selftest +200ms");
+	}
+
+	if (++sm->selftest_iter < 6)
+		schedule_delayed_work(&sm->selftest_work, msecs_to_jiffies(700));
+}
+
+/*
+ * Frame a control message onto the FMT ring (SIT control plane, ch 0xF5) and
+ * signal the CP (ap2cp_msg SEND_FMT + doorbell).  Mirrors s5300_ipc_tx() but on
+ * the FMT ring, which is where the CP services the runtime control channel.
+ */
+static int s5300_fmt_tx(struct s5300_modem *sm, const u8 *data, u32 len)
+{
+	u32 flen = ALIGN(S5300_SIT_HDR + len, 8);
+	void __iomem *buff = sm->ipc + S5300_FMT_TXQ_BUFF;
+	unsigned long flags;
+	u8 hdr[S5300_SIT_HDR];
 	u32 in, out;
 
-	in = readl(sm->ipc + head_off);
-	out = readl(sm->ipc + tail_off);
+	if (S5300_SIT_HDR + len > S5300_FMT_TXQ_SIZE)
+		return -EMSGSIZE;
+
+	spin_lock_irqsave(&sm->tx_lock, flags);
+
+	in = readl(sm->ipc + S5300_FMT_TXQ_HEAD);
+	out = readl(sm->ipc + S5300_FMT_TXQ_TAIL);
+	if (in >= S5300_FMT_TXQ_SIZE || out >= S5300_FMT_TXQ_SIZE ||
+	    s5300_circ_space(S5300_FMT_TXQ_SIZE, in, out) < flen) {
+		spin_unlock_irqrestore(&sm->tx_lock, flags);
+		return -EAGAIN;
+	}
+
+	put_unaligned_le16(S5300_SIT_SYNC, hdr + 0);
+	put_unaligned_le16(sm->fmt_frame_seq++, hdr + 2);
+	put_unaligned_le16(S5300_SIT_CFG_SINGLE, hdr + 4);
+	put_unaligned_le16(S5300_SIT_HDR + len, hdr + 6);
+	hdr[8] = S5300_CH_FMT;
+	hdr[9] = ++sm->fmt_ch_seq;
+	hdr[10] = 0;
+	hdr[11] = 0;
+
+	s5300_circ_write(buff, S5300_FMT_TXQ_SIZE, in, hdr, S5300_SIT_HDR);
+	s5300_circ_write(buff, S5300_FMT_TXQ_SIZE,
+			 (in + S5300_SIT_HDR) % S5300_FMT_TXQ_SIZE, data, len);
+	dma_wmb();
+	writel((in + flen) % S5300_FMT_TXQ_SIZE, sm->ipc + S5300_FMT_TXQ_HEAD);
+
+	spin_unlock_irqrestore(&sm->tx_lock, flags);
+
+	s5300_send_ipc_irq(sm, S5300_INT_VALID | S5300_INT_SEND_FMT);
+	return 0;
+}
+
+static int s5300_ctrl_tx(struct wwan_port *port, struct sk_buff *skb)
+{
+	struct s5300_modem *sm = wwan_port_get_drvdata(port);
+	int ret;
+
+	if (!sm->online)
+		return -ENODEV;
+	ret = s5300_fmt_tx(sm, skb->data, skb->len);
+	if (ret)
+		return ret;
+	consume_skb(skb);
+	return 0;
+}
+
+static const struct wwan_port_ops s5300_ctrl_ops = {
+	.start	= s5300_wwan_start,
+	.stop	= s5300_wwan_stop,
+	.tx	= s5300_ctrl_tx,
+};
+
+/*
+ * Frame an RFS file message onto the NORM_RAW ring (ch 0x29) and ring the RAW
+ * data doorbell (SEND_RAW).  Mirrors s5300_ipc_tx() but with the RFS channel id
+ * and its own per-channel sequence; the boot std_dl writer is quiescent
+ * post-ONLINE so the ring is ours.
+ */
+static int s5300_rfs_tx(struct s5300_modem *sm, const u8 *data, u32 len)
+{
+	u32 flen = ALIGN(S5300_SIT_HDR + len, 8);
+	void __iomem *buff = sm->ipc + S5300_RAW_TXQ_BUFF;
+	unsigned long flags;
+	u8 hdr[S5300_SIT_HDR];
+	u32 in, out;
+
+	if (len == 0 || len > S5300_RFS_MAX)
+		return -EMSGSIZE;
+
+	spin_lock_irqsave(&sm->tx_lock, flags);
+
+	in = readl(sm->ipc + S5300_RAW_TXQ_HEAD);
+	out = readl(sm->ipc + S5300_RAW_TXQ_TAIL);
+	if (in >= S5300_RAW_TXQ_SIZE || out >= S5300_RAW_TXQ_SIZE ||
+	    s5300_circ_space(S5300_RAW_TXQ_SIZE, in, out) < flen) {
+		spin_unlock_irqrestore(&sm->tx_lock, flags);
+		return -EAGAIN;
+	}
+
+	put_unaligned_le16(S5300_SIT_SYNC, hdr + 0);
+	put_unaligned_le16(sm->frame_seq++, hdr + 2);
+	put_unaligned_le16(S5300_SIT_CFG_SINGLE, hdr + 4);
+	put_unaligned_le16(S5300_SIT_HDR + len, hdr + 6);
+	hdr[8] = S5300_CH_RFS;
+	hdr[9] = ++sm->rfs_ch_seq;
+	hdr[10] = 0;
+	hdr[11] = 0;
+
+	s5300_circ_write(buff, S5300_RAW_TXQ_SIZE, in, hdr, S5300_SIT_HDR);
+	s5300_circ_write(buff, S5300_RAW_TXQ_SIZE,
+			 (in + S5300_SIT_HDR) % S5300_RAW_TXQ_SIZE, data, len);
+	dma_wmb();
+	writel((in + flen) % S5300_RAW_TXQ_SIZE, sm->ipc + S5300_RAW_TXQ_HEAD);
+
+	spin_unlock_irqrestore(&sm->tx_lock, flags);
+
+	s5300_send_ipc_irq(sm, S5300_INT_VALID | S5300_INT_SEND_RAW);
+	return 0;
+}
+
+static int s5300_rfs_port_tx(struct wwan_port *port, struct sk_buff *skb)
+{
+	struct s5300_modem *sm = wwan_port_get_drvdata(port);
+	int ret;
+
+	if (!sm->online)
+		return -ENODEV;
+	ret = s5300_rfs_tx(sm, skb->data, skb->len);
+	if (ret)
+		return ret;
+	consume_skb(skb);
+	return 0;
+}
+
+static const struct wwan_port_ops s5300_rfs_ops = {
+	.start	= s5300_wwan_start,
+	.stop	= s5300_wwan_stop,
+	.tx	= s5300_rfs_port_tx,
+};
+
+/*
+ * Drain the NORM_RAW rx ring and demux each 12-byte-framed message on its header
+ * channel id: the RFS file channel (ch 0x29) goes to the RFS port, umts_router
+ * AT (ch 0x15) to the AT port; other channels are dropped.  If the CP asked for
+ * a receive ack on ANY runtime raw frame (REQ_ACK_RAW) -- RFS or AT -- answer
+ * with RES_ACK_RAW like the FMT path; the AT channel needs its receive ack as
+ * much as RFS or the CP's AT response flow stalls.  Runs from the hard IRQ
+ * (@intval is the cp2ap_msg sampled there; skbs GFP_ATOMIC), and bounds the
+ * alloc against a corrupt CP length.
+ */
+static void s5300_drain_raw_rxq(struct s5300_modem *sm, u32 intval)
+{
+	void __iomem *buff = sm->ipc + S5300_RAW_RXQ_BUFF;
+	bool had_raw = false;
+	u32 in, out;
+
+	in = readl(sm->ipc + S5300_RAW_RXQ_HEAD);
+	out = readl(sm->ipc + S5300_RAW_RXQ_TAIL);
+	if (in >= S5300_RAW_RXQ_SIZE || out >= S5300_RAW_RXQ_SIZE) {
+		dev_err_ratelimited(sm->dev, "raw rxq ptr oob (in %#x out %#x)\n",
+				    in, out);
+		return;
+	}
 
 	while (in != out) {
-		u32 usage = s5300_circ_usage(size, in, out);
+		u32 usage = s5300_circ_usage(S5300_RAW_RXQ_SIZE, in, out);
 		u8 hdr[S5300_SIT_HDR];
-		u32 flen, total, plen;
+		struct wwan_port *port;
+		u32 flen, total, plen, max;
 		u8 ch;
 
 		if (usage < S5300_SIT_HDR)
 			break;
-		s5300_circ_read(hdr, buff, size, out, S5300_SIT_HDR);
+		s5300_circ_read(hdr, buff, S5300_RAW_RXQ_SIZE, out, S5300_SIT_HDR);
 		if (get_unaligned_le16(hdr) != S5300_SIT_SYNC) {
-			dev_err_ratelimited(sm->dev, "rx bad sync %#x; flushing\n",
+			dev_err_ratelimited(sm->dev, "raw rx bad sync %#x; flushing\n",
 					    get_unaligned_le16(hdr));
 			out = in;
 			break;
@@ -731,31 +1402,106 @@ static void s5300_rx_ring(struct s5300_modem *sm, u32 head_off, u32 tail_off,
 		ch = hdr[8];
 		plen = flen - S5300_SIT_HDR;
 
-		if (ch == S5300_CH_AT && sm->at_port && plen) {
-			struct sk_buff *skb = alloc_skb(plen, GFP_KERNEL);
+		if (ch == S5300_CH_RFS) {
+			port = sm->rfs_port;
+			max = S5300_RFS_MAX;
+			had_raw = true;
+		} else if (ch == S5300_CH_AT) {
+			port = sm->at_port;
+			max = SZ_2K;
+			had_raw = true;
+		} else {
+			port = NULL;
+			max = 0;
+		}
+
+		if (port && plen && plen <= max) {
+			struct sk_buff *skb = alloc_skb(plen, GFP_ATOMIC);
 
 			if (skb) {
-				s5300_circ_read(skb_put(skb, plen), buff, size,
-						(out + S5300_SIT_HDR) % size, plen);
-				wwan_port_rx(sm->at_port, skb);
+				s5300_circ_read(skb_put(skb, plen), buff,
+						S5300_RAW_RXQ_SIZE,
+						(out + S5300_SIT_HDR) %
+							S5300_RAW_RXQ_SIZE, plen);
+				wwan_port_rx(port, skb);
+			} else {
+				dev_warn_ratelimited(sm->dev,
+						     "raw rx drop ch %#x payload %u\n",
+						     ch, plen);
 			}
 		}
-		out = (out + total) % size;
+		out = (out + total) % S5300_RAW_RXQ_SIZE;
 	}
 
 	/* order the payload reads ahead of the tail advance the CP watches */
 	dma_wmb();
-	writel(out, sm->ipc + tail_off);
+	writel(out, sm->ipc + S5300_RAW_RXQ_TAIL);
+
+	if (had_raw && (intval & S5300_INT_REQ_ACK_RAW))
+		s5300_send_ipc_irq(sm, S5300_INT_VALID | S5300_INT_RES_ACK_RAW);
 }
 
-static void s5300_rx_work(struct work_struct *work)
+/*
+ * Drain the FMT RX ring (the SIT control plane) and, if the CP asked for it
+ * (REQ_ACK_FMT in the interrupt word), confirm the drain with RES_ACK_FMT.  The
+ * CP gates its secondary channels on this ack round-trip, so it runs straight
+ * from the hard IRQ (@intval is the cp2ap_msg sampled there; skbs GFP_ATOMIC).
+ * Payloads go to the SIT control port.
+ */
+static void s5300_drain_fmt_rxq(struct s5300_modem *sm, u32 intval)
 {
-	struct s5300_modem *sm = container_of(work, struct s5300_modem, rx_work);
+	void __iomem *buff = sm->ipc + S5300_FMT_RXQ_BUFF;
+	bool had_data;
+	u32 in, out;
 
-	if (!sm->at_port)
-		return;			/* port not up yet; retry on next IRQ */
-	s5300_rx_ring(sm, S5300_RAW_RXQ_HEAD, S5300_RAW_RXQ_TAIL,
-		      S5300_RAW_RXQ_BUFF, S5300_RAW_RXQ_SIZE);
+	in = readl(sm->ipc + S5300_FMT_RXQ_HEAD);
+	out = readl(sm->ipc + S5300_FMT_RXQ_TAIL);
+	if (in >= S5300_FMT_RXQ_SIZE || out >= S5300_FMT_RXQ_SIZE) {
+		dev_err_ratelimited(sm->dev, "fmt rxq ptr oob (in %#x out %#x)\n",
+				    in, out);
+		return;
+	}
+	had_data = (in != out);
+
+	while (in != out) {
+		u32 usage = s5300_circ_usage(S5300_FMT_RXQ_SIZE, in, out);
+		u8 hdr[S5300_SIT_HDR];
+		u32 flen, total, plen;
+
+		if (usage < S5300_SIT_HDR)
+			break;
+		s5300_circ_read(hdr, buff, S5300_FMT_RXQ_SIZE, out, S5300_SIT_HDR);
+		if (get_unaligned_le16(hdr) != S5300_SIT_SYNC) {
+			dev_err_ratelimited(sm->dev, "fmt rx bad sync %#x; flushing\n",
+					    get_unaligned_le16(hdr));
+			out = in;
+			break;
+		}
+		flen = get_unaligned_le16(hdr + 6);
+		total = ALIGN(flen, 8);
+		if (flen < S5300_SIT_HDR || total > usage)
+			break;			/* partial frame; wait for more */
+		plen = flen - S5300_SIT_HDR;
+
+		if (sm->ctrl_port && plen) {
+			struct sk_buff *skb = alloc_skb(plen, GFP_ATOMIC);
+
+			if (skb) {
+				s5300_circ_read(skb_put(skb, plen), buff,
+						S5300_FMT_RXQ_SIZE,
+						(out + S5300_SIT_HDR) %
+							S5300_FMT_RXQ_SIZE, plen);
+				wwan_port_rx(sm->ctrl_port, skb);
+			}
+		}
+		out = (out + total) % S5300_FMT_RXQ_SIZE;
+	}
+
+	dma_wmb();
+	writel(out, sm->ipc + S5300_FMT_RXQ_TAIL);
+
+	if (had_data && (intval & S5300_INT_REQ_ACK_FMT))
+		s5300_send_ipc_irq(sm, S5300_INT_VALID | S5300_INT_RES_ACK_FMT);
 }
 
 /* Expose the runtime control channel once the CP is ONLINE (process context). */
@@ -792,8 +1538,42 @@ static void s5300_online(struct s5300_modem *sm)
 	}
 	dev_info(sm->dev, "AT control port up (umts_router, ch %u)\n",
 		 S5300_CH_AT);
-	/* Drain anything the CP queued while the port was coming up. */
-	schedule_work(&sm->rx_work);
+
+	/*
+	 * The SIT control plane (umts_ipc0, FMT ring, ch 0xF5).  The CP services
+	 * the secondary channels (umts_router AT) only once this control plane is
+	 * driven and its REQ_ACK round-trips answered, so expose it as its own
+	 * port for a userspace RIL to run the modem init handshake.
+	 */
+	sm->ctrl_port = wwan_create_port(sm->dev, WWAN_PORT_SIT, &s5300_ctrl_ops,
+					 NULL, sm);
+	if (IS_ERR(sm->ctrl_port)) {
+		dev_err(sm->dev, "failed to create SIT port: %ld\n",
+			PTR_ERR(sm->ctrl_port));
+		sm->ctrl_port = NULL;
+	} else {
+		dev_info(sm->dev, "SIT control port up (umts_ipc0, ch %u)\n",
+			 S5300_CH_FMT);
+	}
+
+	/*
+	 * The RFS file port (umts_rfs0, ch 0x29 on the NORM_RAW ring): once ONLINE
+	 * the modem pulls its carrier config and persists NV over it, and rejects
+	 * SETUP_DATA_CALL until an AP-side RFS server answers.  Expose it so a
+	 * userspace server can serve those file requests.
+	 */
+	sm->rfs_port = wwan_create_port(sm->dev, WWAN_PORT_RFS, &s5300_rfs_ops,
+					NULL, sm);
+	if (IS_ERR(sm->rfs_port)) {
+		dev_err(sm->dev, "failed to create RFS port: %ld\n",
+			PTR_ERR(sm->rfs_port));
+		sm->rfs_port = NULL;
+	} else {
+		dev_info(sm->dev, "RFS file port up (umts_rfs0, ch %#x)\n",
+			 S5300_CH_RFS);
+	}
+
+	s5300_dump_rings(sm, "at ONLINE");
 }
 
 static irqreturn_t s5300_irq_handler(int irq, void *data)
@@ -813,10 +1593,16 @@ static irqreturn_t s5300_irq_handler(int irq, void *data)
 
 	if (!(val & S5300_CMD_VALID)) {
 		/* Data notification (SEND_FMT/SEND_RAW), no command. */
-		if (sm->online)
-			/* Runtime: parse the RX rings in process context. */
-			schedule_work(&sm->rx_work);
-		else
+		if (sm->online) {
+			/*
+			 * Both control planes and their REQ_ACK round-trips must be
+			 * answered promptly, so drain + ack them here in the hard
+			 * IRQ: the NORM_RAW ring (RFS files + umts_router AT) and
+			 * the FMT ring (SIT control).
+			 */
+			s5300_drain_raw_rxq(sm, val);
+			s5300_drain_fmt_rxq(sm, val);
+		} else
 			/* Boot: std_dl acks; consume so the CP keeps draining. */
 			writel(readl(sm->ipc + S5300_RAW_RXQ_HEAD),
 			       sm->ipc + S5300_RAW_RXQ_TAIL);
@@ -827,13 +1613,22 @@ static irqreturn_t s5300_irq_handler(int irq, void *data)
 	switch (cmd) {
 	case S5300_CMD_INIT_START:
 		dev_info(sm->dev, "CP INIT_START\n");
+		s5300_pktproc_publish_dl(sm);
+		s5300_set_ap_capabilities(sm);
 		s5300_send_ipc_irq(sm, S5300_CMD(S5300_CMD_PIF_INIT_DONE));
 		break;
 	case S5300_CMD_PHONE_START:
-		dev_info(sm->dev, "CP PHONE_START\n");
+		dev_info(sm->dev, "CP PHONE_START (AP cap %#x, CP cap %#x)\n",
+			 readl(sm->ipc + S5300_IPC_CAP_AP0),
+			 readl(sm->ipc + S5300_IPC_CAP_BASE + 0x4));
 		if (!sm->online) {
+			s5300_pktproc_publish_ul(sm);
 			s5300_init_ipc_queues(sm);
 			sm->online = true;
+			/* debug: probe the ring while the link is still up */
+			if (s5300_no_park)
+				schedule_delayed_work(&sm->selftest_work,
+						      msecs_to_jiffies(100));
 		}
 		/* Re-entrant PHONE_START just gets the INIT_END again. */
 		s5300_send_ipc_irq(sm, S5300_CMD(S5300_CMD_INIT_END));
@@ -1626,7 +2421,7 @@ static int s5300_probe(struct platform_device *pdev)
 	struct device_node *rc_node;
 	struct s5300_modem *sm;
 	const char *fw_name;
-	u16 cmd;
+	u16 cmd, lnksta;
 	int ret;
 
 	sm = devm_kzalloc(dev, sizeof(*sm), GFP_KERNEL);
@@ -1639,8 +2434,8 @@ static int s5300_probe(struct platform_device *pdev)
 	mutex_init(&sm->pcie_onoff_lock);
 	init_completion(&sm->init_done);
 	INIT_WORK(&sm->boot_work, s5300_boot_work);
-	INIT_WORK(&sm->rx_work, s5300_rx_work);
 	INIT_WORK(&sm->pm_work, s5300_pm_work);
+	INIT_DELAYED_WORK(&sm->selftest_work, s5300_selftest_work);
 	sm->link_up = true;	/* boot handshake rings directly; PM arms at ONLINE */
 	platform_set_drvdata(pdev, sm);
 
@@ -1682,6 +2477,14 @@ static int s5300_probe(struct platform_device *pdev)
 		dev_err_probe(dev, ret, "failed to map MSI carveout\n");
 		goto err_rc;
 	}
+	/*
+	 * Optional: the pktproc carveout the CP DMAs downlink packets into.  We
+	 * only publish a minimal DL info region here so MAIN arms its runtime IPC;
+	 * a DT without it still boots (older overlays), MAIN just won't arm.
+	 */
+	if (s5300_map_region(sm, "pktproc", &sm->pktproc_phys, &sm->pktproc_size,
+			     &sm->pktproc))
+		dev_warn(dev, "no pktproc carveout mapped\n");
 
 	if (of_property_read_string(dev->of_node, "firmware-name", &fw_name))
 		fw_name = "tegu/cp_pbl.bin";
@@ -1713,6 +2516,24 @@ static int s5300_probe(struct platform_device *pdev)
 		goto err_fw;
 	}
 	dev_info(dev, "CP endpoint %s\n", pci_name(sm->pdev));
+
+	/*
+	 * On a bare module reload (rmmod/insmod, no reboot) nothing has reset the
+	 * CP, so it is still running MAIN and BL1 would land on it (boot_stage
+	 * stuck at 0).  Detect that by the endpoint link speed: a fresh boot-ROM
+	 * CP the controller just trained is at Gen1, while a live MAIN has
+	 * upshifted to Gen3.  If it is above Gen1, warm-reset it back into its
+	 * boot ROM (MAIN survives in the CP's self-powered DRAM) and wait for the
+	 * Gen1 link to re-train; the MSI target / doorbell BAR below then
+	 * reprogram the freshly-reset endpoint.  Cold boot stays at Gen1 here and
+	 * skips this entirely, so it is unaffected.
+	 */
+	pcie_capability_read_word(sm->pdev, PCI_EXP_LNKSTA, &lnksta);
+	if ((lnksta & PCI_EXP_LNKSTA_CLS) != PCI_EXP_LNKSTA_CLS_2_5GB) {
+		dev_info(dev, "CP endpoint at Gen%u (live MAIN); warm-resetting\n",
+			 (u16)(lnksta & PCI_EXP_LNKSTA_CLS));
+		zumapro_pcie_modem_reset(sm->rc_dev);
+	}
 
 	/*
 	 * Downstream keeps every form of link PM off for the whole CP boot
@@ -1872,8 +2693,12 @@ static void s5300_remove(struct platform_device *pdev)
 	destroy_workqueue(sm->pm_wq);
 
 	cancel_work_sync(&sm->boot_work);
+	cancel_delayed_work_sync(&sm->selftest_work);
 	free_irq(pci_irq_vector(sm->pdev, 0), sm);
-	cancel_work_sync(&sm->rx_work);
+	if (sm->rfs_port)
+		wwan_remove_port(sm->rfs_port);
+	if (sm->ctrl_port)
+		wwan_remove_port(sm->ctrl_port);
 	if (sm->at_port)
 		wwan_remove_port(sm->at_port);
 	release_firmware(sm->pbl);
