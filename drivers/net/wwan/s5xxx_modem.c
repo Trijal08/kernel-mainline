@@ -47,6 +47,7 @@
 #include <linux/sizes.h>
 #include <linux/skbuff.h>
 #include <linux/slab.h>
+#include <linux/sprintf.h>
 #include <linux/unaligned.h>
 #include <linux/workqueue.h>
 #include <linux/wwan.h>
@@ -190,6 +191,19 @@
 #define S5300_IPC_HANDOVER_OFS		0x82c
 #define S5300_HANDOVER_SIZE		161
 #define S5300_HANDOVER_FW		"google/s5400/cp_handover.bin"
+/*
+ * The handover block is assembled entirely from device sources so nothing
+ * device-specific is staged as a blob and it works on any caimito s5400 device:
+ * the HW/RF config words (bytes 0..63) are derived from androidboot.cdt_hwid
+ * (bootloader-provided, read from /proc/bootconfig) plus a hardware_config.json
+ * row, exactly the way the vendor cbd does it; the two IMEIs (bytes 64..95) come
+ * from the bootloader-populated /chosen/config; and the 64-byte CP signature
+ * (bytes 96..159) from the cpsha file (a trailing NUL completes cpsig[65]).
+ * cp_handover.bin is the fallback if any source is unavailable.
+ */
+#define S5300_HANDOVER_IMEI_OFS		64
+#define S5300_HANDOVER_CPSIG_OFS	96
+#define S5300_CPSHA_FW			"google/s5400/persist/modem/cpsha"
 /*
  * RF_CFG auto-selection.  The modem image directory holds one RF_CFG_<sha1> per
  * HW/RF variant plus hardware_config.json, which maps a set of identifiers to
@@ -896,9 +910,251 @@ static irqreturn_t s5300_cp_active_irq(int irq, void *data)
  */
 static void s5300_pktproc_fill_desc(struct s5300_modem *sm);
 
+/*
+ * Parse the decimal value of "key" within the JSON object bytes [start,end).
+ * Returns 0 + *out, or -ENOENT when the key is absent.  Deliberately minimal --
+ * hardware_config.json is a small machine-generated file, not arbitrary JSON, so
+ * a targeted scan beats dragging a parser into the kernel.
+ */
+static int s5300_json_uint(const char *start, const char *end,
+			   const char *key, u32 *out)
+{
+	char pat[16];
+	const char *p;
+	u32 v = 0;
+
+	scnprintf(pat, sizeof(pat), "\"%s\"", key);
+	p = strnstr(start, pat, end - start);
+	if (!p)
+		return -ENOENT;
+	for (p += strlen(pat); p < end && *p != ':'; p++)
+		;
+	for (p++; p < end && (*p == ' ' || *p == '\t'); p++)
+		;
+	if (p >= end || *p < '0' || *p > '9')
+		return -ENOENT;
+	for (; p < end && *p >= '0' && *p <= '9'; p++)
+		v = v * 10 + (*p - '0');
+	*out = v;
+	return 0;
+}
+
+/*
+ * The CDT (Configuration Data Table) fields the bootloader packs into
+ * androidboot.cdt_hwid.  cbd parses the hex string by fixed nibble widths and
+ * matches a hardware_config.json row on platform/product +
+ * stage(=board)/major/minor/rf_sku/rf_sub/modem_hw; that row yields rfid (->
+ * rf_config) and hwinfo (-> revision) and the RF_CFG file.
+ */
+struct s5300_cdt {
+	u32 platform, product, board, major, minor, variant, rf_sku, modem_hw, rf_sub;
+};
+
+/*
+ * cdt_hwid: the bootloader-provided androidboot.cdt_hwid, forwarded in as a
+ * module param -- via bootconfig (a kernel.s5xxx_modem.cdt_hwid entry, which the
+ * kernel renders onto the cmdline) or by userspace out of /proc/bootconfig.  A
+ * module cannot read bootconfig itself (xbc_* is __init-only) and reading
+ * /proc from a driver is an upstream no-no, so the value comes in as a param and
+ * the parse + hardware_config.json lookup (cbd's scan_cdt_property_data) stay
+ * in-kernel.  Empty -> the driver falls back to a staged cp_handover.bin.
+ */
+static char *s5300_cdt_hwid;
+module_param_named(cdt_hwid, s5300_cdt_hwid, charp, 0444);
+MODULE_PARM_DESC(cdt_hwid, "androidboot.cdt_hwid for the auto-built handover block");
+
+/* Parse cdt_hwid the way cbd's scan_cdt_property_data() does (fixed nibbles). */
+static int s5300_parse_cdt_hwid(struct s5300_cdt *cdt)
+{
+	if (!s5300_cdt_hwid || !*s5300_cdt_hwid)
+		return -ENODATA;
+	if (sscanf(s5300_cdt_hwid, "0x%4x%2x%2x%4x%2x%2x%2x%2x%4x",
+		   &cdt->platform, &cdt->product, &cdt->board, &cdt->major,
+		   &cdt->minor, &cdt->variant, &cdt->rf_sku, &cdt->modem_hw,
+		   &cdt->rf_sub) != 9)
+		return -EINVAL;
+	return 0;
+}
+
+/*
+ * Scan one configurations[] entry's config_table rows (bounded by [entry,lim))
+ * for the match; on the matching row fill rfid (-> rf_config), hwinfo (->
+ * revision) and the RF_CFG basename (config_file is an absolute vendor path).
+ * Returns 0 on match, -ENOENT otherwise.
+ */
+static int s5300_hwcfg_row(const char *entry, const char *lim,
+			   const struct s5300_cdt *cdt, u32 *rfid, u32 *hwinfo,
+			   char *rf_cfg, size_t rf_cfg_sz)
+{
+	const char *r = entry;
+
+	while ((r = strnstr(r, "\"config_file\"", lim - r))) {
+		const char *objend = strnstr(r, "}", lim - r);
+		const char *v, *name, *base, *s;
+		u32 stage, major, minor, rf_sku, rf_sub, modem_hw;
+
+		if (!objend)
+			break;
+		if (s5300_json_uint(r, objend, "stage", &stage) ||
+		    s5300_json_uint(r, objend, "major", &major) ||
+		    s5300_json_uint(r, objend, "minor", &minor) ||
+		    s5300_json_uint(r, objend, "rf_sku", &rf_sku) ||
+		    s5300_json_uint(r, objend, "rf_sub", &rf_sub) ||
+		    s5300_json_uint(r, objend, "modem_hw", &modem_hw) ||
+		    stage != cdt->board || major != cdt->major ||
+		    minor != cdt->minor || rf_sku != cdt->rf_sku ||
+		    rf_sub != cdt->rf_sub || modem_hw != cdt->modem_hw ||
+		    s5300_json_uint(r, objend, "rfid", rfid) ||
+		    s5300_json_uint(r, objend, "hwinfo", hwinfo)) {
+			r = objend + 1;
+			continue;
+		}
+		v = strchr(r, ':');
+		if (v && v < objend)
+			v = strchr(v, '"');
+		if (!v || v >= objend)
+			break;
+		for (name = ++v; v < objend && *v != '"'; v++)
+			;
+		for (base = name, s = name; s < v; s++)
+			if (*s == '/')
+				base = s + 1;
+		scnprintf(rf_cfg, rf_cfg_sz, "%.*s", (int)(v - base), base);
+		return 0;
+	}
+	return -ENOENT;
+}
+
+/*
+ * Match this device's hardware_config.json row from the parsed CDT and hand back
+ * rfid (-> rf_config), hwinfo (-> revision) and the RF_CFG basename.  Mirrors
+ * cbd: pick the configurations[] entry on (platform, product), then the
+ * config_table row on (stage=board, major, minor, rf_sku, rf_sub, modem_hw).
+ */
+static int s5300_hwcfg_lookup(struct s5300_modem *sm, const struct s5300_cdt *cdt,
+			      u32 *rfid, u32 *hwinfo, char *rf_cfg, size_t rf_cfg_sz)
+{
+	const struct firmware *json;
+	char *buf, *entry, *bufend;
+	int ret = -ENOENT;
+
+	if (request_firmware_direct(&json, S5300_HWCFG_FW, sm->dev))
+		return -ENOENT;
+	buf = kvmalloc(json->size + 1, GFP_KERNEL);
+	if (!buf) {
+		release_firmware(json);
+		return -ENOMEM;
+	}
+	memcpy(buf, json->data, json->size);
+	buf[json->size] = '\0';
+	release_firmware(json);
+	bufend = buf + strlen(buf);
+
+	entry = buf;
+	while ((entry = strstr(entry, "\"platform\""))) {
+		char *entry_end = strstr(entry + 10, "\"platform\"");
+		char *lim = entry_end ? entry_end : bufend;
+		u32 plat, prod;
+
+		if (!s5300_json_uint(entry, lim, "platform", &plat) &&
+		    !s5300_json_uint(entry, lim, "product", &prod) &&
+		    plat == cdt->platform && prod == cdt->product &&
+		    !s5300_hwcfg_row(entry, lim, cdt, rfid, hwinfo, rf_cfg,
+				     rf_cfg_sz)) {
+			ret = 0;
+			break;
+		}
+		if (!entry_end)
+			break;
+		entry = entry_end;
+	}
+	kvfree(buf);
+	return ret;
+}
+
+/* Parse the CDT hwid param, then resolve rfid/hwinfo/RF_CFG from the json. */
+static int s5300_resolve_hwcfg(struct s5300_modem *sm, struct s5300_cdt *cdt,
+			       u32 *rfid, u32 *hwinfo, char *rf_cfg, size_t sz)
+{
+	int ret = s5300_parse_cdt_hwid(cdt);
+
+	if (ret)
+		return ret;
+	return s5300_hwcfg_lookup(sm, cdt, rfid, hwinfo, rf_cfg, sz);
+}
+
+/*
+ * Assemble the 161-byte t_handover_block_info MAIN reads (the vendor's
+ * IOCTL_HANDOVER_BLOCK_INFO) entirely from device sources -- no staged blob,
+ * works on any caimito s5400.  The HW/RF words come from androidboot.cdt_hwid +
+ * a hardware_config.json row (exactly like cbd's update_handover_block_info),
+ * the two IMEIs from /chosen/config, the CP signature from cpsha.  Returns 0 with
+ * buf filled, or -errno if a source is missing (caller tries cp_handover.bin).
+ */
+static int s5300_build_handover(struct s5300_modem *sm, u8 *buf)
+{
+	const struct firmware *sha;
+	struct device_node *cnode;
+	struct s5300_cdt cdt;
+	u32 rfid, hwinfo;
+	char rf_cfg[80];
+	const void *imei;
+	int ret, len;
+
+	ret = s5300_resolve_hwcfg(sm, &cdt, &rfid, &hwinfo, rf_cfg, sizeof(rf_cfg));
+	if (ret)
+		return ret;
+
+	memset(buf, 0, S5300_HANDOVER_SIZE);
+	put_unaligned_le32(1,            buf + 0);	/* version */
+	put_unaligned_le32(cdt.platform, buf + 4);	/* project_id */
+	put_unaligned_le32(hwinfo,       buf + 8);	/* revision (json hwinfo) */
+	put_unaligned_le32(cdt.major,    buf + 12);
+	put_unaligned_le32(cdt.minor,    buf + 16);
+	put_unaligned_le32(cdt.rf_sku,   buf + 20);	/* modem_sku */
+	put_unaligned_le32(cdt.modem_hw, buf + 24);
+	/* cpinfo0..2 (28/32/36) are runtime flags; cbd left them 0 on this device */
+	put_unaligned_le32(cdt.rf_sub,   buf + 40);
+	put_unaligned_le32(rfid,         buf + 44);	/* rf_config (json rfid) */
+	put_unaligned_le32(cdt.product,  buf + 48);	/* reserved[0] */
+	put_unaligned_le32(cdt.board,    buf + 52);	/* reserved[1] (stage) */
+	put_unaligned_le32(cdt.variant,  buf + 56);	/* reserved[2] */
+	/* reserved[3] (60) = 0 */
+
+	cnode = of_find_node_by_path("/chosen/config");
+	if (!cnode)
+		return -ENOENT;
+	imei = of_get_property(cnode, "imei1", &len);
+	if (imei && len > 0)
+		memcpy(buf + S5300_HANDOVER_IMEI_OFS, imei, min(len, 16));
+	imei = of_get_property(cnode, "imei2", &len);
+	if (imei && len > 0)
+		memcpy(buf + S5300_HANDOVER_IMEI_OFS + 16, imei, min(len, 16));
+	of_node_put(cnode);
+	if (!buf[S5300_HANDOVER_IMEI_OFS])	/* imei1 is mandatory */
+		return -ENODATA;
+
+	/* cpsha is the 64-char hex CP signature; the trailing NUL is already set. */
+	ret = request_firmware_direct(&sha, S5300_CPSHA_FW, sm->dev);
+	if (ret)
+		return ret;
+	if (sha->size < 64) {
+		release_firmware(sha);
+		return -EINVAL;
+	}
+	memcpy(buf + S5300_HANDOVER_CPSIG_OFS, sha->data, 64);
+	release_firmware(sha);
+
+	dev_info(sm->dev,
+		 "built handover: platform %u product %u revision %u rf_config %u\n",
+		 cdt.platform, cdt.product, hwinfo, rfid);
+	return 0;
+}
+
 static void s5300_init_control_messages(struct s5300_modem *sm)
 {
 	const struct firmware *fw;
+	u8 handover[S5300_HANDOVER_SIZE];
 	int i;
 
 	writel(S5300_IPC_SRINFO_OFFSET, sm->ipc + S5300_IPC_SRINFO_OFS_PTR);
@@ -926,11 +1182,16 @@ static void s5300_init_control_messages(struct s5300_modem *sm)
 	/*
 	 * Stage the handover block (HW/RF config + IMEIs + signature) MAIN reads
 	 * to configure itself -- the vendor's IOCTL_HANDOVER_BLOCK_INFO, which the
-	 * bare boot handshake otherwise omits, leaving MAIN unable to arm.  Loaded
-	 * from firmware because it is device-specific; absent, warn and continue
-	 * (like cbd), the modem still reaches ONLINE but may not service the rings.
+	 * bare boot handshake otherwise omits, leaving MAIN unable to arm.  Prefer
+	 * building it from device sources (DT + cpsha); fall back to a pre-staged
+	 * cp_handover.bin.  Absent both, warn and continue (like cbd) -- the modem
+	 * still reaches ONLINE but may not service the rings.
 	 */
-	if (request_firmware_direct(&fw, S5300_HANDOVER_FW, sm->dev) == 0) {
+	if (s5300_build_handover(sm, handover) == 0) {
+		memcpy_toio(sm->ipc + S5300_IPC_HANDOVER_OFS, handover,
+			    S5300_HANDOVER_SIZE);
+		dev_info(sm->dev, "built handover block from device sources\n");
+	} else if (request_firmware_direct(&fw, S5300_HANDOVER_FW, sm->dev) == 0) {
 		if (fw->size == S5300_HANDOVER_SIZE) {
 			memcpy_toio(sm->ipc + S5300_IPC_HANDOVER_OFS,
 				    fw->data, fw->size);
@@ -944,7 +1205,7 @@ static void s5300_init_control_messages(struct s5300_modem *sm)
 		release_firmware(fw);
 	} else {
 		dev_warn(sm->dev,
-			 "no %s; MAIN may reach ONLINE but not arm\n",
+			 "no handover block (DT/cpsha or %s); MAIN may not arm\n",
 			 S5300_HANDOVER_FW);
 	}
 
@@ -2178,35 +2439,6 @@ static void *s5300_build_replay(struct s5300_modem *sm)
 }
 
 /*
- * Parse the decimal value of "key" within the JSON object bytes [start,end).
- * Returns 0 + *out, or -ENOENT when the key is absent.  Deliberately minimal --
- * hardware_config.json is a small machine-generated file, not arbitrary JSON, so
- * a targeted scan beats dragging a parser into the kernel.
- */
-static int s5300_json_uint(const char *start, const char *end,
-			   const char *key, u32 *out)
-{
-	char pat[16];
-	const char *p;
-	u32 v = 0;
-
-	scnprintf(pat, sizeof(pat), "\"%s\"", key);
-	p = strnstr(start, pat, end - start);
-	if (!p)
-		return -ENOENT;
-	for (p += strlen(pat); p < end && *p != ':'; p++)
-		;
-	for (p++; p < end && (*p == ' ' || *p == '\t'); p++)
-		;
-	if (p >= end || *p < '0' || *p > '9')
-		return -ENOENT;
-	for (; p < end && *p >= '0' && *p <= '9'; p++)
-		v = v * 10 + (*p - '0');
-	*out = v;
-	return 0;
-}
-
-/*
  * One-shot gunzip of an in-memory blob into a fresh kvmalloc buffer (caller
  * kvfree).  The device modem partition stores RF_CFG_* gzipped and the kernel
  * firmware loader only auto-decompresses xz/zstd, so handle gzip here.  Mirrors
@@ -2313,96 +2545,26 @@ static int s5300_load_rf_cfg(struct s5300_modem *sm, const char *fw_path,
 }
 
 /*
- * Pick this device's RF_CFG image from hardware_config.json using the HW/RF
- * identifiers in the staged handover block, decompress it, and hand back a fresh
- * buffer in out/outsz (caller kvfree).  The json config_table rows key on
- * major/minor/rf_sub/rf_sku/rfid/hwinfo/modem_hw, which map onto handover fields
- * major_id/minor_id/rf_sub/modem_sku/rf_config/revision/modem_hw.  config_file
- * may be an absolute vendor path, so only its basename is used under
- * S5300_RF_CFG_DIR.  Falls back to S5300_RF_CFG_FALLBACK on any miss.
+ * Pick this device's RF_CFG image, decompress it, and hand back a fresh buffer
+ * in out/outsz (caller kvfree).  Uses the same cdt_hwid -> hardware_config.json
+ * resolution as the handover build; the matched row's config_file basename is
+ * loaded from S5300_RF_CFG_DIR.  Falls back to S5300_RF_CFG_FALLBACK on any miss.
  */
 static int s5300_select_rf_cfg(struct s5300_modem *sm, void **out, size_t *outsz)
 {
-	static const char *const keys[] = {
-		"major", "minor", "rf_sku", "modem_hw", "rf_sub", "rfid", "hwinfo",
-	};
-	static const int off[] = { 12, 16, 20, 24, 40, 44, 8 };
-	const struct firmware *ho, *json;
-	u32 want[ARRAY_SIZE(keys)];
-	char path[160], *jbuf, *p;
-	int i, ret;
+	struct s5300_cdt cdt;
+	u32 rfid, hwinfo;
+	char rf_cfg[80], path[160];
 
-	ret = request_firmware_direct(&ho, S5300_HANDOVER_FW, sm->dev);
-	if (ret || ho->size < S5300_HANDOVER_SIZE) {
-		if (!ret)
-			release_firmware(ho);
-		dev_warn(sm->dev, "no handover block for RF_CFG select; using %s\n",
-			 S5300_RF_CFG_FALLBACK);
-		goto fallback;
+	if (s5300_resolve_hwcfg(sm, &cdt, &rfid, &hwinfo, rf_cfg,
+				sizeof(rf_cfg)) == 0 && rf_cfg[0]) {
+		scnprintf(path, sizeof(path), "%s/%s", S5300_RF_CFG_DIR, rf_cfg);
+		dev_info(sm->dev, "RF_CFG auto-selected %s (rfid=%u hwinfo=%u)\n",
+			 rf_cfg, rfid, hwinfo);
+		return s5300_load_rf_cfg(sm, path, out, outsz);
 	}
-	for (i = 0; i < ARRAY_SIZE(keys); i++)
-		want[i] = get_unaligned_le32(ho->data + off[i]);
-	release_firmware(ho);
-
-	if (request_firmware_direct(&json, S5300_HWCFG_FW, sm->dev)) {
-		dev_warn(sm->dev, "no %s; using %s\n",
-			 S5300_HWCFG_FW, S5300_RF_CFG_FALLBACK);
-		goto fallback;
-	}
-	jbuf = kvmalloc(json->size + 1, GFP_KERNEL);
-	if (!jbuf) {
-		release_firmware(json);
-		return -ENOMEM;
-	}
-	memcpy(jbuf, json->data, json->size);
-	jbuf[json->size] = '\0';
-	release_firmware(json);
-
-	for (p = jbuf; (p = strstr(p, "\"config_file\"")); ) {
-		char *objend = strchr(p, '}');
-		char *v = strchr(p, ':'), *name, *base, *s;
-		bool match = true;
-
-		if (!objend)
-			break;			/* malformed: no object close */
-		if (!v || v > objend)
-			goto next;
-		v = strchr(v, '"');		/* opening quote of the value */
-		if (!v || v > objend)
-			goto next;
-		for (name = ++v; v < objend && *v != '"'; v++)
-			;
-		if (v >= objend)
-			goto next;
-		for (i = 0; i < ARRAY_SIZE(keys); i++) {
-			u32 got;
-
-			if (s5300_json_uint(p, objend, keys[i], &got) ||
-			    got != want[i]) {
-				match = false;
-				break;
-			}
-		}
-		if (match) {
-			/* config_file may be an absolute path; take the basename. */
-			for (base = name, s = name; s < v; s++)
-				if (*s == '/')
-					base = s + 1;
-			scnprintf(path, sizeof(path), "%s/%.*s",
-				  S5300_RF_CFG_DIR, (int)(v - base), base);
-			dev_info(sm->dev,
-				 "RF_CFG auto-selected %.*s (rfid=%u hwinfo=%u rf_sub=%u)\n",
-				 (int)(v - base), base, want[5], want[6], want[4]);
-			kvfree(jbuf);
-			return s5300_load_rf_cfg(sm, path, out, outsz);
-		}
-next:
-		p = objend + 1;
-	}
-	kvfree(jbuf);
-	dev_warn(sm->dev, "no hardware_config.json RF_CFG match; using %s\n",
+	dev_warn(sm->dev, "RF_CFG auto-select failed; using %s\n",
 		 S5300_RF_CFG_FALLBACK);
-fallback:
 	return s5300_load_rf_cfg(sm, S5300_RF_CFG_FALLBACK, out, outsz);
 }
 
@@ -3329,6 +3491,7 @@ module_platform_driver(s5300_driver);
  * fixed name and are not declared here.
  */
 MODULE_FIRMWARE(S5300_HANDOVER_FW);
+MODULE_FIRMWARE(S5300_CPSHA_FW);
 MODULE_FIRMWARE(S5300_HWCFG_FW);
 MODULE_FIRMWARE(S5300_RF_CFG_FALLBACK);
 MODULE_FIRMWARE("google/s5400/efs/nv_normal.bin");
