@@ -315,9 +315,11 @@
 #define S5300_SIT_CH_BOOT		0xf1		/* EXYNOS_CH_ID_BOOT */
 #define S5300_DL_HDR			12
 #define S5300_DL_CHUNK			0xc000		/* 49152-byte payload cap */
-/* std_dl control words: per-section start/end carry a tag; the standalone
+/*
+ * std_dl control words: per-section start/end carry a tag; the standalone
  * finalise word (cbd emits 0xa400, CP acks 0xc400) tells the CP the image is
- * complete and to boot MAIN. */
+ * complete and to boot MAIN.
+ */
 #define S5300_DL_SEC_START(tag)		(0xa100 | ((tag) << 4))
 #define S5300_DL_SEC_END(tag)		(0xa10d | ((tag) << 4))
 #define S5300_DL_SEC_VERIFY(tag)	(0xa301 | ((tag) << 4))	/* CRC-verify */
@@ -350,9 +352,6 @@ struct s5300_modem {
 	u32			irq_count;	/* MSI interrupts seen (debug) */
 	u32			last_cp2ap;	/* last CP2AP_MSG value (debug) */
 	struct work_struct	boot_work;
-	struct delayed_work	selftest_work;	/* debug: probe rings post-ONLINE */
-	struct delayed_work	init_end_work;	/* diagnostic: delayed INIT_END */
-	int			selftest_iter;
 	struct completion	init_done;
 	spinlock_t		lock;	/* orders ap2cp_msg word + doorbell */
 	bool			online;
@@ -624,25 +623,6 @@ static void s5300_relink_restore(struct s5300_modem *sm)
 	s5300_verify_msi_target(sm);
 }
 
-/* Diagnostic: dump every legacy ring pointer + the interrupt words. */
-static void s5300_dump_rings(struct s5300_modem *sm, const char *tag)
-{
-	dev_info(sm->dev,
-		 "%s: fmt tx %#x/%#x rx %#x/%#x | raw tx %#x/%#x rx %#x/%#x | db_rsv %d ap2cp %#x cp2ap %#x\n",
-		 tag,
-		 readl(sm->ipc + S5300_FMT_TXQ_HEAD),
-		 readl(sm->ipc + S5300_FMT_TXQ_TAIL),
-		 readl(sm->ipc + S5300_FMT_RXQ_HEAD),
-		 readl(sm->ipc + S5300_FMT_RXQ_TAIL),
-		 readl(sm->ipc + S5300_RAW_TXQ_HEAD),
-		 readl(sm->ipc + S5300_RAW_TXQ_TAIL),
-		 readl(sm->ipc + S5300_RAW_RXQ_HEAD),
-		 readl(sm->ipc + S5300_RAW_RXQ_TAIL),
-		 sm->db_reserved,
-		 readl(sm->ipc + S5300_IPC_AP2CP_MSG),
-		 readl(sm->ipc + S5300_IPC_CP2AP_MSG));
-}
-
 #define S5300_PARK_SETTLE_MS	30
 
 /*
@@ -691,20 +671,6 @@ module_param_named(pktproc, s5300_pktproc, bool, 0644);
 MODULE_PARM_DESC(pktproc, "publish pktproc regions (0 = pure legacy IPC)");
 
 /*
- * Diagnostic: hold the INIT_END reply back for N ms after PHONE_START.  The
- * CP dies silently ~4.6 s after ONLINE without ever consuming ap2cp_msg or
- * draining a ring, so whether it EVER receives doorbell-delivered commands is
- * unproven.  Delaying INIT_END discriminates: a CP that re-sends PHONE_START
- * during the window (vendor comment: "CP sends a CP_START command to AP
- * periodically until it receives INIT_END") or whose ~4.6 s shutdown timer
- * moves with the delayed send has demonstrably RECEIVED a doorbell; identical
- * behaviour regardless means it never sees our ctrl msgs at all.
- */
-static uint s5300_init_end_delay_ms;
-module_param_named(init_end_delay_ms, s5300_init_end_delay_ms, uint, 0644);
-MODULE_PARM_DESC(init_end_delay_ms, "diagnostic: delay INIT_END after PHONE_START");
-
-/*
  * adopt=0 forces a warm reset + fresh boot even when a live MAIN is found at
  * probe -- the way to get a clean IPC state (freshly initialised rings) on
  * demand from an otherwise-golden CP.
@@ -732,11 +698,6 @@ MODULE_PARM_DESC(adopt, "adopt a live MAIN at probe instead of resetting (defaul
 static bool s5300_cold_cycle = true;
 module_param_named(cold_cycle, s5300_cold_cycle, bool, 0644);
 MODULE_PARM_DESC(cold_cycle, "full CP power cycle + fresh download (default 1); 0 = adopt a live MAIN");
-
-/* Diagnostic: skip all post-ONLINE setup (isolate CP-internal vs our action). */
-static bool s5300_bare_online;
-module_param_named(bare_online, s5300_bare_online, bool, 0644);
-MODULE_PARM_DESC(bare_online, "diagnostic: do nothing after ONLINE");
 
 /*
  * True while the CP still owes us: any legacy txq (FMT or RAW) with head != tail
@@ -850,8 +811,6 @@ static void s5300_pm_work(struct work_struct *work)
 			if (park) {
 				zumapro_pcie_modem_link_down(sm->rc_dev);
 				dev_info(sm->dev, "CP sleep: link down (parked)\n");
-			} else {
-				s5300_dump_rings(sm, "park deferred");
 			}
 		}
 	}
@@ -935,181 +894,6 @@ static irqreturn_t s5300_cp_active_irq(int irq, void *data)
  * AP capability words stay zero (tegu DT: ap_capability_0/1 = 0).
  */
 static void s5300_pktproc_fill_desc(struct s5300_modem *sm);
-
-/*
- * ---- In-module CP cold cycle with the S5910 DCXO shutdown (komodo SFRs) ----
- * This is the ORIGINAL working reset (the one that produced AT->OK): kill the
- * S5910 DCXO reference clock while the CP rails are off -- the deepest reset,
- * genuinely halting the CP -- then bring the DCXO and rails back.  The clean
- * pci-exynos power_cycle only re-arms the DCXO (never shuts it down), which is
- * a shallower reset and let MAIN self-reset ~123 ms after ONLINE.  Raw SFR
- * bit-bang so it runs from the module (no kernel reflash); PCIe side uses the
- * exported link_down/link_up.  SPMI protocol/timing mirror pci-exynos cp_spmi_*.
- */
-#define CC_PERIC0	0x10840000
-#define CC_ALIVE	0x154d0000
-#define CC_GPP8_DAT	0x104		/* PM_WRST  = bit3 */
-#define CC_GPP12_DAT	0x184		/* CP_PWR   = bit2, NRESET = bit3 */
-#define CC_GPP16_DAT	0x224		/* WAKEUP   = bit0, CP_WRST = bit3 */
-#define CC_GPA3_CON	0x60
-#define CC_GPA3_DAT	0x64
-#define CC_CLK_BIT	BIT(2)		/* gpa3-2 SPMI SCLK */
-#define CC_DAT_BIT	BIT(3)		/* gpa3-3 SPMI SDATA */
-#define CC_CLK_SH	8
-#define CC_DAT_SH	12
-#define CC_S5910_SID	5
-
-struct s5300_cc { void __iomem *peric0, *alive; };
-
-static void cc_rmw(void __iomem *r, u32 clr, u32 set)
-{
-	writel((readl(r) & ~clr) | set, r);
-}
-static void cc_clk(struct s5300_cc *c, int v)
-{ cc_rmw(c->alive + CC_GPA3_DAT, v ? 0 : CC_CLK_BIT, v ? CC_CLK_BIT : 0); }
-static void cc_dat(struct s5300_cc *c, int v)
-{ cc_rmw(c->alive + CC_GPA3_DAT, v ? 0 : CC_DAT_BIT, v ? CC_DAT_BIT : 0); }
-static void cc_con(struct s5300_cc *c, int sh, u32 fn)
-{ cc_rmw(c->alive + CC_GPA3_CON, 0xf << sh, fn << sh); }
-static int cc_get(struct s5300_cc *c)
-{ return !!(readl(c->alive + CC_GPA3_DAT) & CC_DAT_BIT); }
-
-static bool cc_parity(u32 d, u32 n)
-{ bool p = 1; while (n--) { p ^= d & 1; d >>= 1; } return p; }
-
-static void cc_send(struct s5300_cc *c, u32 d, u32 n)
-{
-	int mask = BIT(n);
-
-	cc_clk(c, 0);
-	while (mask >>= 1) {
-		cc_clk(c, 1); cc_dat(c, !!(d & mask)); udelay(10);
-		cc_clk(c, 0); udelay(10);
-	}
-}
-static void cc_frame(struct s5300_cc *c, u32 d, u8 n)
-{ cc_send(c, d << 1 | cc_parity(d, n), n + 1); }
-
-static void cc_ssc(struct s5300_cc *c)
-{
-	cc_dat(c, 0); cc_con(c, CC_DAT_SH, 1); cc_clk(c, 0);
-	cc_dat(c, 1); udelay(10); cc_dat(c, 0); udelay(10);
-}
-static void cc_park(struct s5300_cc *c)
-{
-	cc_clk(c, 1); cc_dat(c, 0); udelay(10);
-	cc_con(c, CC_DAT_SH, 0); cc_clk(c, 0); udelay(10);
-}
-static bool cc_ack(struct s5300_cc *c)
-{
-	bool b;
-
-	cc_park(c);
-	cc_clk(c, 1); udelay(10); cc_clk(c, 0);
-	b = cc_get(c); udelay(10); cc_park(c);
-	return b;
-}
-static void cc_arb(struct s5300_cc *c)
-{
-	int i;
-
-	cc_dat(c, 0); cc_con(c, CC_DAT_SH, 1); cc_clk(c, 0); udelay(20);
-	cc_dat(c, 1); udelay(50);
-	cc_clk(c, 1); udelay(10); cc_clk(c, 0); udelay(10);
-	cc_clk(c, 1); cc_dat(c, 0); udelay(10); cc_clk(c, 0); udelay(10);
-	cc_clk(c, 1); cc_dat(c, 1); udelay(10); cc_clk(c, 0); udelay(10);
-	cc_clk(c, 1); cc_dat(c, 0); cc_con(c, CC_DAT_SH, 0); udelay(10);
-	cc_clk(c, 0); udelay(10);
-	for (i = 0; i < 4; i++) { cc_clk(c, 1); udelay(10); cc_clk(c, 0); udelay(10); }
-	cc_clk(c, 1); cc_dat(c, 1); cc_con(c, CC_DAT_SH, 1); udelay(10);
-	cc_clk(c, 0); udelay(10); cc_dat(c, 0);
-}
-/* S5910 EXT_WRITEL one byte; retry twice; return true on ACK. */
-static bool cc_s5910(struct s5300_modem *sm, struct s5300_cc *c, u16 reg, u8 val)
-{
-	bool ack = false;
-	int try;
-
-	for (try = 0; try < 3 && !ack; try++) {
-		cc_clk(c, 0); cc_con(c, CC_CLK_SH, 1);
-		cc_dat(c, 0); cc_con(c, CC_DAT_SH, 1);
-		cc_arb(c); cc_ssc(c);
-		cc_frame(c, (CC_S5910_SID << 8) | 0x30, 12);	/* EXT_WRITEL */
-		cc_frame(c, reg >> 8, 8);
-		cc_frame(c, reg & 0xff, 8);
-		cc_frame(c, val, 8);
-		ack = cc_ack(c);
-		cc_con(c, CC_CLK_SH, 0); cc_con(c, CC_DAT_SH, 0);
-		if (!ack)
-			usleep_range(2000, 2500);
-	}
-	dev_info(sm->dev, "cold_cycle: s5910 %#x=%#x %s\n", reg, val,
-		 ack ? "ACK" : "NAK");
-	return ack;
-}
-
-static int s5300_cp_cold_cycle(struct s5300_modem *sm)
-{
-	struct s5300_cc c;
-	int ret;
-
-	c.peric0 = ioremap(CC_PERIC0, 0x1000);
-	c.alive = ioremap(CC_ALIVE, 0x1000);
-	if (!c.peric0 || !c.alive) {
-		ret = -ENOMEM;
-		goto out;
-	}
-
-	/* Tear the link down first (SError-safe); PHY off, PERST asserted. */
-	zumapro_pcie_modem_link_down(sm->rc_dev);
-
-	/* Halt the CP: NRESET low, CP_WRST low. */
-	dev_info(sm->dev, "cold_cycle: halting CP\n");
-	cc_rmw(c.peric0 + CC_GPP12_DAT, BIT(3), 0);	/* NRESET = 0 */
-	cc_rmw(c.peric0 + CC_GPP16_DAT, BIT(3), 0);	/* CP_WRST = 0 */
-	msleep(20);
-
-	/* S5910 DCXO SHUTDOWN (vendor s5910,seq) -- kill the CP reference clock. */
-	dev_info(sm->dev, "cold_cycle: s5910 DCXO shutdown\n");
-	cc_s5910(sm, &c, 0x215, 0x0f);
-	msleep(1000);					/* vendor step delay */
-	cc_s5910(sm, &c, 0x20e, 0x04);
-	cc_s5910(sm, &c, 0x240, 0x10);
-
-	/* Rails off WHILE the DCXO is dead -- the deepest reset. */
-	dev_info(sm->dev, "cold_cycle: rails off (DCXO dead)\n");
-	cc_rmw(c.peric0 + CC_GPP12_DAT, BIT(2), 0);	/* CP_PWR = 0 */
-	msleep(30);
-	cc_rmw(c.peric0 + CC_GPP8_DAT, BIT(3), 0);	/* PM_WRST = 0 */
-	msleep(50);
-
-	/* S5910 turn-on (vendor s5910,on_seq) -- restart the DCXO. */
-	dev_info(sm->dev, "cold_cycle: s5910 DCXO turn-on\n");
-	cc_s5910(sm, &c, 0x211, 0x47);
-	cc_s5910(sm, &c, 0x236, 0x0e);
-	cc_s5910(sm, &c, 0x215, 0x7f);
-	cc_s5910(sm, &c, 0x20e, 0x00);
-	msleep(10);
-
-	/* Rails on. */
-	dev_info(sm->dev, "cold_cycle: rails on\n");
-	cc_rmw(c.peric0 + CC_GPP8_DAT, 0, BIT(3));	/* PM_WRST = 1 */
-	msleep(10);
-	cc_rmw(c.peric0 + CC_GPP12_DAT, 0, BIT(2));	/* CP_PWR = 1 */
-	msleep(10);
-	cc_rmw(c.peric0 + CC_GPP12_DAT, 0, BIT(3));	/* NRESET = 1 */
-	msleep(10);
-	cc_rmw(c.peric0 + CC_GPP16_DAT, 0, BIT(3));	/* CP_WRST = 1 */
-	msleep(200);					/* ROM settle */
-
-	ret = zumapro_pcie_modem_link_up(sm->rc_dev);
-out:
-	if (c.peric0)
-		iounmap(c.peric0);
-	if (c.alive)
-		iounmap(c.alive);
-	return ret;
-}
 
 static void s5300_init_control_messages(struct s5300_modem *sm)
 {
@@ -1340,8 +1124,6 @@ static void s5300_init_ipc_queues(struct s5300_modem *sm)
 
 	magic = readl(sm->ipc + S5300_IPC_MAGIC);
 	access = readl(sm->ipc + S5300_IPC_ACCESS);
-	dev_info(sm->dev, "init_ipc_queues: wrote magic %#x access %u (readback)\n",
-		 magic, access);
 	if (magic != S5300_IPC_MAGIC_VALUE || access != 1)
 		dev_err(sm->dev, "IPC init readback failed: magic %#x access %u\n",
 			magic, access);
@@ -1453,15 +1235,6 @@ static int s5300_wwan_tx(struct wwan_port *port, struct sk_buff *skb)
 		return ret;
 	}
 	consume_skb(skb);
-	/*
-	 * DEBUG: snapshot the rings immediately and again after MAIN has had
-	 * time to consume the tx and post a reply.  Delta on RAW_TXQ_TAIL means
-	 * MAIN dequeued our frame; delta on RAW_RXQ_HEAD (+ an IPC irq) means it
-	 * replied.  Neither moving = MAIN is not servicing the runtime raw ring.
-	 */
-	s5300_dump_rings(sm, "AT tx: just pushed");
-	msleep(200);
-	s5300_dump_rings(sm, "AT tx: +200ms");
 	return 0;
 }
 
@@ -1470,68 +1243,6 @@ static const struct wwan_port_ops s5300_wwan_ops = {
 	.stop	= s5300_wwan_stop,
 	.tx	= s5300_wwan_tx,
 };
-
-/*
- * DEBUG self-test (no_park only): fire an "AT" onto the RAW ring from the driver
- * itself at a few post-ONLINE delays, before the CP tears the link down, and
- * dump the rings around it.  Deterministic replacement for racing a userspace AT
- * write against the ~120ms-after-ONLINE self-park: if the RAW_TXQ_TAIL advances
- * here MAIN is dequeuing (armed); if it never moves while the link is up, MAIN
- * is not servicing the ring.  Runs in process context (can sleep + ring).
- */
-static int s5300_fmt_tx(struct s5300_modem *sm, const u8 *data, u32 len);
-
-/* Diagnostic: the withheld INIT_END, fired init_end_delay_ms after PHONE_START. */
-static void s5300_init_end_work(struct work_struct *work)
-{
-	struct s5300_modem *sm = container_of(to_delayed_work(work),
-					      struct s5300_modem, init_end_work);
-
-	dev_info(sm->dev,
-		 "delayed INIT_END now (cp_active %d, cp2ap %#x, irq #%u)\n",
-		 sm->cp_active ? gpiod_get_value_cansleep(sm->cp_active) : -1,
-		 readl(sm->ipc + S5300_IPC_CP2AP_MSG), sm->irq_count);
-	s5300_send_ipc_irq(sm, S5300_CMD(S5300_CMD_INIT_END));
-}
-
-static void s5300_selftest_work(struct work_struct *work)
-{
-	struct s5300_modem *sm = container_of(to_delayed_work(work),
-					      struct s5300_modem, selftest_work);
-	static const u8 at[] = { 'A', 'T', '\r' };
-	bool link_up;
-	u32 cpq = 0;
-
-	spin_lock(&sm->lock);
-	link_up = sm->link_up;
-	spin_unlock(&sm->lock);
-
-	/*
-	 * cp_quota in the UL info region is written by the CP once MAIN engages
-	 * its pktproc UL init (vendor "CP quota set to 65535").  Non-zero here is
-	 * direct proof MAIN read our pktproc region and is running -- separating
-	 * "MAIN never armed" from "MAIN armed but ignores this ring".
-	 */
-	if (sm->pktproc)
-		cpq = readl(sm->pktproc + S5300_PKTPROC_UL_INFO_OFS + 4);
-
-	dev_info(sm->dev, "selftest #%d (link_up=%d) cp_quota=%#x:\n",
-		 sm->selftest_iter, link_up, cpq);
-	s5300_dump_rings(sm, "selftest before");
-
-	if (link_up) {
-		/* probe BOTH planes: FMT (umts_ipc0, the RIL's channel) and RAW (AT) */
-		if (s5300_fmt_tx(sm, at, sizeof(at)))
-			dev_info(sm->dev, "selftest FMT tx failed\n");
-		if (s5300_ipc_tx(sm, S5300_CH_AT, at, sizeof(at)))
-			dev_info(sm->dev, "selftest AT tx failed\n");
-		msleep(200);
-		s5300_dump_rings(sm, "selftest +200ms");
-	}
-
-	if (++sm->selftest_iter < 6)
-		schedule_delayed_work(&sm->selftest_work, msecs_to_jiffies(700));
-}
 
 /*
  * Frame a control message onto the FMT ring (SIT control plane, ch 0xF5) and
@@ -1824,18 +1535,6 @@ static void s5300_online(struct s5300_modem *sm)
 		return;
 
 	/*
-	 * Diagnostic: with bare_online set, do NOTHING after ONLINE -- no port
-	 * creation, no cp2ap IRQ arm, no PM.  If the CP still drops PHONE_ACTIVE
-	 * at +122 ms with a bare online, the self-reset is purely CP-internal
-	 * (the boot/image), not something our post-online path triggers.
-	 */
-	if (s5300_bare_online) {
-		dev_info(sm->dev, "bare online: PHONE_ACTIVE %d, watching\n",
-			 sm->cp_active ? gpiod_get_value_cansleep(sm->cp_active) : -1);
-		return;
-	}
-
-	/*
 	 * The link is already up and MAIN is running -- do NOT bounce it here.
 	 * The CP has not parked the link and is not in the wakeup handshake, so
 	 * a PERST-driven retrain would never complete (the CP only re-trains
@@ -1927,8 +1626,6 @@ static void s5300_online(struct s5300_modem *sm)
 		dev_info(sm->dev, "RFS file port up (umts_rfs0, ch %#x)\n",
 			 S5300_CH_RFS);
 	}
-
-	s5300_dump_rings(sm, "at ONLINE");
 }
 
 static irqreturn_t s5300_irq_handler(int irq, void *data)
@@ -1990,27 +1687,9 @@ static irqreturn_t s5300_irq_handler(int irq, void *data)
 				s5300_pktproc_publish_ul(sm);
 			s5300_init_ipc_queues(sm);
 			sm->online = true;
-			/* debug: probe the ring while the link is still up */
-			if (s5300_no_park)
-				schedule_delayed_work(&sm->selftest_work,
-						      msecs_to_jiffies(100));
 		}
-		/*
-		 * Re-entrant PHONE_START just gets the INIT_END again -- unless
-		 * the diagnostic delay is armed, in which case every PHONE_START
-		 * in the window is left unanswered (a re-send here IS the
-		 * doorbell-delivery evidence the experiment is after).
-		 */
-		if (s5300_init_end_delay_ms) {
-			if (!delayed_work_pending(&sm->init_end_work)) {
-				dev_info(sm->dev, "INIT_END delayed %ums (diagnostic)\n",
-					 s5300_init_end_delay_ms);
-				schedule_delayed_work(&sm->init_end_work,
-					msecs_to_jiffies(s5300_init_end_delay_ms));
-			}
-		} else {
-			s5300_send_ipc_irq(sm, S5300_CMD(S5300_CMD_INIT_END));
-		}
+		/* Re-entrant PHONE_START just gets the INIT_END again. */
+		s5300_send_ipc_irq(sm, S5300_CMD(S5300_CMD_INIT_END));
 		complete_all(&sm->init_done);
 		break;
 	case S5300_CMD_CRASH_RESET:
@@ -2764,18 +2443,22 @@ static int s5300_download_main(struct s5300_modem *sm)
 			goto done;
 		}
 
+		if (d->replay)
+			replay_buf = s5300_build_replay(sm);
+
 		if (!d->toc_name) {
 			/* Stage 1: the raw TOC table (first record spans it). */
 			data = sm->pbl->data;
 			size = le32_to_cpu(toc[0].size);
-		} else if (d->replay &&
-			   (replay_buf = s5300_build_replay(sm))) {
+		} else if (replay_buf) {
 			/* REPLAY: freshly built tar (MAIN rejects a stale one). */
 			data = replay_buf;
 			size = S5300_REPLAY_SIZE;
 		} else if (d->rf_cfg) {
-			/* RF_CFG: auto-selected via hardware_config.json, and
-			 * gunzipped -- the caller owns rf_cfg_buf (kvfree below). */
+			/*
+			 * RF_CFG: auto-selected via hardware_config.json, and
+			 * gunzipped -- the caller owns rf_cfg_buf (kvfree below).
+			 */
 			ret = s5300_select_rf_cfg(sm, &rf_cfg_buf, &size);
 			if (ret) {
 				dev_err(sm->dev,
@@ -3250,8 +2933,6 @@ static int s5300_probe(struct platform_device *pdev)
 	init_completion(&sm->init_done);
 	INIT_WORK(&sm->boot_work, s5300_boot_work);
 	INIT_WORK(&sm->pm_work, s5300_pm_work);
-	INIT_DELAYED_WORK(&sm->selftest_work, s5300_selftest_work);
-	INIT_DELAYED_WORK(&sm->init_end_work, s5300_init_end_work);
 	sm->link_up = true;	/* boot handshake rings directly; PM arms at ONLINE */
 	platform_set_drvdata(pdev, sm);
 
@@ -3580,8 +3261,6 @@ static void s5300_remove(struct platform_device *pdev)
 	destroy_workqueue(sm->pm_wq);
 
 	cancel_work_sync(&sm->boot_work);
-	cancel_delayed_work_sync(&sm->selftest_work);
-	cancel_delayed_work_sync(&sm->init_end_work);
 	free_irq(pci_irq_vector(sm->pdev, 0), sm);
 	if (sm->rfs_port)
 		wwan_remove_port(sm->rfs_port);
@@ -3620,8 +3299,6 @@ static void s5300_shutdown(struct platform_device *pdev)
 		free_irq(sm->cp_active_irq, sm);
 	cancel_work_sync(&sm->pm_work);
 	cancel_work_sync(&sm->boot_work);
-	cancel_delayed_work_sync(&sm->selftest_work);
-	cancel_delayed_work_sync(&sm->init_end_work);
 	free_irq(pci_irq_vector(sm->pdev, 0), sm);
 	dev_info(sm->dev, "quiesced for shutdown\n");
 }
