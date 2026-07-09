@@ -106,6 +106,14 @@
 	google,cp-wrst-gpios = <&gpp16 3 GPIO_ACTIVE_HIGH>;
 	google,cp-wakeup-gpios = <&gpp16 0 GPIO_ACTIVE_HIGH>;
 	google,cp-pda-active-gpios = <&gpp16 2 GPIO_ACTIVE_HIGH>;
+	/* power_reset_warm_cp() companions (../fdt.dts gpio_ap2cp_dump_noti,
+	 * gpio_cp2ap_cp_wrst_n, s5910_bb clk/dat-gpio).  The PMIC pair is the
+	 * bit-banged SPMI bus to the CP PMIC (sid 0), patched after every
+	 * CP_PMIC_WRST toggle (warm_reset_seq 0x675=0xa1, 0x67d=0xbe). */
+	google,cp-dump-noti-gpios = <&gpp16 1 GPIO_ACTIVE_HIGH>;
+	google,cp2ap-cp-wrst-gpios = <&gpa7 3 GPIO_ACTIVE_HIGH>;
+	google,cp-pmic-clk-gpios = <&gpa3 2 GPIO_ACTIVE_HIGH>;
+	google,cp-pmic-dat-gpios = <&gpa3 3 GPIO_ACTIVE_HIGH>;
 };
 
 / {
@@ -152,5 +160,8 @@
 		google,pcie = <&pcie_0>;
 		samsung,doorbell-addr = <0x14e60000>;
 		cp2ap-wakeup-gpios = <&gpa5 1 GPIO_ACTIVE_HIGH>;
+		/* CP2AP_PHONE_ACTIVE (../fdt.dts gpio_cp2ap_phone_active): high
+		 * while the CP runs; falling edge after ONLINE = CP crash. */
+		cp2ap-active-gpios = <&gpa5 2 GPIO_ACTIVE_HIGH>;
 	};
 };
