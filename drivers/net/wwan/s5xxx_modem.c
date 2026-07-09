@@ -331,6 +331,7 @@ struct s5300_modem {
 	struct pci_dev		*pdev;
 	struct gpio_desc	*cp2ap_wakeup;
 	struct gpio_desc	*cp_active;	/* CP2AP_PHONE_ACTIVE (crash detect) */
+	struct gpio_desc	*cp_partial_rst; /* AP2CP_PARTIAL_RST_N (drive high) */
 
 	phys_addr_t		ipc_phys;
 	resource_size_t		ipc_size;
@@ -2565,23 +2566,18 @@ done:
 }
 
 /*
- * Drive AP2CP_PARTIAL_RST_N (gpp21-6, peric1) HIGH = deasserted, mirroring the
- * vendor power_on_cp().  This active-low line is a partial-reset request the CP
- * samples; if we leave it floating/low MAIN takes it as "AP wants a partial
- * reset" and resets itself ~200 ms after ONLINE (a purely CP-internal reset,
- * seen with a bare online).  komodo SFR (raw so it runs from the module).
+ * Drive AP2CP_PARTIAL_RST_N (cp-partial-rst-gpios, gpp21-6) HIGH = deasserted,
+ * mirroring the vendor power_on_cp().  This active-low line is a partial-reset
+ * request the CP samples; if we leave it floating/low MAIN takes it as "AP wants
+ * a partial reset" and resets itself ~200 ms after ONLINE (a purely CP-internal
+ * reset, seen with a bare online).  The descriptor is requested output-high at
+ * probe; re-assert here so a warm reload also lands it high.
  */
 static void s5300_drive_partial_rst(struct s5300_modem *sm)
 {
-	void __iomem *p = ioremap(0x10c40000, 0x1000);	/* peric1 */
-
-	if (!p)
+	if (!sm->cp_partial_rst)
 		return;
-	/* gpp21-6: CON nibble (bits 24-27) = output(0x1); DAT bit6 = 1. */
-	writel((readl(p + 0x40) & ~(0xfu << 24)) | (0x1u << 24), p + 0x40);
-	writel(readl(p + 0x44) | BIT(6), p + 0x44);
-	iounmap(p);
-	dev_info(sm->dev, "PARTIAL_RST_N deasserted (gpp21-6 high)\n");
+	gpiod_set_value_cansleep(sm->cp_partial_rst, 1);
 }
 
 static void s5300_boot_work(struct work_struct *work)
@@ -2971,6 +2967,19 @@ static int s5300_probe(struct platform_device *pdev)
 		goto err_rc;
 	}
 
+	/*
+	 * AP2CP_PARTIAL_RST_N: driven high (deasserted) so MAIN does not read it
+	 * as a partial-reset request and self-reset after ONLINE.  Optional -- CPs
+	 * that do not sample it (e.g. tegu s5300) simply omit the property.
+	 */
+	sm->cp_partial_rst = devm_gpiod_get_optional(dev, "cp-partial-rst",
+						     GPIOD_OUT_HIGH);
+	if (IS_ERR(sm->cp_partial_rst)) {
+		ret = dev_err_probe(dev, PTR_ERR(sm->cp_partial_rst),
+				    "failed to get AP2CP_PARTIAL_RST_N\n");
+		goto err_rc;
+	}
+
 	ret = s5300_map_region(sm, "ipc", &sm->ipc_phys, &sm->ipc_size,
 			       &sm->ipc);
 	if (ret) {
@@ -3313,6 +3322,19 @@ static struct platform_driver s5300_driver = {
 	},
 };
 module_platform_driver(s5300_driver);
+
+/*
+ * Fixed-path firmware the driver loads.  The per-device handover block and the
+ * RF_CFG_<sha1> image (chosen at runtime from hardware_config.json) have no
+ * fixed name and are not declared here.
+ */
+MODULE_FIRMWARE(S5300_HANDOVER_FW);
+MODULE_FIRMWARE(S5300_HWCFG_FW);
+MODULE_FIRMWARE(S5300_RF_CFG_FALLBACK);
+MODULE_FIRMWARE("google/s5400/efs/nv_normal.bin");
+MODULE_FIRMWARE("google/s5400/efs/nv_protected.bin");
+MODULE_FIRMWARE("google/s5400/modem_userdata/replay_region.bin");
+MODULE_FIRMWARE(S5300_REPLAY_DDS_FW);
 
 MODULE_DESCRIPTION("Samsung Exynos Modem 5300 PCIe boot driver");
 MODULE_LICENSE("GPL");
