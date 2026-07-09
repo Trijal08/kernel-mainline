@@ -125,6 +125,7 @@ config S5300_MODEM
 	tristate "Samsung Exynos Modem 5300 PCIe boot driver"
 	depends on PCI_EXYNOS || COMPILE_TEST
 	depends on PCI
+	select ZLIB_INFLATE
 	help
 	  Boot driver for the Samsung Exynos Modem 5300 attached over PCIe on
 	  Google Tensor G4 (zumapro) boards. Stages the first-stage CP
