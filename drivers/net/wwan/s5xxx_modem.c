@@ -50,6 +50,7 @@
 #include <linux/unaligned.h>
 #include <linux/workqueue.h>
 #include <linux/wwan.h>
+#include <linux/zlib.h>
 
 #define S5300_PCI_VENDOR_ID		0x144d
 #define S5300_PCI_DEVICE_ID		0xa5a5
@@ -189,6 +190,19 @@
 #define S5300_IPC_HANDOVER_OFS		0x82c
 #define S5300_HANDOVER_SIZE		161
 #define S5300_HANDOVER_FW		"google/s5400/cp_handover.bin"
+/*
+ * RF_CFG auto-selection.  The modem image directory holds one RF_CFG_<sha1> per
+ * HW/RF variant plus hardware_config.json, which maps a set of identifiers to
+ * the right file.  Those identifiers are exactly the ones the handover block
+ * already carries -- json rfid = handover rf_config, hwinfo = revision, and
+ * rf_sub/rf_sku(=modem_sku)/modem_hw/major/minor verbatim -- so we read them
+ * back from the staged block and pick the file (verified on-device: rf_config
+ * 225 / revision 321 -> RF_CFG_ea3a795e...).  Falls back to a pre-staged
+ * rf_cfg.bin if the block or the json is absent.
+ */
+#define S5300_RF_CFG_DIR		"google/s5400/modem/images/default"
+#define S5300_HWCFG_FW			S5300_RF_CFG_DIR "/hardware_config.json"
+#define S5300_RF_CFG_FALLBACK		"google/s5400/rf_cfg.bin"
 /*
  * ap2cp_united_status ds_det field (downstream sbi_ds_det_pos=14, mask 0x3;
  * get_ds_detect() returns 1 on this device, so the live modem reads 0x4000).
@@ -2402,6 +2416,7 @@ static const struct s5300_dl_sec {
 	const char	*fw_name;	/* non-NULL = request_firmware file */
 	bool		verify;		/* send the CRC-verify frame (MAIN) */
 	bool		replay;		/* build a FRESH replay tar (see below) */
+	bool		rf_cfg;		/* auto-select from hardware_config.json */
 } s5300_dl_secs[] = {
 	{ NULL,      NULL,                                            false },
 	{ "PSP",     NULL,                                            false },
@@ -2409,7 +2424,7 @@ static const struct s5300_dl_sec {
 	{ "APM",     NULL,                                            false },
 	{ "VSS",     NULL,                                            false },
 	{ "DBGCORE", NULL,                                            false },
-	{ "RF_CFG",  "google/s5400/rf_cfg.bin",                       false },
+	{ "RF_CFG",  NULL,                                            false, false, true },
 	{ "NV_NORM", "google/s5400/efs/nv_normal.bin",               false },
 	{ "NV_PROT", "google/s5400/efs/nv_protected.bin",            false },
 	/* fw_name is only the fallback if the fresh tar build fails. */
@@ -2482,6 +2497,235 @@ static void *s5300_build_replay(struct s5300_modem *sm)
 	return buf;
 }
 
+/*
+ * Parse the decimal value of "key" within the JSON object bytes [start,end).
+ * Returns 0 + *out, or -ENOENT when the key is absent.  Deliberately minimal --
+ * hardware_config.json is a small machine-generated file, not arbitrary JSON, so
+ * a targeted scan beats dragging a parser into the kernel.
+ */
+static int s5300_json_uint(const char *start, const char *end,
+			   const char *key, u32 *out)
+{
+	char pat[16];
+	const char *p;
+	u32 v = 0;
+
+	scnprintf(pat, sizeof(pat), "\"%s\"", key);
+	p = strnstr(start, pat, end - start);
+	if (!p)
+		return -ENOENT;
+	for (p += strlen(pat); p < end && *p != ':'; p++)
+		;
+	for (p++; p < end && (*p == ' ' || *p == '\t'); p++)
+		;
+	if (p >= end || *p < '0' || *p > '9')
+		return -ENOENT;
+	for (; p < end && *p >= '0' && *p <= '9'; p++)
+		v = v * 10 + (*p - '0');
+	*out = v;
+	return 0;
+}
+
+/*
+ * One-shot gunzip of an in-memory blob into a fresh kvmalloc buffer (caller
+ * kvfree).  The device modem partition stores RF_CFG_* gzipped and the kernel
+ * firmware loader only auto-decompresses xz/zstd, so handle gzip here.  Mirrors
+ * lib/decompress_inflate.c: strip the gzip header, then raw-inflate (the kernel
+ * zlib_inflateInit2 rejects the +16 gzip window).  *out_size gets the length.
+ */
+static void *s5300_gunzip(struct s5300_modem *sm, const u8 *in, size_t in_size,
+			  size_t *out_size)
+{
+	struct z_stream_s strm = {};
+	const u8 *p = in, *end = in + in_size;
+	u32 osize;
+	u8 flg;
+	void *out;
+	int rc;
+
+	if (in_size < 18 || in[0] != 0x1f || in[1] != 0x8b || in[2] != 0x08)
+		return NULL;			/* not a gzip/deflate stream */
+	flg = in[3];
+	p += 10;				/* fixed gzip header */
+	if (flg & 0x04) {			/* FEXTRA */
+		if (p + 2 > end)
+			return NULL;
+		p += 2 + (p[0] | (p[1] << 8));
+	}
+	if (flg & 0x08)				/* FNAME (asciz) */
+		while (p < end && *p++)
+			;
+	if (flg & 0x10)				/* FCOMMENT (asciz) */
+		while (p < end && *p++)
+			;
+	if (flg & 0x02)				/* FHCRC */
+		p += 2;
+	if (p + 8 >= end)			/* deflate stream + 8-byte trailer */
+		return NULL;
+
+	osize = get_unaligned_le32(in + in_size - 4);	/* gzip ISIZE */
+	if (!osize || osize > 32 * 1024 * 1024)
+		return NULL;
+
+	strm.workspace = kvmalloc(zlib_inflate_workspacesize(), GFP_KERNEL);
+	if (!strm.workspace)
+		return NULL;
+	out = kvmalloc(osize, GFP_KERNEL);
+	if (!out) {
+		kvfree(strm.workspace);
+		return NULL;
+	}
+
+	strm.next_in = (u8 *)p;
+	strm.avail_in = end - 8 - p;		/* raw deflate, minus trailer */
+	strm.next_out = out;
+	strm.avail_out = osize;
+
+	rc = zlib_inflateInit2(&strm, -MAX_WBITS);	/* raw deflate */
+	if (rc == Z_OK)
+		rc = zlib_inflate(&strm, Z_FINISH);
+	zlib_inflateEnd(&strm);
+	kvfree(strm.workspace);
+
+	if (rc != Z_STREAM_END || strm.total_out != osize) {
+		dev_warn(sm->dev, "RF_CFG gunzip failed (rc %d, %lu/%u)\n",
+			 rc, strm.total_out, osize);
+		kvfree(out);
+		return NULL;
+	}
+	*out_size = osize;
+	return out;
+}
+
+/*
+ * Load an RF_CFG image named fw_path into a fresh buffer (caller kvfree).  Tries
+ * the name as-is first (raw, or xz/zst which the loader decompresses); if absent,
+ * tries fw_path.gz and gunzips it -- the device modem partition ships RF_CFG_*
+ * gzipped.
+ */
+static int s5300_load_rf_cfg(struct s5300_modem *sm, const char *fw_path,
+			     void **out, size_t *outsz)
+{
+	const struct firmware *fw;
+	char gz[176];
+	void *buf;
+
+	if (request_firmware_direct(&fw, fw_path, sm->dev) == 0) {
+		buf = kvmalloc(fw->size, GFP_KERNEL);
+		if (buf) {
+			memcpy(buf, fw->data, fw->size);
+			*outsz = fw->size;
+			*out = buf;
+		}
+		release_firmware(fw);
+		return buf ? 0 : -ENOMEM;
+	}
+
+	scnprintf(gz, sizeof(gz), "%s.gz", fw_path);
+	if (request_firmware_direct(&fw, gz, sm->dev))
+		return -ENOENT;
+	buf = s5300_gunzip(sm, fw->data, fw->size, outsz);
+	release_firmware(fw);
+	if (!buf)
+		return -EIO;
+	*out = buf;
+	return 0;
+}
+
+/*
+ * Pick this device's RF_CFG image from hardware_config.json using the HW/RF
+ * identifiers in the staged handover block, decompress it, and hand back a fresh
+ * buffer in out/outsz (caller kvfree).  The json config_table rows key on
+ * major/minor/rf_sub/rf_sku/rfid/hwinfo/modem_hw, which map onto handover fields
+ * major_id/minor_id/rf_sub/modem_sku/rf_config/revision/modem_hw.  config_file
+ * may be an absolute vendor path, so only its basename is used under
+ * S5300_RF_CFG_DIR.  Falls back to S5300_RF_CFG_FALLBACK on any miss.
+ */
+static int s5300_select_rf_cfg(struct s5300_modem *sm, void **out, size_t *outsz)
+{
+	static const char *const keys[] = {
+		"major", "minor", "rf_sku", "modem_hw", "rf_sub", "rfid", "hwinfo",
+	};
+	static const int off[] = { 12, 16, 20, 24, 40, 44, 8 };
+	const struct firmware *ho, *json;
+	u32 want[ARRAY_SIZE(keys)];
+	char path[160], *jbuf, *p;
+	int i, ret;
+
+	ret = request_firmware_direct(&ho, S5300_HANDOVER_FW, sm->dev);
+	if (ret || ho->size < S5300_HANDOVER_SIZE) {
+		if (!ret)
+			release_firmware(ho);
+		dev_warn(sm->dev, "no handover block for RF_CFG select; using %s\n",
+			 S5300_RF_CFG_FALLBACK);
+		goto fallback;
+	}
+	for (i = 0; i < ARRAY_SIZE(keys); i++)
+		want[i] = get_unaligned_le32(ho->data + off[i]);
+	release_firmware(ho);
+
+	if (request_firmware_direct(&json, S5300_HWCFG_FW, sm->dev)) {
+		dev_warn(sm->dev, "no %s; using %s\n",
+			 S5300_HWCFG_FW, S5300_RF_CFG_FALLBACK);
+		goto fallback;
+	}
+	jbuf = kvmalloc(json->size + 1, GFP_KERNEL);
+	if (!jbuf) {
+		release_firmware(json);
+		return -ENOMEM;
+	}
+	memcpy(jbuf, json->data, json->size);
+	jbuf[json->size] = '\0';
+	release_firmware(json);
+
+	for (p = jbuf; (p = strstr(p, "\"config_file\"")); ) {
+		char *objend = strchr(p, '}');
+		char *v = strchr(p, ':'), *name, *base, *s;
+		bool match = true;
+
+		if (!objend)
+			break;			/* malformed: no object close */
+		if (!v || v > objend)
+			goto next;
+		v = strchr(v, '"');		/* opening quote of the value */
+		if (!v || v > objend)
+			goto next;
+		for (name = ++v; v < objend && *v != '"'; v++)
+			;
+		if (v >= objend)
+			goto next;
+		for (i = 0; i < ARRAY_SIZE(keys); i++) {
+			u32 got;
+
+			if (s5300_json_uint(p, objend, keys[i], &got) ||
+			    got != want[i]) {
+				match = false;
+				break;
+			}
+		}
+		if (match) {
+			/* config_file may be an absolute path; take the basename. */
+			for (base = name, s = name; s < v; s++)
+				if (*s == '/')
+					base = s + 1;
+			scnprintf(path, sizeof(path), "%s/%.*s",
+				  S5300_RF_CFG_DIR, (int)(v - base), base);
+			dev_info(sm->dev,
+				 "RF_CFG auto-selected %.*s (rfid=%u hwinfo=%u rf_sub=%u)\n",
+				 (int)(v - base), base, want[5], want[6], want[4]);
+			kvfree(jbuf);
+			return s5300_load_rf_cfg(sm, path, out, outsz);
+		}
+next:
+		p = objend + 1;
+	}
+	kvfree(jbuf);
+	dev_warn(sm->dev, "no hardware_config.json RF_CFG match; using %s\n",
+		 S5300_RF_CFG_FALLBACK);
+fallback:
+	return s5300_load_rf_cfg(sm, S5300_RF_CFG_FALLBACK, out, outsz);
+}
+
 static int s5300_download_main(struct s5300_modem *sm)
 {
 	const struct s5300_toc_entry *toc = (const void *)sm->pbl->data;
@@ -2507,6 +2751,7 @@ static int s5300_download_main(struct s5300_modem *sm)
 		u8 tag = i + 1;		/* cbd's sequential stage nibble 1..7 */
 
 		void *replay_buf = NULL;
+		void *rf_cfg_buf = NULL;
 
 		/*
 		 * Warm CP: it went ONLINE without draining the ring.  On a
@@ -2528,6 +2773,17 @@ static int s5300_download_main(struct s5300_modem *sm)
 			/* REPLAY: freshly built tar (MAIN rejects a stale one). */
 			data = replay_buf;
 			size = S5300_REPLAY_SIZE;
+		} else if (d->rf_cfg) {
+			/* RF_CFG: auto-selected via hardware_config.json, and
+			 * gunzipped -- the caller owns rf_cfg_buf (kvfree below). */
+			ret = s5300_select_rf_cfg(sm, &rf_cfg_buf, &size);
+			if (ret) {
+				dev_err(sm->dev,
+					"RF_CFG select failed (tag %u): %d\n",
+					tag, ret);
+				goto done;
+			}
+			data = rf_cfg_buf;
 		} else if (d->fw_name) {
 			/* NV (or replay fallback): a vendor partition file. */
 			ret = request_firmware(&fw, d->fw_name, sm->dev);
@@ -2552,6 +2808,7 @@ static int s5300_download_main(struct s5300_modem *sm)
 		ret = s5300_dl_section(sm, scratch, tag, data, size,
 				       d->verify ? crc : 0);
 		kvfree(replay_buf);
+		kvfree(rf_cfg_buf);
 		if (fw)
 			release_firmware(fw);
 		if (ret == -EALREADY)
