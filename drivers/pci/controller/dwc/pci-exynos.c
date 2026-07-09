@@ -149,6 +149,19 @@ struct exynos_pcie {
 	struct gpio_desc		*cp_pwr;
 	struct gpio_desc		*cp_nreset;
 	struct gpio_desc		*cp_wrst;
+	struct gpio_desc		*cp_dump_noti;	/* AP2CP_DUMP_NOTI (out) */
+	struct gpio_desc		*cp2ap_cp_wrst;	/* CP warm-reset status (in) */
+	bool				cp_ever_powered_on;	/* gate S5910 re-arm */
+	/*
+	 * CP PMIC on the bit-banged SPMI bus (downstream spmi_bit_bang.c +
+	 * cp_pmic.c): after every CP_PMIC_WRST toggle the downstream
+	 * power_reset_warm_cp() patches PMIC registers over this bus
+	 * (warm_reset_seq).  Skipping the patch leaves the PMIC at post-reset
+	 * defaults, which boot fine but kill the CP at its first autonomous
+	 * low-power transition.
+	 */
+	struct gpio_desc		*cp_pmic_clk;
+	struct gpio_desc		*cp_pmic_dat;
 	/* modem runtime-relink state (downstream establish_link) */
 	bool				cp_phy_off;	/* PHY left powered off by link_down */
 	bool				msi_saved;
@@ -598,28 +611,360 @@ static const struct exynos_pcie_drvdata zuma_pcie_drvdata = {
 };
 
 /*
+ * Minimal bit-banged SPMI master for the CP PMIC, ported from the downstream
+ * spmi_bit_bang.c (google,bitbang-spmi-controller).  Two SoC GPIOs (SCLK,
+ * SDATA) drive the CP PMIC at SID 0; the only operations the CP bring-up
+ * needs are Extended Register Read/Write Long (16-bit register address).
+ * Data is clocked out on the rising edge and sampled by the slave on the
+ * falling edge; every frame carries one odd-parity bit.  delay_us = 10 per
+ * clock phase (downstream DT delay_us), ~50 kHz.
+ */
+#define CP_SPMI_DELAY_US	10
+#define CP_SPMI_SID_PMIC	0	/* google,cp-pmic-spmi (pmic@0) */
+#define CP_SPMI_SID_S5910	5	/* google,s5910-spmi DCXO buffer (s5910@5) */
+#define CP_SPMI_CMD_EXT_WRITEL	0x30
+#define CP_SPMI_CMD_EXT_READL	0x38
+
+static void cp_spmi_delay(void)
+{
+	udelay(CP_SPMI_DELAY_US);
+}
+
+static bool cp_spmi_parity(u32 data, u32 num_bits)
+{
+	bool parity = 1;
+
+	while (num_bits--) {
+		parity ^= data & 0x1;
+		data >>= 1;
+	}
+	return parity;
+}
+
+static void cp_spmi_send(struct exynos_pcie *ep, u32 data, u32 num_bits)
+{
+	int mask = BIT(num_bits);	/* start one too high */
+
+	gpiod_set_value_cansleep(ep->cp_pmic_clk, 0);
+	while (mask >>= 1) {
+		gpiod_set_value_cansleep(ep->cp_pmic_clk, 1);
+		gpiod_set_value_cansleep(ep->cp_pmic_dat, !!(data & mask));
+		cp_spmi_delay();
+		gpiod_set_value_cansleep(ep->cp_pmic_clk, 0);
+		cp_spmi_delay();
+	}
+}
+
+/* Frame = payload + trailing odd-parity bit. */
+static void cp_spmi_send_frame(struct exynos_pcie *ep, u32 data, u8 num_bits)
+{
+	cp_spmi_send(ep, data << 1 | cp_spmi_parity(data, num_bits),
+		     num_bits + 1);
+}
+
+/* Command frame: sid[3:0] << 8 | command[7:0], 12 bits + parity. */
+static void cp_spmi_send_cmd_frame(struct exynos_pcie *ep, u8 sid, u8 cmd)
+{
+	cp_spmi_send_frame(ep, (u16)((sid & 0xf) << 8 | cmd), 12);
+}
+
+static bool cp_spmi_recv_frame(struct exynos_pcie *ep, u8 *payload)
+{
+	u32 data = 0;
+	u32 num_bits = 9;	/* 8 data + parity */
+	bool parity;
+
+	gpiod_set_value_cansleep(ep->cp_pmic_clk, 0);
+	while (num_bits--) {
+		gpiod_set_value_cansleep(ep->cp_pmic_clk, 1);
+		data <<= 1;
+		data |= !!gpiod_get_value(ep->cp_pmic_dat);
+		cp_spmi_delay();
+		gpiod_set_value_cansleep(ep->cp_pmic_clk, 0);
+		cp_spmi_delay();
+	}
+	parity = data & 0x1;
+	data >>= 1;
+	*payload = (u8)data;
+	return parity == cp_spmi_parity(data, 8);
+}
+
+static void cp_spmi_ssc(struct exynos_pcie *ep)
+{
+	gpiod_direction_output(ep->cp_pmic_dat, 0);
+	gpiod_set_value_cansleep(ep->cp_pmic_clk, 0);
+	gpiod_set_value_cansleep(ep->cp_pmic_dat, 1);
+	cp_spmi_delay();
+	gpiod_set_value_cansleep(ep->cp_pmic_dat, 0);
+	cp_spmi_delay();
+}
+
+static void cp_spmi_bus_park(struct exynos_pcie *ep)
+{
+	gpiod_set_value_cansleep(ep->cp_pmic_clk, 1);
+	gpiod_set_value_cansleep(ep->cp_pmic_dat, 0);
+	cp_spmi_delay();
+	gpiod_direction_input(ep->cp_pmic_dat);
+	gpiod_set_value_cansleep(ep->cp_pmic_clk, 0);
+	cp_spmi_delay();
+}
+
+/* true = ACK */
+static bool cp_spmi_recv_ack(struct exynos_pcie *ep)
+{
+	bool bit;
+
+	cp_spmi_bus_park(ep);
+	gpiod_set_value_cansleep(ep->cp_pmic_clk, 1);
+	cp_spmi_delay();
+	gpiod_set_value_cansleep(ep->cp_pmic_clk, 0);
+	bit = !!gpiod_get_value(ep->cp_pmic_dat);
+	cp_spmi_delay();
+	cp_spmi_bus_park(ep);
+	return bit;
+}
+
+/*
+ * Bus arbitration preamble (downstream spmi_bus_arbitrate): request the bus
+ * with SDATA high across five phases, one clock, a bus-park, then 'C'/'A'
+ * pattern and four master-priority-level clocks with SDATA released.
+ */
+static void cp_spmi_arbitrate(struct exynos_pcie *ep)
+{
+	int i;
+
+	gpiod_direction_output(ep->cp_pmic_dat, 0);
+	gpiod_set_value_cansleep(ep->cp_pmic_clk, 0);
+	cp_spmi_delay();
+	cp_spmi_delay();
+
+	gpiod_set_value_cansleep(ep->cp_pmic_dat, 1);
+	for (i = 0; i < 5; i++)
+		cp_spmi_delay();
+
+	/* first clock */
+	gpiod_set_value_cansleep(ep->cp_pmic_clk, 1);
+	cp_spmi_delay();
+	gpiod_set_value_cansleep(ep->cp_pmic_clk, 0);
+	cp_spmi_delay();
+
+	/* bus park cycle */
+	gpiod_set_value_cansleep(ep->cp_pmic_clk, 1);
+	gpiod_set_value_cansleep(ep->cp_pmic_dat, 0);
+	cp_spmi_delay();
+	gpiod_set_value_cansleep(ep->cp_pmic_clk, 0);
+	cp_spmi_delay();
+
+	/* c */
+	gpiod_set_value_cansleep(ep->cp_pmic_clk, 1);
+	gpiod_set_value_cansleep(ep->cp_pmic_dat, 1);
+	cp_spmi_delay();
+	gpiod_set_value_cansleep(ep->cp_pmic_clk, 0);
+	cp_spmi_delay();
+
+	/* a */
+	gpiod_set_value_cansleep(ep->cp_pmic_clk, 1);
+	gpiod_set_value_cansleep(ep->cp_pmic_dat, 0);
+	gpiod_direction_input(ep->cp_pmic_dat);
+	cp_spmi_delay();
+	gpiod_set_value_cansleep(ep->cp_pmic_clk, 0);
+	cp_spmi_delay();
+
+	/* xtra clock + mpl0..mpl2 */
+	for (i = 0; i < 4; i++) {
+		gpiod_set_value_cansleep(ep->cp_pmic_clk, 1);
+		cp_spmi_delay();
+		gpiod_set_value_cansleep(ep->cp_pmic_clk, 0);
+		cp_spmi_delay();
+	}
+
+	/* mpl3 */
+	gpiod_set_value_cansleep(ep->cp_pmic_clk, 1);
+	gpiod_direction_output(ep->cp_pmic_dat, 1);
+	cp_spmi_delay();
+	gpiod_set_value_cansleep(ep->cp_pmic_clk, 0);
+	cp_spmi_delay();
+
+	gpiod_set_value_cansleep(ep->cp_pmic_dat, 0);
+}
+
+static void cp_spmi_enable(struct exynos_pcie *ep)
+{
+	gpiod_direction_output(ep->cp_pmic_clk, 0);
+	gpiod_direction_output(ep->cp_pmic_dat, 0);
+}
+
+static void cp_spmi_disable(struct exynos_pcie *ep)
+{
+	gpiod_direction_input(ep->cp_pmic_clk);
+	gpiod_direction_input(ep->cp_pmic_dat);
+}
+
+/* Extended Register Write Long, one byte.  0 on success, -EIO on NAK. */
+static int cp_spmi_writel_reg(struct exynos_pcie *ep, u8 sid, u16 reg, u8 val)
+{
+	bool ack;
+
+	cp_spmi_enable(ep);
+	cp_spmi_arbitrate(ep);
+	cp_spmi_ssc(ep);
+	cp_spmi_send_cmd_frame(ep, sid, CP_SPMI_CMD_EXT_WRITEL);
+	cp_spmi_send_frame(ep, reg >> 8, 8);
+	cp_spmi_send_frame(ep, reg & 0xff, 8);
+	cp_spmi_send_frame(ep, val, 8);
+	ack = cp_spmi_recv_ack(ep);
+	cp_spmi_disable(ep);
+	return ack ? 0 : -EIO;
+}
+
+/* Extended Register Read Long, one byte.  0 on success, -EIO on bad parity. */
+static int cp_spmi_readl_reg(struct exynos_pcie *ep, u8 sid, u16 reg, u8 *val)
+{
+	bool ok;
+
+	cp_spmi_enable(ep);
+	cp_spmi_arbitrate(ep);
+	cp_spmi_ssc(ep);
+	cp_spmi_send_cmd_frame(ep, sid, CP_SPMI_CMD_EXT_READL);
+	cp_spmi_send_frame(ep, reg >> 8, 8);
+	cp_spmi_send_frame(ep, reg & 0xff, 8);
+	cp_spmi_bus_park(ep);
+	ok = cp_spmi_recv_frame(ep, val);
+	cp_spmi_bus_park(ep);
+	cp_spmi_disable(ep);
+	return ok ? 0 : -EIO;
+}
+
+/*
+ * S5910 DCXO clock buffer (sid 5 on the same bit-banged bus).  The CP
+ * releases its refclk request when it enters sleep; the buffer's LPM
+ * configuration decides whether it survives that.  The S5910 loses its
+ * state on full power-off and ONLY the downstream kernel ever programs it
+ * (s5910_turn_on_sequence, DT s5910,on_seq) -- on a board that last ran the
+ * stock kernel long ago the buffer sits at hardware defaults and the CP's
+ * first autonomous sleep (~125 ms after ONLINE when idle) kills it.  Dump
+ * the pre-state for diagnosis, then apply the vendor on_seq while the CP is
+ * still held in warm reset (the downstream analog runs it with the CP held
+ * in reset too, gpio_power_off_cp_with_s5910_on()).
+ */
+static void exynos_pcie_cp_s5910_on_seq(struct exynos_pcie *ep)
+{
+	/* komodo fdt s5910,on_seq: <delay reg val> triples, delays all 0 */
+	static const struct { u16 reg; u8 val; } on_seq[] = {
+		{ 0x211, 0x47 },
+		{ 0x236, 0x0e },
+		{ 0x215, 0x7f },
+		{ 0x20e, 0x00 },	/* DCXO LPM mode off */
+	};
+	static const u16 dump_regs[] = { 0x20e, 0x211, 0x215, 0x236, 0x240 };
+	struct device *dev = ep->pci.dev;
+	u8 val;
+	int i, retry, ret;
+
+	if (!ep->cp_pmic_clk || !ep->cp_pmic_dat)
+		return;
+
+	for (i = 0; i < ARRAY_SIZE(dump_regs); i++) {
+		if (cp_spmi_readl_reg(ep, CP_SPMI_SID_S5910, dump_regs[i],
+				      &val))
+			dev_warn(dev, "s5910 reg %#x read fail\n",
+				 dump_regs[i]);
+		else
+			dev_info(dev, "s5910 reg %#x = %#02x\n",
+				 dump_regs[i], val);
+	}
+
+	for (i = 0; i < ARRAY_SIZE(on_seq); i++) {
+		for (retry = 0; retry < 2; retry++) {
+			ret = cp_spmi_writel_reg(ep, CP_SPMI_SID_S5910,
+						 on_seq[i].reg, on_seq[i].val);
+			if (!ret)
+				break;
+			msleep(2);
+		}
+		if (ret) {
+			dev_err(dev, "s5910 write %#x=%#x not acked\n",
+				on_seq[i].reg, on_seq[i].val);
+			return;
+		}
+	}
+	dev_info(dev, "s5910 turn-on sequence completed (DCXO LPM off)\n");
+}
+
+/*
+ * Downstream power_reset_warm_cp() PMIC step: log the PMIC OTP version
+ * (pmic_get_otp, reg 0x30e) and patch the PMIC after the CP_PMIC_WRST toggle
+ * (pmic_warm_reset_sequence, komodo warm_reset_seq: 0x675=0xa1, 0x67d=0xbe).
+ * Two attempts per access with a 2 ms pause, like the downstream driver.
+ */
+static void exynos_pcie_cp_pmic_warm_reset_seq(struct exynos_pcie *ep)
+{
+	static const struct { u16 reg; u8 val; } seq[] = {
+		{ 0x675, 0xa1 },
+		{ 0x67d, 0xbe },
+	};
+	struct device *dev = ep->pci.dev;
+	u8 otp = 0;
+	int i, retry, ret;
+
+	if (!ep->cp_pmic_clk || !ep->cp_pmic_dat) {
+		dev_warn(dev, "CP PMIC SPMI gpios missing; skipping warm reset sequence\n");
+		return;
+	}
+
+	for (retry = 0; retry < 2; retry++) {
+		ret = cp_spmi_readl_reg(ep, CP_SPMI_SID_PMIC, 0x30e, &otp);
+		if (!ret)
+			break;
+		msleep(2);
+	}
+	if (ret)
+		dev_warn(dev, "CP PMIC OTP version read fail\n");
+	else
+		dev_info(dev, "CP PMIC OTP version %#x\n", otp);
+
+	for (i = 0; i < ARRAY_SIZE(seq); i++) {
+		for (retry = 0; retry < 2; retry++) {
+			ret = cp_spmi_writel_reg(ep, CP_SPMI_SID_PMIC,
+						 seq[i].reg, seq[i].val);
+			if (!ret)
+				break;
+			msleep(2);
+		}
+		if (ret) {
+			dev_err(dev, "CP PMIC write %#x=%#x not acked\n",
+				seq[i].reg, seq[i].val);
+			return;
+		}
+	}
+	dev_info(dev, "CP PMIC warm reset sequence completed\n");
+}
+
+/*
  * Modem (CH0) CP rail sequencing. When the RC hosts the Exynos modem it owns
- * the AP2CP power/reset lines and must cold-cycle the CP into its boot ROM
+ * the AP2CP power/reset lines and must warm-reset the CP into its boot ROM
  * before link training. The lines are optional: a non-modem RC (WiFi CH1) has
- * none and skips this. Sequence and delays mirror the downstream
- * s5100_poweron() cold path.
+ * none and skips this. Full port of the downstream power_reset_warm_cp():
+ * DUMP_NOTI low, gpio_power_wreset_cp() (PM_WRST pulse framing the CP_WRST
+ * toggle, handshaken on CP2AP_CP_WRST), PMIC OTP read + warm_reset_seq over
+ * bit-banged SPMI, then AP_ACTIVE high.
  */
 static void exynos_pcie_cp_power_on(struct exynos_pcie *ep)
 {
-	dev_info(ep->pci.dev, "warm-resetting the CP (modem) endpoint\n");
+	struct device *dev = ep->pci.dev;
+	int val = -1, i;
+
+	dev_info(dev, "warm-resetting the CP (modem) endpoint\n");
 
 	/*
-	 * WARM reset only (vendor power_on_cp): assert then release CP_WRST_N
-	 * while pulsing PM_WRST_N, and leave cp_pwr ON throughout.  The CP's
-	 * DRAM is self-powered, so the MAIN image loaded on a previous boot
-	 * survives -- which is exactly what the vendor relies on: it never
-	 * re-downloads MAIN, the bootloader just re-runs the resident image.
-	 * Cold-cycling cp_pwr (as this used to) wipes that DRAM and forces a
-	 * full firmware re-download the mask-ROM bootloader cannot complete
-	 * over the boot ring.  cp_pwr/cp_nreset are set high WITHOUT a low
-	 * pulse so an already-powered CP keeps its DRAM.
+	 * WARM reset only: the CP's DRAM is self-powered, so the MAIN image
+	 * loaded on a previous boot survives -- the vendor never re-downloads
+	 * MAIN, the bootloader just re-runs the resident image.  Cold-cycling
+	 * cp_pwr wipes that DRAM and forces a full firmware re-download the
+	 * mask-ROM bootloader cannot complete over the boot ring.  cp_pwr and
+	 * cp_nreset are set high WITHOUT a low pulse so an already-powered CP
+	 * keeps its DRAM.
 	 */
-	gpiod_direction_output(ep->cp_pda_active, 1);
 	gpiod_direction_output(ep->cp_pwr, 1);
 	gpiod_direction_output(ep->cp_nreset, 1);
 	/*
@@ -629,13 +974,58 @@ static void exynos_pcie_cp_power_on(struct exynos_pcie *ep)
 	 * got its direction set, so its runtime wake nudge went nowhere.
 	 */
 	gpiod_direction_output(ep->cp_wakeup, 0);
+	/* Not a crash-dump boot (downstream clears DUMP_NOTI before the reset). */
+	if (ep->cp_dump_noti)
+		gpiod_direction_output(ep->cp_dump_noti, 0);
 
+	/*
+	 * gpio_power_wreset_cp(): frame the CP_WRST_N toggle inside a
+	 * PM_WRST_N (CP_PMIC_WRST) pulse, waiting for the CP to acknowledge
+	 * the reset on CP2AP_CP_WRST_N.  The PM_WRST release (back to 0)
+	 * BEFORE CP_WRST releases is load-bearing: the CP must come out of
+	 * warm reset with its PMIC reset already de-asserted.
+	 */
+	if (ep->cp2ap_cp_wrst) {
+		val = gpiod_get_value_cansleep(ep->cp2ap_cp_wrst);
+		if (!val)
+			dev_warn(dev, "cp2ap_cp_wrst low before warm reset\n");
+	}
+
+	gpiod_direction_output(ep->cp_pm_wrst, 1);
+	msleep(5);
 	gpiod_direction_output(ep->cp_wrst, 0);
-	gpiod_direction_output(ep->cp_pm_wrst, 0);
-	msleep(50);
-	gpiod_set_value_cansleep(ep->cp_pm_wrst, 1);
-	msleep(10);
+	if (val == 0)
+		udelay(1000);
+
+	for (i = 0; ep->cp2ap_cp_wrst && i < 20; i++) {
+		if (!gpiod_get_value_cansleep(ep->cp2ap_cp_wrst))
+			break;
+		usleep_range(1000, 1100);
+	}
+
+	gpiod_set_value_cansleep(ep->cp_pm_wrst, 0);
+	msleep(5);
+
+	/*
+	 * With the CP core still held in warm reset: dump + program the S5910
+	 * DCXO clock buffer (vendor s5910,on_seq) so the CP boots with a
+	 * clock buffer configured to survive its autonomous sleep entries.
+	 */
+	exynos_pcie_cp_s5910_on_seq(ep);
+
 	gpiod_set_value_cansleep(ep->cp_wrst, 1);
+	msleep(45);
+
+	/*
+	 * The CP_PMIC_WRST pulse above reset the CP PMIC to its OTP defaults;
+	 * patch it exactly like the downstream flow does, or the CP boots but
+	 * dies at its first autonomous low-power transition (~120 ms after
+	 * ONLINE when idle).
+	 */
+	exynos_pcie_cp_pmic_warm_reset_seq(ep);
+
+	/* PDA_ACTIVE high after the reset, mirroring power_reset_warm_cp(). */
+	gpiod_direction_output(ep->cp_pda_active, 1);
 
 	/* ROM settle before link training */
 	msleep(200);
@@ -668,6 +1058,29 @@ static int exynos_pcie_cp_get_gpios(struct exynos_pcie *ep)
 	    IS_ERR(ep->cp_pm_wrst) || IS_ERR(ep->cp_nreset) ||
 	    IS_ERR(ep->cp_wrst))
 		return -EINVAL;
+
+	/*
+	 * power_reset_warm_cp() companions: DUMP_NOTI, the CP2AP_CP_WRST_N
+	 * reset handshake input, and the CP PMIC bit-banged SPMI pair.
+	 * Optional so DTBs without them still boot, but each miss is a real
+	 * gap in the vendor sequence -- warn loudly.
+	 */
+	ep->cp_dump_noti = devm_gpiod_get_optional(dev, "google,cp-dump-noti",
+						   GPIOD_ASIS);
+	ep->cp2ap_cp_wrst = devm_gpiod_get_optional(dev,
+						    "google,cp2ap-cp-wrst",
+						    GPIOD_IN);
+	ep->cp_pmic_clk = devm_gpiod_get_optional(dev, "google,cp-pmic-clk",
+						  GPIOD_ASIS);
+	ep->cp_pmic_dat = devm_gpiod_get_optional(dev, "google,cp-pmic-dat",
+						  GPIOD_ASIS);
+	if (IS_ERR(ep->cp_dump_noti) || IS_ERR(ep->cp2ap_cp_wrst) ||
+	    IS_ERR(ep->cp_pmic_clk) || IS_ERR(ep->cp_pmic_dat))
+		return -EINVAL;
+	if (!ep->cp_dump_noti)
+		dev_warn(dev, "no cp-dump-noti gpio (vendor clears it pre-reset)\n");
+	if (!ep->cp2ap_cp_wrst)
+		dev_warn(dev, "no cp2ap-cp-wrst gpio (reset unhandshaken)\n");
 
 	exynos_pcie_cp_power_on(ep);
 	return 0;
@@ -1348,22 +1761,125 @@ EXPORT_SYMBOL_GPL(zumapro_pcie_modem_wake);
  * baseband is pulsed, then we wait for the Gen1 boot-ROM link to re-train; the
  * caller reprograms the endpoint's config (MSI target, doorbell BAR) afterwards.
  */
-int zumapro_pcie_modem_reset(struct device *rc_dev)
+/*
+ * Report the CP link state so the modem driver can decide between ADOPTING a
+ * live MAIN (Gen3 endpoint after a bare module reload) and warm-resetting into
+ * the boot ROM.  Returns the PCI_EXP_LNKSTA_CLS speed (1 = Gen1 boot ROM,
+ * 3 = Gen3 running MAIN) or -ENOLINK when the link is parked or down.
+ */
+int zumapro_pcie_modem_link_speed(struct device *rc_dev)
 {
 	struct exynos_pcie *ep = zumapro_pcie_from_dev(rc_dev);
-	int ret;
+	u32 ltssm;
+	u8 exp;
+
+	if (!ep)
+		return -ENODEV;
+	if (ep->cp_phy_off)
+		return -ENOLINK;
+	ltssm = exynos_pcie_readl(ep->pci.elbi_base, PCIE_ZUMA_RDLH_LINKUP) &
+		LTSSM_STATE_MASK;
+	if (ltssm < LTSSM_STATE_RCVRY_LOCK || ltssm > LTSSM_STATE_L1_IDLE)
+		return -ENOLINK;
+	exp = dw_pcie_find_capability(&ep->pci, PCI_CAP_ID_EXP);
+	return dw_pcie_readw_dbi(&ep->pci, exp + PCI_EXP_LNKSTA) &
+	       PCI_EXP_LNKSTA_CLS;
+}
+EXPORT_SYMBOL_GPL(zumapro_pcie_modem_link_speed);
+
+/*
+ * FULL CP cold power cycle -- a faithful port of the downstream power_on_cp()'s
+ * gpio_power_offon_cp() (non-WRESET_WA).  Unlike the warm reset
+ * (exynos_pcie_cp_power_on(), a CP_WRST pulse that leaves CP_PWR asserted so a
+ * running MAIN survives in self-refresh DRAM), this genuinely powers the CP
+ * down (drops CP_PWR and PM_WRST, resetting the CP PMIC) and back up, so a
+ * crashed / self-reset MAIN is guaranteed back in its boot ROM.  This is what
+ * the vendor runs to recover a CP after the cp_active crash indication; a
+ * warm reset alone cannot stop a live MAIN, which is why a fresh download then
+ * lands on it and wedges at INIT_START.
+ *
+ * The S5910 DCXO clock buffer is only ever RE-ARMED here (its on_seq, applied
+ * while the CP is held in NRESET), never shut down -- the downstream normal
+ * power path does the same; the shutdown sequence belongs to power_shutdown.
+ * Delays and ordering are byte-for-byte the vendor's (mif_gpio_set_value's
+ * post-set msleep).
+ */
+int zumapro_pcie_modem_power_cycle(struct device *rc_dev)
+{
+	struct exynos_pcie *ep = zumapro_pcie_from_dev(rc_dev);
 
 	if (!ep)
 		return -ENODEV;
 
+	/*
+	 * Isolate the RC before CP_PWR drops: with the endpoint about to vanish,
+	 * an in-flight RC access would take an SError.  link_down asserts PERST
+	 * and powers the PHY off (sets cp_phy_off), so link_up() below does the
+	 * full re-init retrain.  Skip if the previous instance already parked it.
+	 */
+	if (!ep->cp_phy_off)
+		zumapro_pcie_modem_link_down(rc_dev);
+
+	dev_info(ep->pci.dev, "CP cold power cycle\n");
+
+	/* --- gpio_power_off_cp_with_s5910_on() --- */
+	gpiod_set_value_cansleep(ep->cp_wakeup, 1);
+	msleep(10);
+	gpiod_set_value_cansleep(ep->cp_wakeup, 0);
+	gpiod_set_value_cansleep(ep->cp_nreset, 0);
+	/* Re-arm the S5910 while the CP is held in reset (skipped first power-on). */
+	if (ep->cp_ever_powered_on) {
+		udelay(10);
+		exynos_pcie_cp_s5910_on_seq(ep);
+		udelay(200);
+	}
+	gpiod_set_value_cansleep(ep->cp_wrst, 0);
+	gpiod_set_value_cansleep(ep->cp_pwr, 0);
+	msleep(30);
+	gpiod_set_value_cansleep(ep->cp_pm_wrst, 0);
+	msleep(50);
+
+	/* --- gpio_power_offon_cp() power-on half --- */
+	ep->cp_ever_powered_on = true;
+	gpiod_set_value_cansleep(ep->cp_pm_wrst, 1);
+	msleep(10);
+	gpiod_set_value_cansleep(ep->cp_pwr, 1);
+	msleep(10);
+	gpiod_set_value_cansleep(ep->cp_nreset, 1);
+	msleep(10);
+	gpiod_set_value_cansleep(ep->cp_wrst, 1);
+
+	/* ROM settle before link training (matches cp_power_on's 200 ms). */
+	msleep(200);
+
+	return zumapro_pcie_modem_link_up(rc_dev);
+}
+EXPORT_SYMBOL_GPL(zumapro_pcie_modem_power_cycle);
+
+int zumapro_pcie_modem_reset(struct device *rc_dev)
+{
+	struct exynos_pcie *ep = zumapro_pcie_from_dev(rc_dev);
+
+	if (!ep)
+		return -ENODEV;
+
+	ep->cp_ever_powered_on = true;
 	exynos_pcie_cp_power_on(ep);
 
-	ret = dw_pcie_wait_for_link(&ep->pci);
-	if (ret)
+	/*
+	 * If the previous modem instance parked the link (link_down: PHY off,
+	 * LTSSM disabled), a plain wait can never train -- run the full
+	 * re-init relink.  Otherwise the LTSSM is still armed and the
+	 * freshly-reset boot ROM re-trains by itself; fall back to the full
+	 * relink if it does not.
+	 */
+	if (!ep->cp_phy_off) {
+		if (!dw_pcie_wait_for_link(&ep->pci))
+			return 0;
 		dev_warn(ep->pci.dev,
-			 "CP endpoint did not re-link after warm reset (%d)\n",
-			 ret);
-	return ret;
+			 "post-reset light retrain failed; full relink\n");
+	}
+	return zumapro_pcie_modem_link_up(rc_dev);
 }
 EXPORT_SYMBOL_GPL(zumapro_pcie_modem_reset);
 
