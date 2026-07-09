@@ -22,15 +22,19 @@ properties:
     const: samsung,s5300-modem
 
   memory-region:
+    minItems: 2
     items:
       - description: IPC shared-memory carveout (boot image staging, command
           words and message queues)
       - description: MSI carveout the CP reports boot progress into
+      - description: PKTPROC carveout the CP DMAs downlink packets into
 
   memory-region-names:
+    minItems: 2
     items:
       - const: ipc
       - const: msi
+      - const: pktproc
 
   firmware-name:
     maxItems: 1
@@ -50,6 +54,17 @@ properties:
     maxItems: 1
     description: CP-driven line signalling the CP is awake / ready to
       re-link.
+
+  cp2ap-active-gpios:
+    maxItems: 1
+    description: CP2AP_PHONE_ACTIVE; high while the CP runs, a falling edge
+      after ONLINE indicates a CP crash.  Optional (crash diagnosis).
+
+  cp-partial-rst-gpios:
+    maxItems: 1
+    description: AP2CP_PARTIAL_RST_N; the AP holds this active-low line high
+      (deasserted) or MAIN samples it as a partial-reset request and
+      self-resets after ONLINE.  Optional.
 
 required:
   - compatible
