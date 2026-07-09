@@ -163,5 +163,11 @@
 		/* CP2AP_PHONE_ACTIVE (../fdt.dts gpio_cp2ap_phone_active): high
 		 * while the CP runs; falling edge after ONLINE = CP crash. */
 		cp2ap-active-gpios = <&gpa5 2 GPIO_ACTIVE_HIGH>;
+		/*
+		 * AP2CP_PARTIAL_RST_N (../fdt.dts gpio_ap2cp_pmu_reset, gpp21-6):
+		 * active-low partial-reset request MAIN samples; the driver holds
+		 * it high (deasserted) or MAIN self-resets ~200 ms after ONLINE.
+		 */
+		cp-partial-rst-gpios = <&gpp21 6 GPIO_ACTIVE_HIGH>;
 	};
 };
