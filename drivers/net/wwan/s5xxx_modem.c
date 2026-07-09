@@ -700,19 +700,24 @@ module_param_named(adopt, s5300_allow_adopt, bool, 0644);
 MODULE_PARM_DESC(adopt, "adopt a live MAIN at probe instead of resetting (default 1)");
 
 /*
- * cold_cycle DEFAULT 0: do NOT reset the CP if a live MAIN is already
- * running (Gen3 endpoint) -- ADOPT it instead.  This is load-bearing: any
- * reset + re-download makes MAIN self-reset ~123 ms after ONLINE, because we
- * re-download the image but cannot redo the CP security/NV handshake rild
- * does, so MAIN rejects the fresh boot.  A CP that Android (or a prior good
- * boot) left running and calibrated survives ONLY if we adopt it untouched.
- * cold_cycle=1 forces the full vendor power cycle (s5910 + rails) -- use it
- * only to recover a genuinely wedged/dead CP; expect the +123 ms self-reset
- * until the security handshake is implemented.
+ * cold_cycle DEFAULT 1: power-cycle the CP (s5910 + rails) back to its boot
+ * ROM and download a fresh image.  This is the verified-working path (AT
+ * returns OK after ONLINE) and the one autoload must take: on a real boot the
+ * CP is in its boot ROM, not a live Gen3 endpoint, so there is nothing to
+ * adopt.  The old belief that a reset+download always self-resets ~123 ms
+ * after ONLINE was wrong -- the cause was AP2CP_PARTIAL_RST_N (gpp21-6) never
+ * being driven high, which MAIN samples as "AP requests partial reset."  That
+ * is now deasserted in s5300_boot_work() (s5300_drive_partial_rst), so a fresh
+ * download survives.
+ *
+ * cold_cycle=0 skips the reset when a live MAIN already exists (Gen3 endpoint)
+ * and ADOPTS it instead -- faster for developer warm reloads, but the ring
+ * resync can surface stale buffered data on the first read, so it is not the
+ * default.  Autoload never hits the adopt branch (boot-ROM CP is not Gen3).
  */
-static bool s5300_cold_cycle;
+static bool s5300_cold_cycle = true;
 module_param_named(cold_cycle, s5300_cold_cycle, bool, 0644);
-MODULE_PARM_DESC(cold_cycle, "force a full CP power cycle even if a live MAIN exists (default 0 = adopt)");
+MODULE_PARM_DESC(cold_cycle, "full CP power cycle + fresh download (default 1); 0 = adopt a live MAIN");
 
 /* Diagnostic: skip all post-ONLINE setup (isolate CP-internal vs our action). */
 static bool s5300_bare_online;
