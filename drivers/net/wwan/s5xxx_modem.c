@@ -36,6 +36,7 @@
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/iopoll.h>
+#include <linux/list.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/of.h>
@@ -271,6 +272,27 @@
 #define S5300_CH_RFS			0x29
 #define S5300_RFS_MAX			SZ_4K
 
+/*
+ * In-kernel RFS server: after attach the CP OPENs + READs its carrier config
+ * (path-whitelisted to carrierconfig/) and its NV files over the RFS channel,
+ * chunk by chunk with an ack ping-pong.  We answer them from firmware (the
+ * carrierconfig tree + the efs NV) rather than forwarding to a userspace daemon.
+ * Framing (RE'd from downstream rfsd): u16 cmd, u16 token, u32 payload_len, then
+ * the payload.  Every request MUST be answered or the CP stalls its IPC.
+ */
+#define S5300_RFS_MAXFID		32
+#define S5300_RFS_CHUNK			2012	/* downstream rfsd chunk size */
+#define S5300_CC_DIR			"google/s5400/carrierconfig"
+#define S5300_RFS_C_READ		0x0001	/* AP->CP chunk / CP->AP next-ack */
+#define S5300_RFS_C_WRITE		0x0002	/* AP->CP req / CP->AP data */
+#define S5300_RFS_C_STATUS		0x0003	/* status + fid + file-size */
+#define S5300_RFS_C_OPEN		0x0004	/* open a path */
+#define S5300_RFS_C_CLOSE		0x0005
+#define S5300_RFS_C_IO			0x0006	/* start a read or write */
+#define S5300_RFS_C_OPEN_FID		0x0007	/* open an NV file by id */
+#define S5300_RFS_IO_READ		1
+#define S5300_RFS_IO_WRITE		2
+
 /* Doorbell values: bit 16 triggers, low bits select the mailbox index. */
 #define S5300_DB_TRIGGER		BIT(16)
 #define S5300_DB_MSG			(S5300_DB_TRIGGER | 0x0)	/* int_ap2cp_msg */
@@ -339,6 +361,18 @@
 #define S5300_DL_SEC_VERIFY(tag)	(0xa301 | ((tag) << 4))	/* CRC-verify */
 #define S5300_DL_FINISH			0xa400
 
+/* Per-open state for the in-kernel RFS server (indexed by the CP's fid). */
+struct s5300_rfs_file {
+	bool			used;
+	const struct firmware	*fw;	/* cached read source, or NULL */
+	size_t			size;	/* file size reported at OPEN */
+	loff_t			roff;	/* read cursor */
+	size_t			rremain;	/* bytes left to serve */
+	loff_t			woff;	/* write cursor */
+	size_t			wremain;	/* bytes left to sink */
+	u16			token;	/* active IO token, echoed in chunks */
+};
+
 struct s5300_modem {
 	struct device		*dev;
 	struct device		*rc_dev;
@@ -406,6 +440,14 @@ struct s5300_modem {
 	/* RFS file channel (umts_rfs0, ch 0x29) on the NORM_RAW ring. */
 	struct wwan_port	*rfs_port;
 	u8			rfs_ch_seq;	/* RFS per-channel sequence */
+
+	/* In-kernel RFS server: carrierconfig/NV files the CP pulls post-attach. */
+	struct s5300_rfs_file	rfs_files[S5300_RFS_MAXFID];
+	struct work_struct	rfs_work;
+	struct list_head	rfs_rxq;	/* queued CP requests (rfs_lock) */
+	spinlock_t		rfs_lock;
+	struct workqueue_struct	*rfs_wq;
+	u8			*rfs_txbuf;	/* one READ frame (rfs_work only) */
 };
 
 /*
@@ -1642,6 +1684,303 @@ static const struct wwan_port_ops s5300_rfs_ops = {
 };
 
 /*
+ * Answer the CP's RFS file reads (carrier config + NV) in the kernel instead of
+ * forwarding /dev/wwan0rfs0 to a userspace daemon.  Default on; rfs_server=0
+ * hands the port back to userspace.
+ */
+static bool s5300_rfs_server = true;
+module_param_named(rfs_server, s5300_rfs_server, bool, 0644);
+MODULE_PARM_DESC(rfs_server, "answer the CP's RFS reads in-kernel (0 = /dev/wwan0rfs0)");
+
+/* One queued CP request, handed from the hard-IRQ demux to s5300_rfs_work. */
+struct s5300_rfs_frame {
+	struct list_head	node;
+	u32			len;
+	u8			data[];
+};
+
+/* Send an RFS app frame, retrying while the RAW tx ring is momentarily full. */
+static void s5300_rfs_send(struct s5300_modem *sm, const u8 *frame, u32 len)
+{
+	int i;
+
+	for (i = 0; i < 200; i++) {
+		if (s5300_rfs_tx(sm, frame, len) != -EAGAIN)
+			return;
+		usleep_range(1000, 2000);
+	}
+	dev_warn_ratelimited(sm->dev, "RFS tx stalled (ring full)\n");
+}
+
+/* OP_STATUS(3): status=success, fid, and (on OPEN) the file size. */
+static void s5300_rfs_op_status(struct s5300_modem *sm, u16 token, u32 fid,
+				u32 extra)
+{
+	u8 r[20];
+
+	put_unaligned_le16(S5300_RFS_C_STATUS, r + 0);
+	put_unaligned_le16(token, r + 2);
+	put_unaligned_le32(12, r + 4);
+	put_unaligned_le32(0, r + 8);		/* status 0 = success */
+	put_unaligned_le32(fid, r + 0xc);
+	put_unaligned_le32(extra, r + 0x10);
+	s5300_rfs_send(sm, r, sizeof(r));
+}
+
+static void s5300_rfs_close_file(struct s5300_rfs_file *e)
+{
+	if (e->fw)
+		release_firmware(e->fw);
+	memset(e, 0, sizeof(*e));
+}
+
+/* Serve the next READ chunk for fid, or OP_STATUS when the read is done. */
+static void s5300_rfs_read_step(struct s5300_modem *sm, u32 fid)
+{
+	struct s5300_rfs_file *e = &sm->rfs_files[fid];
+	u32 clen = min_t(size_t, e->rremain, S5300_RFS_CHUNK);
+	u8 *tx = sm->rfs_txbuf;
+
+	if (!clen || !e->fw || e->roff + clen > e->fw->size) {
+		s5300_rfs_op_status(sm, e->token, fid, 0);
+		return;
+	}
+	put_unaligned_le16(S5300_RFS_C_READ, tx + 0);
+	put_unaligned_le16(e->token, tx + 2);
+	put_unaligned_le32(12 + clen, tx + 4);
+	put_unaligned_le32(fid, tx + 8);
+	put_unaligned_le32(e->roff, tx + 0xc);
+	put_unaligned_le32(clen, tx + 0x10);
+	memcpy(tx + 0x14, e->fw->data + e->roff, clen);
+	s5300_rfs_send(sm, tx, 0x14 + clen);
+	e->roff += clen;
+	e->rremain -= clen;
+}
+
+/* Ask the CP for the next write chunk for fid (the data is sunk + discarded). */
+static void s5300_rfs_write_req(struct s5300_modem *sm, u32 fid)
+{
+	struct s5300_rfs_file *e = &sm->rfs_files[fid];
+	u32 clen = min_t(size_t, e->wremain, S5300_RFS_CHUNK);
+	u8 r[20];
+
+	put_unaligned_le16(S5300_RFS_C_WRITE, r + 0);
+	put_unaligned_le16(e->token, r + 2);
+	put_unaligned_le32(12, r + 4);
+	put_unaligned_le32(fid, r + 8);
+	put_unaligned_le32(e->woff, r + 0xc);
+	put_unaligned_le32(clen, r + 0x10);
+	s5300_rfs_send(sm, r, sizeof(r));
+}
+
+/* Map + open a whitelisted OPEN(path) request read-only from firmware. */
+static int s5300_rfs_open_path(struct s5300_modem *sm, struct s5300_rfs_file *e,
+			       const u8 *path, u32 plen)
+{
+	char name[256], fw[288];
+	const char *rel;
+	int ret;
+
+	if (plen >= sizeof(name))
+		return -ENAMETOOLONG;
+	memcpy(name, path, plen);
+	name[plen] = '\0';
+
+	/* Whitelist: carrier config only, no path traversal (like rfsd). */
+	if (strstr(name, "..") ||
+	    (!strstr(name, "carrierconfig") && !strstr(name, "confpack")))
+		return -EPERM;
+	rel = strstr(name, "carrierconfig/");
+	if (!rel)
+		return -EINVAL;
+	rel += strlen("carrierconfig/");
+	scnprintf(fw, sizeof(fw), "%s/%s", S5300_CC_DIR, rel);
+	ret = request_firmware_direct(&e->fw, fw, sm->dev);
+	dev_dbg(sm->dev, "RFS serve %s: %d\n", fw, ret);
+	return ret;
+}
+
+/* NV files served read-only from the staged efs partition. */
+static const char *s5300_rfs_nv_name(u32 fid)
+{
+	switch (fid) {
+	case 1:	return "google/s5400/efs/nv_normal.bin";
+	case 2:	return "google/s5400/efs/nv_protected.bin";
+	case 3:	return "google/s5400/efs/nv_user.bin";
+	default: return NULL;
+	}
+}
+
+static void s5300_rfs_open_nv(struct s5300_modem *sm, struct s5300_rfs_file *e,
+			      u32 fid)
+{
+	const char *name = s5300_rfs_nv_name(fid);
+
+	e->used = true;
+	if (name && !request_firmware_direct(&e->fw, name, sm->dev))
+		e->size = e->fw->size;
+}
+
+/* Handle one CP RFS request (process context, single-threaded via rfs_work). */
+static void s5300_rfs_handle(struct s5300_modem *sm, const u8 *f, u32 n)
+{
+	u16 cmd = get_unaligned_le16(f), token = get_unaligned_le16(f + 2);
+	u32 fid, off, iolen, iotype, clen, plen;
+	struct s5300_rfs_file *e;
+
+	switch (cmd) {
+	case S5300_RFS_C_OPEN:			/* 4: open a path */
+		if (n < 0x10)
+			return;
+		fid = get_unaligned_le32(f + 8);
+		plen = get_unaligned_le32(f + 0xc);
+		if (fid >= S5300_RFS_MAXFID)
+			return;
+		if (0x10 + plen > n)
+			plen = n - 0x10;
+		e = &sm->rfs_files[fid];
+		s5300_rfs_close_file(e);
+		e->used = true;
+		if (!s5300_rfs_open_path(sm, e, f + 0x10, plen) && e->fw)
+			e->size = e->fw->size;
+		s5300_rfs_op_status(sm, token, fid, e->size);
+		return;
+	case S5300_RFS_C_OPEN_FID:		/* 7: open an NV file by id */
+		fid = get_unaligned_le32(f + 8);
+		if (fid >= S5300_RFS_MAXFID)
+			return;
+		e = &sm->rfs_files[fid];
+		s5300_rfs_close_file(e);
+		s5300_rfs_open_nv(sm, e, fid);
+		s5300_rfs_op_status(sm, token, fid, e->size);
+		return;
+	case S5300_RFS_C_IO:			/* 6: start a read or write */
+		if (n < 0x18)
+			return;
+		fid = get_unaligned_le32(f + 8);
+		off = get_unaligned_le32(f + 0xc);
+		iolen = get_unaligned_le32(f + 0x10);
+		iotype = get_unaligned_le32(f + 0x14);
+		if (fid >= S5300_RFS_MAXFID)
+			return;
+		e = &sm->rfs_files[fid];
+		/* NV files may be IO_REQUEST'd without a preceding OPEN_FID. */
+		if (!e->used && s5300_rfs_nv_name(fid))
+			s5300_rfs_open_nv(sm, e, fid);
+		if (!e->used) {			/* never leave a request unanswered */
+			s5300_rfs_op_status(sm, token, fid, 0);
+			return;
+		}
+		e->token = token;
+		if (iotype == S5300_RFS_IO_READ) {
+			e->roff = off;
+			e->rremain = iolen;
+			s5300_rfs_read_step(sm, fid);
+		} else if (iotype == S5300_RFS_IO_WRITE) {
+			e->woff = off;
+			e->wremain = iolen;
+			s5300_rfs_write_req(sm, fid);
+		} else {
+			s5300_rfs_op_status(sm, token, fid, 0);
+		}
+		return;
+	case S5300_RFS_C_READ:			/* 1: CP ack -> next chunk */
+		if (n < 0x10)
+			return;
+		fid = get_unaligned_le32(f + 0xc);
+		if (fid >= S5300_RFS_MAXFID || !sm->rfs_files[fid].used)
+			return;
+		e = &sm->rfs_files[fid];
+		if (e->rremain)
+			s5300_rfs_read_step(sm, fid);
+		else
+			s5300_rfs_op_status(sm, e->token, fid, 0);
+		return;
+	case S5300_RFS_C_WRITE:			/* 2: CP data -> discard */
+		if (n < 0x14)
+			return;
+		fid = get_unaligned_le32(f + 0xc);
+		if (fid >= S5300_RFS_MAXFID || !sm->rfs_files[fid].used)
+			return;
+		clen = get_unaligned_le32(f + 0x10);
+		e = &sm->rfs_files[fid];
+		e->woff += clen;
+		e->wremain = e->wremain > clen ? e->wremain - clen : 0;
+		if (e->wremain)
+			s5300_rfs_write_req(sm, fid);
+		else
+			s5300_rfs_op_status(sm, e->token, fid, 0);
+		return;
+	case S5300_RFS_C_CLOSE:			/* 5: close + ack */
+		fid = get_unaligned_le32(f + 8);
+		if (fid >= S5300_RFS_MAXFID)
+			return;
+		s5300_rfs_close_file(&sm->rfs_files[fid]);
+		s5300_rfs_op_status(sm, token, fid, 0);
+		return;
+	case S5300_RFS_C_STATUS:		/* 3: CP ack -- consume */
+		return;
+	default:
+		dev_dbg(sm->dev, "RFS unknown cmd %#x\n", cmd);
+		return;
+	}
+}
+
+static void s5300_rfs_work(struct work_struct *work)
+{
+	struct s5300_modem *sm = container_of(work, struct s5300_modem, rfs_work);
+	struct s5300_rfs_frame *fr;
+	unsigned long flags;
+
+	for (;;) {
+		spin_lock_irqsave(&sm->rfs_lock, flags);
+		fr = list_first_entry_or_null(&sm->rfs_rxq,
+					      struct s5300_rfs_frame, node);
+		if (fr)
+			list_del(&fr->node);
+		spin_unlock_irqrestore(&sm->rfs_lock, flags);
+		if (!fr)
+			break;
+		s5300_rfs_handle(sm, fr->data, fr->len);
+		kfree(fr);
+	}
+}
+
+/* Copy a CP RFS request off the ring (hard IRQ) and queue it for rfs_work. */
+static void s5300_rfs_enqueue(struct s5300_modem *sm, void __iomem *buff,
+			      u32 off, u32 plen)
+{
+	struct s5300_rfs_frame *fr;
+	unsigned long flags;
+
+	if (plen < 8)
+		return;
+	fr = kmalloc(sizeof(*fr) + plen, GFP_ATOMIC);
+	if (!fr)
+		return;
+	fr->len = plen;
+	s5300_circ_read(fr->data, buff, S5300_RAW_RXQ_SIZE, off, plen);
+	spin_lock_irqsave(&sm->rfs_lock, flags);
+	list_add_tail(&fr->node, &sm->rfs_rxq);
+	spin_unlock_irqrestore(&sm->rfs_lock, flags);
+	queue_work(sm->rfs_wq, &sm->rfs_work);
+}
+
+/* Drop any queued RFS requests and release cached files (teardown). */
+static void s5300_rfs_cleanup(struct s5300_modem *sm)
+{
+	struct s5300_rfs_frame *fr, *tmp;
+	int i;
+
+	list_for_each_entry_safe(fr, tmp, &sm->rfs_rxq, node) {
+		list_del(&fr->node);
+		kfree(fr);
+	}
+	for (i = 0; i < S5300_RFS_MAXFID; i++)
+		s5300_rfs_close_file(&sm->rfs_files[i]);
+}
+
+/*
  * Drain the NORM_RAW rx ring and demux each 12-byte-framed message on its header
  * channel id: the RFS file channel (ch 0x29) goes to the RFS port, umts_router
  * AT (ch 0x15) to the AT port; other channels are dropped.  If the CP asked for
@@ -1689,9 +2028,19 @@ static void s5300_drain_raw_rxq(struct s5300_modem *sm, u32 intval)
 		plen = flen - S5300_SIT_HDR;
 
 		if (ch == S5300_CH_RFS) {
-			port = sm->rfs_port;
-			max = S5300_RFS_MAX;
 			had_raw = true;
+			if (s5300_rfs_server && plen <= S5300_RFS_MAX) {
+				/* Serve the request in-kernel, not via the port. */
+				s5300_rfs_enqueue(sm, buff,
+						  (out + S5300_SIT_HDR) %
+							  S5300_RAW_RXQ_SIZE,
+						  plen);
+				port = NULL;
+				max = 0;
+			} else {
+				port = sm->rfs_port;
+				max = S5300_RFS_MAX;
+			}
 		} else if (ch == S5300_CH_AT) {
 			port = sm->at_port;
 			max = SZ_2K;
@@ -3091,6 +3440,9 @@ static int s5300_probe(struct platform_device *pdev)
 	init_completion(&sm->init_done);
 	INIT_WORK(&sm->boot_work, s5300_boot_work);
 	INIT_WORK(&sm->pm_work, s5300_pm_work);
+	INIT_WORK(&sm->rfs_work, s5300_rfs_work);
+	INIT_LIST_HEAD(&sm->rfs_rxq);
+	spin_lock_init(&sm->rfs_lock);
 	sm->link_up = true;	/* boot handshake rings directly; PM arms at ONLINE */
 	platform_set_drvdata(pdev, sm);
 
@@ -3365,17 +3717,28 @@ static int s5300_probe(struct platform_device *pdev)
 		ret = -ENOMEM;
 		goto err_irq;
 	}
+	/* Ordered wq for the in-kernel RFS server; stateful ack ping-pong. */
+	sm->rfs_wq = alloc_ordered_workqueue("s5300-rfs", 0);
+	if (!sm->rfs_wq) {
+		ret = -ENOMEM;
+		goto err_wq;
+	}
+	sm->rfs_txbuf = devm_kmalloc(dev, 0x14 + S5300_RFS_CHUNK, GFP_KERNEL);
+	if (!sm->rfs_txbuf) {
+		ret = -ENOMEM;
+		goto err_rfs;
+	}
 	sm->cp2ap_irq = gpiod_to_irq(sm->cp2ap_wakeup);
 	if (sm->cp2ap_irq < 0) {
 		ret = dev_err_probe(dev, sm->cp2ap_irq, "CP2AP_WAKEUP to irq\n");
-		goto err_wq;
+		goto err_rfs;
 	}
 	ret = request_irq(sm->cp2ap_irq, s5300_cp2ap_wakeup_irq,
 			  IRQF_TRIGGER_RISING | IRQF_TRIGGER_FALLING |
 			  IRQF_NO_AUTOEN, "s5300-cp2ap-wakeup", sm);
 	if (ret) {
 		dev_err(dev, "CP2AP_WAKEUP request_irq: %d\n", ret);
-		goto err_wq;
+		goto err_rfs;
 	}
 
 	/*
@@ -3399,6 +3762,8 @@ static int s5300_probe(struct platform_device *pdev)
 
 	return 0;
 
+err_rfs:
+	destroy_workqueue(sm->rfs_wq);
 err_wq:
 	destroy_workqueue(sm->pm_wq);
 err_irq:
@@ -3433,6 +3798,10 @@ static void s5300_remove(struct platform_device *pdev)
 
 	cancel_work_sync(&sm->boot_work);
 	free_irq(pci_irq_vector(sm->pdev, 0), sm);
+	/* Main IRQ gone -> no more RFS enqueues; drain the server. */
+	cancel_work_sync(&sm->rfs_work);
+	destroy_workqueue(sm->rfs_wq);
+	s5300_rfs_cleanup(sm);
 	if (sm->rfs_port)
 		wwan_remove_port(sm->rfs_port);
 	if (sm->ctrl_port)
@@ -3471,6 +3840,7 @@ static void s5300_shutdown(struct platform_device *pdev)
 	cancel_work_sync(&sm->pm_work);
 	cancel_work_sync(&sm->boot_work);
 	free_irq(pci_irq_vector(sm->pdev, 0), sm);
+	cancel_work_sync(&sm->rfs_work);
 	dev_info(sm->dev, "quiesced for shutdown\n");
 }
 
