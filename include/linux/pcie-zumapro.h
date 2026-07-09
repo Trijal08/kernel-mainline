@@ -36,6 +36,8 @@ int zumapro_pcie_modem_link_up(struct device *rc_dev);
 int zumapro_pcie_modem_gen3(struct device *rc_dev);
 int zumapro_pcie_modem_wake(struct device *rc_dev);
 int zumapro_pcie_modem_reset(struct device *rc_dev);
+int zumapro_pcie_modem_power_cycle(struct device *rc_dev);
+int zumapro_pcie_modem_link_speed(struct device *rc_dev);
 #else
 static inline int zumapro_pcie_set_msi_target(struct device *rc_dev,
 					      phys_addr_t target)
@@ -64,6 +66,14 @@ static inline int zumapro_pcie_modem_wake(struct device *rc_dev)
 	return -ENODEV;
 }
 static inline int zumapro_pcie_modem_reset(struct device *rc_dev)
+{
+	return -ENODEV;
+}
+static inline int zumapro_pcie_modem_link_speed(struct device *rc_dev)
+{
+	return -ENODEV;
+}
+static inline int zumapro_pcie_modem_power_cycle(struct device *rc_dev)
 {
 	return -ENODEV;
 }
