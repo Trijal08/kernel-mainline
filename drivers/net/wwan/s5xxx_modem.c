@@ -33,12 +33,15 @@
 #include <linux/delay.h>
 #include <linux/firmware.h>
 #include <linux/gpio/consumer.h>
+#include <linux/if_arp.h>
+#include <linux/if_ether.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/iopoll.h>
 #include <linux/list.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
+#include <linux/netdevice.h>
 #include <linux/of.h>
 #include <linux/of_platform.h>
 #include <linux/of_reserved_mem.h>
@@ -176,6 +179,26 @@
 #define S5300_PKTPROC_UL_NUM_QUEUE	2
 #define S5300_PKTPROC_UL_Q0_NUM_DESC	1760
 #define S5300_PKTPROC_UL_Q1_NUM_DESC	880
+#define S5300_PKTPROC_UL_Q0_MAX_PKT	1024	/* q0 (HIPRIO) buffer stride */
+#define S5300_PKTPROC_UL_TXQ		1	/* NORM queue (q1) carries PS data */
+
+/* DL sktbuf control byte (desc byte 5): ring-boundary markers. */
+#define S5300_PKTPROC_CTRL_HEAD		0x80
+#define S5300_PKTPROC_CTRL_RINGEND	0x08
+
+/*
+ * UL descriptor: last_desc ownership (UL info word0 bit24, CP-written) and the
+ * CP DMA padding the komodo DT mandates (pktproc_ul_padding_required=1).
+ */
+#define S5300_PKTPROC_END_BIT_AP	0
+#define S5300_PKTPROC_UL_CP_PADDING	76
+
+/*
+ * First PDP (raw-IP data) channel.  With CH_EXTENSION advertised (ap_cap bit1)
+ * the CP keys PS data on the extended id EXYNOS_CH_EX_ID_PDP_0 (181); the legacy
+ * id would be 1.  Keep ap_cap bit1 set or this must change.
+ */
+#define S5300_CH_PDP_FIRST		0xb5
 #define S5300_IPC_AP2CP_MSG		0x800
 #define S5300_IPC_CP2AP_MSG		0x804
 #define S5300_IPC_AP2CP_STATUS		0x808
@@ -448,6 +471,21 @@ struct s5300_modem {
 	spinlock_t		rfs_lock;
 	struct workqueue_struct	*rfs_wq;
 	u8			*rfs_txbuf;	/* one READ frame (rfs_work only) */
+
+	/*
+	 * PKTPROC data path: the raw-IP data netdev (rmnet0).  The DL sktbuf ring
+	 * is drained from the MSI handler into skbs; dl_fore is the AP's re-arm
+	 * (buffers-available) pointer and dl_done its private consumer cursor, both
+	 * per DL queue.  The UL NORM ring is fed by ndo_start_xmit; ul_done is the
+	 * producer index, touched only under tx_lock.
+	 */
+	struct net_device	*ndev;
+	u32			dl_fore[S5300_PKTPROC_DL_NUM_QUEUE];
+	u32			dl_done[S5300_PKTPROC_DL_NUM_QUEUE];
+	u32			ul_done;
+	u16			ul_cp_quota;
+	u8			ul_end_bit_owner;
+	bool			ul_active;
 };
 
 /*
@@ -1300,9 +1338,23 @@ static void s5300_pktproc_fill_desc(struct s5300_modem *sm)
 		desc = sm->pktproc + S5300_PKTPROC_DL_DESC_OFS +
 		       q * S5300_PKTPROC_DL_Q_DESC_SZ;
 		memset_io(desc, 0, S5300_PKTPROC_DL_Q_DESC_SZ);
-		for (j = 0; j < S5300_PKTPROC_DL_NUM_DESC; j++)
-			writel(cp_buff + j * S5300_PKTPROC_DL_TRUE_PKT,
-			       desc + j * S5300_PKTPROC_DESC_SKTBUF_SZ);
+		for (j = 0; j < S5300_PKTPROC_DL_NUM_DESC; j++) {
+			void __iomem *d = desc + j * S5300_PKTPROC_DESC_SKTBUF_SZ;
+			u32 ctrl = 0;
+
+			/*
+			 * Address in bytes 0-3; the control byte (byte 5) carries
+			 * the ring-boundary markers, so a HEAD/RINGEND-aware CP arms
+			 * the ring.  writel(ctrl << 8) lands ctrl in byte 5 and zeros
+			 * paddr[35:32] (byte 4) and status (byte 6).
+			 */
+			if (j == 0)
+				ctrl |= S5300_PKTPROC_CTRL_HEAD;
+			if (j == S5300_PKTPROC_DL_NUM_DESC - 1)
+				ctrl |= S5300_PKTPROC_CTRL_RINGEND;
+			writel(cp_buff + j * S5300_PKTPROC_DL_TRUE_PKT, d);
+			writel(ctrl << 8, d + 4);
+		}
 	}
 }
 
@@ -1330,8 +1382,15 @@ static void s5300_pktproc_publish_dl(struct s5300_modem *sm)
 		writel(cp_desc, qinfo + 0);
 		writel(S5300_PKTPROC_DL_NUM_DESC, qinfo + 4);
 		writel(cp_buff, qinfo + 8);
-		writel(0, qinfo + 12);		/* fore_ptr (AP consumer) */
+		/*
+		 * fore_ptr is the AP "buffers-available" pointer.  fill_desc armed
+		 * all num_desc slots, so offer num_desc-1 (circ leaves one slot as
+		 * the empty gap); the drain re-arms from here as the CP consumes.
+		 */
+		writel(S5300_PKTPROC_DL_NUM_DESC - 1, qinfo + 12);
 		writel(0, qinfo + 16);		/* rear_ptr (CP producer) */
+		sm->dl_fore[q] = S5300_PKTPROC_DL_NUM_DESC - 1;
+		sm->dl_done[q] = 0;
 	}
 	/* header last: num_queues:4 | desc_mode:2 | irq_mode:2 | max_packet_size:16 */
 	hdr = (S5300_PKTPROC_DL_NUM_QUEUE & 0xf) |
@@ -1347,7 +1406,7 @@ static void s5300_pktproc_publish_dl(struct s5300_modem *sm)
 static void s5300_pktproc_publish_ul(struct s5300_modem *sm)
 {
 	void __iomem *info, *qinfo;
-	u32 cp_desc, cp_buff, hdr;
+	u32 cp_desc, cp_buff;
 	int q, ndesc;
 
 	if (!sm->pktproc)
@@ -1367,7 +1426,7 @@ static void s5300_pktproc_publish_ul(struct s5300_modem *sm)
 				  S5300_PKTPROC_DESC_UL_SZ;
 			cp_buff = S5300_PKTPROC_CP_BASE + S5300_PKTPROC_UL_BUFF_OFS +
 				  S5300_PKTPROC_UL_Q0_NUM_DESC *
-				  1024 /* q0 max_packet_size */;
+				  S5300_PKTPROC_UL_Q0_MAX_PKT;
 		}
 		/*
 		 * struct pktproc_info_ul: header u32 + cp_quota u32, then
@@ -1380,11 +1439,13 @@ static void s5300_pktproc_publish_ul(struct s5300_modem *sm)
 		writel(0, qinfo + 12);		/* fore_ptr (AP producer) */
 		writel(0, qinfo + 16);		/* rear_ptr (CP consumer) */
 	}
-	/* header: num_queues:4 | mode:4 | max_packet_size:16 | end_bit_owner:1 */
-	hdr = (S5300_PKTPROC_UL_NUM_QUEUE & 0xf) |
-	      ((S5300_PKTPROC_UL_MAX_PKT & 0xffff) << 8);
-	writel(hdr, info);
-	/* cp_quota (info + 4) is CP-owned -- do NOT write it (it zeroed at boot). */
+	/*
+	 * Header: only num_queues is AP-owned (vendor create_ul writes just that).
+	 * end_bit_owner (word0 bit24) and cp_quota (info + 4) are written by the CP
+	 * once it sees the PKTPROC_UL capability and are read back at PHONE_START --
+	 * do not write them here or the CP's values get clobbered.
+	 */
+	writel(S5300_PKTPROC_UL_NUM_QUEUE & 0xf, info);
 	dev_info(sm->dev, "published UL pktproc: %d queues\n",
 		 S5300_PKTPROC_UL_NUM_QUEUE);
 }
@@ -2139,6 +2200,282 @@ static void s5300_drain_fmt_rxq(struct s5300_modem *sm, u32 intval)
 		s5300_send_ipc_irq(sm, S5300_INT_VALID | S5300_INT_RES_ACK_FMT);
 }
 
+/*
+ * PKTPROC data path.  The CP DMAs downlink PS packets into the DL sktbuf ring
+ * and consumes uplink packets from the NORM UL ring; control traffic keeps
+ * riding the legacy FMT/RAW rings.  DL is polled from the shared MSI-0 handler
+ * (the CP's per-queue DL MSIs are the exclusive irq_mode vectors we do not
+ * wire up); UL is driven by the rmnet0 netdev's ndo_start_xmit.
+ */
+
+/*
+ * Drain filled DL sktbuf descriptors [done..rear) into skbs and re-arm the
+ * freed slots.  No CP IOMMU on this SoC: the packet sits at
+ * buff_vbase + true_packet_size*done, length from the descriptor; sniff the IP
+ * version nibble and hand it to the raw-IP netdev.  Bounded by num_desc so a
+ * garbled rear pointer cannot spin.  Runs in the MSI hard-IRQ once ONLINE.
+ */
+static void s5300_pktproc_dl_drain(struct s5300_modem *sm)
+{
+	void __iomem *info = sm->pktproc + S5300_PKTPROC_DL_INFO_OFS;
+	u32 n = S5300_PKTPROC_DL_NUM_DESC;
+	int q;
+
+	if (!sm->pktproc || !sm->ndev)
+		return;
+
+	for (q = 0; q < S5300_PKTPROC_DL_NUM_QUEUE; q++) {
+		void __iomem *qinfo = info + 4 + q * 20;
+		void __iomem *descs = sm->pktproc + S5300_PKTPROC_DL_DESC_OFS +
+				      q * S5300_PKTPROC_DL_Q_DESC_SZ;
+		void __iomem *buff = sm->pktproc + S5300_PKTPROC_DL_BUFF_OFS +
+				     q * S5300_PKTPROC_DL_Q_BUFF_SZ;
+		u32 cp_buff = S5300_PKTPROC_CP_BASE + S5300_PKTPROC_DL_BUFF_OFS +
+			      q * S5300_PKTPROC_DL_Q_BUFF_SZ;
+		u32 rear = readl(qinfo + 16) % n;
+		u32 done = sm->dl_done[q];
+		u32 fore = sm->dl_fore[q];
+		u32 space, guard, i;
+
+		if (done == rear)
+			continue;
+		/* order the descriptor/buffer reads after the rear-ptr sample */
+		dma_rmb();
+
+		for (guard = 0; done != rear && guard < n; guard++) {
+			void __iomem *d = descs +
+					  done * S5300_PKTPROC_DESC_SKTBUF_SZ;
+			u32 len = readl(d + 8) & 0xffff;	/* length @ byte 8 */
+			struct sk_buff *skb;
+
+			if (len == 0 || len > S5300_PKTPROC_DL_MAX_PKT) {
+				sm->ndev->stats.rx_length_errors++;
+				goto next;
+			}
+			skb = netdev_alloc_skb(sm->ndev, len);
+			if (!skb) {
+				sm->ndev->stats.rx_dropped++;
+				goto next;
+			}
+			memcpy_fromio(skb_put(skb, len),
+				      buff + done * S5300_PKTPROC_DL_TRUE_PKT,
+				      len);
+			skb->protocol = htons((skb->data[0] >> 4) == 6 ?
+					      ETH_P_IPV6 : ETH_P_IP);
+			skb->dev = sm->ndev;
+			skb_reset_mac_header(skb);
+			skb_reset_network_header(skb);
+			sm->ndev->stats.rx_packets++;
+			sm->ndev->stats.rx_bytes += len;
+			netif_rx(skb);
+next:
+			done = (done + 1 == n) ? 0 : done + 1;
+		}
+		sm->dl_done[q] = done;
+
+		/* Re-arm the freed slots: circ_space(n, fore, done). */
+		space = s5300_circ_space(n, fore, done);
+		for (i = 0; i < space; i++) {
+			void __iomem *d = descs +
+					  fore * S5300_PKTPROC_DESC_SKTBUF_SZ;
+			u32 ctrl = 0;
+
+			if (fore == 0)
+				ctrl |= S5300_PKTPROC_CTRL_HEAD;
+			if (fore == n - 1)
+				ctrl |= S5300_PKTPROC_CTRL_RINGEND;
+			writel(cp_buff + fore * S5300_PKTPROC_DL_TRUE_PKT, d);
+			writel(ctrl << 8, d + 4);
+			fore = (fore + 1 == n) ? 0 : fore + 1;
+		}
+		if (space) {
+			sm->dl_fore[q] = fore;
+			/* re-armed descriptors visible before the fore advance */
+			dma_wmb();
+			writel(fore, qinfo + 12);
+		}
+	}
+}
+
+/*
+ * At PHONE_START: read the CP-written end_bit_owner (UL info word0 bit24) and
+ * cp_quota (word1), reset the TX cursor and enable UL transmit -- but only once
+ * PKTPROC_UL is advertised (ap_cap bit0); otherwise the CP does not consume the
+ * ring and an up'd rmnet0 would ring spurious doorbells.
+ */
+static void s5300_pktproc_ul_activate(struct s5300_modem *sm)
+{
+	void __iomem *info = sm->pktproc + S5300_PKTPROC_UL_INFO_OFS;
+	void __iomem *qinfo = info + 8 + S5300_PKTPROC_UL_TXQ * 20;
+
+	if (!sm->pktproc)
+		return;
+
+	sm->ul_end_bit_owner = (readl(info) >> 24) & 1;
+	sm->ul_cp_quota = readl(info + 4) & 0xffff;
+	sm->ul_done = 0;
+	writel(0, qinfo + 12);		/* fore_ptr (AP producer) */
+	writel(0, qinfo + 16);		/* rear_ptr (CP consumer) */
+	sm->ul_active = s5300_pktproc && (s5300_ap_cap & 0x1);
+
+	dev_info(sm->dev, "pktproc UL %s: end_bit_owner=%u cp_quota=%u\n",
+		 sm->ul_active ? "active" : "provisioned (UL cap withheld)",
+		 sm->ul_end_bit_owner, sm->ul_cp_quota);
+}
+
+/*
+ * Transmit one skb on the NORM UL queue (q1): copy into the ring buffer, write
+ * the 32-byte descriptor, publish fore_ptr and ring the CP with SEND_DATA
+ * (== SEND_RAW; the CP scans both rings on this bit).  Serialised on tx_lock, so
+ * ul_done needs no extra protection.  Returns false when the ring is full or the
+ * frame is oversized -- the caller drops.
+ */
+static bool s5300_pktproc_ul_xmit(struct s5300_modem *sm, struct sk_buff *skb)
+{
+	void __iomem *info = sm->pktproc + S5300_PKTPROC_UL_INFO_OFS;
+	void __iomem *qinfo = info + 8 + S5300_PKTPROC_UL_TXQ * 20;
+	u32 n = S5300_PKTPROC_UL_Q1_NUM_DESC;
+	u32 dsize = skb->len + S5300_PKTPROC_UL_CP_PADDING;
+	u32 desc_base = S5300_PKTPROC_UL_DESC_OFS +
+			S5300_PKTPROC_UL_Q0_NUM_DESC * S5300_PKTPROC_DESC_UL_SZ;
+	u32 buff_base = S5300_PKTPROC_UL_BUFF_OFS +
+			S5300_PKTPROC_UL_Q0_NUM_DESC * S5300_PKTPROC_UL_Q0_MAX_PKT;
+	void __iomem *desc, *buf;
+	u32 cp_buf, rear, slot;
+	unsigned long flags;
+	u8 last;
+
+	if (dsize > S5300_PKTPROC_UL_MAX_PKT)
+		return false;
+
+	spin_lock_irqsave(&sm->tx_lock, flags);
+	slot = sm->ul_done;
+	rear = readl(qinfo + 16) % n;	/* rear_ptr (CP consumer) */
+	/* circ_space(n, fore=slot, rear): need at least one free descriptor. */
+	if (s5300_circ_space(n, slot, rear) < 1) {
+		spin_unlock_irqrestore(&sm->tx_lock, flags);
+		return false;
+	}
+
+	desc = sm->pktproc + desc_base + slot * S5300_PKTPROC_DESC_UL_SZ;
+	buf = sm->pktproc + buff_base + slot * S5300_PKTPROC_UL_MAX_PKT;
+	cp_buf = S5300_PKTPROC_CP_BASE + buff_base +
+		 slot * S5300_PKTPROC_UL_MAX_PKT;
+	last = sm->ul_end_bit_owner == S5300_PKTPROC_END_BIT_AP ? 1 : 0;
+
+	memcpy_toio(buf, skb->data, skb->len);
+	writel(dsize, desc + 0x0);		/* data_size (+CP_PADDING) */
+	writel(dsize, desc + 0x4);		/* total_pkt_size */
+	writel(cp_buf, desc + 0x8);		/* sktbuf_point[31:0] */
+	writel(0, desc + 0xc);			/* sktbuf_point[35:32] + pbp */
+	writel(last, desc + 0x10);		/* last_desc (bit0) */
+	writel(S5300_CH_PDP_FIRST << 8, desc + 0x14);	/* lcid @ byte 21 */
+	writel(0, desc + 0x18);
+	writel(0, desc + 0x1c);
+
+	slot = (slot + 1 == n) ? 0 : slot + 1;
+	sm->ul_done = slot;
+	wmb();				/* descriptor + payload land before fore */
+	writel(slot, qinfo + 12);	/* fore_ptr (AP producer) */
+	spin_unlock_irqrestore(&sm->tx_lock, flags);
+
+	s5300_send_ipc_irq(sm, S5300_INT_VALID | S5300_INT_SEND_RAW);
+	return true;
+}
+
+static int s5300_ndo_open(struct net_device *ndev)
+{
+	netif_start_queue(ndev);
+	return 0;
+}
+
+static int s5300_ndo_stop(struct net_device *ndev)
+{
+	netif_stop_queue(ndev);
+	return 0;
+}
+
+static netdev_tx_t s5300_ndo_start_xmit(struct sk_buff *skb,
+					struct net_device *ndev)
+{
+	struct s5300_modem *sm = *(struct s5300_modem **)netdev_priv(ndev);
+	unsigned int len;
+
+	/*
+	 * ul_xmit copies only the linear head; no scatter-gather feature is
+	 * advertised, so this is a no-op today, but guard the invariant.
+	 */
+	if (skb_linearize(skb)) {
+		ndev->stats.tx_dropped++;
+		dev_kfree_skb_any(skb);
+		return NETDEV_TX_OK;
+	}
+	len = skb->len;
+
+	if (sm->ul_active && s5300_pktproc_ul_xmit(sm, skb)) {
+		ndev->stats.tx_packets++;
+		ndev->stats.tx_bytes += len;
+	} else {
+		ndev->stats.tx_dropped++;
+	}
+	dev_kfree_skb_any(skb);
+	return NETDEV_TX_OK;
+}
+
+static const struct net_device_ops s5300_netdev_ops = {
+	.ndo_open	= s5300_ndo_open,
+	.ndo_stop	= s5300_ndo_stop,
+	.ndo_start_xmit	= s5300_ndo_start_xmit,
+};
+
+static void s5300_netdev_setup(struct net_device *ndev)
+{
+	ndev->netdev_ops = &s5300_netdev_ops;
+	ndev->type = ARPHRD_RAWIP;
+	ndev->flags = IFF_POINTOPOINT | IFF_NOARP;
+	ndev->hard_header_len = 0;
+	ndev->addr_len = 0;
+	ndev->mtu = ETH_DATA_LEN;
+	ndev->min_mtu = 68;
+	ndev->max_mtu = ETH_DATA_LEN;
+	ndev->tx_queue_len = 1000;
+	ndev->needs_free_netdev = true;
+}
+
+/*
+ * Register the raw-IP data netdev (rmnet0).  Called from s5300_online: RX is
+ * guarded by sm->ndev in the drain and TX by sm->ul_active, so the interface
+ * appears exactly when the modem is ONLINE.  pktproc-off (legacy IPC) builds
+ * skip it -- there is no UL/DL ring to back it.
+ */
+static void s5300_register_netdev(struct s5300_modem *sm)
+{
+	struct net_device *ndev;
+	int ret;
+
+	if (!sm->pktproc || !s5300_pktproc || !s5300_ap_cap || sm->ndev)
+		return;
+
+	ndev = alloc_netdev(sizeof(struct s5300_modem *), "rmnet%d",
+			    NET_NAME_ENUM, s5300_netdev_setup);
+	if (!ndev) {
+		dev_err(sm->dev, "failed to allocate rmnet netdev\n");
+		return;
+	}
+	*(struct s5300_modem **)netdev_priv(ndev) = sm;
+	SET_NETDEV_DEV(ndev, sm->dev);
+
+	ret = register_netdev(ndev);
+	if (ret) {
+		dev_err(sm->dev, "failed to register rmnet netdev: %d\n", ret);
+		free_netdev(ndev);
+		return;
+	}
+	sm->ndev = ndev;
+	dev_info(sm->dev, "raw-IP data netdev %s up (ch %#x)\n",
+		 ndev->name, S5300_CH_PDP_FIRST);
+}
+
 /* Expose the runtime control channel once the CP is ONLINE (process context). */
 static void s5300_online(struct s5300_modem *sm)
 {
@@ -2237,6 +2574,14 @@ static void s5300_online(struct s5300_modem *sm)
 		dev_info(sm->dev, "RFS file port up (umts_rfs0, ch %#x)\n",
 			 S5300_CH_RFS);
 	}
+
+	/*
+	 * The raw-IP data path (rmnet0).  The CP DMAs downlink PS packets into the
+	 * DL pktproc ring (drained from the MSI handler) and consumes uplink from
+	 * the NORM UL ring; carrying real traffic still needs an active data call
+	 * (SETUP_DATA_CALL over the SIT control plane) to assign an IP.
+	 */
+	s5300_register_netdev(sm);
 }
 
 static irqreturn_t s5300_irq_handler(int irq, void *data)
@@ -2251,6 +2596,15 @@ static irqreturn_t s5300_irq_handler(int irq, void *data)
 		dev_info(sm->dev, "IPC irq #%u: cp2ap %#x\n", sm->irq_count, val);
 		sm->last_cp2ap = val;
 	}
+	/*
+	 * Poll the DL pktproc ring on every MSI-0.  DL notifications are the
+	 * exclusive irq_mode per-queue vectors we do not wire up and arrive as bare
+	 * MSIs that need not set INT_VALID, so drain before the INT_VALID gate --
+	 * otherwise a DL-only interrupt returns here having done nothing.
+	 */
+	if (sm->online)
+		s5300_pktproc_dl_drain(sm);
+
 	if (!(val & S5300_INT_VALID))
 		return IRQ_HANDLED;
 
@@ -2284,8 +2638,19 @@ static irqreturn_t s5300_irq_handler(int irq, void *data)
 		 * everything.  Isolates whether MAIN's pktproc engine reading
 		 * our DL/UL regions is what kills the CP ~125 ms after ONLINE.
 		 */
-		if (s5300_pktproc && s5300_ap_cap)
+		if (s5300_pktproc && s5300_ap_cap) {
 			s5300_pktproc_publish_dl(sm);
+			/*
+			 * Provision the UL geometry here too, before the AP
+			 * advertises PKTPROC_UL below: the CP consumes the UL rings
+			 * as soon as it reads the capability, so q_info must be valid
+			 * first.  The CP does not touch UL memory until the first TX
+			 * doorbell, and it writes end_bit_owner/cp_quota afterwards
+			 * (read back at PHONE_START by ul_activate).
+			 */
+			if (s5300_ap_cap & 0x1)
+				s5300_pktproc_publish_ul(sm);
+		}
 		s5300_set_ap_capabilities(sm);
 		s5300_send_ipc_irq(sm, S5300_CMD(S5300_CMD_PIF_INIT_DONE));
 		break;
@@ -2294,8 +2659,12 @@ static irqreturn_t s5300_irq_handler(int irq, void *data)
 			 readl(sm->ipc + S5300_IPC_CAP_AP0),
 			 readl(sm->ipc + S5300_IPC_CAP_BASE + 0x4));
 		if (!sm->online) {
+			/*
+			 * UL geometry was published at INIT_START; here just read
+			 * back the CP-written end_bit_owner/cp_quota and enable TX.
+			 */
 			if (s5300_pktproc && (s5300_ap_cap & 0x1))
-				s5300_pktproc_publish_ul(sm);
+				s5300_pktproc_ul_activate(sm);
 			s5300_init_ipc_queues(sm);
 			sm->online = true;
 		}
@@ -3798,7 +4167,9 @@ static void s5300_remove(struct platform_device *pdev)
 
 	cancel_work_sync(&sm->boot_work);
 	free_irq(pci_irq_vector(sm->pdev, 0), sm);
-	/* Main IRQ gone -> no more RFS enqueues; drain the server. */
+	/* Main IRQ gone -> no more DL drains or RFS enqueues. */
+	if (sm->ndev)
+		unregister_netdev(sm->ndev);	/* needs_free_netdev frees it */
 	cancel_work_sync(&sm->rfs_work);
 	destroy_workqueue(sm->rfs_wq);
 	s5300_rfs_cleanup(sm);
@@ -3833,6 +4204,11 @@ static void s5300_shutdown(struct platform_device *pdev)
 
 	if (!sm)
 		return;
+
+	/* Stop rmnet TX from ringing the doorbell on a link about to die. */
+	sm->ul_active = false;
+	if (sm->ndev)
+		netif_tx_disable(sm->ndev);
 
 	free_irq(sm->cp2ap_irq, sm);
 	if (sm->cp_active_irq >= 0)
