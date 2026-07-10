@@ -11,6 +11,16 @@
 #define TENSOR_GS101_PHY_CTRL		0x3ec8
 #define TENSOR_GS101_PHY_CTRL_MASK	0x1
 #define TENSOR_GS101_PHY_CTRL_EN	BIT(0)
+/*
+ * zuma/zumapro insert extra PMU_ALIVE registers ahead of the PHY isolation
+ * controls, so the UFS PHY_CTRL sits one register lower than on gs101. Using
+ * the gs101 offset here clears a bit in an unrelated PMU_ALIVE register on
+ * phy_power_off(); as PMU_ALIVE survives a warm reset, that wedges the next
+ * boot until VDD_ALIVE is cut.
+ */
+#define TENSOR_ZUMA_PHY_CTRL		0x3ec0
+#define TENSOR_ZUMA_PHY_CTRL_MASK	0x1
+#define TENSOR_ZUMA_PHY_CTRL_EN		BIT(0)
 #define PHY_GS101_LANE_OFFSET		0x200
 #define TRSV_REG338			0x338
 #define LN0_MON_RX_CAL_DONE		BIT(3)
@@ -307,9 +317,9 @@ const struct samsung_ufs_phy_drvdata tensor_zuma_ufs_phy = {
 	.cfgs = tensor_zuma_ufs_phy_cfgs,
 	.cfgs_hibern8 = tensor_gs101_hibern8_cfgs,
 	.isol = {
-		.offset = TENSOR_GS101_PHY_CTRL,
-		.mask = TENSOR_GS101_PHY_CTRL_MASK,
-		.en = TENSOR_GS101_PHY_CTRL_EN,
+		.offset = TENSOR_ZUMA_PHY_CTRL,
+		.mask = TENSOR_ZUMA_PHY_CTRL_MASK,
+		.en = TENSOR_ZUMA_PHY_CTRL_EN,
 	},
 	.clk_list = tensor_gs101_ufs_phy_clks,
 	.num_clks = ARRAY_SIZE(tensor_gs101_ufs_phy_clks),
