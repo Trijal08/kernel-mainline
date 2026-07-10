@@ -4182,9 +4182,9 @@
 				 * Frequency-only G3D shader-core points from the zuma
 				 * vendor DVFS table v2 (gpu1 column).  Voltage is
 				 * ASV/ECT-calibrated and owned by ACPM, so no opp-microvolt.
-				 * Capped at gpu_dvfs_max_freq (890 MHz); the v2 boost row
-				 * (940 MHz / L2 950 MHz) is omitted as it exceeds the
-				 * declared max.  The paired G3DL2 rate is noted per OPP.
+				 * zumapro overrides gpu_dvfs_max_freq to 940 MHz (zuma itself
+				 * caps at 890), so all 14 rows apply here.  The paired G3DL2
+				 * rate is noted per OPP.
 				 */
 				opp-150000000 { opp-hz = /bits/ 64 <150000000>; }; /* L2 160 MHz */
 				opp-302000000 { opp-hz = /bits/ 64 <302000000>; }; /* L2 386 MHz */
@@ -4198,7 +4198,8 @@
 				opp-723000000 { opp-hz = /bits/ 64 <723000000>; }; /* L2 900 MHz */
 				opp-807000000 { opp-hz = /bits/ 64 <807000000>; }; /* L2 900 MHz */
 				opp-850000000 { opp-hz = /bits/ 64 <850000000>; }; /* L2 900 MHz */
-				opp-890000000 { opp-hz = /bits/ 64 <890000000>; }; /* L2 900 MHz, Fmax */
+				opp-890000000 { opp-hz = /bits/ 64 <890000000>; }; /* L2 900 MHz */
+				opp-940000000 { opp-hz = /bits/ 64 <940000000>; }; /* L2 950 MHz, Fmax */
 			};
 		};
 	};
