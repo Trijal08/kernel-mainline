@@ -189,6 +189,18 @@ config NVMEM_MAX77759
 	  This driver can also be built as a module. If so, the module
 	  will be called nvmem-max77759.
 
+config NVMEM_MAX77779
+	tristate "Maxim Integrated MAX77779 NVMEM Support"
+	depends on MFD_MAX77779
+	default MFD_MAX77779
+	help
+	  Say Y here to include support for the battery-backed scratchpad found
+	  in Maxim Integrated MAX77779 PMICs. It holds values shared with the
+	  bootloader, such as the reboot mode and reason.
+
+	  This driver can also be built as a module. If so, the module
+	  will be called nvmem-max77779.
+
 config NVMEM_MESON_EFUSE
 	tristate "Amlogic Meson GX eFuse Support"
 	depends on (ARCH_MESON || COMPILE_TEST) && MESON_SM
