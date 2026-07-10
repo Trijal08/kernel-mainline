@@ -99,6 +99,18 @@ enum max77779_chgr_mode {
 	MAX77779_CHGR_MODE_OTG_BOOST_ON		= 0xa,
 };
 
+/*
+ * Scratchpad sub-block. Unlike the others it sits behind its own I2C address
+ * and is addressed as 16-bit registers, so one MAX77779_SP_REG_DATA register
+ * covers two scratchpad bytes. PAGE_CTRL selects which 256-byte page the data
+ * window maps; the battery-backed values the bootloader looks at all live in
+ * page 0.
+ */
+#define MAX77779_SP_REG_PAGE_CTRL               0x70
+#define MAX77779_SP_REG_DATA                    0x80
+#define MAX77779_SP_REG_MAX                     0xff
+#define MAX77779_SP_PAGE_SIZE                   256
+
 /* MaxQ opcodes for max77779_maxq_command() */
 #define MAX77779_MAXQ_OPCODE_MAXLENGTH (MAX77779_MAXQ_REG_AP_DATAOUT32 - \
 					MAX77779_MAXQ_REG_AP_DATAOUT0 + \
