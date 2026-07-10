@@ -3837,17 +3837,13 @@
 			/* provides the CLKOUT0/CLKOUT1 pad gates (index 0/1) */
 			#clock-cells = <1>;
 
-			poweroff: syscon-poweroff {
-				compatible = "syscon-poweroff";
-				offset = <0x3e9c>; /* PAD_CTRL_PWR_HOLD */
-				mask = <0x00000100>;
-				value = <0x0>;
-			};
-
-			reboot: syscon-reboot {
-				compatible = "google,gs101-reboot";
-			};
-
+			/*
+			 * No syscon-poweroff or syscon-reboot node here.  Both of
+			 * gs101's drive PS_HOLD at PMU+0x3e9c, which zumapro does
+			 * not have: system reset and power-off are PSCI
+			 * SYSTEM_RESET/SYSTEM_OFF calls handled in EL3.  Only the
+			 * reboot reason is written from Linux.
+			 */
 			reboot-mode {
 				compatible = "syscon-reboot-mode";
 				offset = <0x0810>; /* EXYNOS_PMU_SYSIP_DAT0 */
