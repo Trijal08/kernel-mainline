@@ -507,6 +507,7 @@ struct s5300_modem {
 	 */
 	struct s5300_chardev	oem;
 	wait_queue_head_t	fmt_tx_wq;
+	unsigned long		fmt_busy_until;	/* inhibit park during an FMT transfer (jiffies) */
 
 	/* RFS file channel (umts_rfs0, ch 0x29) on the NORM_RAW ring. */
 	struct wwan_port	*rfs_port;
@@ -769,6 +770,21 @@ static void s5300_relink_restore(struct s5300_modem *sm)
 #define S5300_PARK_SETTLE_MS	30
 
 /*
+ * The CP idle-parks its PCIe link aggressively (CP2AP_WAKEUP low ~1 s after it
+ * goes quiet).  An oem/GEMS file fetch, though, streams ~50 back-to-back 4 KB
+ * chunks over the FMT ring, and each chunk fills the 4 KB ring -- so if the CP
+ * parks between chunks the AP must PERST-relink for every one, which crawls and
+ * thrashes the link.  Keep the link up for a short grace period after any FMT
+ * traffic (a request delivered to userspace, or a frame we send) so the whole
+ * transfer drains at L0; normal idle park resumes once it goes quiet.
+ */
+#define S5300_FMT_BUSY_MS	500
+static inline void s5300_fmt_mark_busy(struct s5300_modem *sm)
+{
+	WRITE_ONCE(sm->fmt_busy_until, jiffies + msecs_to_jiffies(S5300_FMT_BUSY_MS));
+}
+
+/*
  * Debug: when set, never park the runtime PCIe link -- keep it in L0 after
  * ONLINE even when the CP requests deep sleep.  Lets us test the FMT/RAW
  * control path (AT/SIT/RFS) with the link permanently up, isolating a
@@ -946,7 +962,9 @@ static void s5300_pm_work(struct work_struct *work)
 			 * (keep the link up for genuinely in-flight tx).
 			 */
 			park = !sm->main_armed ||
-			       (!s5300_tx_pending(sm) && !sm->db_reserved);
+			       (!s5300_tx_pending(sm) && !sm->db_reserved &&
+				time_after_eq(jiffies,
+					      READ_ONCE(sm->fmt_busy_until)));
 			if (park)
 				sm->link_up = false;
 			spin_unlock_irqrestore(&sm->lock, flags);
@@ -1723,6 +1741,8 @@ static int s5300_fmt_ring_tx(struct s5300_modem *sm, u8 ch, u8 *ch_seq,
 	spin_unlock_irqrestore(&sm->tx_lock, flags);
 
 	s5300_send_ipc_irq(sm, S5300_INT_VALID | S5300_INT_SEND_FMT);
+	/* Keep the link up while a multi-frame FMT transfer is in flight. */
+	s5300_fmt_mark_busy(sm);
 	return 0;
 }
 
@@ -2392,6 +2412,11 @@ static void s5300_drain_fmt_rxq(struct s5300_modem *sm, u32 intval)
 			if (plen)
 				s5300_chardev_rx(&sm->oem, buff,
 						 S5300_FMT_RXQ_SIZE, out, plen);
+			/*
+			 * The CP opened an oem transaction and expects a
+			 * (multi-frame) reply; keep the link up so it drains at L0.
+			 */
+			s5300_fmt_mark_busy(sm);
 		} else if (hdr[8] != S5300_CH_FMT) {
 			dev_info_ratelimited(sm->dev,
 					     "fmt rxq drop unhandled ch %#x payload %u\n",
