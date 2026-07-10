@@ -41,6 +41,7 @@ enum max77779_i2c_subdev_id {
 	 */
 	MAX77779_I2C_SUBDEV_ID_MAXQ,
 	MAX77779_I2C_SUBDEV_ID_CHARGER,
+	MAX77779_I2C_SUBDEV_ID_SCRATCH,
 };
 
 struct max77779_i2c_subdev {
@@ -186,6 +187,28 @@ static const struct regmap_config max77779_regmap_config_charger = {
 	.cache_type = REGCACHE_FLAT,
 };
 
+static bool max77779_scratch_reg(struct device *dev, unsigned int reg)
+{
+	return reg == MAX77779_SP_REG_PAGE_CTRL ||
+	       (reg >= MAX77779_SP_REG_DATA && reg <= MAX77779_SP_REG_MAX);
+}
+
+/*
+ * The scratchpad is RAM, so nothing here may be cached. Its registers are
+ * 16-bit, which is what lets a raw access walk the data window as a flat run
+ * of scratchpad bytes.
+ */
+static const struct regmap_config max77779_regmap_config_scratch = {
+	.name = "scratch",
+	.reg_bits = 8,
+	.val_bits = 16,
+	.val_format_endian = REGMAP_ENDIAN_NATIVE,
+	.max_register = MAX77779_SP_REG_MAX,
+	.readable_reg = max77779_scratch_reg,
+	.writeable_reg = max77779_scratch_reg,
+	.volatile_reg = max77779_scratch_reg,
+};
+
 /*
  * Interrupts - with the following interrupt hierarchy:
  *   pmic IRQs (INTSRC)
@@ -317,6 +340,15 @@ static const struct max77779_i2c_subdev max77779_i2c_subdevs[] = {
 		.id = MAX77779_I2C_SUBDEV_ID_CHARGER,
 		.cfg = &max77779_regmap_config_charger,
 		.i2c_address = 0x69,
+	},
+	{
+		/*
+		 * No regmap pointer is kept for this one: the nvmem child is
+		 * its only user and reaches it by name via dev_get_regmap().
+		 */
+		.id = MAX77779_I2C_SUBDEV_ID_SCRATCH,
+		.cfg = &max77779_regmap_config_scratch,
+		.i2c_address = 0x60,
 	},
 };
 
