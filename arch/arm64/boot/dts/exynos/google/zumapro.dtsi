@@ -669,7 +669,7 @@
 			 /* PCIe (HSI2) outbound MEM window + config space */
 			 <0x60000000 0x0 0x60000000 0x01000000>;
 		pd_g3d: pd-g3d@15461A80 {
-			compatible = "samsung,exynos5433-pd";
+			compatible = "google,gs101-pd";
 			reg = <0x15461A80 0x20>;
 			cal_id = <0xB1380000>;
 			need_smc = <0x1EE10204>;
@@ -679,7 +679,7 @@
 			#power-domain-cells = <0>;
 		};
 		pd_embedded_g3d: pd-embedded_g3d@15461C80 {
-			compatible = "samsung,exynos5433-pd";
+			compatible = "google,gs101-pd";
 			reg = <0x15461C80 0x20>;
 			cal_id = <0xB1380001>;
 			status = "okay";
@@ -687,7 +687,7 @@
 			#power-domain-cells = <0>;
 		};
 		pd_dpub: pd-dpub@15461D00 {
-			compatible = "samsung,exynos5433-pd";
+			compatible = "google,gs101-pd";
 			reg = <0x15461D00 0x20>;
 			cal_id = <0xB1380002>;
 			need_smc = <0x19410204>;
@@ -697,7 +697,7 @@
 			skip-idle-ip;
 		};
 		pd_dpuf0: pd-dpuf0@15461D80 {
-			compatible = "samsung,exynos5433-pd";
+			compatible = "google,gs101-pd";
 			reg = <0x15461D80 0x20>;
 			cal_id = <0xB1380003>;
 			need_smc = <0x19810204>;
@@ -708,7 +708,7 @@
 			skip-idle-ip;
 		};
 		pd_dpuf1: pd-dpuf1@15461E00 {
-			compatible = "samsung,exynos5433-pd";
+			compatible = "google,gs101-pd";
 			reg = <0x15461E00 0x20>;
 			cal_id = <0xB1380004>;
 			need_smc = <0x19C10204>;
@@ -719,7 +719,7 @@
 			skip-idle-ip;
 		};
 		pd_g2d: pd-g2d@15461E80 {
-			compatible = "samsung,exynos5433-pd";
+			compatible = "google,gs101-pd";
 			reg = <0x15461E80 0x20>;
 			cal_id = <0xB1380005>;
 			need_smc = <0x1A810204>;
@@ -728,7 +728,7 @@
 			#power-domain-cells = <0>;
 		};
 		pd_gdc: pd-gdc@15461F00 {
-			compatible = "samsung,exynos5433-pd";
+			compatible = "google,gs101-pd";
 			reg = <0x15461F00 0x20>;
 			cal_id = <0xB1380006>;
 			need_smc = <0x1D410204>;
@@ -737,7 +737,7 @@
 			#power-domain-cells = <0>;
 		};
 		pd_gse: pd-gse@15461F80 {
-			compatible = "samsung,exynos5433-pd";
+			compatible = "google,gs101-pd";
 			reg = <0x15461F80 0x20>;
 			cal_id = <0xB1380007>;
 			need_smc = <0x1D810204>;
@@ -746,7 +746,7 @@
 			#power-domain-cells = <0>;
 		};
 		pd_mcsc: pd-mcsc@15462000 {
-			compatible = "samsung,exynos5433-pd";
+			compatible = "google,gs101-pd";
 			reg = <0x15462000 0x20>;
 			cal_id = <0xB1380008>;
 			need_smc = <0x1D010204>;
@@ -755,7 +755,7 @@
 			#power-domain-cells = <0>;
 		};
 		pd_mfc: pd-mfc@15462080 {
-			compatible = "samsung,exynos5433-pd";
+			compatible = "google,gs101-pd";
 			reg = <0x15462080 0x20>;
 			cal_id = <0xB1380009>;
 			need_smc = <0x1A410204>;
@@ -764,7 +764,7 @@
 			#power-domain-cells = <0>;
 		};
 		pd_rgbp: pd-rgbp@15462100 {
-			compatible = "samsung,exynos5433-pd";
+			compatible = "google,gs101-pd";
 			reg = <0x15462100 0x20>;
 			cal_id = <0xB138000A>;
 			need_smc = <0x1C410204>;
@@ -773,7 +773,7 @@
 			#power-domain-cells = <0>;
 		};
 		pd_tnr: pd-tnr@15462180 {
-			compatible = "samsung,exynos5433-pd";
+			compatible = "google,gs101-pd";
 			reg = <0x15462180 0x20>;
 			cal_id = <0xB138000B>;
 			need_smc = <0x1CC10204>;
@@ -782,7 +782,7 @@
 			#power-domain-cells = <0>;
 		};
 		pd_yuvp: pd-yuvp@15462200 {
-			compatible = "samsung,exynos5433-pd";
+			compatible = "google,gs101-pd";
 			reg = <0x15462200 0x20>;
 			cal_id = <0xB138000C>;
 			need_smc = <0x1C810204>;
@@ -791,7 +791,7 @@
 			#power-domain-cells = <0>;
 		};
 		pd_aoc: pd-aoc@15462280 {
-			compatible = "samsung,exynos5433-pd";
+			compatible = "google,gs101-pd";
 			reg = <0x15462280 0x20>;
 			cal_id = <0xB138000D>;
 			need_smc = <0x19010204>;
@@ -800,7 +800,7 @@
 			#power-domain-cells = <0>;
 		};
 		pd_aur: pd-aur@15462300 {
-			compatible = "samsung,exynos5433-pd";
+			compatible = "google,gs101-pd";
 			reg = <0x15462300 0x20>;
 			cal_id = <0xB138000E>;
 			need_smc = <0x20A10204>;
@@ -809,7 +809,7 @@
 			#power-domain-cells = <0>;
 		};
 		pd_bw: pd-bw@15462380 {
-			compatible = "samsung,exynos5433-pd";
+			compatible = "google,gs101-pd";
 			reg = <0x15462380 0x20>;
 			cal_id = <0xB138000F>;
 			need_smc = <0x1A610204>;
@@ -818,7 +818,7 @@
 			#power-domain-cells = <0>;
 		};
 		pd_eh: pd-eh@15462400 {
-			compatible = "samsung,exynos5433-pd";
+			compatible = "google,gs101-pd";
 			reg = <0x15462400 0x20>;
 			cal_id = <0xB1380010>;
 			need_smc = <0x16C10204>;
@@ -828,7 +828,7 @@
 			#power-domain-cells = <0>;
 		};
 		pd_ispfe: pd-ispfe@15462480 {
-			compatible = "samsung,exynos5433-pd";
+			compatible = "google,gs101-pd";
 			reg = <0x15462480 0x20>;
 			cal_id = <0xB1380011>;
 			need_smc = <0x1C010204>;
@@ -837,7 +837,7 @@
 			#power-domain-cells = <0>;
 		};
 		pd_tpu: pd-tpu@15462500 {
-			compatible = "samsung,exynos5433-pd";
+			compatible = "google,gs101-pd";
 			reg = <0x15462500 0x20>;
 			cal_id = <0xB1380012>;
 			need_smc = <0x1A310204>;
@@ -846,7 +846,7 @@
 			#power-domain-cells = <0>;
 		};
 		pd_hsi0: pd-hsi0@15462A80 {
-			compatible = "samsung,exynos5433-pd";
+			compatible = "google,gs101-pd";
 			reg = <0x15462A80 0x20>;
 			cal_id = <0xB1380018>;
 			need_smc = <0x11010204>;
