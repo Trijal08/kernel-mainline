@@ -332,6 +332,8 @@
 /* boot_stage / CP2AP_WAKEUP polling, downstream check_cp_status(). */
 #define S5300_POLL_INTERVAL_MS		20
 #define S5300_POLL_COUNT		200
+#define S5300_POLL_INTERVAL_US		(S5300_POLL_INTERVAL_MS * 1000)
+#define S5300_POLL_TIMEOUT_US		(S5300_POLL_COUNT * S5300_POLL_INTERVAL_US)
 
 /* PHONE_START handshake timeout, downstream MIF_INIT_TIMEOUT. */
 #define S5300_INIT_TIMEOUT		(15 * HZ)
@@ -2992,19 +2994,16 @@ static int s5300_setup_doorbell(struct s5300_modem *sm)
 static int s5300_poll_boot_stage(struct s5300_modem *sm, u32 target)
 {
 	u32 val;
-	int i;
+	int ret;
 
-	for (i = 0; i < S5300_POLL_COUNT; i++) {
-		val = readl(sm->msi + S5300_MSI_BOOT_STAGE);
-		if (val == target)
-			return 0;
-		msleep(S5300_POLL_INTERVAL_MS);
-	}
-
-	dev_err(sm->dev,
-		"boot_stage stuck at %#x (want %#x, err_report %#x)\n", val,
-		target, readl(sm->msi + S5300_MSI_ERR_REPORT));
-	return -ETIMEDOUT;
+	ret = readl_poll_timeout(sm->msi + S5300_MSI_BOOT_STAGE, val,
+				 val == target, S5300_POLL_INTERVAL_US,
+				 S5300_POLL_TIMEOUT_US);
+	if (ret)
+		dev_err(sm->dev,
+			"boot_stage stuck at %#x (want %#x, err_report %#x)\n",
+			val, target, readl(sm->msi + S5300_MSI_ERR_REPORT));
+	return ret;
 }
 
 /*
@@ -3030,16 +3029,14 @@ static void s5300_send_boot_image(struct s5300_modem *sm, size_t off,
 
 static int s5300_poll_cp_wakeup(struct s5300_modem *sm)
 {
-	int i;
+	int val, ret;
 
-	for (i = 0; i < S5300_POLL_COUNT; i++) {
-		if (gpiod_get_value_cansleep(sm->cp2ap_wakeup))
-			return 0;
-		msleep(S5300_POLL_INTERVAL_MS);
-	}
-
-	dev_err(sm->dev, "CP2AP_WAKEUP never asserted after the re-link\n");
-	return -ETIMEDOUT;
+	ret = read_poll_timeout(gpiod_get_value_cansleep, val, val,
+				S5300_POLL_INTERVAL_US, S5300_POLL_TIMEOUT_US,
+				false, sm->cp2ap_wakeup);
+	if (ret)
+		dev_err(sm->dev, "CP2AP_WAKEUP never asserted after the re-link\n");
+	return ret;
 }
 
 /*
@@ -3424,7 +3421,7 @@ static void *s5300_gunzip(struct s5300_modem *sm, const u8 *in, size_t in_size,
 	if (flg & 0x04) {			/* FEXTRA */
 		if (p + 2 > end)
 			return NULL;
-		p += 2 + (p[0] | (p[1] << 8));
+		p += 2 + get_unaligned_le16(p);
 	}
 	if (flg & 0x08)				/* FNAME (asciz) */
 		while (p < end && *p++)
