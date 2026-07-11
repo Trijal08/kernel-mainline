@@ -32,7 +32,6 @@
 #include <linux/completion.h>
 #include <linux/delay.h>
 #include <linux/firmware.h>
-#include <linux/fs.h>
 #include <linux/gpio/consumer.h>
 #include <linux/if_arp.h>
 #include <linux/if_ether.h>
@@ -40,7 +39,6 @@
 #include <linux/io.h>
 #include <linux/iopoll.h>
 #include <linux/list.h>
-#include <linux/miscdevice.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/netdevice.h>
@@ -50,12 +48,10 @@
 #include <linux/pci.h>
 #include <linux/pcie-zumapro.h>
 #include <linux/platform_device.h>
-#include <linux/poll.h>
 #include <linux/sizes.h>
 #include <linux/skbuff.h>
 #include <linux/slab.h>
 #include <linux/sprintf.h>
-#include <linux/uaccess.h>
 #include <linux/unaligned.h>
 #include <linux/wait.h>
 #include <linux/workqueue.h>
@@ -385,13 +381,12 @@
  * legacy FMT ring post-ONLINE -- same frame shape as the SIT control channel,
  * only the channel byte differs.  The CP streams UE-capability-config file
  * requests here; left unanswered its internal LTE-RRC message queue overflows
- * and the modem asserts (PAL_QUEUE_FULL).  A userspace daemon answers it via
- * /dev/umts_oem1.  Payloads are capped so header+payload+pad still fit one
- * ring slot with the circ one-slot gap; both FMT writers share the cap.
+ * and the modem asserts (PAL_QUEUE_FULL).  A userspace daemon answers it over
+ * the WWAN_PORT_OEM char port.  Payloads are capped so header+payload+pad still
+ * fit one ring slot with the circ one-slot gap; both FMT writers share the cap.
  */
 #define S5300_CH_OEM			0x82	/* EXYNOS_CH_ID_OEM_0 + 1 (oem_ipc1) */
 #define S5300_FMT_MAX			(S5300_FMT_TXQ_SIZE - S5300_SIT_HDR - 8)
-#define S5300_OEM_RXQ_MAX		64	/* bound the un-drained rx backlog */
 #define S5300_SIT_CH_BOOT		0xf1		/* EXYNOS_CH_ID_BOOT */
 #define S5300_DL_HDR			12
 #define S5300_DL_CHUNK			0xc000		/* 49152-byte payload cap */
@@ -418,24 +413,6 @@ struct s5300_rfs_file {
 };
 
 struct s5300_modem;
-
-/*
- * A generic cpif channel exposed as a misc chardev.  Received frames (link
- * header already stripped by the ring drain) are queued as skbs, one delivered
- * per read(); write() wraps one app message in the 12-byte EXYNOS link header
- * for @channel and pushes it onto the FMT transport ring.  The first (only)
- * user is oem_ipc1 (ch 0x82); the header is staged on the stack in the shared
- * s5300_fmt_ring_tx(), so no per-chardev tx buffer is needed.
- */
-struct s5300_chardev {
-	struct s5300_modem	*sm;
-	struct miscdevice	miscdev;
-	u8			channel;	/* EXYNOS channel id */
-	u8			ch_seq;		/* per-channel link-header seq */
-	u32			tx_max;		/* max app payload per frame */
-	struct sk_buff_head	rxq;		/* one skb per received frame */
-	wait_queue_head_t	read_wq;
-};
 
 struct s5300_modem {
 	struct device		*dev;
@@ -502,12 +479,13 @@ struct s5300_modem {
 	u8			fmt_ch_seq;	/* FMT per-channel sequence */
 
 	/*
-	 * OEM/GEMS channel (ch 0x82) on the FMT ring, exposed as /dev/umts_oem1.
+	 * OEM/GEMS channel (ch 0x82) on the FMT ring, a WWAN_PORT_OEM char port.
 	 * Both post-ONLINE FMT writers (SIT + oem) share tx_lock and fmt_frame_seq
 	 * via s5300_fmt_ring_tx(); fmt_tx_wq wakes a blocked oem writer when the CP
 	 * drains the txq and frees ring space.
 	 */
-	struct s5300_chardev	oem;
+	struct wwan_port	*oem_port;
+	u8			oem_ch_seq;	/* per-channel link-header seq */
 	wait_queue_head_t	fmt_tx_wq;
 	unsigned long		fmt_busy_until;	/* inhibit park during an FMT transfer (jiffies) */
 
@@ -1769,79 +1747,54 @@ static const struct wwan_port_ops s5300_ctrl_ops = {
 
 /* --- generic channel chardev (oem_ipc1 today) ---------------------------- */
 
-static int s5300_chardev_open(struct inode *inode, struct file *file)
+/*
+ * OEM/GEMS (ch 0x82) TX.  One write() is one app message that fills at most one
+ * FMT ring slot; a full ring maps to -EAGAIN.  The WWAN core hands the whole
+ * message as a single linear skb (default frag_len) and takes ownership only on
+ * success, so consume the skb when the send lands and return the error (the core
+ * frees it) otherwise -- the same contract as s5300_wwan_tx().
+ */
+static int s5300_oem_tx(struct wwan_port *port, struct sk_buff *skb)
 {
-	struct s5300_chardev *cd = container_of(file->private_data,
-						struct s5300_chardev, miscdev);
+	struct s5300_modem *sm = wwan_port_get_drvdata(port);
+	int ret;
 
-	file->private_data = cd;
+	if (!sm->online)
+		return -ENODEV;
+	if (skb->len > S5300_FMT_MAX)
+		return -EMSGSIZE;
+
+	ret = s5300_fmt_ring_tx(sm, S5300_CH_OEM, &sm->oem_ch_seq, S5300_FMT_MAX,
+				skb->data, skb->len);
+	if (ret == -EBUSY)
+		return -EAGAIN;
+	if (ret)
+		return ret;
+	consume_skb(skb);
 	return 0;
 }
 
-/* One read() returns exactly one received frame's payload (datagram-like). */
-static ssize_t s5300_chardev_read(struct file *file, char __user *buf,
-				  size_t count, loff_t *ppos)
-{
-	struct s5300_chardev *cd = file->private_data;
-	struct sk_buff *skb;
-	size_t n;
-
-	skb = skb_dequeue(&cd->rxq);
-	if (!skb) {
-		if (file->f_flags & O_NONBLOCK)
-			return -EAGAIN;
-		if (wait_event_interruptible(cd->read_wq,
-					     (skb = skb_dequeue(&cd->rxq))))
-			return -ERESTARTSYS;
-	}
-
-	n = min(count, (size_t)skb->len);
-	if (copy_to_user(buf, skb->data, n)) {
-		/* Keep the message for a retry rather than losing it. */
-		skb_queue_head(&cd->rxq, skb);
-		return -EFAULT;
-	}
-	kfree_skb(skb);
-	return n;
-}
-
 /*
- * One write() is one app message.  It fills at most one FMT ring slot, so on a
- * full ring (-EBUSY) block until the CP drains it (fmt_tx_wq, woken from the IRQ
- * handler) rather than dropping the frame; O_NONBLOCK maps that to -EAGAIN.
+ * Blocking TX: on a full ring block until the CP drains it (fmt_tx_wq, woken
+ * from the IRQ handler) rather than dropping the frame.  The retry overwrites
+ * @ret with the next send's status, so a positive wait return never leaks out.
  */
-static ssize_t s5300_chardev_write(struct file *file, const char __user *buf,
-				   size_t count, loff_t *ppos)
+static int s5300_oem_tx_blocking(struct wwan_port *port, struct sk_buff *skb)
 {
-	struct s5300_chardev *cd = file->private_data;
-	struct s5300_modem *sm = cd->sm;
-	u32 needed;
-	u8 *kbuf;
+	struct s5300_modem *sm = wwan_port_get_drvdata(port);
+	u32 needed = round_up(S5300_SIT_HDR + skb->len, 8);
 	int ret;
 
-	if (count == 0)
-		return 0;
-	if (count > cd->tx_max)
+	if (!sm->online)
+		return -ENODEV;
+	if (skb->len > S5300_FMT_MAX)
 		return -EMSGSIZE;
 
-	kbuf = kmalloc(count, GFP_KERNEL);
-	if (!kbuf)
-		return -ENOMEM;
-	if (copy_from_user(kbuf, buf, count)) {
-		kfree(kbuf);
-		return -EFAULT;
-	}
-
-	needed = round_up(S5300_SIT_HDR + count, 8);
 	for (;;) {
-		ret = s5300_fmt_ring_tx(sm, cd->channel, &cd->ch_seq, cd->tx_max,
-					kbuf, count);
+		ret = s5300_fmt_ring_tx(sm, S5300_CH_OEM, &sm->oem_ch_seq,
+					S5300_FMT_MAX, skb->data, skb->len);
 		if (ret != -EBUSY)
 			break;
-		if (file->f_flags & O_NONBLOCK) {
-			ret = -EAGAIN;
-			break;
-		}
 		ret = wait_event_interruptible_timeout(sm->fmt_tx_wq,
 				s5300_fmt_txq_space(sm) >= needed, HZ);
 		if (ret == 0)
@@ -1851,27 +1804,17 @@ static ssize_t s5300_chardev_write(struct file *file, const char __user *buf,
 		/* Space appeared; retry the send. */
 	}
 
-	kfree(kbuf);
-	return ret < 0 ? ret : (ssize_t)count;
+	if (ret)
+		return ret;
+	consume_skb(skb);
+	return 0;
 }
 
-static __poll_t s5300_chardev_poll(struct file *file, poll_table *wait)
-{
-	struct s5300_chardev *cd = file->private_data;
-	__poll_t mask = EPOLLOUT | EPOLLWRNORM;	/* TX backpressure lives in write() */
-
-	poll_wait(file, &cd->read_wq, wait);
-	if (!skb_queue_empty(&cd->rxq))
-		mask |= EPOLLIN | EPOLLRDNORM;
-	return mask;
-}
-
-static const struct file_operations s5300_chardev_fops = {
-	.owner		= THIS_MODULE,
-	.open		= s5300_chardev_open,
-	.read		= s5300_chardev_read,
-	.write		= s5300_chardev_write,
-	.poll		= s5300_chardev_poll,
+static const struct wwan_port_ops s5300_oem_ops = {
+	.start		= s5300_wwan_start,
+	.stop		= s5300_wwan_stop,
+	.tx		= s5300_oem_tx,
+	.tx_blocking	= s5300_oem_tx_blocking,
 };
 
 /*
@@ -2342,27 +2285,21 @@ static void s5300_drain_raw_rxq(struct s5300_modem *sm, u32 intval)
  * The backlog is bounded so a daemon that never opens the node cannot exhaust
  * memory -- excess frames are dropped (a draining daemon never hits this).
  */
-static void s5300_chardev_rx(struct s5300_chardev *cd, void __iomem *buff,
-			     u32 ringsize, u32 out, u32 payload)
+/*
+ * Copy one FMT payload (its link header already parsed) out of the rxq ring into
+ * an skb and hand it to @port.  Runs in the MSI hard-IRQ, so GFP_ATOMIC; a drop
+ * on OOM is harmless (the CP re-requests).  The WWAN core owns rxq backpressure.
+ */
+static void s5300_fmt_deliver(struct wwan_port *port, void __iomem *buff,
+			      u32 out, u32 payload)
 {
-	struct sk_buff *skb;
+	struct sk_buff *skb = alloc_skb(payload, GFP_ATOMIC);
 
-	if (skb_queue_len(&cd->rxq) >= S5300_OEM_RXQ_MAX) {
-		dev_warn_ratelimited(cd->sm->dev, "%s rxq full, dropping %u\n",
-				     cd->miscdev.name, payload);
+	if (!skb)
 		return;
-	}
-	skb = alloc_skb(payload, GFP_ATOMIC);
-	if (!skb) {
-		dev_warn_ratelimited(cd->sm->dev,
-				     "%s alloc_skb(%u) failed, dropping\n",
-				     cd->miscdev.name, payload);
-		return;
-	}
-	s5300_circ_read(skb_put(skb, payload), buff, ringsize,
-			(out + S5300_SIT_HDR) % ringsize, payload);
-	skb_queue_tail(&cd->rxq, skb);
-	wake_up_interruptible(&cd->read_wq);
+	s5300_circ_read(skb_put(skb, payload), buff, S5300_FMT_RXQ_SIZE,
+			(out + S5300_SIT_HDR) % S5300_FMT_RXQ_SIZE, payload);
+	wwan_port_rx(port, skb);
 }
 
 /*
@@ -2411,9 +2348,8 @@ static void s5300_drain_fmt_rxq(struct s5300_modem *sm, u32 intval)
 		plen = flen - S5300_SIT_HDR;
 
 		if (hdr[8] == S5300_CH_OEM) {
-			if (plen)
-				s5300_chardev_rx(&sm->oem, buff,
-						 S5300_FMT_RXQ_SIZE, out, plen);
+			if (sm->oem_port && plen)
+				s5300_fmt_deliver(sm->oem_port, buff, out, plen);
 			/*
 			 * The CP opened an oem transaction and expects a
 			 * (multi-frame) reply; keep the link up so it drains at L0.
@@ -2424,15 +2360,7 @@ static void s5300_drain_fmt_rxq(struct s5300_modem *sm, u32 intval)
 					     "fmt rxq drop unhandled ch %#x payload %u\n",
 					     hdr[8], plen);
 		} else if (sm->ctrl_port && plen) {
-			struct sk_buff *skb = alloc_skb(plen, GFP_ATOMIC);
-
-			if (skb) {
-				s5300_circ_read(skb_put(skb, plen), buff,
-						S5300_FMT_RXQ_SIZE,
-						(out + S5300_SIT_HDR) %
-							S5300_FMT_RXQ_SIZE, plen);
-				wwan_port_rx(sm->ctrl_port, skb);
-			}
+			s5300_fmt_deliver(sm->ctrl_port, buff, out, plen);
 		}
 		out = (out + total) % S5300_FMT_RXQ_SIZE;
 	}
@@ -2817,6 +2745,22 @@ static void s5300_online(struct s5300_modem *sm)
 	} else {
 		dev_info(sm->dev, "RFS file port up (umts_rfs0, ch %#x)\n",
 			 S5300_CH_RFS);
+	}
+
+	/*
+	 * The oem/GEMS channel (ch 0x82 on the FMT ring): post-ONLINE the CP streams
+	 * UE-capability-config file requests here and asserts if they go unanswered.
+	 * A userspace daemon answers them over this port; the kernel is transport only.
+	 */
+	sm->oem_port = wwan_create_port(sm->dev, WWAN_PORT_OEM, &s5300_oem_ops,
+					NULL, sm);
+	if (IS_ERR(sm->oem_port)) {
+		dev_err(sm->dev, "failed to create OEM port: %ld\n",
+			PTR_ERR(sm->oem_port));
+		sm->oem_port = NULL;
+	} else {
+		dev_info(sm->dev, "OEM/GEMS port up (oem_ipc1, ch %#x)\n",
+			 S5300_CH_OEM);
 	}
 
 	/*
@@ -4054,11 +3998,6 @@ static int s5300_probe(struct platform_device *pdev)
 	INIT_LIST_HEAD(&sm->rfs_rxq);
 	spin_lock_init(&sm->rfs_lock);
 	init_waitqueue_head(&sm->fmt_tx_wq);
-	sm->oem.sm = sm;
-	sm->oem.channel = S5300_CH_OEM;
-	sm->oem.tx_max = S5300_FMT_MAX;
-	skb_queue_head_init(&sm->oem.rxq);
-	init_waitqueue_head(&sm->oem.read_wq);
 	sm->link_up = true;	/* boot handshake rings directly; PM arms at ONLINE */
 	platform_set_drvdata(pdev, sm);
 
@@ -4374,29 +4313,11 @@ static int s5300_probe(struct platform_device *pdev)
 			dev_warn(dev, "CP2AP_PHONE_ACTIVE irq unavailable\n");
 	}
 
-	/*
-	 * The oem/GEMS channel (ch 0x82 on the FMT ring), exposed as /dev/umts_oem1
-	 * for the userspace daemon that answers the CP's UE-capability-config file
-	 * requests.  Registered up front; it only carries traffic once ONLINE.
-	 */
-	sm->oem.miscdev.minor = MISC_DYNAMIC_MINOR;
-	sm->oem.miscdev.name = "umts_oem1";
-	sm->oem.miscdev.fops = &s5300_chardev_fops;
-	sm->oem.miscdev.parent = dev;
-	ret = misc_register(&sm->oem.miscdev);
-	if (ret) {
-		dev_err(dev, "misc_register(oem): %d\n", ret);
-		goto err_cp_irq;
-	}
-
+	/* The oem/GEMS port (ch 0x82) comes up with the other CP channels at ONLINE. */
 	schedule_work(&sm->boot_work);
 
 	return 0;
 
-err_cp_irq:
-	if (sm->cp_active_irq >= 0)
-		free_irq(sm->cp_active_irq, sm);
-	free_irq(sm->cp2ap_irq, sm);
 err_rfs:
 	destroy_workqueue(sm->rfs_wq);
 err_wq:
@@ -4439,8 +4360,8 @@ static void s5300_remove(struct platform_device *pdev)
 	cancel_work_sync(&sm->rfs_work);
 	destroy_workqueue(sm->rfs_wq);
 	s5300_rfs_cleanup(sm);
-	misc_deregister(&sm->oem.miscdev);
-	skb_queue_purge(&sm->oem.rxq);
+	if (sm->oem_port)
+		wwan_remove_port(sm->oem_port);
 	if (sm->rfs_port)
 		wwan_remove_port(sm->rfs_port);
 	if (sm->ctrl_port)
