@@ -934,6 +934,14 @@ static irqreturn_t s5300_cp_active_irq(int irq, void *data)
 
 	if (up) {
 		dev_info(sm->dev, "CP2AP_PHONE_ACTIVE irq: level 1 (CP alive)\n");
+	} else if (!sm->online) {
+		/*
+		 * A falling edge before the CP has reached ONLINE is just the boot
+		 * reset (probe cold-cycles the CP, and the boot handshake bounces
+		 * the link) -- not a crash.  The MSI words would only show the
+		 * reset/mask-ROM state anyway.
+		 */
+		dev_info(sm->dev, "CP2AP_PHONE_ACTIVE irq: level 0 (CP resetting)\n");
 	} else {
 		/*
 		 * Post-mortem: the CP dies too hard to send CMD_CRASH_EXIT, but
