@@ -1,0 +1,42 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/soc/samsung/google,cp-pmic-spmi.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Google Exynos modem (CP) PMIC on SPMI
+
+maintainers:
+  - Trijal Saha <trijalsaha2012@gmail.com>
+
+description:
+  The Exynos modem (CP) PMIC, an SPMI slave.  It has no dedicated driver; the CP
+  power sequencer (google,exynos-cp-power) reaches it over SPMI to re-apply a
+  register patch after each CP PMIC reset.
+
+properties:
+  compatible:
+    const: google,cp-pmic-spmi
+
+  reg:
+    maxItems: 1
+
+required:
+  - compatible
+  - reg
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/spmi/spmi.h>
+
+    spmi {
+        #address-cells = <2>;
+        #size-cells = <0>;
+
+        pmic@0 {
+            compatible = "google,cp-pmic-spmi";
+            reg = <0 SPMI_USID>;
+        };
+    };
