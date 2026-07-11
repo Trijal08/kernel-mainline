@@ -361,6 +361,10 @@ static const struct {
 		.name = "RFS",
 		.devsuf = "rfs",
 	},
+	[WWAN_PORT_OEM] = {
+		.name = "OEM",
+		.devsuf = "oem",
+	},
 };
 
 static ssize_t type_show(struct device *dev, struct device_attribute *attr,
