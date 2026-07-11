@@ -152,6 +152,56 @@
 	};
 };
 
+/*
+ * KEPLER GNSS receiver on spi_21 (USI3_HSI0), per ../fdt.dts (gnssif + the
+ * spi@111E0000 gnss@0 child). The receiver is a companion of the CP: its
+ * firmware is staged into CP shared memory and booted by the modem, and this
+ * SPI bus is only the runtime host link.
+ *
+ * The bus pins are dedicated HSI0 signals - there is no HSI0 pin controller,
+ * so only the two handshake lines need muxing. The vendor tags both GPIOs
+ * GPIO_ACTIVE_LOW but drives and samples them with the legacy raw GPIO API,
+ * which ignores polarity; the lines are asserted high in hardware, so they are
+ * described active-high here.
+ */
+&spi_21 {
+	num-cs = <1>;
+
+	gnss@0 {
+		compatible = "samsung,kepler";
+		reg = <0>;
+		spi-max-frequency = <3125000>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&gnss_spi_irq &gnss_spi_int>;
+		/* GNSS2AP_SPI_INT on gpa5-4, the data-ready/ready interrupt */
+		gnss2ap-gpios = <&gpa5 4 GPIO_ACTIVE_HIGH>;
+		/* AP2GNSS_SPI_INT on gpp2-3, the host-ready line */
+		ap2gnss-gpios = <&gpp2 3 GPIO_ACTIVE_HIGH>;
+
+		controller-data {
+			samsung,spi-feedback-delay = <0>;
+		};
+	};
+};
+
+&pinctrl_far_alive {
+	gnss_spi_irq: gnss-spi-irq-pins {
+		samsung,pins = "gpa5-4";
+		samsung,pin-function = <GS101_PIN_FUNC_EINT>;
+		samsung,pin-pud = <GS101_PIN_PULL_DOWN>;
+		samsung,pin-drv = <GS101_PIN_DRV_2_5_MA>;
+	};
+};
+
+&pinctrl_peric0 {
+	gnss_spi_int: gnss-spi-int-pins {
+		samsung,pins = "gpp2-3";
+		samsung,pin-function = <GS101_PIN_FUNC_OUTPUT>;
+		samsung,pin-pud = <GS101_PIN_PULL_NONE>;
+		samsung,pin-drv = <GS101_PIN_DRV_2_5_MA>;
+	};
+};
+
 / {
 	reserved-memory {
 		/* CP IPC + boot-image staging (../fdt.dts cp_rmem) */
