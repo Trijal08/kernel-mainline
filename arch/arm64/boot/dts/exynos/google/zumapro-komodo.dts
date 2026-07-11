@@ -9,6 +9,7 @@
 
 #include "zumapro-pixel-common.dtsi"
 #include "zumapro-caimito-wireless.dtsi"
+#include <dt-bindings/spmi/spmi.h>
 
 / {
 	model = "Pixel 9 Pro XL";
@@ -100,20 +101,55 @@
 	pinctrl-0 = <&pcie0_clkreq &pcie0_perst>;
 	pinctrl-names = "default";
 	reset-gpios = <&gph0 0 GPIO_ACTIVE_HIGH>;	/* PERST (gph0-0) */
-	google,cp-pwr-gpios = <&gpp12 2 GPIO_ACTIVE_HIGH>;
-	google,cp-nreset-gpios = <&gpp12 3 GPIO_ACTIVE_HIGH>;
-	google,cp-pm-wrst-gpios = <&gpp8 3 GPIO_ACTIVE_HIGH>;
-	google,cp-wrst-gpios = <&gpp16 3 GPIO_ACTIVE_HIGH>;
+	/* AP2CP_WAKEUP: runtime PCIe link-request signal, owned by the RC. */
 	google,cp-wakeup-gpios = <&gpp16 0 GPIO_ACTIVE_HIGH>;
-	google,cp-pda-active-gpios = <&gpp16 2 GPIO_ACTIVE_HIGH>;
-	/* power_reset_warm_cp() companions (../fdt.dts gpio_ap2cp_dump_noti,
-	 * gpio_cp2ap_cp_wrst_n, s5910_bb clk/dat-gpio).  The PMIC pair is the
-	 * bit-banged SPMI bus to the CP PMIC (sid 0), patched after every
-	 * CP_PMIC_WRST toggle (warm_reset_seq 0x675=0xa1, 0x67d=0xbe). */
-	google,cp-dump-noti-gpios = <&gpp16 1 GPIO_ACTIVE_HIGH>;
-	google,cp2ap-cp-wrst-gpios = <&gpa7 3 GPIO_ACTIVE_HIGH>;
-	google,cp-pmic-clk-gpios = <&gpa3 2 GPIO_ACTIVE_HIGH>;
-	google,cp-pmic-dat-gpios = <&gpa3 3 GPIO_ACTIVE_HIGH>;
+	/* CP rails + CP PMIC/S5910 (SPMI) sequencing live in the cp-power node. */
+	google,cp-power = <&cp_power>;
+};
+
+/ {
+	/*
+	 * CP PMIC bit-banged SPMI bus (SCLK gpa3-2, SDATA gpa3-3): the CP PMIC
+	 * at SID 0 and the S5910 DCXO clock buffer at SID 5.
+	 */
+	spmi {
+		compatible = "google,bitbang-spmi-controller";
+		#address-cells = <2>;
+		#size-cells = <0>;
+		sclk-gpios = <&gpa3 2 GPIO_ACTIVE_HIGH>;
+		sdata-gpios = <&gpa3 3 GPIO_ACTIVE_HIGH>;
+		delay-us = <10>;
+
+		cp_pmic: pmic@0 {
+			compatible = "google,cp-pmic-spmi";
+			reg = <0 SPMI_USID>;
+		};
+
+		cp_s5910: s5910@5 {
+			compatible = "google,s5910-spmi";
+			reg = <5 SPMI_USID>;
+		};
+	};
+
+	/*
+	 * Exynos modem (CP) power/reset sequencer: owns the AP2CP rail GPIOs
+	 * (../fdt.dts gpio_ap2cp_*) and drives the CP PMIC + S5910 over SPMI.
+	 * The PCIe RC (&pcie_0) references it and delegates CP power/reset.
+	 * warm_reset_seq (0x675=0xa1, 0x67d=0xbe) and the S5910 on_seq are in
+	 * the driver.
+	 */
+	cp_power: cp-power {
+		compatible = "google,exynos-cp-power";
+		cp-pwr-gpios = <&gpp12 2 GPIO_ACTIVE_HIGH>;
+		cp-nreset-gpios = <&gpp12 3 GPIO_ACTIVE_HIGH>;
+		cp-pm-wrst-gpios = <&gpp8 3 GPIO_ACTIVE_HIGH>;
+		cp-wrst-gpios = <&gpp16 3 GPIO_ACTIVE_HIGH>;
+		cp-pda-active-gpios = <&gpp16 2 GPIO_ACTIVE_HIGH>;
+		cp-dump-noti-gpios = <&gpp16 1 GPIO_ACTIVE_HIGH>;
+		cp2ap-cp-wrst-gpios = <&gpa7 3 GPIO_ACTIVE_HIGH>;
+		google,cp-pmic = <&cp_pmic>;
+		google,cp-dcxo = <&cp_s5910>;
+	};
 };
 
 / {
