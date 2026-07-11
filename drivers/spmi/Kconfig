@@ -19,6 +19,18 @@ config SPMI_APPLE
 	  SPMI controller present on many Apple SoCs, including the
 	  t8103 (M1) and t600x (M1 Pro/Max).
 
+config SPMI_GOOGLE
+	tristate "Google GPIO bit-banged SPMI controller"
+	depends on GPIOLIB || COMPILE_TEST
+	help
+	  Enable support for a single-master SPMI bus bit-banged over two
+	  GPIOs (SCLK and SDATA).  This reaches a PMIC wired to a bare GPIO
+	  pair rather than a dedicated SPMI controller block, such as the
+	  Exynos modem CP PMIC on Tensor (gs/zuma) platforms.
+
+	  This driver can also be built as a module; if so, the module will
+	  be called spmi-google-controller.
+
 config SPMI_HISI3670
 	tristate "Hisilicon 3670 SPMI Controller"
 	select IRQ_DOMAIN_HIERARCHY
