@@ -231,6 +231,28 @@
 				regulator-ramp-delay = <6250>;
 				regulator-always-on;
 			};
+
+			/*
+			 * GNSS rails.  The receiver has no enable GPIO -- these
+			 * are its only power control, and it is held up whenever
+			 * the sub-PMIC is.  Left unconstrained on purpose: the
+			 * levels come from PMIC OTP and nothing should retune
+			 * them, so these only pin the rails on.
+			 */
+			s_ldo9_reg: ldo9s {
+				regulator-name = "vdd_gnss_core";
+				regulator-always-on;
+			};
+
+			s_ldo10_reg: ldo10s {
+				regulator-name = "vdd_gnss_rf";
+				regulator-always-on;
+			};
+
+			s_ldo11_reg: ldo11s {
+				regulator-name = "vdd_gnss_aux";
+				regulator-always-on;
+			};
 		};
 
 		s2mpg15_gpio: gpio {

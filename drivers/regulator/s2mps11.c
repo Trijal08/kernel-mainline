@@ -1796,6 +1796,12 @@ S2MPG10_VOLTAGE_RANGE(s2mpg15_buck, 1, 200000, 450000, 1300000, STEP_6_25_MV);
 /* voltage range for s2mpg15 LDO 1 */
 S2MPG10_VOLTAGE_RANGE(s2mpg15_ldo, 1, 300000, 700000, 1300000, STEP_12_5_MV);
 
+/* voltage range for s2mpg15 LDO 9 */
+S2MPG10_VOLTAGE_RANGE(s2mpg15_ldo, 9, 725000, 725000, 1512500, STEP_12_5_MV);
+
+/* voltage range for s2mpg15 LDO 10, 11 */
+S2MPG10_VOLTAGE_RANGE(s2mpg15_ldo, 10, 700000, 700000, 2275000, STEP_25_MV);
+
 #define regulator_desc_s2mpg14_buck(_num, _supply, _range) {		\
 	.name		= "buck"#_num"m",				\
 	.supply_name	= _supply,					\
@@ -1889,6 +1895,10 @@ static const struct regulator_desc s2mpg15_regulators[] = {
 	regulator_desc_s2mpg15_buck(11, "vinb11s", s2mpg15_buck_vranges1),
 	regulator_desc_s2mpg15_ldo(1, "vinl1s", s2mpg15_ldo_vranges1),
 	regulator_desc_s2mpg15_ldo(2, "vinl2s", s2mpg15_ldo_vranges1),
+	/* GNSS core, RF and aux rails */
+	regulator_desc_s2mpg15_ldo(9, "vinl9s", s2mpg15_ldo_vranges9),
+	regulator_desc_s2mpg15_ldo(10, "vinl10s", s2mpg15_ldo_vranges10),
+	regulator_desc_s2mpg15_ldo(11, "vinl11s", s2mpg15_ldo_vranges10),
 };
 
 static int s2mps14_pmic_enable_ext_control(struct s2mps11_info *s2mps11,
