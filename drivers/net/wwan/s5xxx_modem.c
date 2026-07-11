@@ -445,8 +445,6 @@ struct s5300_modem {
 	struct completion	init_done;
 	spinlock_t		lock;	/* orders ap2cp_msg word + doorbell */
 	bool			online;
-	bool			adopt;	/* live MAIN found at probe: no reset/boot */
-	bool			cold_cycled;	/* CP was rail-cycled this probe */
 
 	/*
 	 * CP-driven runtime PCIe power management (post-ONLINE): the CP parks its
@@ -765,78 +763,12 @@ static inline void s5300_fmt_mark_busy(struct s5300_modem *sm)
 }
 
 /*
- * Debug: when set, never park the runtime PCIe link -- keep it in L0 after
- * ONLINE even when the CP requests deep sleep.  Lets us test the FMT/RAW
- * control path (AT/SIT/RFS) with the link permanently up, isolating a
- * ring-servicing bug from the parked-CP GPIO wake handshake.
+ * AP capability part 0, advertised at INIT_START (vendor komodo value).  Bit 0
+ * (PKTPROC_UL) makes the CP DMA uplink from the UL pktproc rings and is the gate
+ * that arms MAIN's runtime IPC, so it is only valid because we publish valid
+ * DL/UL pktproc info regions; bit 1 is CH_EXTENSION.
  */
-static bool s5300_no_park;
-module_param_named(no_park, s5300_no_park, bool, 0644);
-MODULE_PARM_DESC(no_park, "keep the runtime PCIe link up (skip CP deep-sleep park)");
-
-/*
- * Debug: publish ds_det=1 so the CP runs deep-sleep link PM (default).  Set 0 to
- * leave ds_det clear so the CP never parks the runtime link -- isolates MAIN's
- * runtime-IPC arming from the (separately broken) parked-CP wake handshake.
- */
-static bool s5300_ds_det = true;
-module_param_named(ds_det, s5300_ds_det, bool, 0644);
-MODULE_PARM_DESC(ds_det, "publish ds_det=1 for CP deep-sleep link PM (0 = link stays up)");
-
-/*
- * AP capability part 0 advertised at INIT_START.  Vendor value is 0x3
- * (PKTPROC_UL|CH_EXTENSION, cpif_full.txt).  Bit0 PKTPROC_UL makes the CP DMA
- * uplink from the UL pktproc rings, so it is only safe once we publish a valid
- * UL info region (we do).  Knob so we can prove bit0 is the arming gate.
- */
-/*
- * Vendor komodo value: 0x3 (PKTPROC_UL|CH_EXTENSION, cpif_full.txt).  Proven
- * on-device together with pktproc=1: fresh boot to ONLINE, both legacy rings
- * serviced, AT round-trips, runtime park/wake cycles.  (The earlier deaths
- * this was suspected for were stale per-device NV/replay partition content.)
- */
-static uint s5300_ap_cap = 0x3;
-module_param_named(ap_cap, s5300_ap_cap, uint, 0644);
-MODULE_PARM_DESC(ap_cap, "AP capability[0] published at INIT_START (vendor 0x3)");
-
-/*
- * Master pktproc kill-switch.  pktproc=0 skips the DL desc fill and the DL/UL
- * info publishes regardless of ap_cap (pure legacy IPC, the tegu fallback
- * config).  Default ON: the vendor config is proven on-device with fresh
- * NV/replay partition content.
- */
-static bool s5300_pktproc = true;
-module_param_named(pktproc, s5300_pktproc, bool, 0644);
-MODULE_PARM_DESC(pktproc, "publish pktproc regions (0 = pure legacy IPC)");
-
-/*
- * adopt=0 forces a warm reset + fresh boot even when a live MAIN is found at
- * probe -- the way to get a clean IPC state (freshly initialised rings) on
- * demand from an otherwise-golden CP.
- */
-static bool s5300_allow_adopt = true;
-module_param_named(adopt, s5300_allow_adopt, bool, 0644);
-MODULE_PARM_DESC(adopt, "adopt a live MAIN at probe instead of resetting (default 1)");
-
-/*
- * cold_cycle DEFAULT 1: power-cycle the CP (s5910 + rails) back to its boot
- * ROM and download a fresh image.  This is the verified-working path (AT
- * returns OK after ONLINE) and the one autoload must take: on a real boot the
- * CP is in its boot ROM, not a live Gen3 endpoint, so there is nothing to
- * adopt.  The old belief that a reset+download always self-resets ~123 ms
- * after ONLINE was wrong -- the cause was AP2CP_PARTIAL_RST_N (gpp21-6) never
- * being driven high, which MAIN samples as "AP requests partial reset."  That
- * is now deasserted in s5300_boot_work() (s5300_drive_partial_rst), so a fresh
- * download survives.
- *
- * cold_cycle=0 skips the reset when a live MAIN already exists (Gen3 endpoint)
- * and ADOPTS it instead -- faster for developer warm reloads, but the ring
- * resync can surface stale buffered data on the first read, so it is not the
- * default.  Autoload never hits the adopt branch (boot-ROM CP is not Gen3).
- */
-static bool s5300_cold_cycle = true;
-module_param_named(cold_cycle, s5300_cold_cycle, bool, 0644);
-MODULE_PARM_DESC(cold_cycle, "full CP power cycle + fresh download (default 1); 0 = adopt a live MAIN");
+#define S5300_AP_CAP			0x3
 
 /*
  * True while the CP still owes us: any legacy txq (FMT or RAW) with head != tail
@@ -896,15 +828,6 @@ static void s5300_pm_work(struct work_struct *work)
 		} else {
 			dev_err(sm->dev, "CP wakeup: relink failed\n");
 		}
-	} else if (!want_up && sm->link_up && s5300_no_park) {
-		/*
-		 * Debug knob: the CP asked to park (CP2AP_WAKEUP low) but we keep the
-		 * link in L0 so MAIN stays serviceable.  Isolates "does the runtime
-		 * FMT/RAW ring path work with the link up?" from the parked-CP wake
-		 * handshake -- with no_park set, an AT write should get an OK without
-		 * any relink at all.
-		 */
-		dev_info(sm->dev, "no_park: CP requested park, keeping link up\n");
 	} else if (!want_up && sm->link_up) {
 		bool park;
 
@@ -1293,14 +1216,10 @@ static void s5300_init_control_messages(struct s5300_modem *sm)
 	writel(0, sm->ipc + S5300_IPC_AP2CP_MSG);
 	writel(0, sm->ipc + S5300_IPC_CP2AP_MSG);
 	/*
-	 * ds_det=1 (0x4000) tells the CP to run its deep-sleep link PM (park the
-	 * link when idle, cycle CP2AP_WAKEUP).  Debug knob s5300_ds_det=0 leaves it
-	 * clear so the CP keeps the runtime link permanently up -- lets us exercise
-	 * the FMT/RAW control path with no park/wake handshake at all (the wake is
-	 * separately broken), isolating whether MAIN arms its runtime IPC.
+	 * ds_det=1 (0x4000) tells the CP to run its deep-sleep link PM: park the
+	 * link when idle and ask for it back on CP2AP_WAKEUP (s5300_pm_work).
 	 */
-	writel(s5300_ds_det ? S5300_IPC_DS_DET : 0,
-	       sm->ipc + S5300_IPC_AP2CP_STATUS);
+	writel(S5300_IPC_DS_DET, sm->ipc + S5300_IPC_AP2CP_STATUS);
 	writel(0, sm->ipc + S5300_IPC_CP2AP_STATUS);
 	for (i = 0; i < S5300_IPC_CAP_WORDS; i++)
 		writel(0, sm->ipc + S5300_IPC_CAP_BASE + 4 * i);
@@ -1342,7 +1261,7 @@ static void s5300_init_control_messages(struct s5300_modem *sm)
 	 * DL at INIT_START, UL at PHONE_START.  Skipped entirely in ap_cap=0
 	 * (pure-legacy Steffen-mode) boots.
 	 */
-	if (s5300_pktproc && s5300_ap_cap)
+	if (sm->pktproc)
 		s5300_pktproc_fill_desc(sm);
 }
 
@@ -1506,9 +1425,9 @@ static void s5300_pktproc_publish_ul(struct s5300_modem *sm)
  */
 static void s5300_set_ap_capabilities(struct s5300_modem *sm)
 {
-	writel(s5300_ap_cap, sm->ipc + S5300_IPC_CAP_AP0);
+	writel(S5300_AP_CAP, sm->ipc + S5300_IPC_CAP_AP0);
 	writel(0, sm->ipc + S5300_IPC_CAP_AP1);
-	dev_info(sm->dev, "AP capability part0 %#x, CP part0 %#x\n", s5300_ap_cap,
+	dev_info(sm->dev, "AP capability part0 %#x, CP part0 %#x\n", S5300_AP_CAP,
 		 readl(sm->ipc + S5300_IPC_CAP_BASE + 0x4));
 }
 
@@ -1885,15 +1804,6 @@ static const struct wwan_port_ops s5300_rfs_ops = {
 	.tx	= s5300_rfs_port_tx,
 };
 
-/*
- * Answer the CP's RFS file reads (carrier config + NV) in the kernel instead of
- * forwarding /dev/wwan0rfs0 to a userspace daemon.  Default on; rfs_server=0
- * hands the port back to userspace.
- */
-static bool s5300_rfs_server = true;
-module_param_named(rfs_server, s5300_rfs_server, bool, 0644);
-MODULE_PARM_DESC(rfs_server, "answer the CP's RFS reads in-kernel (0 = /dev/wwan0rfs0)");
-
 /* One queued CP request, handed from the hard-IRQ demux to s5300_rfs_work. */
 struct s5300_rfs_frame {
 	struct list_head	node;
@@ -2231,7 +2141,7 @@ static void s5300_drain_raw_rxq(struct s5300_modem *sm, u32 intval)
 
 		if (ch == S5300_CH_RFS) {
 			had_raw = true;
-			if (s5300_rfs_server && plen <= S5300_RFS_MAX) {
+			if (plen <= S5300_RFS_MAX) {
 				/* Serve the request in-kernel, not via the port. */
 				s5300_rfs_enqueue(sm, buff,
 						  (out + S5300_SIT_HDR) %
@@ -2488,7 +2398,7 @@ static void s5300_pktproc_ul_activate(struct s5300_modem *sm)
 	sm->ul_done = 0;
 	writel(0, qinfo + 12);		/* fore_ptr (AP producer) */
 	writel(0, qinfo + 16);		/* rear_ptr (CP consumer) */
-	sm->ul_active = s5300_pktproc && (s5300_ap_cap & 0x1);
+	sm->ul_active = !!sm->pktproc;
 
 	dev_info(sm->dev, "pktproc UL %s: end_bit_owner=%u cp_quota=%u\n",
 		 sm->ul_active ? "active" : "provisioned (UL cap withheld)",
@@ -2625,7 +2535,7 @@ static void s5300_register_netdev(struct s5300_modem *sm)
 	struct net_device *ndev;
 	int ret;
 
-	if (!sm->pktproc || !s5300_pktproc || !s5300_ap_cap || sm->ndev)
+	if (!sm->pktproc || sm->ndev)
 		return;
 
 	ndev = alloc_netdev(sizeof(struct s5300_modem *), "rmnet%d",
@@ -2820,15 +2730,7 @@ static irqreturn_t s5300_irq_handler(int irq, void *data)
 	switch (cmd) {
 	case S5300_CMD_INIT_START:
 		dev_info(sm->dev, "CP INIT_START\n");
-		/*
-		 * ap_cap=0 is Steffen-mode pure legacy IPC (proven on tegu:
-		 * AT/SIT/RFS all ride the legacy rings, SMS works, no pktproc
-		 * at all).  The capability check tolerates a lesser AP
-		 * ((ap ^ cp) & ap == 0), so the CP falls back to legacy for
-		 * everything.  Isolates whether MAIN's pktproc engine reading
-		 * our DL/UL regions is what kills the CP ~125 ms after ONLINE.
-		 */
-		if (s5300_pktproc && s5300_ap_cap) {
+		if (sm->pktproc) {
 			s5300_pktproc_publish_dl(sm);
 			/*
 			 * Provision the UL geometry here too, before the AP
@@ -2838,8 +2740,7 @@ static irqreturn_t s5300_irq_handler(int irq, void *data)
 			 * doorbell, and it writes end_bit_owner/cp_quota afterwards
 			 * (read back at PHONE_START by ul_activate).
 			 */
-			if (s5300_ap_cap & 0x1)
-				s5300_pktproc_publish_ul(sm);
+			s5300_pktproc_publish_ul(sm);
 		}
 		s5300_set_ap_capabilities(sm);
 		s5300_send_ipc_irq(sm, S5300_CMD(S5300_CMD_PIF_INIT_DONE));
@@ -2853,7 +2754,7 @@ static irqreturn_t s5300_irq_handler(int irq, void *data)
 			 * UL geometry was published at INIT_START; here just read
 			 * back the CP-written end_bit_owner/cp_quota and enable TX.
 			 */
-			if (s5300_pktproc && (s5300_ap_cap & 0x1))
+			if (sm->pktproc)
 				s5300_pktproc_ul_activate(sm);
 			s5300_init_ipc_queues(sm);
 			sm->online = true;
@@ -3499,17 +3400,6 @@ static int s5300_download_main(struct s5300_modem *sm)
 		void *replay_buf = NULL;
 		void *rf_cfg_buf = NULL;
 
-		/*
-		 * Warm CP: it went ONLINE without draining the ring.  On a
-		 * cold-cycled boot this can only be a stale resident MAIN
-		 * (handshaked against the previous session's rings); keep
-		 * streaming so it restarts against ours.
-		 */
-		if (!sm->cold_cycled && completion_done(&sm->init_done)) {
-			dev_info(sm->dev, "CP online mid-boot; skipping download\n");
-			goto done;
-		}
-
 		if (d->replay)
 			replay_buf = s5300_build_replay(sm);
 
@@ -3652,34 +3542,9 @@ static void s5300_boot_work(struct work_struct *work)
 					      boot_work);
 	struct pci_dev *pdev = sm->pdev;
 	size_t bl1_size, btl_off, btl_size;
-	unsigned long flags;
 	int ret, i, attempt;
 
 	s5300_drive_partial_rst(sm);
-
-	if (sm->adopt) {
-		/*
-		 * Warm-reload / self-recovery adopt: MAIN is alive at Gen3 but
-		 * the AP and CP ring views are DESYNCED -- our head/tail are
-		 * stale (left at the previous session's download-era offsets),
-		 * MAIN has its own, so a fresh AT frame lands where MAIN is not
-		 * reading and the txq tail never advances.  Re-run the vendor
-		 * init_legacy_link (magic + zero every FMT/RAW head/tail) so
-		 * both sides restart the rings from 0, and clear the ctrl-msg
-		 * words, before exposing the ports.
-		 */
-		writel(0, sm->ipc + S5300_IPC_AP2CP_MSG);
-		writel(0, sm->ipc + S5300_IPC_CP2AP_MSG);
-		s5300_init_ipc_queues(sm);
-		spin_lock_irqsave(&sm->lock, flags);
-		sm->online = true;
-		sm->link_up = true;
-		spin_unlock_irqrestore(&sm->lock, flags);
-		complete_all(&sm->init_done);
-		dev_info(sm->dev, "adopted live MAIN (rings resynced)\n");
-		s5300_online(sm);
-		return;
-	}
 
 	for (attempt = 0; ; attempt++) {
 		/*
@@ -3825,30 +3690,15 @@ static void s5300_boot_work(struct work_struct *work)
 	s5300_send_doorbell(sm, S5300_DB_LINK_ACK);
 
 	/*
-	 * Warm CP: the warm reset preserved the CP's self-powered DRAM, so MAIN
-	 * is resident.  Like the vendor, the bootloader just re-runs it and
-	 * raises INIT_START on its own -- no download at all.  Wait for that.
-	 *
-	 * But never after a cold cycle.  The CP's DDR is self-powered, so a
-	 * stale MAIN survives even a rail cycle and the bootloader happily
-	 * re-runs it -- an instance that handshaked against the PREVIOUS
-	 * session's rings.  It drains our txq and answers nothing (an AT write
-	 * is consumed, no reply).  A cold cycle must always re-stream MAIN so
-	 * it re-runs INIT_START/PHONE_START against the rings we just cleared.
+	 * The CP's DDR is self-powered, so a stale MAIN survives even the rail
+	 * cycle and the bootloader happily re-runs it -- an instance that
+	 * handshaked against the PREVIOUS session's rings.  It would drain our
+	 * txq and answer nothing (an AT write is consumed, no reply).  So drop
+	 * any handshake it raised mid-boot and always re-stream MAIN, so it
+	 * re-runs INIT_START/PHONE_START against the rings we just cleared.
 	 */
-	if (!sm->cold_cycled) {
-		dev_info(sm->dev, "link re-established; waiting for resident MAIN\n");
-		if (wait_for_completion_timeout(&sm->init_done, 5 * HZ)) {
-			release_firmware(sm->pbl);
-			sm->pbl = NULL;
-			goto online;
-		}
-	} else {
-		/* Drop any handshake a stale resident MAIN raised mid-boot. */
-		reinit_completion(&sm->init_done);
-		dev_info(sm->dev,
-			 "cold cycle: forcing a fresh MAIN download\n");
-	}
+	reinit_completion(&sm->init_done);
+	dev_info(sm->dev, "forcing a fresh MAIN download\n");
 
 	/*
 	 * Cold CP (MAIN not resident -- e.g. first boot after a full CP power
@@ -3930,7 +3780,6 @@ static void s5300_boot_work(struct work_struct *work)
 		return;
 	}
 
-online:
 	dev_info(sm->dev, "CP is ONLINE\n");
 	s5300_online(sm);
 	return;
@@ -3981,7 +3830,7 @@ static int s5300_probe(struct platform_device *pdev)
 	struct device_node *rc_node;
 	struct s5300_modem *sm;
 	const char *fw_name;
-	u16 cmd, lnksta;
+	u16 cmd;
 	int ret;
 
 	sm = devm_kzalloc(dev, sizeof(*sm), GFP_KERNEL);
@@ -4102,51 +3951,18 @@ static int s5300_probe(struct platform_device *pdev)
 	dev_info(dev, "CP endpoint %s\n", pci_name(sm->pdev));
 
 	/*
-	 * A live MAIN (Gen3 endpoint) is ADOPTED, not reset: the light warm
-	 * reset does not take against a running MAIN (its link re-trains at
-	 * Gen3 x2 and BL1 lands on deaf ears, boot_stage stuck at 0), the SPMI
-	 * patches collide with the CP's own bus traffic (arbitration loses vs
-	 * the live master), and killing a working modem on a module reload is
-	 * the wrong trade anyway.  Everything else -- parked link, dead CP,
-	 * boot ROM at Gen1 -- goes through the parked-aware warm reset, so a
-	 * reload is a cold boot exactly when it has to be.
+	 * FULL CP power cycle (vendor gpio_power_offon_cp): genuinely powers the
+	 * CP down and up so a crashed / self-reset MAIN is back in its boot ROM,
+	 * then stream a fresh image.  A warm reset (CP_WRST pulse) cannot stop a
+	 * running MAIN -- the fresh download then lands on it and wedges at
+	 * INIT_START -- so the power cycle is the only path that always works,
+	 * and it is what autoload needs anyway (on a real boot the CP is in its
+	 * boot ROM, not a live endpoint).  The power cycle includes the relink,
+	 * so there is no separate warm reset here.
 	 */
-	if (s5300_cold_cycle) {
-		/*
-		 * FULL CP power cycle (vendor gpio_power_offon_cp): genuinely
-		 * powers the CP down and up so a crashed / self-reset MAIN is
-		 * back in its boot ROM.  A warm reset (CP_WRST pulse) cannot
-		 * stop a running MAIN -- the fresh download then lands on it and
-		 * wedges at INIT_START -- which is why cold_cycle uses this, not
-		 * modem_reset.  The power cycle includes the relink, so there is
-		 * no separate warm reset here.
-		 */
-		ret = zumapro_pcie_modem_power_cycle(sm->rc_dev);
-		if (ret)
-			dev_warn(dev, "CP power cycle: no link (%d); continuing\n",
-				 ret);
-		sm->cold_cycled = true;
-	} else {
-		/*
-		 * A live MAIN (Gen3 endpoint after a bare reload) is adopted;
-		 * anything else (parked, Gen1 boot ROM) gets the warm reset.
-		 * Config-space read, not the pci-exynos helper, so the module
-		 * needs no symbol the flashed kernel might lack; a parked link
-		 * reads all-ones and falls through to the reset.
-		 */
-		pcie_capability_read_word(sm->pdev, PCI_EXP_LNKSTA, &lnksta);
-		if (s5300_allow_adopt && lnksta != 0xffff &&
-		    (lnksta & PCI_EXP_LNKSTA_CLS) == PCI_EXP_LNKSTA_CLS_8_0GB) {
-			dev_info(dev, "live MAIN (Gen3 link); adopting\n");
-			sm->adopt = true;
-		} else {
-			dev_info(dev, "CP LNKSTA %#x; warm-resetting\n", lnksta);
-			ret = zumapro_pcie_modem_reset(sm->rc_dev);
-			if (ret)
-				dev_warn(dev, "CP warm reset: no link (%d)\n",
-					 ret);
-		}
-	}
+	ret = zumapro_pcie_modem_power_cycle(sm->rc_dev);
+	if (ret)
+		dev_warn(dev, "CP power cycle: no link (%d); continuing\n", ret);
 
 	/*
 	 * Downstream keeps every form of link PM off for the whole CP boot
