@@ -65,4 +65,17 @@ config GNSS_USB
 
 	  If unsure, say N.
 
+config GNSS_KEPLER
+	tristate "Samsung KEPLER GNSS receiver support"
+	depends on SPI
+	help
+	  Say Y here if you have a Samsung "KEPLER" GNSS receiver, the GNSS
+	  companion of the Exynos CP (baseband) on Google Tensor boards. It is
+	  reached over a dedicated SPI bus with a two-wire ready handshake.
+
+	  To compile this driver as a module, choose M here: the module will
+	  be called gnss-kepler.
+
+	  If unsure, say N.
+
 endif # GNSS
