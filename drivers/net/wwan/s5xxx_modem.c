@@ -56,7 +56,6 @@
 #include <linux/wait.h>
 #include <linux/workqueue.h>
 #include <linux/wwan.h>
-#include <linux/zlib.h>
 
 #define S5300_PCI_VENDOR_ID		0x144d
 #define S5300_PCI_DEVICE_ID		0xa5a5
@@ -217,31 +216,32 @@
 #define S5300_HANDOVER_SIZE		161
 #define S5300_HANDOVER_FW		"google/s5400/cp_handover.bin"
 /*
- * The handover block is assembled entirely from device sources so nothing
- * device-specific is staged as a blob and it works on any caimito s5400 device:
- * the HW/RF config words (bytes 0..63) are derived from androidboot.cdt_hwid
- * (bootloader-provided, read from /proc/bootconfig) plus a hardware_config.json
- * row, exactly the way the vendor cbd does it; the two IMEIs (bytes 64..95) come
- * from the bootloader-populated /chosen/config; and the 64-byte CP signature
- * (bytes 96..159) from the cpsha file (a trailing NUL completes cpsig[65]).
- * cp_handover.bin is the fallback if any source is unavailable.
+ * The handover block is assembled at runtime rather than staged whole, so the
+ * per-unit secrets never sit in an image: the HW/RF config words (bytes 0..63)
+ * come from the resolved hwcfg digest (struct s5300_hwcfg), the two IMEIs (bytes
+ * 64..95) from the bootloader-populated /chosen/config, and the 64-byte CP
+ * signature (bytes 96..159) from the cpsha file (a trailing NUL completes
+ * cpsig[65]).  cp_handover.bin is the fallback if any source is unavailable.
  */
 #define S5300_HANDOVER_IMEI_OFS		64
 #define S5300_HANDOVER_CPSIG_OFS	96
 #define S5300_CPSHA_FW			"google/s5400/persist/modem/cpsha"
 /*
- * RF_CFG auto-selection.  The modem image directory holds one RF_CFG_<sha1> per
- * HW/RF variant plus hardware_config.json, which maps a set of identifiers to
- * the right file.  Those identifiers are exactly the ones the handover block
- * already carries -- json rfid = handover rf_config, hwinfo = revision, and
- * rf_sub/rf_sku(=modem_sku)/modem_hw/major/minor verbatim -- so we read them
- * back from the staged block and pick the file (verified on-device: rf_config
- * 225 / revision 321 -> RF_CFG_ea3a795e...).  Falls back to a pre-staged
- * rf_cfg.bin if the block or the json is absent.
+ * Everything the CP needs beyond modem.bin is staged under a fixed name and
+ * prepared outside the kernel: the resolved HW/RF identifiers (hwcfg.bin, see
+ * struct s5300_hwcfg), the RF calibration image picked for this unit and already
+ * decompressed (rf_cfg.bin), and the replay archive packed from the live
+ * modem_userdata (replay_region.bin).  Selecting, decompressing and packing
+ * those is not a kernel's job -- it just loads them.
+ *
+ * NOTE: MAIN rejects a STALE replay archive and then self-disables a few seconds
+ * after ONLINE without ever servicing the IPC rings, so whatever stages
+ * replay_region.bin must repack it from the live modem_userdata, not ship a
+ * build-time copy that can go stale.
  */
-#define S5300_RF_CFG_DIR		"google/s5400/modem/images/default"
-#define S5300_HWCFG_FW			S5300_RF_CFG_DIR "/hardware_config.json"
-#define S5300_RF_CFG_FALLBACK		"google/s5400/rf_cfg.bin"
+#define S5300_HWCFG_FW			"google/s5400/hwcfg.bin"
+#define S5300_RF_CFG_FW			"google/s5400/rf_cfg.bin"
+#define S5300_REPLAY_FW			"google/s5400/replay_region.bin"
 /*
  * ap2cp_united_status ds_det field (downstream sbi_ds_det_pos=14, mask 0x3;
  * get_ds_detect() returns 1 on this device, so the live modem reads 0x4000).
@@ -960,214 +960,84 @@ static irqreturn_t s5300_cp_active_irq(int irq, void *data)
 static void s5300_pktproc_fill_desc(struct s5300_modem *sm);
 
 /*
- * Parse the decimal value of "key" within the JSON object bytes [start,end).
- * Returns 0 + *out, or -ENOENT when the key is absent.  Deliberately minimal --
- * hardware_config.json is a small machine-generated file, not arbitrary JSON, so
- * a targeted scan beats dragging a parser into the kernel.
+ * Resolved hardware configuration, staged as firmware.  The bootloader's CDT
+ * identifiers and the vendor's RF config table are reduced to this fixed digest
+ * at image-build time, so neither a CDT parse nor a config-table parser has to
+ * live in the kernel.  No per-unit secrets are in here: the IMEIs still come
+ * from /chosen/config and the CP signature from the cpsha firmware, both read at
+ * runtime.
  */
-static int s5300_json_uint(const char *start, const char *end,
-			   const char *key, u32 *out)
-{
-	char pat[16];
-	const char *p;
-	u32 v = 0;
+#define S5300_HWCFG_MAGIC		0x57483553	/* "S5HW" */
+#define S5300_HWCFG_VERSION		1
 
-	scnprintf(pat, sizeof(pat), "\"%s\"", key);
-	p = strnstr(start, pat, end - start);
-	if (!p)
-		return -ENOENT;
-	for (p += strlen(pat); p < end && *p != ':'; p++)
-		;
-	for (p++; p < end && (*p == ' ' || *p == '\t'); p++)
-		;
-	if (p >= end || *p < '0' || *p > '9')
-		return -ENOENT;
-	for (; p < end && *p >= '0' && *p <= '9'; p++)
-		v = v * 10 + (*p - '0');
-	*out = v;
-	return 0;
-}
-
-/*
- * The CDT (Configuration Data Table) fields the bootloader packs into
- * androidboot.cdt_hwid.  cbd parses the hex string by fixed nibble widths and
- * matches a hardware_config.json row on platform/product +
- * stage(=board)/major/minor/rf_sku/rf_sub/modem_hw; that row yields rfid (->
- * rf_config) and hwinfo (-> revision) and the RF_CFG file.
- */
-struct s5300_cdt {
-	u32 platform, product, board, major, minor, variant, rf_sku, modem_hw, rf_sub;
+struct s5300_hwcfg {
+	__le32	magic;
+	__le32	version;
+	__le32	platform;
+	__le32	revision;	/* vendor config-table "hwinfo" */
+	__le32	major;
+	__le32	minor;
+	__le32	rf_sku;		/* CDT modem_sku */
+	__le32	modem_hw;
+	__le32	rf_sub;
+	__le32	rf_config;	/* vendor config-table "rfid" */
+	__le32	product;
+	__le32	board;		/* CDT stage */
+	__le32	variant;
 };
 
-/*
- * cdt_hwid: the bootloader-provided androidboot.cdt_hwid, forwarded in as a
- * module param -- via bootconfig (a kernel.s5xxx_modem.cdt_hwid entry, which the
- * kernel renders onto the cmdline) or by userspace out of /proc/bootconfig.  A
- * module cannot read bootconfig itself (xbc_* is __init-only) and reading
- * /proc from a driver is an upstream no-no, so the value comes in as a param and
- * the parse + hardware_config.json lookup (cbd's scan_cdt_property_data) stay
- * in-kernel.  Empty -> the driver falls back to a staged cp_handover.bin.
- */
-static char *s5300_cdt_hwid;
-module_param_named(cdt_hwid, s5300_cdt_hwid, charp, 0444);
-MODULE_PARM_DESC(cdt_hwid, "androidboot.cdt_hwid for the auto-built handover block");
-
-/* Parse cdt_hwid the way cbd's scan_cdt_property_data() does (fixed nibbles). */
-static int s5300_parse_cdt_hwid(struct s5300_cdt *cdt)
+static int s5300_load_hwcfg(struct s5300_modem *sm, struct s5300_hwcfg *cfg)
 {
-	if (!s5300_cdt_hwid || !*s5300_cdt_hwid)
-		return -ENODATA;
-	if (sscanf(s5300_cdt_hwid, "0x%4x%2x%2x%4x%2x%2x%2x%2x%4x",
-		   &cdt->platform, &cdt->product, &cdt->board, &cdt->major,
-		   &cdt->minor, &cdt->variant, &cdt->rf_sku, &cdt->modem_hw,
-		   &cdt->rf_sub) != 9)
+	const struct firmware *fw;
+	int ret;
+
+	ret = request_firmware_direct(&fw, S5300_HWCFG_FW, sm->dev);
+	if (ret)
+		return ret;
+
+	if (fw->size != sizeof(*cfg)) {
+		dev_warn(sm->dev, "%s is %zu bytes, want %zu\n", S5300_HWCFG_FW,
+			 fw->size, sizeof(*cfg));
+		release_firmware(fw);
 		return -EINVAL;
+	}
+	memcpy(cfg, fw->data, sizeof(*cfg));
+	release_firmware(fw);
+
+	if (le32_to_cpu(cfg->magic) != S5300_HWCFG_MAGIC ||
+	    le32_to_cpu(cfg->version) != S5300_HWCFG_VERSION) {
+		dev_warn(sm->dev, "%s: bad magic/version\n", S5300_HWCFG_FW);
+		return -EINVAL;
+	}
 	return 0;
 }
 
-/*
- * Scan one configurations[] entry's config_table rows (bounded by [entry,lim))
- * for the match; on the matching row fill rfid (-> rf_config), hwinfo (->
- * revision) and the RF_CFG basename (config_file is an absolute vendor path).
- * Returns 0 on match, -ENOENT otherwise.
- */
-static int s5300_hwcfg_row(const char *entry, const char *lim,
-			   const struct s5300_cdt *cdt, u32 *rfid, u32 *hwinfo,
-			   char *rf_cfg, size_t rf_cfg_sz)
-{
-	const char *r = entry;
-
-	while ((r = strnstr(r, "\"config_file\"", lim - r))) {
-		const char *objend = strnstr(r, "}", lim - r);
-		const char *v, *name, *base, *s;
-		u32 stage, major, minor, rf_sku, rf_sub, modem_hw;
-
-		if (!objend)
-			break;
-		if (s5300_json_uint(r, objend, "stage", &stage) ||
-		    s5300_json_uint(r, objend, "major", &major) ||
-		    s5300_json_uint(r, objend, "minor", &minor) ||
-		    s5300_json_uint(r, objend, "rf_sku", &rf_sku) ||
-		    s5300_json_uint(r, objend, "rf_sub", &rf_sub) ||
-		    s5300_json_uint(r, objend, "modem_hw", &modem_hw) ||
-		    stage != cdt->board || major != cdt->major ||
-		    minor != cdt->minor || rf_sku != cdt->rf_sku ||
-		    rf_sub != cdt->rf_sub || modem_hw != cdt->modem_hw ||
-		    s5300_json_uint(r, objend, "rfid", rfid) ||
-		    s5300_json_uint(r, objend, "hwinfo", hwinfo)) {
-			r = objend + 1;
-			continue;
-		}
-		v = strchr(r, ':');
-		if (v && v < objend)
-			v = strchr(v, '"');
-		if (!v || v >= objend)
-			break;
-		for (name = ++v; v < objend && *v != '"'; v++)
-			;
-		for (base = name, s = name; s < v; s++)
-			if (*s == '/')
-				base = s + 1;
-		scnprintf(rf_cfg, rf_cfg_sz, "%.*s", (int)(v - base), base);
-		return 0;
-	}
-	return -ENOENT;
-}
-
-/*
- * Match this device's hardware_config.json row from the parsed CDT and hand back
- * rfid (-> rf_config), hwinfo (-> revision) and the RF_CFG basename.  Mirrors
- * cbd: pick the configurations[] entry on (platform, product), then the
- * config_table row on (stage=board, major, minor, rf_sku, rf_sub, modem_hw).
- */
-static int s5300_hwcfg_lookup(struct s5300_modem *sm, const struct s5300_cdt *cdt,
-			      u32 *rfid, u32 *hwinfo, char *rf_cfg, size_t rf_cfg_sz)
-{
-	const struct firmware *json;
-	char *buf, *entry, *bufend;
-	int ret = -ENOENT;
-
-	if (request_firmware_direct(&json, S5300_HWCFG_FW, sm->dev))
-		return -ENOENT;
-	buf = kvmalloc(json->size + 1, GFP_KERNEL);
-	if (!buf) {
-		release_firmware(json);
-		return -ENOMEM;
-	}
-	memcpy(buf, json->data, json->size);
-	buf[json->size] = '\0';
-	release_firmware(json);
-	bufend = buf + strlen(buf);
-
-	entry = buf;
-	while ((entry = strstr(entry, "\"platform\""))) {
-		char *entry_end = strstr(entry + 10, "\"platform\"");
-		char *lim = entry_end ? entry_end : bufend;
-		u32 plat, prod;
-
-		if (!s5300_json_uint(entry, lim, "platform", &plat) &&
-		    !s5300_json_uint(entry, lim, "product", &prod) &&
-		    plat == cdt->platform && prod == cdt->product &&
-		    !s5300_hwcfg_row(entry, lim, cdt, rfid, hwinfo, rf_cfg,
-				     rf_cfg_sz)) {
-			ret = 0;
-			break;
-		}
-		if (!entry_end)
-			break;
-		entry = entry_end;
-	}
-	kvfree(buf);
-	return ret;
-}
-
-/* Parse the CDT hwid param, then resolve rfid/hwinfo/RF_CFG from the json. */
-static int s5300_resolve_hwcfg(struct s5300_modem *sm, struct s5300_cdt *cdt,
-			       u32 *rfid, u32 *hwinfo, char *rf_cfg, size_t sz)
-{
-	int ret = s5300_parse_cdt_hwid(cdt);
-
-	if (ret)
-		return ret;
-	return s5300_hwcfg_lookup(sm, cdt, rfid, hwinfo, rf_cfg, sz);
-}
-
-/*
- * Assemble the 161-byte t_handover_block_info MAIN reads (the vendor's
- * IOCTL_HANDOVER_BLOCK_INFO) entirely from device sources -- no staged blob,
- * works on any caimito s5400.  The HW/RF words come from androidboot.cdt_hwid +
- * a hardware_config.json row (exactly like cbd's update_handover_block_info),
- * the two IMEIs from /chosen/config, the CP signature from cpsha.  Returns 0 with
- * buf filled, or -errno if a source is missing (caller tries cp_handover.bin).
- */
 static int s5300_build_handover(struct s5300_modem *sm, u8 *buf)
 {
 	const struct firmware *sha;
 	struct device_node *cnode;
-	struct s5300_cdt cdt;
-	u32 rfid, hwinfo;
-	char rf_cfg[80];
+	struct s5300_hwcfg cfg;
 	const void *imei;
 	int ret, len;
 
-	ret = s5300_resolve_hwcfg(sm, &cdt, &rfid, &hwinfo, rf_cfg, sizeof(rf_cfg));
+	ret = s5300_load_hwcfg(sm, &cfg);
 	if (ret)
 		return ret;
 
 	memset(buf, 0, S5300_HANDOVER_SIZE);
-	put_unaligned_le32(1,            buf + 0);	/* version */
-	put_unaligned_le32(cdt.platform, buf + 4);	/* project_id */
-	put_unaligned_le32(hwinfo,       buf + 8);	/* revision (json hwinfo) */
-	put_unaligned_le32(cdt.major,    buf + 12);
-	put_unaligned_le32(cdt.minor,    buf + 16);
-	put_unaligned_le32(cdt.rf_sku,   buf + 20);	/* modem_sku */
-	put_unaligned_le32(cdt.modem_hw, buf + 24);
+	put_unaligned_le32(1, buf + 0);					/* version */
+	put_unaligned_le32(le32_to_cpu(cfg.platform),  buf + 4);	/* project_id */
+	put_unaligned_le32(le32_to_cpu(cfg.revision),  buf + 8);
+	put_unaligned_le32(le32_to_cpu(cfg.major),     buf + 12);
+	put_unaligned_le32(le32_to_cpu(cfg.minor),     buf + 16);
+	put_unaligned_le32(le32_to_cpu(cfg.rf_sku),    buf + 20);	/* modem_sku */
+	put_unaligned_le32(le32_to_cpu(cfg.modem_hw),  buf + 24);
 	/* cpinfo0..2 (28/32/36) are runtime flags; cbd left them 0 on this device */
-	put_unaligned_le32(cdt.rf_sub,   buf + 40);
-	put_unaligned_le32(rfid,         buf + 44);	/* rf_config (json rfid) */
-	put_unaligned_le32(cdt.product,  buf + 48);	/* reserved[0] */
-	put_unaligned_le32(cdt.board,    buf + 52);	/* reserved[1] (stage) */
-	put_unaligned_le32(cdt.variant,  buf + 56);	/* reserved[2] */
+	put_unaligned_le32(le32_to_cpu(cfg.rf_sub),    buf + 40);
+	put_unaligned_le32(le32_to_cpu(cfg.rf_config), buf + 44);
+	put_unaligned_le32(le32_to_cpu(cfg.product),   buf + 48);	/* reserved[0] */
+	put_unaligned_le32(le32_to_cpu(cfg.board),     buf + 52);	/* reserved[1] */
+	put_unaligned_le32(le32_to_cpu(cfg.variant),   buf + 56);	/* reserved[2] */
 	/* reserved[3] (60) = 0 */
 
 	cnode = of_find_node_by_path("/chosen/config");
@@ -1196,7 +1066,8 @@ static int s5300_build_handover(struct s5300_modem *sm, u8 *buf)
 
 	dev_info(sm->dev,
 		 "built handover: platform %u product %u revision %u rf_config %u\n",
-		 cdt.platform, cdt.product, hwinfo, rfid);
+		 le32_to_cpu(cfg.platform), le32_to_cpu(cfg.product),
+		 le32_to_cpu(cfg.revision), le32_to_cpu(cfg.rf_config));
 	return 0;
 }
 
@@ -3161,217 +3032,18 @@ static const struct s5300_dl_sec {
 	const char	*toc_name;	/* NULL = the raw TOC table */
 	const char	*fw_name;	/* non-NULL = request_firmware file */
 	bool		verify;		/* send the CRC-verify frame (MAIN) */
-	bool		replay;		/* build a FRESH replay tar (see below) */
-	bool		rf_cfg;		/* auto-select from hardware_config.json */
 } s5300_dl_secs[] = {
-	{ NULL,      NULL,                                            false },
-	{ "PSP",     NULL,                                            false },
-	{ "MAIN",    NULL,                                            true  },
-	{ "APM",     NULL,                                            false },
-	{ "VSS",     NULL,                                            false },
-	{ "DBGCORE", NULL,                                            false },
-	{ "RF_CFG",  NULL,                                            false, false, true },
-	{ "NV_NORM", "google/s5400/efs/nv_normal.bin",               false },
-	{ "NV_PROT", "google/s5400/efs/nv_protected.bin",            false },
-	/* fw_name is only the fallback if the fresh tar build fails. */
-	{ "REPLAY",  "google/s5400/modem_userdata/replay_region.bin", false,
-	  true },
+	{ NULL,      NULL,                                false },
+	{ "PSP",     NULL,                                false },
+	{ "MAIN",    NULL,                                true  },
+	{ "APM",     NULL,                                false },
+	{ "VSS",     NULL,                                false },
+	{ "DBGCORE", NULL,                                false },
+	{ "RF_CFG",  S5300_RF_CFG_FW,                     false },
+	{ "NV_NORM", "google/s5400/efs/nv_normal.bin",    false },
+	{ "NV_PROT", "google/s5400/efs/nv_protected.bin", false },
+	{ "REPLAY",  S5300_REPLAY_FW,                     false },
 };
-
-/*
- * REPLAY must be a FRESH tar of the live modem_userdata/replay files on every
- * boot -- MAIN rejects a stale archive and then self-disables a few seconds
- * after ONLINE without ever servicing the IPC rings (found the hard way; also
- * documented in cbd-lite).  Downstream cbd assembles it at each boot; mirror
- * that in-kernel from the live dds.bin so no boot-script step is needed.
- *
- * Archive layout, byte-verified against the stock cbd std_dl stream: one
- * GNU-tar member "replay/dds.bin" (mode 0666, uid/gid radio/system 1001/1000,
- * magic "ustar  \0", chksum "%06o\0 "), content at +512, zero-padded to the
- * 512 KiB TOC section size.
- */
-#define S5300_REPLAY_DDS_FW	"google/s5400/modem_userdata/replay/dds.bin"
-#define S5300_REPLAY_SIZE	0x80000
-
-static void *s5300_build_replay(struct s5300_modem *sm)
-{
-	const struct firmware *fw;
-	unsigned int sum = 0;
-	u8 *buf;
-	int i, ret;
-
-	ret = request_firmware(&fw, S5300_REPLAY_DDS_FW, sm->dev);
-	if (ret) {
-		dev_warn(sm->dev, "no %s (%d); using stale replay_region.bin\n",
-			 S5300_REPLAY_DDS_FW, ret);
-		return NULL;
-	}
-	if (fw->size > S5300_REPLAY_SIZE - 3 * 512) {
-		dev_warn(sm->dev, "dds.bin too large (%#zx)\n", fw->size);
-		release_firmware(fw);
-		return NULL;
-	}
-
-	buf = kvzalloc(S5300_REPLAY_SIZE, GFP_KERNEL);
-	if (!buf) {
-		release_firmware(fw);
-		return NULL;
-	}
-
-	memcpy(buf, "replay/dds.bin", 15);		/* name[100] */
-	memcpy(buf + 100, "0000666", 8);		/* mode */
-	memcpy(buf + 108, "0001751", 8);		/* uid: radio (1001) */
-	memcpy(buf + 116, "0001750", 8);		/* gid: system (1000) */
-	snprintf(buf + 124, 12, "%011zo", fw->size);	/* size */
-	snprintf(buf + 136, 12, "%011llo",		/* mtime: fresh */
-		 (unsigned long long)ktime_get_real_seconds());
-	memset(buf + 148, ' ', 8);			/* chksum: spaces */
-	buf[156] = '0';					/* typeflag: file */
-	memcpy(buf + 257, "ustar  ", 8);		/* magic+version */
-	memcpy(buf + 265, "radio", 6);			/* uname */
-	memcpy(buf + 297, "system", 7);			/* gname */
-
-	for (i = 0; i < 512; i++)
-		sum += buf[i];
-	snprintf(buf + 148, 8, "%06o", sum);		/* NUL lands at [154] */
-	buf[155] = ' ';
-
-	memcpy(buf + 512, fw->data, fw->size);
-	dev_info(sm->dev, "built fresh replay tar (dds.bin %#zx bytes)\n",
-		 fw->size);
-	release_firmware(fw);
-	return buf;
-}
-
-/*
- * One-shot gunzip of an in-memory blob into a fresh kvmalloc buffer (caller
- * kvfree).  The device modem partition stores RF_CFG_* gzipped and the kernel
- * firmware loader only auto-decompresses xz/zstd, so handle gzip here.  Mirrors
- * lib/decompress_inflate.c: strip the gzip header, then raw-inflate (the kernel
- * zlib_inflateInit2 rejects the +16 gzip window).  *out_size gets the length.
- */
-static void *s5300_gunzip(struct s5300_modem *sm, const u8 *in, size_t in_size,
-			  size_t *out_size)
-{
-	struct z_stream_s strm = {};
-	const u8 *p = in, *end = in + in_size;
-	u32 osize;
-	u8 flg;
-	void *out;
-	int rc;
-
-	if (in_size < 18 || in[0] != 0x1f || in[1] != 0x8b || in[2] != 0x08)
-		return NULL;			/* not a gzip/deflate stream */
-	flg = in[3];
-	p += 10;				/* fixed gzip header */
-	if (flg & 0x04) {			/* FEXTRA */
-		if (p + 2 > end)
-			return NULL;
-		p += 2 + get_unaligned_le16(p);
-	}
-	if (flg & 0x08)				/* FNAME (asciz) */
-		while (p < end && *p++)
-			;
-	if (flg & 0x10)				/* FCOMMENT (asciz) */
-		while (p < end && *p++)
-			;
-	if (flg & 0x02)				/* FHCRC */
-		p += 2;
-	if (p + 8 >= end)			/* deflate stream + 8-byte trailer */
-		return NULL;
-
-	osize = get_unaligned_le32(in + in_size - 4);	/* gzip ISIZE */
-	if (!osize || osize > 32 * 1024 * 1024)
-		return NULL;
-
-	strm.workspace = kvmalloc(zlib_inflate_workspacesize(), GFP_KERNEL);
-	if (!strm.workspace)
-		return NULL;
-	out = kvmalloc(osize, GFP_KERNEL);
-	if (!out) {
-		kvfree(strm.workspace);
-		return NULL;
-	}
-
-	strm.next_in = (u8 *)p;
-	strm.avail_in = end - 8 - p;		/* raw deflate, minus trailer */
-	strm.next_out = out;
-	strm.avail_out = osize;
-
-	rc = zlib_inflateInit2(&strm, -MAX_WBITS);	/* raw deflate */
-	if (rc == Z_OK)
-		rc = zlib_inflate(&strm, Z_FINISH);
-	zlib_inflateEnd(&strm);
-	kvfree(strm.workspace);
-
-	if (rc != Z_STREAM_END || strm.total_out != osize) {
-		dev_warn(sm->dev, "RF_CFG gunzip failed (rc %d, %lu/%u)\n",
-			 rc, strm.total_out, osize);
-		kvfree(out);
-		return NULL;
-	}
-	*out_size = osize;
-	return out;
-}
-
-/*
- * Load an RF_CFG image named fw_path into a fresh buffer (caller kvfree).  Tries
- * the name as-is first (raw, or xz/zst which the loader decompresses); if absent,
- * tries fw_path.gz and gunzips it -- the device modem partition ships RF_CFG_*
- * gzipped.
- */
-static int s5300_load_rf_cfg(struct s5300_modem *sm, const char *fw_path,
-			     void **out, size_t *outsz)
-{
-	const struct firmware *fw;
-	char gz[176];
-	void *buf;
-
-	if (request_firmware_direct(&fw, fw_path, sm->dev) == 0) {
-		buf = kvmalloc(fw->size, GFP_KERNEL);
-		if (buf) {
-			memcpy(buf, fw->data, fw->size);
-			*outsz = fw->size;
-			*out = buf;
-		}
-		release_firmware(fw);
-		return buf ? 0 : -ENOMEM;
-	}
-
-	scnprintf(gz, sizeof(gz), "%s.gz", fw_path);
-	if (request_firmware_direct(&fw, gz, sm->dev))
-		return -ENOENT;
-	buf = s5300_gunzip(sm, fw->data, fw->size, outsz);
-	release_firmware(fw);
-	if (!buf)
-		return -EIO;
-	*out = buf;
-	return 0;
-}
-
-/*
- * Pick this device's RF_CFG image, decompress it, and hand back a fresh buffer
- * in out/outsz (caller kvfree).  Uses the same cdt_hwid -> hardware_config.json
- * resolution as the handover build; the matched row's config_file basename is
- * loaded from S5300_RF_CFG_DIR.  Falls back to S5300_RF_CFG_FALLBACK on any miss.
- */
-static int s5300_select_rf_cfg(struct s5300_modem *sm, void **out, size_t *outsz)
-{
-	struct s5300_cdt cdt;
-	u32 rfid, hwinfo;
-	char rf_cfg[80], path[160];
-
-	if (s5300_resolve_hwcfg(sm, &cdt, &rfid, &hwinfo, rf_cfg,
-				sizeof(rf_cfg)) == 0 && rf_cfg[0]) {
-		scnprintf(path, sizeof(path), "%s/%s", S5300_RF_CFG_DIR, rf_cfg);
-		dev_info(sm->dev, "RF_CFG auto-selected %s (rfid=%u hwinfo=%u)\n",
-			 rf_cfg, rfid, hwinfo);
-		return s5300_load_rf_cfg(sm, path, out, outsz);
-	}
-	dev_warn(sm->dev, "RF_CFG auto-select failed; using %s\n",
-		 S5300_RF_CFG_FALLBACK);
-	return s5300_load_rf_cfg(sm, S5300_RF_CFG_FALLBACK, out, outsz);
-}
 
 static int s5300_download_main(struct s5300_modem *sm)
 {
@@ -3397,35 +3069,12 @@ static int s5300_download_main(struct s5300_modem *sm)
 		u32 crc = 0;
 		u8 tag = i + 1;		/* cbd's sequential stage nibble 1..7 */
 
-		void *replay_buf = NULL;
-		void *rf_cfg_buf = NULL;
-
-		if (d->replay)
-			replay_buf = s5300_build_replay(sm);
-
 		if (!d->toc_name) {
 			/* Stage 1: the raw TOC table (first record spans it). */
 			data = sm->pbl->data;
 			size = le32_to_cpu(toc[0].size);
-		} else if (replay_buf) {
-			/* REPLAY: freshly built tar (MAIN rejects a stale one). */
-			data = replay_buf;
-			size = S5300_REPLAY_SIZE;
-		} else if (d->rf_cfg) {
-			/*
-			 * RF_CFG: auto-selected via hardware_config.json, and
-			 * gunzipped -- the caller owns rf_cfg_buf (kvfree below).
-			 */
-			ret = s5300_select_rf_cfg(sm, &rf_cfg_buf, &size);
-			if (ret) {
-				dev_err(sm->dev,
-					"RF_CFG select failed (tag %u): %d\n",
-					tag, ret);
-				goto done;
-			}
-			data = rf_cfg_buf;
 		} else if (d->fw_name) {
-			/* NV (or replay fallback): a vendor partition file. */
+			/* RF_CFG / NV / REPLAY: a staged image. */
 			ret = request_firmware(&fw, d->fw_name, sm->dev);
 			if (ret) {
 				dev_err(sm->dev, "cold boot needs %s (tag %u): %d\n",
@@ -3447,8 +3096,6 @@ static int s5300_download_main(struct s5300_modem *sm)
 			 name, tag, size, d->verify ? ", CRC-verified" : "");
 		ret = s5300_dl_section(sm, scratch, tag, data, size,
 				       d->verify ? crc : 0);
-		kvfree(replay_buf);
-		kvfree(rf_cfg_buf);
 		if (fw)
 			release_firmware(fw);
 		if (ret == -EALREADY)
@@ -4237,19 +3884,14 @@ static struct platform_driver s5300_driver = {
 };
 module_platform_driver(s5300_driver);
 
-/*
- * Fixed-path firmware the driver loads.  The per-device handover block and the
- * RF_CFG_<sha1> image (chosen at runtime from hardware_config.json) have no
- * fixed name and are not declared here.
- */
+/* Firmware the driver loads; all of it is staged under a fixed name. */
 MODULE_FIRMWARE(S5300_HANDOVER_FW);
 MODULE_FIRMWARE(S5300_CPSHA_FW);
 MODULE_FIRMWARE(S5300_HWCFG_FW);
-MODULE_FIRMWARE(S5300_RF_CFG_FALLBACK);
+MODULE_FIRMWARE(S5300_RF_CFG_FW);
+MODULE_FIRMWARE(S5300_REPLAY_FW);
 MODULE_FIRMWARE("google/s5400/efs/nv_normal.bin");
 MODULE_FIRMWARE("google/s5400/efs/nv_protected.bin");
-MODULE_FIRMWARE("google/s5400/modem_userdata/replay_region.bin");
-MODULE_FIRMWARE(S5300_REPLAY_DDS_FW);
 
 MODULE_DESCRIPTION("Samsung Exynos Modem 5300 PCIe boot driver");
 MODULE_LICENSE("GPL");
