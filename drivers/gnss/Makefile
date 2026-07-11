@@ -20,3 +20,6 @@ gnss-ubx-y := ubx.o
 
 obj-$(CONFIG_GNSS_USB)			+= gnss-usb.o
 gnss-usb-y := usb.o
+
+obj-$(CONFIG_GNSS_KEPLER)		+= gnss-kepler.o
+gnss-kepler-y := kepler.o
