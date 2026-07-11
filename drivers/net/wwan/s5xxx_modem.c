@@ -1373,53 +1373,93 @@ static void s5300_circ_read(void *dst, void __iomem *buff, u32 size, u32 off,
 }
 
 /*
- * Frame a control message with the 12-byte exynos link header for channel @ch,
- * push it into the NORM_RAW TX ring and signal the CP (ap2cp_msg SEND_RAW +
- * doorbell).  Single-frame only -- control messages are well under 2 KB.
+ * The two SIT transport rings.  NORM_RAW carries the AT and RFS control
+ * channels (and the boot download); FMT carries the SIT control plane and the
+ * oem/GEMS channel.  Every single-frame writer funnels through s5300_ring_tx().
  */
-static int s5300_ipc_tx(struct s5300_modem *sm, u8 ch, const u8 *data, u32 len)
+struct s5300_txring {
+	u32	buff;		/* ring data window (ipc offset) */
+	u32	size;		/* ring size / wrap modulus */
+	u32	head;		/* AP producer index register */
+	u32	tail;		/* CP consumer index register */
+	u32	int_flag;	/* ap2cp_msg SEND_* bit to raise */
+};
+
+static const struct s5300_txring s5300_raw_txring = {
+	.buff = S5300_RAW_TXQ_BUFF, .size = S5300_RAW_TXQ_SIZE,
+	.head = S5300_RAW_TXQ_HEAD, .tail = S5300_RAW_TXQ_TAIL,
+	.int_flag = S5300_INT_SEND_RAW,
+};
+
+static const struct s5300_txring s5300_fmt_txring = {
+	.buff = S5300_FMT_TXQ_BUFF, .size = S5300_FMT_TXQ_SIZE,
+	.head = S5300_FMT_TXQ_HEAD, .tail = S5300_FMT_TXQ_TAIL,
+	.int_flag = S5300_INT_SEND_FMT,
+};
+
+/*
+ * Frame one app message with the 12-byte EXYNOS link header for channel @ch,
+ * push it into ring @r and signal the CP (ap2cp_msg SEND_* + doorbell).
+ * Single-frame only.  @frame_seq (shared per ring) and the head RMW are
+ * serialised by tx_lock; each caller owns its @ch_seq.  Returns @full_err on a
+ * full ring so the caller picks -EAGAIN (drop) or -EBUSY (wait and retry).
+ */
+static int s5300_ring_tx(struct s5300_modem *sm, const struct s5300_txring *r,
+			 u16 *frame_seq, u8 ch, u8 *ch_seq, u32 max,
+			 const u8 *data, u32 len, int full_err)
 {
 	u32 flen = ALIGN(S5300_SIT_HDR + len, 8);
-	void __iomem *buff = sm->ipc + S5300_RAW_TXQ_BUFF;
+	void __iomem *buff = sm->ipc + r->buff;
 	unsigned long flags;
 	u8 hdr[S5300_SIT_HDR];
 	u32 in, out;
 
-	if (S5300_SIT_HDR + len > 2048)
+	if (len == 0 || len > max)
 		return -EMSGSIZE;
 
 	spin_lock_irqsave(&sm->tx_lock, flags);
 
-	in = readl(sm->ipc + S5300_RAW_TXQ_HEAD);
-	out = readl(sm->ipc + S5300_RAW_TXQ_TAIL);
-	if (s5300_circ_space(S5300_RAW_TXQ_SIZE, in, out) < flen) {
+	in = readl(sm->ipc + r->head);
+	out = readl(sm->ipc + r->tail);
+	if (in >= r->size || out >= r->size) {
 		spin_unlock_irqrestore(&sm->tx_lock, flags);
-		return -EAGAIN;
+		dev_err_ratelimited(sm->dev, "txq ptr oob (in %#x out %#x)\n",
+				    in, out);
+		return -EIO;
+	}
+	if (s5300_circ_space(r->size, in, out) < flen) {
+		spin_unlock_irqrestore(&sm->tx_lock, flags);
+		return full_err;
 	}
 
 	put_unaligned_le16(S5300_SIT_SYNC, hdr + 0);
-	put_unaligned_le16(sm->frame_seq++, hdr + 2);
+	put_unaligned_le16((*frame_seq)++, hdr + 2);
 	put_unaligned_le16(S5300_SIT_CFG_SINGLE, hdr + 4);
 	put_unaligned_le16(S5300_SIT_HDR + len, hdr + 6);
 	hdr[8] = ch;
-	hdr[9] = ++sm->at_ch_seq;
+	hdr[9] = ++*ch_seq;
 	hdr[10] = 0;
 	hdr[11] = 0;
 
-	s5300_circ_write(buff, S5300_RAW_TXQ_SIZE, in, hdr, S5300_SIT_HDR);
-	s5300_circ_write(buff, S5300_RAW_TXQ_SIZE,
-			 (in + S5300_SIT_HDR) % S5300_RAW_TXQ_SIZE, data, len);
+	s5300_circ_write(buff, r->size, in, hdr, S5300_SIT_HDR);
+	s5300_circ_write(buff, r->size, (in + S5300_SIT_HDR) % r->size,
+			 data, len);
 	/* the CP polls the head; order the payload ahead of the advance */
 	dma_wmb();
-	writel((in + flen) % S5300_RAW_TXQ_SIZE, sm->ipc + S5300_RAW_TXQ_HEAD);
+	writel((in + flen) % r->size, sm->ipc + r->head);
 
 	spin_unlock_irqrestore(&sm->tx_lock, flags);
 
-	dev_info(sm->dev, "raw tx: ch %u len %u, txq head %#x->%#x tail %#x\n",
-		 ch, len, in, (in + flen) % S5300_RAW_TXQ_SIZE,
-		 readl(sm->ipc + S5300_RAW_TXQ_TAIL));
-	s5300_send_ipc_irq(sm, S5300_INT_VALID | S5300_INT_SEND_RAW);
+	s5300_send_ipc_irq(sm, S5300_INT_VALID | r->int_flag);
 	return 0;
+}
+
+/* AT / control channels on the NORM_RAW ring; also the boot handshake path. */
+static int s5300_ipc_tx(struct s5300_modem *sm, u8 ch, const u8 *data, u32 len)
+{
+	return s5300_ring_tx(sm, &s5300_raw_txring, &sm->frame_seq, ch,
+			     &sm->at_ch_seq, 2048 - S5300_SIT_HDR, data, len,
+			     -EAGAIN);
 }
 
 static int s5300_wwan_start(struct wwan_port *port)
@@ -1475,53 +1515,15 @@ static u32 s5300_fmt_txq_space(struct s5300_modem *sm)
 static int s5300_fmt_ring_tx(struct s5300_modem *sm, u8 ch, u8 *ch_seq,
 			     u32 max, const u8 *data, u32 len)
 {
-	u32 flen = ALIGN(S5300_SIT_HDR + len, 8);
-	void __iomem *buff = sm->ipc + S5300_FMT_TXQ_BUFF;
-	unsigned long flags;
-	u8 hdr[S5300_SIT_HDR];
-	u32 in, out;
+	int ret;
 
 	if (!READ_ONCE(sm->online))
 		return -ENODEV;
-	if (len == 0 || len > max)
-		return -EMSGSIZE;
-
-	spin_lock_irqsave(&sm->tx_lock, flags);
-
-	in = readl(sm->ipc + S5300_FMT_TXQ_HEAD);
-	out = readl(sm->ipc + S5300_FMT_TXQ_TAIL);
-	if (in >= S5300_FMT_TXQ_SIZE || out >= S5300_FMT_TXQ_SIZE) {
-		spin_unlock_irqrestore(&sm->tx_lock, flags);
-		dev_err_ratelimited(sm->dev, "fmt txq ptr oob (in %#x out %#x)\n",
-				    in, out);
-		return -EIO;
-	}
-	if (s5300_circ_space(S5300_FMT_TXQ_SIZE, in, out) < flen) {
-		spin_unlock_irqrestore(&sm->tx_lock, flags);
-		return -EBUSY;
-	}
-
-	put_unaligned_le16(S5300_SIT_SYNC, hdr + 0);
-	put_unaligned_le16(sm->fmt_frame_seq++, hdr + 2);
-	put_unaligned_le16(S5300_SIT_CFG_SINGLE, hdr + 4);
-	put_unaligned_le16(S5300_SIT_HDR + len, hdr + 6);
-	hdr[8] = ch;
-	hdr[9] = ++*ch_seq;
-	hdr[10] = 0;
-	hdr[11] = 0;
-
-	s5300_circ_write(buff, S5300_FMT_TXQ_SIZE, in, hdr, S5300_SIT_HDR);
-	s5300_circ_write(buff, S5300_FMT_TXQ_SIZE,
-			 (in + S5300_SIT_HDR) % S5300_FMT_TXQ_SIZE, data, len);
-	dma_wmb();
-	writel((in + flen) % S5300_FMT_TXQ_SIZE, sm->ipc + S5300_FMT_TXQ_HEAD);
-
-	spin_unlock_irqrestore(&sm->tx_lock, flags);
-
-	s5300_send_ipc_irq(sm, S5300_INT_VALID | S5300_INT_SEND_FMT);
-	/* Keep the link up while a multi-frame FMT transfer is in flight. */
-	s5300_fmt_mark_busy(sm);
-	return 0;
+	ret = s5300_ring_tx(sm, &s5300_fmt_txring, &sm->fmt_frame_seq, ch,
+			    ch_seq, max, data, len, -EBUSY);
+	if (!ret)
+		s5300_fmt_mark_busy(sm);	/* keep the link up during the transfer */
+	return ret;
 }
 
 static int s5300_ctrl_tx(struct wwan_port *port, struct sk_buff *skb)
@@ -1615,52 +1617,11 @@ static const struct wwan_port_ops s5300_oem_ops = {
 	.tx_blocking	= s5300_oem_tx_blocking,
 };
 
-/*
- * Frame an RFS file message onto the NORM_RAW ring (ch 0x29) and ring the RAW
- * data doorbell (SEND_RAW).  Mirrors s5300_ipc_tx() but with the RFS channel id
- * and its own per-channel sequence; the boot std_dl writer is quiescent
- * post-ONLINE so the ring is ours.
- */
+/* RFS file channel (ch 0x29) on the NORM_RAW ring, its own per-channel seq. */
 static int s5300_rfs_tx(struct s5300_modem *sm, const u8 *data, u32 len)
 {
-	u32 flen = ALIGN(S5300_SIT_HDR + len, 8);
-	void __iomem *buff = sm->ipc + S5300_RAW_TXQ_BUFF;
-	unsigned long flags;
-	u8 hdr[S5300_SIT_HDR];
-	u32 in, out;
-
-	if (len == 0 || len > S5300_RFS_MAX)
-		return -EMSGSIZE;
-
-	spin_lock_irqsave(&sm->tx_lock, flags);
-
-	in = readl(sm->ipc + S5300_RAW_TXQ_HEAD);
-	out = readl(sm->ipc + S5300_RAW_TXQ_TAIL);
-	if (in >= S5300_RAW_TXQ_SIZE || out >= S5300_RAW_TXQ_SIZE ||
-	    s5300_circ_space(S5300_RAW_TXQ_SIZE, in, out) < flen) {
-		spin_unlock_irqrestore(&sm->tx_lock, flags);
-		return -EAGAIN;
-	}
-
-	put_unaligned_le16(S5300_SIT_SYNC, hdr + 0);
-	put_unaligned_le16(sm->frame_seq++, hdr + 2);
-	put_unaligned_le16(S5300_SIT_CFG_SINGLE, hdr + 4);
-	put_unaligned_le16(S5300_SIT_HDR + len, hdr + 6);
-	hdr[8] = S5300_CH_RFS;
-	hdr[9] = ++sm->rfs_ch_seq;
-	hdr[10] = 0;
-	hdr[11] = 0;
-
-	s5300_circ_write(buff, S5300_RAW_TXQ_SIZE, in, hdr, S5300_SIT_HDR);
-	s5300_circ_write(buff, S5300_RAW_TXQ_SIZE,
-			 (in + S5300_SIT_HDR) % S5300_RAW_TXQ_SIZE, data, len);
-	dma_wmb();
-	writel((in + flen) % S5300_RAW_TXQ_SIZE, sm->ipc + S5300_RAW_TXQ_HEAD);
-
-	spin_unlock_irqrestore(&sm->tx_lock, flags);
-
-	s5300_send_ipc_irq(sm, S5300_INT_VALID | S5300_INT_SEND_RAW);
-	return 0;
+	return s5300_ring_tx(sm, &s5300_raw_txring, &sm->frame_seq, S5300_CH_RFS,
+			     &sm->rfs_ch_seq, S5300_RFS_MAX, data, len, -EAGAIN);
 }
 
 static int s5300_rfs_port_tx(struct wwan_port *port, struct sk_buff *skb)
