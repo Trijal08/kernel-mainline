@@ -96,4 +96,19 @@ config SAMSUNG_PM_CHECK_CHUNKSIZE
 config EXYNOS_REGULATOR_COUPLER
 	bool "Exynos SoC Regulator Coupler" if COMPILE_TEST
 	depends on ARCH_EXYNOS || COMPILE_TEST
+
+config EXYNOS_CP_POWER
+	tristate "Exynos modem (CP) power/reset sequencer"
+	depends on OF && GPIOLIB && SPMI
+	depends on ARCH_EXYNOS || COMPILE_TEST
+	select REGMAP_SPMI
+	help
+	  Power/reset sequencer for the Exynos modem (CP).  It owns the AP2CP
+	  rail GPIOs and drives the CP PMIC and the S5910 DCXO buffer over SPMI,
+	  so the PCIe root complex that hosts the modem endpoint can delegate CP
+	  warm reset and cold power cycling.  Say Y here on Tensor (zuma/zumapro)
+	  modem platforms.
+
+	  This driver can also be built as a module; if so, the module will be
+	  called exynos-cp-power.
 endif
