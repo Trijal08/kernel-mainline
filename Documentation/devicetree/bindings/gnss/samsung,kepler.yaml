@@ -1,0 +1,64 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/gnss/samsung,kepler.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Samsung KEPLER GNSS receiver
+
+maintainers:
+  - Trijal Saha <trijalsaha2012@gmail.com>
+
+description:
+  The Samsung "KEPLER" GNSS receiver is the navigation companion of the Exynos
+  CP (baseband) on Google Tensor SoCs. Its firmware is staged into CP shared
+  memory and booted by the modem; the runtime host link is a dedicated SPI bus
+  with a two-wire ready handshake.
+
+allOf:
+  - $ref: gnss-common.yaml#
+  - $ref: /schemas/spi/spi-peripheral-props.yaml#
+
+properties:
+  compatible:
+    const: samsung,kepler
+
+  reg:
+    maxItems: 1
+
+  gnss2ap-gpios:
+    maxItems: 1
+    description:
+      Receiver-to-host line. Driven high while the receiver has data to move
+      or, during a host-initiated write, once it is ready to accept the
+      transfer. This line is also the interrupt source.
+
+  ap2gnss-gpios:
+    maxItems: 1
+    description:
+      Host-to-receiver line, asserted by the host to signal that it is ready.
+
+required:
+  - compatible
+  - reg
+  - gnss2ap-gpios
+  - ap2gnss-gpios
+
+unevaluatedProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/gpio/gpio.h>
+
+    spi {
+        #address-cells = <1>;
+        #size-cells = <0>;
+
+        gnss@0 {
+            compatible = "samsung,kepler";
+            reg = <0>;
+            spi-max-frequency = <3125000>;
+            gnss2ap-gpios = <&gpa5 4 GPIO_ACTIVE_HIGH>;
+            ap2gnss-gpios = <&gpp2 3 GPIO_ACTIVE_HIGH>;
+        };
+    };
