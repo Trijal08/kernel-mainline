@@ -242,6 +242,19 @@
 #define S5300_HWCFG_FW			"google/s5400/hwcfg.bin"
 #define S5300_RF_CFG_FW			"google/s5400/rf_cfg.bin"
 #define S5300_REPLAY_FW			"google/s5400/replay_region.bin"
+
+/*
+ * The GNSS receiver (a KEPLER core alongside the CP, driven over its own SPI
+ * bus by drivers/gnss/kepler.c) executes from the SHMEM_GNSS_FW window at the
+ * top of the CP shared-memory carveout -- the 4 MB above the 8 MB of IPC.
+ * Nothing but the AP writes it, and the CP does not read it until the receiver
+ * is started, which is why the vendor stack stages it from user space (gnssd's
+ * IOCTL_LOAD_GNSS_IMAGE on /dev/umts_ipc0) once the CP is up.  Do it in-kernel
+ * at the same point instead, so the receiver needs no proprietary helper.
+ */
+#define S5300_GNSS_FW			"google/s5400/kepler.bin"
+#define S5300_GNSS_FW_OFFSET		0x800000
+#define S5300_GNSS_FW_SIZE		0x400000
 /*
  * ap2cp_united_status ds_det field (downstream sbi_ds_det_pos=14, mask 0x3;
  * get_ds_detect() returns 1 on this device, so the live modem reads 0x4000).
@@ -3152,6 +3165,35 @@ static void s5300_drive_partial_rst(struct s5300_modem *sm)
 	gpiod_set_value_cansleep(sm->cp_partial_rst, 1);
 }
 
+/*
+ * Stage the GNSS receiver's firmware into its shared-memory window.  Optional:
+ * without it the receiver simply never starts, which does not affect the modem,
+ * so a missing image is a note rather than an error.
+ */
+static void s5300_load_gnss_fw(struct s5300_modem *sm)
+{
+	const struct firmware *fw;
+
+	if (sm->ipc_size < S5300_GNSS_FW_OFFSET + S5300_GNSS_FW_SIZE)
+		return;
+
+	if (request_firmware_direct(&fw, S5300_GNSS_FW, sm->dev)) {
+		dev_info(sm->dev, "no %s; GNSS receiver will not start\n",
+			 S5300_GNSS_FW);
+		return;
+	}
+
+	if (fw->size > S5300_GNSS_FW_SIZE) {
+		dev_warn(sm->dev, "%s too large (%zu > %d); skipping\n",
+			 S5300_GNSS_FW, fw->size, S5300_GNSS_FW_SIZE);
+	} else {
+		memcpy_toio(sm->ipc + S5300_GNSS_FW_OFFSET, fw->data, fw->size);
+		dev_info(sm->dev, "staged GNSS firmware (%zu bytes)\n", fw->size);
+	}
+
+	release_firmware(fw);
+}
+
 static void s5300_boot_work(struct work_struct *work)
 {
 	struct s5300_modem *sm = container_of(work, struct s5300_modem,
@@ -3397,6 +3439,7 @@ static void s5300_boot_work(struct work_struct *work)
 	}
 
 	dev_info(sm->dev, "CP is ONLINE\n");
+	s5300_load_gnss_fw(sm);
 	s5300_online(sm);
 	return;
 
