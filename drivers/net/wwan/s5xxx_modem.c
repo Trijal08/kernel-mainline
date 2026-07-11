@@ -2898,11 +2898,12 @@ static int s5300_setup_doorbell(struct s5300_modem *sm)
 	int i, ret;
 
 	/*
-	 * The PCI core could not place the mask ROM's six 1M BARs in the
-	 * small CH0 window; drop them from resource management entirely so
-	 * pci_enable_device() has nothing unclaimed to trip over, then
-	 * program BAR0 directly (downstream s51xx_pcie_probe() does the
-	 * same).
+	 * The mask ROM endpoint exposes no sizeable BARs: the PCI core sizes
+	 * BAR0 (a 64-bit memory BAR the ROM leaves at address 0) to nothing and
+	 * assigns no resources or bridge window at all.  Clear the (empty)
+	 * resources so pci_enable_device() has nothing unclaimed to trip over,
+	 * then program BAR0 to the fixed doorbell bus address directly
+	 * (downstream s51xx_pcie_probe() does the same).
 	 */
 	for (i = 0; i < PCI_STD_NUM_BARS; i++) {
 		sm->pdev->resource[i].start = 0;
