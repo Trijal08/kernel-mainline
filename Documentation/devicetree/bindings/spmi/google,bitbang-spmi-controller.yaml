@@ -1,0 +1,77 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/spmi/google,bitbang-spmi-controller.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Google GPIO bit-banged SPMI controller
+
+maintainers:
+  - Trijal Saha <trijalsaha2012@gmail.com>
+
+description:
+  A single-master SPMI bus bit-banged over two GPIOs (SCLK and SDATA).  It
+  reaches a PMIC wired to a bare GPIO pair rather than a dedicated SPMI
+  controller block, such as the Exynos modem CP PMIC on Tensor (gs/zuma)
+  platforms.  Unlike a memory-mapped controller it has no register space, so
+  the node carries no reg and is not named with a unit address.  Child nodes
+  are SPMI slaves addressed as described in spmi.yaml.
+
+properties:
+  $nodename:
+    pattern: "^spmi(-[0-9]+)?$"
+
+  compatible:
+    const: google,bitbang-spmi-controller
+
+  "#address-cells":
+    const: 2
+
+  "#size-cells":
+    const: 0
+
+  sclk-gpios:
+    maxItems: 1
+    description: SPMI serial clock (SCLK) line.
+
+  sdata-gpios:
+    maxItems: 1
+    description: SPMI serial data (SDATA) line.
+
+  delay-us:
+    default: 10
+    description:
+      Delay held for each clock phase, in microseconds; the bus runs at
+      roughly 1 / (2 * delay-us).
+
+patternProperties:
+  "@[0-9a-f]$":
+    type: object
+    description: An SPMI slave device.  See spmi.yaml.
+
+required:
+  - compatible
+  - "#address-cells"
+  - "#size-cells"
+  - sclk-gpios
+  - sdata-gpios
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/gpio/gpio.h>
+    #include <dt-bindings/spmi/spmi.h>
+
+    spmi {
+        compatible = "google,bitbang-spmi-controller";
+        #address-cells = <2>;
+        #size-cells = <0>;
+        sclk-gpios = <&gpa3 2 GPIO_ACTIVE_HIGH>;
+        sdata-gpios = <&gpa3 3 GPIO_ACTIVE_HIGH>;
+        delay-us = <10>;
+
+        pmic@0 {
+            reg = <0 SPMI_USID>;
+        };
+    };
