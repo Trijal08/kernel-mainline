@@ -1,0 +1,83 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/soc/samsung/google,exynos-cp-power.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Exynos modem (CP) power/reset sequencer
+
+maintainers:
+  - Trijal Saha <trijalsaha2012@gmail.com>
+
+description:
+  Sequences power and reset for the Exynos modem (CP) on Tensor (zuma/zumapro)
+  platforms.  It owns the AP2CP rail GPIOs and drives the CP PMIC and the S5910
+  DCXO clock buffer over SPMI, so the PCIe root complex that hosts the modem
+  endpoint can delegate CP warm reset and cold power cycling to it.
+
+properties:
+  compatible:
+    const: google,exynos-cp-power
+
+  cp-pwr-gpios:
+    maxItems: 1
+    description: CP power enable (AP2CP_CP_PWR_ON).
+
+  cp-nreset-gpios:
+    maxItems: 1
+    description: CP reset, active low (AP2CP_CP_NRESET_N).
+
+  cp-pm-wrst-gpios:
+    maxItems: 1
+    description: CP PMIC warm reset (AP2CP_PM_WRST_N).
+
+  cp-wrst-gpios:
+    maxItems: 1
+    description: CP warm reset (AP2CP_CP_WRST_N).
+
+  cp-pda-active-gpios:
+    maxItems: 1
+    description: AP power-down acknowledge (AP2CP_PDA_ACTIVE).
+
+  cp-dump-noti-gpios:
+    maxItems: 1
+    description: Crash-dump notification (AP2CP_DUMP_NOTI); cleared before reset.
+
+  cp2ap-cp-wrst-gpios:
+    maxItems: 1
+    description: CP warm-reset acknowledge input (CP2AP_CP_WRST_N).
+
+  google,cp-pmic:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: Phandle to the CP PMIC SPMI device patched after a warm reset.
+
+  google,cp-dcxo:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: Phandle to the S5910 DCXO clock-buffer SPMI device.
+
+required:
+  - compatible
+  - cp-pwr-gpios
+  - cp-nreset-gpios
+  - cp-pm-wrst-gpios
+  - cp-wrst-gpios
+  - cp-pda-active-gpios
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/gpio/gpio.h>
+
+    cp-power {
+        compatible = "google,exynos-cp-power";
+        cp-pwr-gpios = <&gpp12 2 GPIO_ACTIVE_HIGH>;
+        cp-nreset-gpios = <&gpp12 3 GPIO_ACTIVE_HIGH>;
+        cp-pm-wrst-gpios = <&gpp8 3 GPIO_ACTIVE_HIGH>;
+        cp-wrst-gpios = <&gpp16 3 GPIO_ACTIVE_HIGH>;
+        cp-pda-active-gpios = <&gpp16 2 GPIO_ACTIVE_HIGH>;
+        cp-dump-noti-gpios = <&gpp16 1 GPIO_ACTIVE_HIGH>;
+        cp2ap-cp-wrst-gpios = <&gpa7 3 GPIO_ACTIVE_HIGH>;
+        google,cp-pmic = <&cp_pmic>;
+        google,cp-dcxo = <&cp_s5910>;
+    };

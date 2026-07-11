@@ -1,0 +1,43 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/soc/samsung/google,s5910-spmi.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Samsung S5910 DCXO clock buffer on SPMI
+
+maintainers:
+  - Trijal Saha <trijalsaha2012@gmail.com>
+
+description:
+  The S5910 DCXO clock buffer that feeds the Exynos modem (CP), an SPMI slave.
+  It has no dedicated driver; the CP power sequencer (google,exynos-cp-power)
+  reaches it over SPMI to program its turn-on sequence (LPM off) while the CP is
+  held in reset, so the buffer survives the CP's autonomous sleep.
+
+properties:
+  compatible:
+    const: google,s5910-spmi
+
+  reg:
+    maxItems: 1
+
+required:
+  - compatible
+  - reg
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/spmi/spmi.h>
+
+    spmi {
+        #address-cells = <2>;
+        #size-cells = <0>;
+
+        clock-buffer@5 {
+            compatible = "google,s5910-spmi";
+            reg = <5 SPMI_USID>;
+        };
+    };
