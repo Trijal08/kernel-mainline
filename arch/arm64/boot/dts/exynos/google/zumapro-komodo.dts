@@ -180,6 +180,13 @@
 
 		controller-data {
 			samsung,spi-feedback-delay = <0>;
+			/*
+			 * Native manual chip select. The controller's automatic
+			 * mode never clears CS_SIG_INACT, so the chip select is
+			 * held inactive and the receiver never sees the bus: it
+			 * answers the handshake on its GPIOs but is deaf on SPI.
+			 */
+			samsung,spi-chip-select-mode = <0>;
 		};
 	};
 };
