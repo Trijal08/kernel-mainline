@@ -3731,7 +3731,7 @@
 			#address-cells = <1>;
 			#size-cells = <1>;
 			clocks = <&cmu_hsi0 CLK_GOUT_HSI0_PCLK>,
-				 <&cmu_hsi0 CLK_GOUT_HSI0_CLK_HSI0_BUS_CLK>;
+				 <&cmu_hsi0 CLK_GOUT_HSI0_CLK_HSI0_USI3_USI_CLK>;
 			clock-names = "pclk", "ipclk";
 			samsung,sysreg = <&sysreg_hsi0 0x1020>;
 			status = "disabled";
@@ -3743,7 +3743,7 @@
 				#address-cells = <1>;
 				#size-cells = <0>;
 				clocks = <&cmu_hsi0 CLK_GOUT_HSI0_PCLK>,
-					 <&cmu_hsi0 CLK_GOUT_HSI0_CLK_HSI0_BUS_CLK>;
+					 <&cmu_hsi0 CLK_GOUT_HSI0_CLK_HSI0_USI3_USI_CLK>;
 				clock-names = "spi", "spi_busclk0";
 				interrupts = <GIC_SPI 409 IRQ_TYPE_LEVEL_HIGH 0>;
 				status = "disabled";
