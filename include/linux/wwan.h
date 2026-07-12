@@ -23,6 +23,7 @@
  * @WWAN_PORT_SIT: Samsung Exynos SIT modem control (umts_ipc0)
  * @WWAN_PORT_RFS: Samsung Exynos modem Remote File System channel
  * @WWAN_PORT_OEM: Samsung Exynos modem OEM/GEMS channel (oem_ipc1)
+ * @WWAN_PORT_GNSS: Samsung Exynos modem GNSS receiver boot channel
  *
  * @WWAN_PORT_MAX: Highest supported port types
  * @WWAN_PORT_UNKNOWN: Special value to indicate an unknown port type
@@ -42,6 +43,7 @@ enum wwan_port_type {
 	WWAN_PORT_SIT,
 	WWAN_PORT_RFS,
 	WWAN_PORT_OEM,
+	WWAN_PORT_GNSS,
 
 	/* Add new port types above this line */
 
