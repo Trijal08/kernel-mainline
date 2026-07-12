@@ -519,6 +519,14 @@ struct s5300_modem {
 	 */
 	struct wwan_port	*gnss_port;
 	u8			gnss_ch_seq;	/* GNSS per-channel sequence */
+	/*
+	 * The in-kernel codeload (s5300_gnss_codeload) runs before gnss_port
+	 * exists and collects the CP's ch-0xf0 replies here; once the port is up
+	 * the channel belongs to user space.
+	 */
+	struct completion	gnss_rsp;
+	u8			gnss_rsp_buf[8];
+	u8			gnss_rsp_len;
 
 	/* In-kernel RFS server: carrierconfig/NV files the CP pulls post-attach. */
 	struct s5300_rfs_file	rfs_files[S5300_RFS_MAXFID];
@@ -1523,13 +1531,112 @@ static const struct wwan_port_ops s5300_wwan_ops = {
 };
 
 /*
- * gnss_boot char port (RAW ch 0xf0).  The GNSS receiver's boot is a codeload
- * conversation on this channel (vendor gnssd: power/reset then a chunked,
- * CRC-verified firmware push).  Rather than drive a reverse-engineered sequence
- * blindly from the kernel, expose the channel raw so the sequence can be
- * developed and observed from user space; the proven sequence then moves back
- * in-kernel so the receiver comes up on module load with no helper.  User space
- * writes command/chunk payloads; the CP's replies arrive as port reads.
+ * GNSS receiver codeload over the gnss_boot channel (RAW ch 0xf0).  Once the
+ * firmware image is staged in the shared window, this command sequence starts
+ * the receiver: init/power/reset, two "load" commands that tell the CP the
+ * image geometry, and a short chip-config train.  The image is a whole file at
+ * shared-window offset 0; the CP reads seg0 (the whole file) and seg1 (its
+ * header) from there.  The sequence was recovered by replaying a stock capture
+ * and is firmware-agnostic -- the only per-image values are the two load sizes,
+ * derived here from the file.  Runtime aiding (SGEE) and the CHRE/CHPP data
+ * session are left to user space over this port and /dev/gnssN.
+ */
+#define S5300_GNSS_INIT		0x0201
+#define S5300_GNSS_POWER_ON	0x0202
+#define S5300_GNSS_ASSERT_RESET	0x0203
+#define S5300_GNSS_RELEASE_RESET 0x0204
+#define S5300_GNSS_LOAD		0x0e05
+#define S5300_GNSS_BLC		0x0e09
+
+struct s5300_gnss_load_cmd {
+	__le16	opcode;
+	__le32	addr;
+	__le32	reserved;
+	__le32	size;
+} __packed;
+
+/* One boot-channel command, sent and paced against the CP's reply. */
+static int s5300_gnss_cmd(struct s5300_modem *sm, const void *cmd, u32 len)
+{
+	int ret;
+
+	reinit_completion(&sm->gnss_rsp);
+	ret = s5300_ring_tx(sm, &s5300_raw_txring, &sm->frame_seq,
+			    S5300_CH_GNSS_BOOT, &sm->gnss_ch_seq,
+			    2048 - S5300_SIT_HDR, cmd, len, -EAGAIN);
+	if (ret)
+		return ret;
+	/* Wait for the reply so commands are paced as the receiver expects;
+	 * a non-zero status is informational (some replies are not "ok").
+	 */
+	wait_for_completion_timeout(&sm->gnss_rsp, msecs_to_jiffies(2000));
+	return 0;
+}
+
+static int s5300_gnss_op(struct s5300_modem *sm, u16 opcode)
+{
+	__le16 cmd = cpu_to_le16(opcode);
+
+	return s5300_gnss_cmd(sm, &cmd, sizeof(cmd));
+}
+
+static int s5300_gnss_load(struct s5300_modem *sm, u32 addr, u32 size)
+{
+	struct s5300_gnss_load_cmd cmd = {
+		.opcode	= cpu_to_le16(S5300_GNSS_LOAD),
+		.addr	= cpu_to_le32(addr),
+		.size	= cpu_to_le32(size),
+	};
+
+	return s5300_gnss_cmd(sm, &cmd, sizeof(cmd));
+}
+
+static int s5300_gnss_blc(struct s5300_modem *sm, u32 field0, u32 arg)
+{
+	struct { __le16 op; __le32 field0; __le32 arg; __le32 pad; } __packed cmd = {
+		.op	= cpu_to_le16(S5300_GNSS_BLC),
+		.field0	= cpu_to_le32(field0),
+		.arg	= cpu_to_le32(arg),
+	};
+
+	return s5300_gnss_cmd(sm, &cmd, sizeof(cmd));
+}
+
+/*
+ * Run the codeload for a staged image.  @hdr4 is the u32 at file offset 4 (the
+ * header block size); @fw_size is the whole file size.  Returns 0 once the
+ * sequence has been sent.
+ */
+static void s5300_gnss_codeload(struct s5300_modem *sm, u32 fw_size, u32 hdr4)
+{
+	int i;
+
+	for (i = 0; i < 3; i++)
+		s5300_gnss_op(sm, S5300_GNSS_INIT);
+	s5300_gnss_op(sm, S5300_GNSS_POWER_ON);
+	s5300_gnss_op(sm, S5300_GNSS_ASSERT_RESET);
+	s5300_gnss_op(sm, S5300_GNSS_RELEASE_RESET);
+
+	/* seg0 = whole file at window offset 0; seg1 = its header block. */
+	s5300_gnss_load(sm, 0, fw_size);
+	s5300_gnss_load(sm, 4, hdr4);
+
+	/* Chip-config train (fixed field0/arg pairs from the stock sequence;
+	 * the 0x02 command carries a 0x20 flag in field0 and a 32-bit arg).
+	 */
+	s5300_gnss_blc(sm, 0x00020020, 0x60000001);
+	s5300_gnss_blc(sm, 0x00240000, 0);
+	s5300_gnss_blc(sm, 0x00230000, 0);
+	s5300_gnss_blc(sm, 0x00230000, 0);
+	s5300_gnss_blc(sm, 0x00240000, 0);
+	s5300_gnss_blc(sm, 0x00230000, 0);
+	s5300_gnss_blc(sm, 0x00230000, 0);
+}
+
+/*
+ * gnss_boot char port (RAW ch 0xf0).  After the in-kernel codeload has started
+ * the receiver, this exposes the channel raw so user space can drive the
+ * runtime side (SGEE aiding); the CP's replies arrive as port reads.
  */
 static int s5300_gnss_tx(struct wwan_port *port, struct sk_buff *skb)
 {
@@ -2058,10 +2165,28 @@ static void s5300_drain_raw_rxq(struct s5300_modem *sm, u32 intval)
 			max = SZ_2K;
 			had_raw = true;
 		} else if (ch == S5300_CH_GNSS_BOOT) {
-			/* CP replies on the GNSS boot channel go to its port. */
-			port = sm->gnss_port;
-			max = SZ_2K;
 			had_raw = true;
+			if (sm->gnss_port) {
+				/* Runtime: the channel belongs to user space. */
+				port = sm->gnss_port;
+				max = SZ_2K;
+			} else {
+				/* Boot: hand the reply to the in-kernel codeload. */
+				u32 n = min_t(u32, plen,
+					      sizeof(sm->gnss_rsp_buf));
+
+				if (n) {
+					s5300_circ_read(sm->gnss_rsp_buf, buff,
+							S5300_RAW_RXQ_SIZE,
+							(out + S5300_SIT_HDR) %
+								S5300_RAW_RXQ_SIZE,
+							n);
+					sm->gnss_rsp_len = n;
+					complete(&sm->gnss_rsp);
+				}
+				port = NULL;
+				max = 0;
+			}
 		} else {
 			port = NULL;
 			max = 0;
@@ -3249,16 +3374,18 @@ static void s5300_load_gnss_fw(struct s5300_modem *sm)
 		return;
 	}
 
-	if (fw->size > S5300_GNSS_FW_SIZE) {
-		dev_warn(sm->dev, "%s too large (%zu > %d); skipping\n",
-			 S5300_GNSS_FW, fw->size, S5300_GNSS_FW_SIZE);
+	if (fw->size > S5300_GNSS_FW_SIZE || fw->size < 8) {
+		dev_warn(sm->dev, "%s bad size %zu; skipping\n",
+			 S5300_GNSS_FW, fw->size);
 	} else {
-		/*
-		 * Stage the image into the shared window; the codeload that
-		 * actually starts the receiver is driven over the gnss_boot port.
-		 */
+		/* seg1 size lives in the image header at offset 4. */
+		u32 hdr4 = get_unaligned_le32(fw->data + 4);
+
 		memcpy_toio(sm->ipc + S5300_GNSS_FW_OFFSET, fw->data, fw->size);
-		dev_info(sm->dev, "staged GNSS firmware (%zu bytes)\n", fw->size);
+		s5300_gnss_codeload(sm, fw->size, hdr4);
+		dev_info(sm->dev,
+			 "staged GNSS firmware (%zu bytes) and ran the codeload\n",
+			 fw->size);
 	}
 
 	release_firmware(fw);
@@ -3571,6 +3698,7 @@ static int s5300_probe(struct platform_device *pdev)
 	spin_lock_init(&sm->tx_lock);
 	mutex_init(&sm->pcie_onoff_lock);
 	init_completion(&sm->init_done);
+	init_completion(&sm->gnss_rsp);
 	INIT_WORK(&sm->boot_work, s5300_boot_work);
 	INIT_WORK(&sm->pm_work, s5300_pm_work);
 	INIT_WORK(&sm->rfs_work, s5300_rfs_work);
