@@ -362,6 +362,10 @@ static const struct {
 		.name = "OEM",
 		.devsuf = "oem",
 	},
+	[WWAN_PORT_GNSS] = {
+		.name = "GNSS",
+		.devsuf = "gnss",
+	},
 };
 
 static ssize_t type_show(struct device *dev, struct device_attribute *attr,
