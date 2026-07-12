@@ -399,6 +399,14 @@
  * fit one ring slot with the circ one-slot gap; both FMT writers share the cap.
  */
 #define S5300_CH_OEM			0x82	/* EXYNOS_CH_ID_OEM_0 + 1 (oem_ipc1) */
+
+/*
+ * The GNSS receiver is booted by the CP, not by us: once its firmware is in
+ * the shared window (see S5300_GNSS_FW), the CP starts it in response to this
+ * RAW channel -- the vendor's gnss_boot io_device.  Plain passthrough, so the
+ * channel is exposed as a port and the boot conversation is left to user space.
+ */
+#define S5300_CH_GNSS_BOOT		0xf0
 #define S5300_FMT_MAX			(S5300_FMT_TXQ_SIZE - S5300_SIT_HDR - 8)
 #define S5300_SIT_CH_BOOT		0xf1		/* EXYNOS_CH_ID_BOOT */
 #define S5300_DL_HDR			12
@@ -503,6 +511,14 @@ struct s5300_modem {
 	/* RFS file channel (umts_rfs0, ch 0x29) on the NORM_RAW ring. */
 	struct wwan_port	*rfs_port;
 	u8			rfs_ch_seq;	/* RFS per-channel sequence */
+
+	/*
+	 * GNSS receiver boot channel (gnss_boot, ch 0xf0) on the NORM_RAW ring.
+	 * Exposed raw as a WWAN char port so the codeload sequence can be driven
+	 * and observed from user space; once proven it moves back into the kernel.
+	 */
+	struct wwan_port	*gnss_port;
+	u8			gnss_ch_seq;	/* GNSS per-channel sequence */
 
 	/* In-kernel RFS server: carrierconfig/NV files the CP pulls post-attach. */
 	struct s5300_rfs_file	rfs_files[S5300_RFS_MAXFID];
@@ -1506,6 +1522,37 @@ static const struct wwan_port_ops s5300_wwan_ops = {
 	.tx	= s5300_wwan_tx,
 };
 
+/*
+ * gnss_boot char port (RAW ch 0xf0).  The GNSS receiver's boot is a codeload
+ * conversation on this channel (vendor gnssd: power/reset then a chunked,
+ * CRC-verified firmware push).  Rather than drive a reverse-engineered sequence
+ * blindly from the kernel, expose the channel raw so the sequence can be
+ * developed and observed from user space; the proven sequence then moves back
+ * in-kernel so the receiver comes up on module load with no helper.  User space
+ * writes command/chunk payloads; the CP's replies arrive as port reads.
+ */
+static int s5300_gnss_tx(struct wwan_port *port, struct sk_buff *skb)
+{
+	struct s5300_modem *sm = wwan_port_get_drvdata(port);
+	int ret;
+
+	if (!sm->online)
+		return -ENODEV;
+	ret = s5300_ring_tx(sm, &s5300_raw_txring, &sm->frame_seq,
+			    S5300_CH_GNSS_BOOT, &sm->gnss_ch_seq,
+			    2048 - S5300_SIT_HDR, skb->data, skb->len, -EAGAIN);
+	if (ret)
+		return ret;
+	consume_skb(skb);
+	return 0;
+}
+
+static const struct wwan_port_ops s5300_gnss_ops = {
+	.start	= s5300_wwan_start,
+	.stop	= s5300_wwan_stop,
+	.tx	= s5300_gnss_tx,
+};
+
 /* Free space (bytes) in the FMT txq; 0 if the CP left the pointers corrupt. */
 static u32 s5300_fmt_txq_space(struct s5300_modem *sm)
 {
@@ -2008,6 +2055,11 @@ static void s5300_drain_raw_rxq(struct s5300_modem *sm, u32 intval)
 			}
 		} else if (ch == S5300_CH_AT) {
 			port = sm->at_port;
+			max = SZ_2K;
+			had_raw = true;
+		} else if (ch == S5300_CH_GNSS_BOOT) {
+			/* CP replies on the GNSS boot channel go to its port. */
+			port = sm->gnss_port;
 			max = SZ_2K;
 			had_raw = true;
 		} else {
@@ -2524,6 +2576,20 @@ static void s5300_online(struct s5300_modem *sm)
 	} else {
 		dev_info(sm->dev, "OEM/GEMS port up (oem_ipc1, ch %#x)\n",
 			 S5300_CH_OEM);
+	}
+
+	/*
+	 * The GNSS boot channel (ch 0xf0), exposed raw for codeload development.
+	 */
+	sm->gnss_port = wwan_create_port(sm->dev, WWAN_PORT_GNSS, &s5300_gnss_ops,
+					 NULL, sm);
+	if (IS_ERR(sm->gnss_port)) {
+		dev_err(sm->dev, "failed to create GNSS port: %ld\n",
+			PTR_ERR(sm->gnss_port));
+		sm->gnss_port = NULL;
+	} else {
+		dev_info(sm->dev, "GNSS boot port up (gnss_boot, ch %#x)\n",
+			 S5300_CH_GNSS_BOOT);
 	}
 
 	/*
@@ -3187,6 +3253,10 @@ static void s5300_load_gnss_fw(struct s5300_modem *sm)
 		dev_warn(sm->dev, "%s too large (%zu > %d); skipping\n",
 			 S5300_GNSS_FW, fw->size, S5300_GNSS_FW_SIZE);
 	} else {
+		/*
+		 * Stage the image into the shared window; the codeload that
+		 * actually starts the receiver is driven over the gnss_boot port.
+		 */
 		memcpy_toio(sm->ipc + S5300_GNSS_FW_OFFSET, fw->data, fw->size);
 		dev_info(sm->dev, "staged GNSS firmware (%zu bytes)\n", fw->size);
 	}
@@ -3836,6 +3906,8 @@ static void s5300_remove(struct platform_device *pdev)
 	cancel_work_sync(&sm->rfs_work);
 	destroy_workqueue(sm->rfs_wq);
 	s5300_rfs_cleanup(sm);
+	if (sm->gnss_port)
+		wwan_remove_port(sm->gnss_port);
 	if (sm->oem_port)
 		wwan_remove_port(sm->oem_port);
 	if (sm->rfs_port)
