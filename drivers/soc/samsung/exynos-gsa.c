@@ -30,6 +30,8 @@
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 
+#include <linux/soc/samsung/exynos-gsa.h>
+
 /* Mailbox registers (base = the gsa-ns MMIO window). */
 #define MBOX_INTCR0_REG		0x0024	/* GSA->AP interrupt clear */
 #define MBOX_INTMR0_REG		0x0028	/* GSA->AP interrupt mask */
@@ -43,10 +45,12 @@
 #define MBOX_HOST_REQ_IRQ	0
 #define MBOX_CLIENT_RSP_IRQ	0
 
-/* The GSA firmware answers in well under a second; cap the wait so a wedged or
- * absent GSA returns an error instead of hanging the (uninterruptible) caller.
+/* Most commands answer in well under a second, but an image-authenticate/load
+ * makes the GSA hash a multi-MB body, so allow generous headroom.  The point of
+ * the cap is only to fail instead of hanging the (uninterruptible) caller if the
+ * GSA is wedged or absent; the firmware is far faster than this in practice.
  */
-#define GSA_MBOX_TIMEOUT_MS	1000
+#define GSA_MBOX_TIMEOUT_MS	10000
 
 /* Mailbox command opcodes (subset; full set in the vendor gsa_mbox.h). */
 enum gsa_mbox_cmd {
@@ -238,6 +242,34 @@ out:
 	mutex_unlock(&s->mbox_lock);
 	return ret;
 }
+
+/**
+ * gsa_load_aoc_fw_image() - have the GSA authenticate and load an AOC image
+ * @gsa:    the GSA device, resolved from the consumer's "gsa-device" phandle
+ * @header: DMA address of the image's 4K authentication header (coherent memory
+ *          the GSA reads by DMA)
+ * @body:   physical address of the image body, already staged where the GSA can
+ *          read it (the AOC DRAM carveout)
+ *
+ * The GSA reads the header, verifies it over the body and, on success, unlocks
+ * the AOC firmware.  Returns 0 on success or a negative errno; -EACCES means the
+ * image failed authentication.
+ */
+int gsa_load_aoc_fw_image(struct device *gsa, dma_addr_t header, phys_addr_t body)
+{
+	struct gsa_dev_state *s = dev_get_drvdata(gsa);
+	u32 args[4] = {
+		lower_32_bits(header), upper_32_bits(header),
+		lower_32_bits(body), upper_32_bits(body),
+	};
+
+	if (!s)
+		return -ENODEV;
+
+	return gsa_send_mbox_cmd(s, GSA_MB_CMD_LOAD_AOC_FW_IMG, args,
+				 ARRAY_SIZE(args), NULL, 0);
+}
+EXPORT_SYMBOL_GPL(gsa_load_aoc_fw_image);
 
 static int gsa_probe(struct platform_device *pdev)
 {
