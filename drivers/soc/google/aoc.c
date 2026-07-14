@@ -159,7 +159,17 @@ static int aoc_probe(struct platform_device *pdev)
 	}
 	dev_info(dev, "loaded %s (%zu bytes)\n", AOC_FIRMWARE_NAME, fw->size);
 
-	aoc_load_image(aoc, fw);
+	if (aoc_load_image(aoc, fw) == 0) {
+		/*
+		 * The core's reset is in the secure domain - the AP cannot poke
+		 * it directly - so ask the GSA to take the AOC out of reset.
+		 */
+		ret = gsa_aoc_start(aoc->gsa);
+		if (ret)
+			dev_err(dev, "GSA failed to start the AOC: %d\n", ret);
+		else
+			dev_info(dev, "AOC started by the GSA\n");
+	}
 	release_firmware(fw);
 
 	return 0;
