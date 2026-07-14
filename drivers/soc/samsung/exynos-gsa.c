@@ -60,6 +60,9 @@ enum gsa_mbox_cmd {
 	GSA_MB_CMD_SJTAG_GET_CHIP_ID	= 101,
 };
 
+/* Argument to GSA_MB_CMD_AOC_CMD: take the AOC out of reset and start it. */
+#define GSA_AOC_START		1
+
 /* Response cmd word = request cmd with this bit set. */
 #define GSA_MB_CMD_RSP		BIT(31)
 
@@ -270,6 +273,27 @@ int gsa_load_aoc_fw_image(struct device *gsa, dma_addr_t header, phys_addr_t bod
 				 ARRAY_SIZE(args), NULL, 0);
 }
 EXPORT_SYMBOL_GPL(gsa_load_aoc_fw_image);
+
+/**
+ * gsa_aoc_start() - ask the GSA to take the AOC out of reset
+ * @gsa: the GSA device
+ *
+ * The AOC's reset is in the secure domain and cannot be released by the
+ * non-secure AP; the GSA does it in response to this command.  Must be called
+ * only after a successful gsa_load_aoc_fw_image().  Returns 0 on success or a
+ * negative errno.
+ */
+int gsa_aoc_start(struct device *gsa)
+{
+	struct gsa_dev_state *s = dev_get_drvdata(gsa);
+	u32 arg = GSA_AOC_START;
+
+	if (!s)
+		return -ENODEV;
+
+	return gsa_send_mbox_cmd(s, GSA_MB_CMD_AOC_CMD, &arg, 1, NULL, 0);
+}
+EXPORT_SYMBOL_GPL(gsa_aoc_start);
 
 static int gsa_probe(struct platform_device *pdev)
 {
