@@ -46,6 +46,8 @@
 #include <linux/string_choices.h>
 #include <linux/unaligned.h>
 
+#include "touch_bus_negotiator.h"
+
 #define SYNA_TCM_HEADER_SIZE		4
 #define SYNA_TCM_CRC_SIZE		2
 #define SYNA_TCM_HEADER_BITS		(SYNA_TCM_HEADER_SIZE * 8)
@@ -85,8 +87,20 @@
 #define TCM_CMD_RESET			0x04
 #define TCM_CMD_GET_APPLICATION_INFO	0x20
 #define TCM_CMD_GET_TOUCH_REPORT_CONFIG	0x25
+#define TCM_CMD_SET_DYNAMIC_CONFIG	0x24
 #define TCM_CMD_ENTER_DEEP_SLEEP	0x2c
 #define TCM_CMD_EXIT_DEEP_SLEEP		0x2d
+
+/*
+ * Dynamic-config field ids (payload of TCM_CMD_SET_DYNAMIC_CONFIG, a
+ * [field, value_le16] triple).  Field 0x09 arms the controller's low-power
+ * wake-on-gesture ("LPWG") scanning: instead of deep sleep the firmware keeps
+ * a low-power scan running so a tap can be detected.  On tegu the bus is then
+ * handed to AoC, which does the gesture recognition itself.  Values from the
+ * Synaptics reference (synaptics_touchcom_core_dev.h: DC_ENABLE_WAKEUP_GESTURE_
+ * MODE = 0x09; syna_tcm_set_dynamic_config()).
+ */
+#define TCM_DC_ENABLE_WAKEUP_GESTURE_MODE	0x09
 
 /* Status codes (< 0x10) and report codes (>= 0x10) */
 #define TCM_STATUS_IDLE			0x00
@@ -162,6 +176,11 @@ struct syna_tcm {
 
 	struct syna_tcm_object objects[SYNA_TCM_MAX_SLOTS];
 	unsigned long slots_seen;
+
+	/* Touch Bus Negotiator (AoC bus handoff for tap-to-wake). */
+	bool tbn_enabled;	/* opted in via goog,tbn-enabled and registered */
+	u32 tbn_mask;		/* device bit from register_tbn() */
+	bool tbn_suspended;	/* bus was released to AoC across this suspend */
 };
 
 /*
@@ -456,6 +475,29 @@ static int syna_tcm_exchange(struct syna_tcm *ts, u8 command,
 		msleep(SYNA_TCM_RESP_POLL_MS);
 		waited += SYNA_TCM_RESP_POLL_MS;
 	}
+}
+
+/* Write one [field, value_le16] dynamic-config entry and wait for its ack. */
+static int syna_tcm_set_dynamic_config(struct syna_tcm *ts, u8 field, u16 value)
+{
+	u8 payload[3];
+
+	payload[0] = field;
+	put_unaligned_le16(value, &payload[1]);
+
+	return syna_tcm_exchange(ts, TCM_CMD_SET_DYNAMIC_CONFIG, payload,
+				 sizeof(payload));
+}
+
+/*
+ * Enter or leave the controller's low-power wake-on-gesture mode.  This is
+ * the alternative to deep sleep used when AoC takes the bus in suspend: the
+ * firmware keeps a low-power scan alive so a tap can wake the system.
+ */
+static int syna_tcm_set_gesture_mode(struct syna_tcm *ts, bool enable)
+{
+	return syna_tcm_set_dynamic_config(ts, TCM_DC_ENABLE_WAKEUP_GESTURE_MODE,
+					   enable ? 1 : 0);
 }
 
 /* LSB-first bit field extraction; reads beyond the report yield zero. */
@@ -881,6 +923,43 @@ static int syna_tcm_setup_input(struct syna_tcm *ts)
 	return 0;
 }
 
+static void syna_tcm_tbn_unregister(void *data)
+{
+	struct syna_tcm *ts = data;
+
+	unregister_tbn(&ts->tbn_mask);
+}
+
+/*
+ * Opt in to the Touch Bus Negotiator when the DT asks for it.  Registration
+ * only reserves a device bit in the (global) negotiator; if the negotiator has
+ * not probed yet register_tbn() yields mask 0 and the driver quietly keeps the
+ * deep-sleep suspend path.  The feature must never be able to break touch, so a
+ * missing/late TBN is not fatal.
+ */
+static void syna_tcm_setup_tbn(struct syna_tcm *ts)
+{
+	struct device *dev = &ts->spi->dev;
+
+	ts->tbn_enabled = device_property_read_bool(dev, "goog,tbn-enabled");
+	if (!ts->tbn_enabled)
+		return;
+
+	register_tbn(&ts->tbn_mask);
+	if (!ts->tbn_mask) {
+		dev_warn(dev, "TBN unavailable, using deep-sleep suspend\n");
+		ts->tbn_enabled = false;
+		return;
+	}
+
+	if (devm_add_action_or_reset(dev, syna_tcm_tbn_unregister, ts)) {
+		ts->tbn_enabled = false;
+		return;
+	}
+
+	dev_info(dev, "TBN bus handoff enabled, mask %#x\n", ts->tbn_mask);
+}
+
 static int syna_tcm_probe(struct spi_device *spi)
 {
 	struct device *dev = &spi->dev;
@@ -948,6 +1027,8 @@ static int syna_tcm_probe(struct spi_device *spi)
 	if (error)
 		return error;
 
+	syna_tcm_setup_tbn(ts);
+
 	error = devm_request_threaded_irq(dev, spi->irq, NULL,
 					  syna_tcm_irq_thread,
 					  IRQF_ONESHOT, "syna_tcm", ts);
@@ -957,32 +1038,90 @@ static int syna_tcm_probe(struct spi_device *spi)
 	return 0;
 }
 
+/*
+ * Suspend: when the AoC bus handoff is available, put the controller into
+ * low-power gesture mode and release the SPI bus to AoC so it can watch for a
+ * tap.  Otherwise -- or on any failure -- fall back to deep sleep with the AP
+ * still owning the bus.  The IRQ is disabled either way: once AoC owns the bus
+ * the AP must not drive SPI, and AoC signals a wake over its own mailbox, not
+ * this line.
+ */
 static int syna_tcm_suspend(struct device *dev)
 {
 	struct syna_tcm *ts = spi_get_drvdata(to_spi_device(dev));
+	bool use_tbn = ts->tbn_enabled && tbn_ready();
 	int error;
 
 	disable_irq(ts->spi->irq);
 
 	mutex_lock(&ts->io_lock);
-	error = syna_tcm_exchange(ts, TCM_CMD_ENTER_DEEP_SLEEP, NULL, 0);
+	if (use_tbn) {
+		error = syna_tcm_set_gesture_mode(ts, true);
+		if (error) {
+			/*
+			 * Gesture mode did not arm: do not hand a bus AoC
+			 * cannot use to it.  Fall back to deep sleep, AP keeps
+			 * the bus.
+			 */
+			dev_warn(dev,
+				 "gesture mode failed (%d), using deep sleep\n",
+				 error);
+			use_tbn = false;
+			error = syna_tcm_exchange(ts, TCM_CMD_ENTER_DEEP_SLEEP,
+						  NULL, 0);
+		}
+	} else {
+		error = syna_tcm_exchange(ts, TCM_CMD_ENTER_DEEP_SLEEP, NULL, 0);
+	}
 	mutex_unlock(&ts->io_lock);
 	if (error)
-		dev_warn(dev, "failed to enter deep sleep: %d\n", error);
+		dev_warn(dev, "failed to enter low power: %d\n", error);
+
+	if (use_tbn) {
+		/*
+		 * Hand the bus to AoC.  tbn_suspended is set unconditionally so
+		 * resume always reclaims it -- even if the release times out we
+		 * must never leave touch stranded with AoC owning the bus.
+		 */
+		ts->tbn_suspended = true;
+		error = tbn_release_bus(ts->tbn_mask);
+		if (error)
+			dev_warn(dev, "tbn_release_bus failed: %d\n", error);
+	}
 
 	return 0;
 }
 
+/*
+ * Resume: mirror suspend.  If the bus went to AoC, reclaim it before any SPI
+ * traffic and leave gesture mode; otherwise just exit deep sleep.
+ */
 static int syna_tcm_resume(struct device *dev)
 {
 	struct syna_tcm *ts = spi_get_drvdata(to_spi_device(dev));
 	int error;
 
-	mutex_lock(&ts->io_lock);
-	error = syna_tcm_exchange(ts, TCM_CMD_EXIT_DEEP_SLEEP, NULL, 0);
-	mutex_unlock(&ts->io_lock);
-	if (error)
-		dev_warn(dev, "failed to exit deep sleep: %d\n", error);
+	if (ts->tbn_suspended) {
+		error = tbn_request_bus(ts->tbn_mask);
+		if (error)
+			dev_warn(dev, "tbn_request_bus failed: %d\n", error);
+		ts->tbn_suspended = false;
+
+		mutex_lock(&ts->io_lock);
+		error = syna_tcm_set_gesture_mode(ts, false);
+		if (error) {
+			dev_warn(dev, "failed to exit gesture mode: %d\n", error);
+			/* Best effort: also try to leave deep sleep. */
+			syna_tcm_exchange(ts, TCM_CMD_EXIT_DEEP_SLEEP, NULL, 0);
+		}
+		mutex_unlock(&ts->io_lock);
+	} else {
+		mutex_lock(&ts->io_lock);
+		error = syna_tcm_exchange(ts, TCM_CMD_EXIT_DEEP_SLEEP, NULL, 0);
+		mutex_unlock(&ts->io_lock);
+		if (error)
+			dev_warn(dev, "failed to exit deep sleep: %d\n", error);
+	}
 
 	enable_irq(ts->spi->irq);
 
