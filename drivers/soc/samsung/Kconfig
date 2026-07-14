@@ -70,6 +70,15 @@ config EXYNOS_S2MPU
 	  the unit into passthrough so the master (e.g. the GPU) can reach
 	  memory, which is required to bring such masters up on these SoCs.
 
+config EXYNOS_GSA
+	tristate "Google GSA security-core mailbox driver"
+	depends on ARCH_EXYNOS || ((ARM || ARM64) && COMPILE_TEST)
+	help
+	  The GSA (Google Security Algorithm subsystem) is the always-running
+	  root of trust on Tensor (gs101 and derivatives) SoCs. This driver
+	  opens the AP<->GSA mailbox so the AP can issue commands to it, such as
+	  authenticating and loading coprocessor firmware (e.g. for the AOC).
+
 config SAMSUNG_PM_CHECK
 	bool "S3C2410 PM Suspend Memory CRC"
 	depends on PM && (ARCH_S3C64XX || ARCH_S5PV210)
