@@ -38,4 +38,12 @@ int gsa_load_aoc_fw_image(struct device *gsa, dma_addr_t header, phys_addr_t bod
  */
 int gsa_aoc_start(struct device *gsa);
 
+/**
+ * gsa_aoc_get_state() - query the AOC's state from the GSA
+ * @gsa: the GSA device
+ *
+ * Return: the GSA-reported AOC state (>= 0), or a negative errno.
+ */
+int gsa_aoc_get_state(struct device *gsa);
+
 #endif /* __LINUX_SOC_SAMSUNG_EXYNOS_GSA_H */
