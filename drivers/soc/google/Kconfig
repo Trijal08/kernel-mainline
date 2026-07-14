@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# Google SoC drivers
+#
+
+config GOOGLE_AOC
+	tristate "Google AOC (Always-On Compute) coprocessor"
+	depends on EXYNOS_GSA
+	depends on TRUSTY
+	help
+	  The AOC is an always-on coprocessor on Google Tensor SoCs that owns
+	  Bluetooth, audio and the sensor hub.  The GSA security core
+	  authenticates its firmware, and a Trusty application brings the core
+	  out of reset, so the driver needs both.
+
+	  This can be built as a module, which will be called aoc.

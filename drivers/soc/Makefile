@@ -13,6 +13,7 @@ obj-$(CONFIG_ARCH_DOVE)		+= dove/
 obj-$(CONFIG_MACH_DOVE)		+= dove/
 obj-y				+= fsl/
 obj-y				+= fujitsu/
+obj-y				+= google/
 obj-$(CONFIG_ARCH_GEMINI)	+= gemini/
 obj-y				+= hisilicon/
 obj-y				+= imx/
