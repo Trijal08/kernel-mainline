@@ -26,4 +26,16 @@ struct device;
  */
 int gsa_load_aoc_fw_image(struct device *gsa, dma_addr_t header, phys_addr_t body);
 
+/**
+ * gsa_aoc_start() - ask the GSA to take the AOC out of reset
+ * @gsa: the GSA device
+ *
+ * The AOC's reset lives in the secure domain, so the non-secure AP cannot
+ * release it directly; the GSA does.  Call only after gsa_load_aoc_fw_image()
+ * has succeeded.
+ *
+ * Return: 0 on success, or a negative errno.
+ */
+int gsa_aoc_start(struct device *gsa);
+
 #endif /* __LINUX_SOC_SAMSUNG_EXYNOS_GSA_H */
