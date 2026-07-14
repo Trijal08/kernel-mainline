@@ -2017,6 +2017,18 @@
 		};
 
 		/*
+		 * DMA firewall in front of the GSA's own bus master.  Left
+		 * enforcing, it blocks the GSA from reading the AP-provided
+		 * command buffers (e.g. the coprocessor image header handed to
+		 * the firmware-load command).  The permissive S2MPU driver
+		 * installs an allow-all MPT so those DMAs reach memory.
+		 */
+		s2mpu_s0_gsa: s2mpu@16470000 {
+			compatible = "google,s2mpu-v9";
+			reg = <0x16470000 0x10000>;
+		};
+
+		/*
 		 * GSA (Google Security Algorithm subsystem) non-secure mailbox
 		 * interface - the AP's door to the always-running root-of-trust
 		 * core, used to authenticate and load coprocessor firmware.
