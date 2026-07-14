@@ -60,7 +60,8 @@ enum gsa_mbox_cmd {
 	GSA_MB_CMD_SJTAG_GET_CHIP_ID	= 101,
 };
 
-/* Argument to GSA_MB_CMD_AOC_CMD: take the AOC out of reset and start it. */
+/* Arguments to GSA_MB_CMD_AOC_CMD. */
+#define GSA_AOC_GET_STATE	0
 #define GSA_AOC_START		1
 
 /* Response cmd word = request cmd with this bit set. */
@@ -294,6 +295,33 @@ int gsa_aoc_start(struct device *gsa)
 	return gsa_send_mbox_cmd(s, GSA_MB_CMD_AOC_CMD, &arg, 1, NULL, 0);
 }
 EXPORT_SYMBOL_GPL(gsa_aoc_start);
+
+/**
+ * gsa_aoc_get_state() - query the AOC's state from the GSA
+ * @gsa: the GSA device
+ *
+ * Return: the GSA-reported AOC state (>= 0), -ENODATA if the GSA returned no
+ * state word, or another negative errno.
+ */
+int gsa_aoc_get_state(struct device *gsa)
+{
+	struct gsa_dev_state *s = dev_get_drvdata(gsa);
+	u32 arg = GSA_AOC_GET_STATE;
+	u32 state = 0;
+	int ret;
+
+	if (!s)
+		return -ENODEV;
+
+	ret = gsa_send_mbox_cmd(s, GSA_MB_CMD_AOC_CMD, &arg, 1, &state, 1);
+	if (ret < 0)
+		return ret;
+	if (ret < 1)
+		return -ENODATA;
+
+	return state;
+}
+EXPORT_SYMBOL_GPL(gsa_aoc_get_state);
 
 static int gsa_probe(struct platform_device *pdev)
 {
