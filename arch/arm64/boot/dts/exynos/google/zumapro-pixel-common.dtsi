@@ -18,7 +18,6 @@
 / {
 	aliases {
 		serial0 = &serial_0;
-		serial1 = &serial_18;
 	};
 
 	chosen {
