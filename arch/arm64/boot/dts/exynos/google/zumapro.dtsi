@@ -2039,10 +2039,16 @@
 			interrupts = <GIC_SPI 375 IRQ_TYPE_LEVEL_HIGH 0>;
 		};
 
+		/* DMA firewall in front of the AOC's bus master. */
+		s2mpu_s0_aoc: s2mpu@190c0000 {
+			compatible = "google,s2mpu-v9";
+			reg = <0x190c0000 0x10000>;
+		};
+
 		/*
 		 * AOC (Always-On Compute) coprocessor.  Its firmware is staged
-		 * into the aoc_reserve carveout and authenticated by the GSA
-		 * before the core is released.
+		 * into the aoc_reserve carveout and authenticated by the GSA,
+		 * which also takes the core out of its (secure) reset.
 		 */
 		aoc: aoc {
 			compatible = "google,aoc";
