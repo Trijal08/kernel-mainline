@@ -999,7 +999,7 @@ static void syna_tcm_setup_tbn(struct syna_tcm *ts)
 	}
 
 	register_tbn_lptw_callback(syna_tcm_lptw_report, ts);
-	device_init_wakeup(dev, true);
+	devm_device_init_wakeup(dev);
 
 	dev_info(dev, "TBN bus handoff enabled, mask %#x\n", ts->tbn_mask);
 }
