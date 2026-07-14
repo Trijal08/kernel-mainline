@@ -82,6 +82,9 @@
 #define SYNA_TCM_RESP_POLL_MS		2
 #define SYNA_TCM_RESP_TIMEOUT_MS	3000
 
+/* How long an AoC tap-to-wake holds the system awake for userspace to react. */
+#define SYNA_TCM_WAKE_HOLD_MS		3000
+
 /* TouchComm commands */
 #define TCM_CMD_IDENTIFY		0x02
 #define TCM_CMD_RESET			0x04
@@ -909,6 +912,9 @@ static int syna_tcm_setup_input(struct syna_tcm *ts)
 	input_set_abs_params(input, ABS_MT_POSITION_X, 0, ts->max_x, 0, 0);
 	input_set_abs_params(input, ABS_MT_POSITION_Y, 0, ts->max_y, 0, 0);
 
+	/* AoC tap-to-wake (TBN LPTW) is delivered as a KEY_WAKEUP press. */
+	input_set_capability(input, EV_KEY, KEY_WAKEUP);
+
 	error = input_mt_init_slots(input, ts->max_objects,
 				    INPUT_MT_DIRECT | INPUT_MT_DROP_UNUSED);
 	if (error)
@@ -923,10 +929,30 @@ static int syna_tcm_setup_input(struct syna_tcm *ts)
 	return 0;
 }
 
+/*
+ * AoC detected a low-power touch-wake gesture while it owned the bus and woke
+ * the AP over its mailbox (the touch IRQ stays silent).  This runs in the TBN
+ * read-thread context once the AP is already awake: report a wakeup event so
+ * the system does not immediately re-suspend, and inject a KEY_WAKEUP press so
+ * userspace turns the display on.
+ */
+static void syna_tcm_lptw_report(struct TbnLptwEvent *lptw, void *data)
+{
+	struct syna_tcm *ts = data;
+
+	pm_wakeup_event(&ts->spi->dev, SYNA_TCM_WAKE_HOLD_MS);
+
+	input_report_key(ts->input, KEY_WAKEUP, 1);
+	input_sync(ts->input);
+	input_report_key(ts->input, KEY_WAKEUP, 0);
+	input_sync(ts->input);
+}
+
 static void syna_tcm_tbn_unregister(void *data)
 {
 	struct syna_tcm *ts = data;
 
+	register_tbn_lptw_callback(NULL, NULL);
 	unregister_tbn(&ts->tbn_mask);
 }
 
@@ -956,6 +982,9 @@ static void syna_tcm_setup_tbn(struct syna_tcm *ts)
 		ts->tbn_enabled = false;
 		return;
 	}
+
+	register_tbn_lptw_callback(syna_tcm_lptw_report, ts);
+	device_init_wakeup(dev, true);
 
 	dev_info(dev, "TBN bus handoff enabled, mask %#x\n", ts->tbn_mask);
 }
