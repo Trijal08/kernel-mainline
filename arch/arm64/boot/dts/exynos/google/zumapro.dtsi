@@ -2016,6 +2016,17 @@
 			<14 STR_CFG(STR_SPTLB(0x00, 0x00), S2_EN, BL1, PREF_PRED, STLB_PREF, PTLB_PREF) DIR_RW STR_ID(0x40) STR_MASK(0x00)>;
 		};
 
+		/*
+		 * GSA (Google Security Algorithm subsystem) non-secure mailbox
+		 * interface - the AP's door to the always-running root-of-trust
+		 * core, used to authenticate and load coprocessor firmware.
+		 */
+		gsa: gsa@16490000 {
+			compatible = "google,gs101-gsa-v1";
+			reg = <0x16490000 0x1000>;
+			interrupts = <GIC_SPI 375 IRQ_TYPE_LEVEL_HIGH 0>;
+		};
+
 		sysmmu_gdc: iommu@1D4C0000 {
 			compatible = "samsung,exynos-sysmmu";
 			reg = <0x1D4C0000 0x10000>;
