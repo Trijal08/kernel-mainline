@@ -16,6 +16,7 @@
  * Copyright 2026 Trijal Saha <trijalsaha2012@gmail.com>
  */
 
+#include <linux/delay.h>
 #include <linux/dma-mapping.h>
 #include <linux/firmware.h>
 #include <linux/io.h>
@@ -36,6 +37,9 @@
  * the GSA verifies); the body that the certificate signs follows it.
  */
 #define AOC_AUTH_HEADER_SIZE	4096
+
+/* The running AOC firmware stamps this into its DRAM control block. */
+#define AOC_MAGIC		0xa0c00a0cU
 
 struct aoc_data {
 	struct device *dev;
@@ -84,6 +88,39 @@ static int aoc_load_image(struct aoc_data *aoc, const struct firmware *fw)
 
 	dma_free_coherent(dev, AOC_AUTH_HEADER_SIZE, hdr, hdr_da);
 	return ret;
+}
+
+/* Confirm the core is actually executing after the GSA released it. */
+static void aoc_check_alive(struct aoc_data *aoc)
+{
+	const volatile u32 *p = aoc->carveout;
+	size_t i, n = aoc->carveout_size / 4;
+	int state;
+	u32 head;
+
+	msleep(100);	/* give the core time to boot and stamp its magic */
+
+	state = gsa_aoc_get_state(aoc->gsa);
+	if (state < 0)
+		dev_info(aoc->dev, "GSA GET_STATE -> %d\n", state);
+	else
+		dev_info(aoc->dev, "GSA reports AOC state %d\n", state);
+
+	head = p[0];
+	if (head == 0xffffffffU) {
+		dev_info(aoc->dev, "carveout still reads 0xff from the AP (fenced)\n");
+		return;
+	}
+	for (i = 0; i < n; i++) {
+		if (p[i] == AOC_MAGIC) {
+			dev_info(aoc->dev,
+				 "AOC control-block magic at carveout+%#zx - core alive\n",
+				 i * 4);
+			return;
+		}
+	}
+	dev_info(aoc->dev, "carveout readable (head %#x) but AOC_MAGIC not found\n",
+		 head);
 }
 
 static int aoc_probe(struct platform_device *pdev)
@@ -165,10 +202,12 @@ static int aoc_probe(struct platform_device *pdev)
 		 * it directly - so ask the GSA to take the AOC out of reset.
 		 */
 		ret = gsa_aoc_start(aoc->gsa);
-		if (ret)
+		if (ret) {
 			dev_err(dev, "GSA failed to start the AOC: %d\n", ret);
-		else
+		} else {
 			dev_info(dev, "AOC started by the GSA\n");
+			aoc_check_alive(aoc);
+		}
 	}
 	release_firmware(fw);
 
