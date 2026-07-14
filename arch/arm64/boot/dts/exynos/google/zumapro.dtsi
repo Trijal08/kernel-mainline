@@ -2039,6 +2039,17 @@
 			interrupts = <GIC_SPI 375 IRQ_TYPE_LEVEL_HIGH 0>;
 		};
 
+		/*
+		 * AOC (Always-On Compute) coprocessor.  Its firmware is staged
+		 * into the aoc_reserve carveout and authenticated by the GSA
+		 * before the core is released.
+		 */
+		aoc: aoc {
+			compatible = "google,aoc";
+			memory-region = <&aoc_reserve>;
+			gsa-device = <&gsa>;
+		};
+
 		sysmmu_gdc: iommu@1D4C0000 {
 			compatible = "samsung,exynos-sysmmu";
 			reg = <0x1D4C0000 0x10000>;
