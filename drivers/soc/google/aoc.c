@@ -1057,6 +1057,19 @@ bool aoc_service_can_write(struct aoc_service *svc)
 }
 EXPORT_SYMBOL_GPL(aoc_service_can_write);
 
+/*
+ * The AOC's running position in this service's byte stream, for use as a PCM
+ * hardware pointer: the bytes it has consumed on a playback (AP->AOC) service,
+ * or produced on a capture (AOC->AP) one.
+ */
+u32 aoc_service_progress(struct aoc_service *svc, bool playback)
+{
+	void *r = svc_region(svc->hdr, playback ? AOC_DOWN : AOC_UP);
+
+	return ipc_r32((u8 *)r + (playback ? REG_RX : REG_TX));
+}
+EXPORT_SYMBOL_GPL(aoc_service_progress);
+
 void aoc_service_set_handler(struct aoc_service *svc,
 			     void (*handler)(struct aoc_service *svc, void *priv),
 			     void *priv)
