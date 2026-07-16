@@ -426,9 +426,33 @@ static int aoc_pcm_hw_params(struct snd_soc_component *comp,
 				 params_rate(params), params_width(params),
 				 params_buffer_bytes(params),
 				 params_period_bytes(params));
-	if (ret)
+	if (ret) {
 		dev_err(comp->dev, "endpoint setup failed: %d\n", ret);
+		return ret;
+	}
+
+	/*
+	 * Route the source to the speaker here rather than at trigger: this is
+	 * what makes the AOC clock its TDM, and the amplifiers are powered up
+	 * before the trigger and will not complete their own power-up until
+	 * they can lock to that clock.
+	 */
+	ret = aoc_audio_bind(aud, s->source, AOC_SINK_SPEAKER, true);
+	if (ret)
+		dev_err(comp->dev, "speaker bind failed: %d\n", ret);
 	return ret;
+}
+
+static int aoc_pcm_hw_free(struct snd_soc_component *comp,
+			   struct snd_pcm_substream *substream)
+{
+	struct aoc_audio *aud = substream_to_aud(substream);
+	struct aoc_audio_stream *s = substream->runtime->private_data;
+
+	if (aoc_pcm_is_be(substream))
+		return 0;
+
+	return aoc_audio_bind(aud, s->source, AOC_SINK_SPEAKER, false);
 }
 
 /* Start/stop the AOC pulling from the ring (the dai link is nonatomic). */
@@ -458,16 +482,9 @@ static int aoc_pcm_trigger(struct snd_soc_component *comp,
 		return -EINVAL;
 	}
 
-	if (on) {
-		/* Route the source to the speaker, then start it. */
-		ret = aoc_audio_bind(aud, s->source, AOC_SINK_SPEAKER, true);
-		if (!ret)
-			ret = aoc_audio_source(aud, s->source, true);
-	} else {
-		aoc_audio_source(aud, s->source, false);
-		ret = aoc_audio_bind(aud, s->source, AOC_SINK_SPEAKER, false);
-	}
-	dev_dbg(comp->dev, "playback %s source %u -> speaker: %d\n",
+	/* The route is already up; this only starts and stops the flow. */
+	ret = aoc_audio_source(aud, s->source, on);
+	dev_dbg(comp->dev, "playback %s source %u: %d\n",
 		on ? "start" : "stop", s->source, ret);
 	return ret;
 }
@@ -478,6 +495,7 @@ static const struct snd_soc_component_driver aoc_component = {
 	.close = aoc_pcm_close,
 	.pcm_new = aoc_pcm_new,
 	.hw_params = aoc_pcm_hw_params,
+	.hw_free = aoc_pcm_hw_free,
 	.prepare = aoc_pcm_prepare,
 	.trigger = aoc_pcm_trigger,
 	.ack = aoc_pcm_ack,
