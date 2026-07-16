@@ -1327,40 +1327,46 @@ int cs35l41_probe(struct cs35l41_private *cs35l41, const struct cs35l41_hw_cfg *
 		regmap_update_bits(cs35l41->regmap, CS35L41_IRQ1_MASK3, CS35L41_INT3_PLL_LOCK_MASK,
 				   0 << CS35L41_INT3_PLL_LOCK_SHIFT);
 
-	ret = devm_request_threaded_irq(cs35l41->dev, cs35l41->irq, NULL, cs35l41_irq,
-					IRQF_ONESHOT | IRQF_SHARED | irq_pol,
-					"cs35l41", cs35l41);
-	if (ret != 0) {
-		dev_err_probe(cs35l41->dev, ret, "Failed to request IRQ\n");
-		goto err;
-	}
-
-	ret = cs35l41_set_pdata(cs35l41);
-	if (ret < 0) {
-		dev_err_probe(cs35l41->dev, ret, "Set pdata failed\n");
-		goto err;
-	}
-
-	ret = cs35l41_get_system_name(cs35l41);
-	if (ret < 0)
-		goto err;
-
-	ret = cs35l41_dsp_init(cs35l41);
-	if (ret < 0)
-		goto err;
-
+	/*
+	 * Runtime PM has to be up before the interrupt is armed: the handler
+	 * resumes the device to read the status, and an interrupt that arrives
+	 * before then is dropped without the status ever being cleared.  The
+	 * line is level triggered, so that one never goes away.
+	 */
 	pm_runtime_set_autosuspend_delay(cs35l41->dev, 3000);
 	pm_runtime_use_autosuspend(cs35l41->dev);
 	pm_runtime_set_active(cs35l41->dev);
 	pm_runtime_get_noresume(cs35l41->dev);
 	pm_runtime_enable(cs35l41->dev);
 
+	ret = devm_request_threaded_irq(cs35l41->dev, cs35l41->irq, NULL, cs35l41_irq,
+					IRQF_ONESHOT | IRQF_SHARED | irq_pol,
+					"cs35l41", cs35l41);
+	if (ret != 0) {
+		dev_err_probe(cs35l41->dev, ret, "Failed to request IRQ\n");
+		goto err_pm;
+	}
+
+	ret = cs35l41_set_pdata(cs35l41);
+	if (ret < 0) {
+		dev_err_probe(cs35l41->dev, ret, "Set pdata failed\n");
+		goto err_pm;
+	}
+
+	ret = cs35l41_get_system_name(cs35l41);
+	if (ret < 0)
+		goto err_pm;
+
+	ret = cs35l41_dsp_init(cs35l41);
+	if (ret < 0)
+		goto err_pm;
+
 	ret = devm_snd_soc_register_component(cs35l41->dev,
 					      &soc_component_dev_cs35l41,
 					      cs35l41_dai, ARRAY_SIZE(cs35l41_dai));
 	if (ret < 0) {
 		dev_err_probe(cs35l41->dev, ret, "Register codec failed\n");
-		goto err_pm;
+		goto err_dsp;
 	}
 
 	pm_runtime_put_autosuspend(cs35l41->dev);
@@ -1370,12 +1376,12 @@ int cs35l41_probe(struct cs35l41_private *cs35l41, const struct cs35l41_hw_cfg *
 
 	return 0;
 
+err_dsp:
+	wm_adsp2_remove(&cs35l41->dsp);
 err_pm:
 	pm_runtime_dont_use_autosuspend(cs35l41->dev);
 	pm_runtime_disable(cs35l41->dev);
 	pm_runtime_put_noidle(cs35l41->dev);
-
-	wm_adsp2_remove(&cs35l41->dsp);
 err:
 	cs35l41_safe_reset(cs35l41->regmap, cs35l41->hw_cfg.bst_type);
 	regulator_bulk_disable(CS35L41_NUM_SUPPLIES, cs35l41->supplies);
