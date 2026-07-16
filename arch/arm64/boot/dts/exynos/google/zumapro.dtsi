@@ -2048,12 +2048,16 @@
 		/*
 		 * AOC (Always-On Compute) coprocessor.  Its firmware is staged
 		 * into the aoc_reserve carveout and authenticated by the GSA,
-		 * which also takes the core out of its (secure) reset.
+		 * which also takes the core out of its (secure) reset.  It runs
+		 * at the fixed virtual addresses baked into its image, so the
+		 * driver programs sysmmu_aoc from the firmware's mapping table
+		 * before starting the core.
 		 */
 		aoc: aoc {
 			compatible = "google,aoc";
 			memory-region = <&aoc_reserve>;
 			gsa-device = <&gsa>;
+			iommus = <&sysmmu_aoc>;
 		};
 
 		sysmmu_gdc: iommu@1D4C0000 {
