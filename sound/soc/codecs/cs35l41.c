@@ -758,7 +758,7 @@ static int cs35l41_pcm_hw_params(struct snd_pcm_substream *substream,
 {
 	struct cs35l41_private *cs35l41 = snd_soc_component_get_drvdata(dai->component);
 	unsigned int rate = params_rate(params);
-	u8 asp_wl;
+	u8 asp_width, asp_wl;
 	int i;
 
 	for (i = 0; i < ARRAY_SIZE(cs35l41_fs_rates); i++) {
@@ -771,7 +771,13 @@ static int cs35l41_pcm_hw_params(struct snd_pcm_substream *substream,
 		return -EINVAL;
 	}
 
+	/*
+	 * The word length is how many bits of the slot carry the sample; the
+	 * slot itself is as wide as the sample's container.  For S24_LE those
+	 * differ: 24 bits of audio in a 32-bit slot.
+	 */
 	asp_wl = params_width(params);
+	asp_width = params_physical_width(params);
 
 	regmap_update_bits(cs35l41->regmap, CS35L41_GLOBAL_CLK_CTRL,
 			   CS35L41_GLOBAL_FS_MASK,
@@ -780,14 +786,14 @@ static int cs35l41_pcm_hw_params(struct snd_pcm_substream *substream,
 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
 		regmap_update_bits(cs35l41->regmap, CS35L41_SP_FORMAT,
 				   CS35L41_ASP_WIDTH_RX_MASK,
-				   asp_wl << CS35L41_ASP_WIDTH_RX_SHIFT);
+				   asp_width << CS35L41_ASP_WIDTH_RX_SHIFT);
 		regmap_update_bits(cs35l41->regmap, CS35L41_SP_RX_WL,
 				   CS35L41_ASP_RX_WL_MASK,
 				   asp_wl << CS35L41_ASP_RX_WL_SHIFT);
 	} else {
 		regmap_update_bits(cs35l41->regmap, CS35L41_SP_FORMAT,
 				   CS35L41_ASP_WIDTH_TX_MASK,
-				   asp_wl << CS35L41_ASP_WIDTH_TX_SHIFT);
+				   asp_width << CS35L41_ASP_WIDTH_TX_SHIFT);
 		regmap_update_bits(cs35l41->regmap, CS35L41_SP_TX_WL,
 				   CS35L41_ASP_TX_WL_MASK,
 				   asp_wl << CS35L41_ASP_TX_WL_SHIFT);
