@@ -20,7 +20,7 @@
 #define CLKS_NR_TOP	(CLK_GOUT_CMU_TPU_UART + 1)
 #define CLKS_NR_APM	(CLK_APM_PLL_DIV16_APM + 1)
 #define CLKS_NR_DPU	(CLK_MOUT_DPU_DSIM_USER + 1)
-#define CLKS_NR_HSI0	(CLK_GOUT_HSI0_CLK_HSI0_USI3_USI_CLK + 1)
+#define CLKS_NR_HSI0	(CLK_GOUT_HSI0_CLK_HSI0_USI1_USI_CLK + 1)
 #define CLKS_NR_HSI1	(CLK_GOUT_HSI1_PCIE_GEN3_0_PIPE_PAL_APB_PCLK + 1)
 #define CLKS_NR_HSI2	(CLK_GOUT_HSI2_XIU_P_HSI2_ACLK + 1)
 #define CLKS_NR_MISC	(CLK_GOUT_MISC_XIU_D_MISC_ACLK + 1)
@@ -2080,6 +2080,7 @@ static const struct samsung_cmu_info dpu_cmu_info __initconst = {
 #define CLK_CON_MUX_MUX_CLK_HSI0_USB31DRD						0x1008
 #define CLK_CON_MUX_MUX_CLK_HSI0_USI2							0x101c
 #define CLK_CON_DIV_DIV_CLK_HSI0_USB31DRD						0x1800
+#define CLK_CON_DIV_DIV_CLK_HSI0_USI1							0x1818
 #define CLK_CON_DIV_DIV_CLK_HSI0_USI2							0x181c
 #define CLK_CON_DIV_DIV_CLK_HSI0_USI3							0x1820
 #define CLK_CON_GAT_CLK_BLK_HSI0_UID_HSI0_CMU_HSI0_IPCLKPORT_PCLK			0x2000
@@ -2121,6 +2122,7 @@ static const struct samsung_cmu_info dpu_cmu_info __initconst = {
 #define CLK_CON_GAT_GOUT_BLK_HSI0_UID_XIU_D0_HSI0_IPCLKPORT_ACLK			0x20c4
 #define CLK_CON_GAT_GOUT_BLK_HSI0_UID_XIU_D1_HSI0_IPCLKPORT_ACLK			0x2094
 #define CLK_CON_GAT_GOUT_BLK_HSI0_UID_XIU_P_HSI0_IPCLKPORT_ACLK				0x20cc
+#define CLK_CON_GAT_GATE_CLK_HSI0_USI1							0x211c
 #define CLK_CON_GAT_GATE_CLK_HSI0_USI2							0x2120
 #define CLK_CON_GAT_GATE_CLK_HSI0_USI3							0x2124
 #define DMYQCH_CON_USB31DRD_QCH								0x3000
@@ -2184,6 +2186,7 @@ static const unsigned long hsi0_clk_regs[] __initconst = {
 	CLK_CON_MUX_MUX_CLK_HSI0_USB31DRD,
 	CLK_CON_MUX_MUX_CLK_HSI0_USI2,
 	CLK_CON_DIV_DIV_CLK_HSI0_USB31DRD,
+	CLK_CON_DIV_DIV_CLK_HSI0_USI1,
 	CLK_CON_DIV_DIV_CLK_HSI0_USI2,
 	CLK_CON_DIV_DIV_CLK_HSI0_USI3,
 	CLK_CON_GAT_CLK_BLK_HSI0_UID_HSI0_CMU_HSI0_IPCLKPORT_PCLK,
@@ -2225,6 +2228,7 @@ static const unsigned long hsi0_clk_regs[] __initconst = {
 	CLK_CON_GAT_GOUT_BLK_HSI0_UID_XIU_D0_HSI0_IPCLKPORT_ACLK,
 	CLK_CON_GAT_GOUT_BLK_HSI0_UID_XIU_D1_HSI0_IPCLKPORT_ACLK,
 	CLK_CON_GAT_GOUT_BLK_HSI0_UID_XIU_P_HSI0_IPCLKPORT_ACLK,
+	CLK_CON_GAT_GATE_CLK_HSI0_USI1,
 	CLK_CON_GAT_GATE_CLK_HSI0_USI2,
 	CLK_CON_GAT_GATE_CLK_HSI0_USI3,
 	DMYQCH_CON_USB31DRD_QCH,
@@ -2337,6 +2341,9 @@ static const struct samsung_div_clock hsi0_div_clks[] __initconst = {
 	DIV(CLK_DOUT_HSI0_USB31DRD,
 	    "dout_hsi0_usb31drd", "mout_hsi0_usb20_user",
 	    CLK_CON_DIV_DIV_CLK_HSI0_USB31DRD, 0, 3),
+	DIV(CLK_DOUT_HSI0_USI1,
+	    "dout_hsi0_usi1", "mout_hsi0_bus",
+	    CLK_CON_DIV_DIV_CLK_HSI0_USI1, 0, 4),
 	DIV(CLK_DOUT_HSI0_USI2,
 	    "dout_hsi0_usi2", "mout_hsi0_bus",
 	    CLK_CON_DIV_DIV_CLK_HSI0_USI2, 0, 4),
@@ -2508,6 +2515,10 @@ static const struct samsung_gate_clock hsi0_gate_clks[] __initconst = {
 	     "gout_hsi0_xiu_p_hsi0_aclk", "mout_hsi0_bus",
 	     CLK_CON_GAT_GOUT_BLK_HSI0_UID_XIU_P_HSI0_IPCLKPORT_ACLK,
 	     21, CLK_IGNORE_UNUSED, 0),
+	GATE(CLK_GOUT_HSI0_CLK_HSI0_USI1_USI_CLK,
+	     "gout_hsi0_clk_hsi0_usi1_usi_clk", "dout_hsi0_usi1",
+	     CLK_CON_GAT_GATE_CLK_HSI0_USI1,
+	     21, CLK_SET_RATE_PARENT, 0),
 	GATE(CLK_GOUT_HSI0_CLK_HSI0_USI2_USI_CLK,
 	     "gout_hsi0_clk_hsi0_usi2_usi_clk", "dout_hsi0_usi2",
 	     CLK_CON_GAT_GATE_CLK_HSI0_USI2,
