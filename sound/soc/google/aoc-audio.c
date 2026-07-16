@@ -47,6 +47,8 @@
 #define AOC_TDM0_SLOT_WIDTH	32
 #define AOC_TDM0_RATE		48000
 #define AOC_TDM0_CHANNELS	2
+/* 24 bits of audio in each 32-bit slot: the amplifiers are 24-bit parts. */
+#define AOC_TDM0_FORMAT		SNDRV_PCM_FORMAT_S24_LE
 
 /*
  * AOC control-command framing (from the vendor aoc-interface): a CONTAINER_HDR
@@ -526,7 +528,7 @@ static struct snd_soc_dai_driver aoc_dais[] = {
 			.channels_min = AOC_TDM0_CHANNELS,
 			.channels_max = AOC_TDM0_CHANNELS,
 			.rates = SNDRV_PCM_RATE_48000,
-			.formats = SNDRV_PCM_FMTBIT_S32_LE,
+			.formats = SNDRV_PCM_FMTBIT_S24_LE,
 		},
 	},
 };
@@ -552,7 +554,7 @@ static int aoc_tdm0_fixup(struct snd_soc_pcm_runtime *rtd,
 	rate->min = rate->max = AOC_TDM0_RATE;
 	channels->min = channels->max = AOC_TDM0_CHANNELS;
 	snd_mask_none(fmt);
-	snd_mask_set_format(fmt, SNDRV_PCM_FORMAT_S32_LE);
+	snd_mask_set_format(fmt, AOC_TDM0_FORMAT);
 	return 0;
 }
 
