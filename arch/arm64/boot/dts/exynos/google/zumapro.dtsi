@@ -555,6 +555,24 @@
 	};
 
 	/*
+	 * The Trusty secure OS, reached from the normal world by SMC.  The core
+	 * driver detects it and exposes the call primitives its subsystems (IRQ,
+	 * log, virtio/IPC) build on.  Regless: it is an SMC interface, not MMIO.
+	 * The virtio child carries the tipc transport used to reach Trusty apps.
+	 */
+	trusty: trusty {
+		compatible = "android,trusty-smc-v1";
+
+		trusty_virtio: virtio {
+			compatible = "android,trusty-virtio-v1";
+		};
+
+		trusty_log: log {
+			compatible = "android,trusty-log-v1";
+		};
+	};
+
+	/*
 	 * The TMU is owned by the ACPM firmware and read over IPC via the
 	 * acpm_tmu sensor.  On a bare mainline boot the firmware only measures;
 	 * active throttling would need cpufreq cooling, so for now each CPU-
