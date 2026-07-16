@@ -2058,6 +2058,15 @@
 			memory-region = <&aoc_reserve>;
 			gsa-device = <&gsa>;
 			iommus = <&sysmmu_aoc>;
+			/*
+			 * The AOC2AP doorbell interrupts, one per mailbox block
+			 * (A32/F1/P6 at 0x1520/0x1522/0x1524_0000); the driver
+			 * maps the mailbox registers itself.
+			 */
+			interrupts = <GIC_SPI 77 IRQ_TYPE_LEVEL_HIGH 0>,
+				     <GIC_SPI 78 IRQ_TYPE_LEVEL_HIGH 0>,
+				     <GIC_SPI 79 IRQ_TYPE_LEVEL_HIGH 0>;
+			interrupt-names = "aoc_a32", "aoc_f1", "aoc_p6";
 		};
 
 		sysmmu_gdc: iommu@1D4C0000 {
