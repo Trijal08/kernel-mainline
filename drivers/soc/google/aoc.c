@@ -19,6 +19,7 @@
 #include <linux/delay.h>
 #include <linux/dma-mapping.h>
 #include <linux/firmware.h>
+#include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/iommu.h>
 #include <linux/mod_devicetable.h>
@@ -187,6 +188,18 @@ struct aoc_data {
 	u32 chip_type;
 	u32 chip_rev;
 	struct iommu_domain *domain;	/* the AOC's SysMMU translation */
+
+	/* Runtime IPC, valid once the AOC has published its control block. */
+	void *ipc;			/* control block = ipc base = carveout + ipc_offset */
+	u32 n_services;
+	u32 service_size;
+	u32 services_offset;
+	void __iomem *mbox[3];		/* the three AOC2AP mailbox blocks */
+	struct aoc_mbox_irq {
+		struct aoc_data *aoc;
+		int block;
+	} mbox_irq[3];
+	atomic_t mbox_irqs;		/* AOC->AP interrupts seen (diagnostic) */
 
 	/* Trusty channel to the GSA AOC hardware manager. */
 	struct tipc_chan *tz_chan;
@@ -605,7 +618,7 @@ out:
 }
 
 /* Poll the AOC state + control block over a few seconds; log the trajectory. */
-static void aoc_check_alive(struct aoc_data *aoc)
+static bool aoc_check_alive(struct aoc_data *aoc)
 {
 	const void *cb = (const u8 *)aoc->carveout + aoc->ipc_offset;
 	static const unsigned int delays_ms[] = { 100, 400, 500, 1000, 1000 };
@@ -616,7 +629,7 @@ static void aoc_check_alive(struct aoc_data *aoc)
 
 	if (aoc->ipc_offset + 0x100 > aoc->carveout_size) {
 		dev_warn(aoc->dev, "ipc_offset %#x out of range\n", aoc->ipc_offset);
-		return;
+		return false;
 	}
 
 	for (i = 0; i < ARRAY_SIZE(delays_ms); i++) {
@@ -660,12 +673,410 @@ static void aoc_check_alive(struct aoc_data *aoc)
 				 readl(mmu + REG_V9_FAULT_INFO0_VM));
 			iounmap(mmu);
 		}
-		return;
+		return false;
 	}
 
 	dev_info(aoc->dev, "AOC alive: control block at carveout+%#x\n",
 		 aoc->ipc_offset);
 	aoc_dump_control_block(aoc, cb);
+	return true;
+}
+
+/*
+ * ---------------------------------------------------------------------------
+ * Runtime IPC.
+ *
+ * Once the core is online it publishes a control block at ipc_offset holding a
+ * table of named services.  Each service is a pair of memory regions (one per
+ * direction) carved from the carveout: AOC_UP (index 0) is the AOC->AP stream
+ * the AP reads, AOC_DOWN (index 1) is the AP->AOC stream the AP writes.  A
+ * region is either a byte ring or a slotted message queue, addressed by the
+ * shared tx/rx/wp/rp counters in its descriptor.  The AP notifies the AOC of a
+ * write, and is notified of one, through a doorbell mailbox; each service names
+ * the doorbell channel to use in its flags.
+ *
+ * The carveout is mapped write-combining and the AOC is not cache-coherent with
+ * the AP, so the descriptor counters are accessed with READ_ONCE/WRITE_ONCE and
+ * the payload with explicit barriers before a doorbell / after an interrupt.
+ * ---------------------------------------------------------------------------
+ */
+
+#define AOC_UP			0	/* FW -> AP (AP reads) */
+#define AOC_DOWN		1	/* AP -> FW (AP writes) */
+
+/* struct aoc_ipc_service_header: name[32], flags, then two regions. */
+#define SVC_FLAGS		0x20
+#define SVC_REGIONS		0x24
+#define REG_STRIDE		28	/* sizeof(struct aoc_ipc_memory_region) */
+/* region field offsets */
+#define REG_OFFSET		0x00	/* ring base, relative to the ipc base */
+#define REG_SIZE		0x04	/* ring size, or queue slot size, in bytes */
+#define REG_SLOTS		0x08	/* number of queue slots */
+#define REG_TX			0x0c	/* bytes/slots written (by the region's writer) */
+#define REG_RX			0x10	/* bytes/slots read (by the region's reader) */
+#define REG_WP			0x14	/* write offset into the ring */
+#define REG_RP			0x18	/* read offset into the ring */
+
+#define SVC_TYPE_MASK		0x00070000
+#define SVC_TYPE_SHIFT		16
+#define SVC_TYPE_QUEUE		0
+#define SVC_TYPE_RING		1
+#define SVC_IRQ_MASK		0x00f80000
+#define SVC_IRQ_SHIFT		19
+
+#define AOC_MSG_HDR_SIZE	8	/* struct aoc_ipc_message_header (queues) */
+
+/*
+ * The AOC2AP doorbell mailboxes: three whitechapel blocks (for the A32, F1 and
+ * P6 cores), 16 channels each, so a service's 0..47 channel index selects both
+ * the block and the bit.  These match the vendor's mbox@1520/1522/1524_0000.
+ */
+#define AOC_MBOX_BLOCKS		3
+#define AOC_MBOX_CH_PER_BLOCK	16
+#define AOC_MBOX_SIZE		0x1000
+#define MB_INTGR0		0x0020	/* AP -> AOC: generate interrupt */
+#define MB_INTCR1		0x0044	/* AOC -> AP: clear interrupt */
+#define MB_INTMR1		0x0048	/* AOC -> AP: interrupt mask */
+#define MB_INTSR1		0x004c	/* AOC -> AP: interrupt status */
+static const phys_addr_t aoc_mbox_phys[AOC_MBOX_BLOCKS] = {
+	0x15200000, 0x15220000, 0x15240000,
+};
+
+/*
+ * The control service's version command (from the vendor aoc-interface): a
+ * write/read round-trip that returns the core's build hash and link time.  Used
+ * as an end-to-end self-test of the IPC path.
+ */
+#define AOC_DATA_TYPE_CMD	0
+#define CMD_SYS_VERSION_GET_ID	6
+#define AOC_VERSION_STR_MAX	64
+struct aoc_container_hdr {
+	u8 type;
+	u8 cntr;
+	__le16 len;
+} __packed;
+struct aoc_cmd_hdr {
+	struct aoc_container_hdr parent;
+	__le16 id;
+	__le16 reply;
+} __packed;
+struct cmd_sys_version_get {
+	struct aoc_cmd_hdr hdr;
+	__le32 core;
+	char version[AOC_VERSION_STR_MAX];
+	char link_time[AOC_VERSION_STR_MAX];
+} __packed;
+
+/* The carveout is write-combining; keep these accesses uncached and ordered. */
+static u16 ipc_r16(const void *p)
+{
+	return le16_to_cpu(READ_ONCE(*(const __le16 *)p));
+}
+
+static void ipc_w16(void *p, u16 v)
+{
+	WRITE_ONCE(*(__le16 *)p, cpu_to_le16(v));
+}
+
+static u32 ipc_r32(const void *p)
+{
+	return le32_to_cpu(READ_ONCE(*(const __le32 *)p));
+}
+
+static void ipc_w32(void *p, u32 v)
+{
+	WRITE_ONCE(*(__le32 *)p, cpu_to_le32(v));
+}
+
+static void *svc_region(void *svc, int dir)
+{
+	return (u8 *)svc + SVC_REGIONS + dir * REG_STRIDE;
+}
+
+static u32 svc_flags(void *svc)
+{
+	return ipc_r32((u8 *)svc + SVC_FLAGS);
+}
+
+static int svc_type(void *svc)
+{
+	return (svc_flags(svc) & SVC_TYPE_MASK) >> SVC_TYPE_SHIFT;
+}
+
+static u32 svc_mbox(void *svc)
+{
+	return (svc_flags(svc) & SVC_IRQ_MASK) >> SVC_IRQ_SHIFT;
+}
+
+/* Look a service up by name in the published table. */
+static void *aoc_find_service(struct aoc_data *aoc, const char *name)
+{
+	unsigned int i;
+
+	for (i = 0; i < aoc->n_services; i++) {
+		void *svc = (u8 *)aoc->ipc + aoc->services_offset +
+			    (size_t)i * aoc->service_size;
+		char nm[AOC_SERVICE_NAME_LEN + 1];
+
+		memcpy(nm, svc, AOC_SERVICE_NAME_LEN);
+		nm[AOC_SERVICE_NAME_LEN] = '\0';
+		if (!strcmp(nm, name))
+			return svc;
+	}
+	return NULL;
+}
+
+/* Ring the AOC's doorbell for the given 0..47 channel. */
+static void aoc_signal(struct aoc_data *aoc, u32 channel)
+{
+	u32 blk = channel / AOC_MBOX_CH_PER_BLOCK;
+	u32 bit = channel % AOC_MBOX_CH_PER_BLOCK;
+
+	if (blk >= AOC_MBOX_BLOCKS || !aoc->mbox[blk])
+		return;
+	wmb();				/* IPC writes must land before the doorbell */
+	writel(1U << bit, aoc->mbox[blk] + MB_INTGR0);
+}
+
+/* Is there a message for the AP to read on this service? */
+static bool aoc_service_readable(void *svc)
+{
+	void *r = svc_region(svc, AOC_UP);
+
+	return ipc_r32((u8 *)r + REG_TX) != ipc_r32((u8 *)r + REG_RX);
+}
+
+/* Write one queued message (AP -> AOC).  Returns 0 or a negative errno. */
+static int aoc_queue_write(struct aoc_data *aoc, void *svc,
+			   const void *buf, size_t len)
+{
+	void *r = svc_region(svc, AOC_DOWN);
+	u32 size = ipc_r32((u8 *)r + REG_SIZE);
+	u32 slots = ipc_r32((u8 *)r + REG_SLOTS);
+	u32 tx = ipc_r32((u8 *)r + REG_TX);
+	u32 rx = ipc_r32((u8 *)r + REG_RX);
+	u32 wp = ipc_r32((u8 *)r + REG_WP);
+	u8 *dst;
+	u32 off;
+
+	if (!slots || len + AOC_MSG_HDR_SIZE > size)
+		return -EMSGSIZE;
+	if ((tx - rx) >= slots)			/* queue full */
+		return -EAGAIN;
+
+	off = ipc_r32((u8 *)r + REG_OFFSET) + size * (tx % slots);
+	dst = (u8 *)aoc->ipc + off;
+	ipc_w16(dst, len);			/* message header: length + reserved */
+	ipc_w16(dst + 2, 0);
+	ipc_w16(dst + 4, 0);
+	ipc_w16(dst + 6, 0);
+	memcpy(dst + AOC_MSG_HDR_SIZE, buf, len);
+	wmb();					/* data before the advanced index */
+	ipc_w32((u8 *)r + REG_TX, tx + 1);
+	ipc_w32((u8 *)r + REG_WP, (wp + 1) % size);
+	return 0;
+}
+
+/* Read one queued message (AOC -> AP).  Returns the length or a negative errno. */
+static int aoc_queue_read(struct aoc_data *aoc, void *svc, void *buf, size_t max)
+{
+	void *r = svc_region(svc, AOC_UP);
+	u32 size = ipc_r32((u8 *)r + REG_SIZE);
+	u32 slots = ipc_r32((u8 *)r + REG_SLOTS);
+	u32 tx = ipc_r32((u8 *)r + REG_TX);
+	u32 rx = ipc_r32((u8 *)r + REG_RX);
+	u32 rp = ipc_r32((u8 *)r + REG_RP);
+	const u8 *src;
+	u32 off;
+	u16 len;
+
+	if (!slots || tx == rx)
+		return -ENODATA;
+
+	off = ipc_r32((u8 *)r + REG_OFFSET) + size * (rx % slots);
+	src = (const u8 *)aoc->ipc + off;
+	len = ipc_r16(src);
+	if (len > max || len + AOC_MSG_HDR_SIZE > size)
+		return -EMSGSIZE;
+
+	rmb();					/* index seen before the data */
+	memcpy(buf, src + AOC_MSG_HDR_SIZE, len);
+	ipc_w32((u8 *)r + REG_RX, rx + 1);
+	ipc_w32((u8 *)r + REG_RP, (rp + 1) % size);
+	return len;
+}
+
+/* Drain bytes from a ring (AOC -> AP).  Returns the count or a negative errno. */
+static int aoc_ring_read(struct aoc_data *aoc, void *svc, void *buf, size_t max)
+{
+	void *r = svc_region(svc, AOC_UP);
+	u32 size = ipc_r32((u8 *)r + REG_SIZE);
+	u32 tx = ipc_r32((u8 *)r + REG_TX);
+	u32 rx = ipc_r32((u8 *)r + REG_RX);
+	u32 wp = ipc_r32((u8 *)r + REG_WP);
+	u32 rp = ipc_r32((u8 *)r + REG_RP);
+	const u8 *ring = (const u8 *)aoc->ipc + ipc_r32((u8 *)r + REG_OFFSET);
+	u32 avail, to_read;
+
+	if (!size)
+		return -ENODATA;
+
+	/* If the writer lapped us, drop the stale bytes and keep the last ring. */
+	if ((tx - rx) > size) {
+		u32 adv = (tx - rx) - size;
+
+		rx += adv;
+		rp = (rp + adv) % size;
+		ipc_w32((u8 *)r + REG_RX, rx);
+		ipc_w32((u8 *)r + REG_RP, rp);
+	}
+
+	if (wp > rp)
+		avail = wp - rp;
+	else if (wp < rp)
+		avail = wp + size - rp;
+	else
+		avail = (tx == rx) ? 0 : size;
+	if (!avail)
+		return -ENODATA;
+
+	to_read = min(avail, (u32)max);
+	rmb();
+	if (rp + to_read <= size) {
+		memcpy(buf, ring + rp, to_read);
+	} else {
+		u32 part = size - rp;
+
+		memcpy(buf, ring + rp, part);
+		memcpy((u8 *)buf + part, ring, to_read - part);
+	}
+	ipc_w32((u8 *)r + REG_RX, rx + to_read);
+	ipc_w32((u8 *)r + REG_RP, (rp + to_read) % size);
+	return to_read;
+}
+
+/* AOC -> AP doorbell: the core has produced/consumed something. */
+static irqreturn_t aoc_mbox_isr(int irq, void *dev_id)
+{
+	struct aoc_mbox_irq *mi = dev_id;
+	struct aoc_data *aoc = mi->aoc;
+	void __iomem *base = aoc->mbox[mi->block];
+	u32 status = readl(base + MB_INTSR1);
+
+	if (!status)
+		return IRQ_NONE;
+
+	writel(status, base + MB_INTCR1);	/* ack every asserted channel */
+	atomic_inc(&aoc->mbox_irqs);
+	/*
+	 * A consumer re-checks its own service, so a wake is all that is owed
+	 * here; per-service handler dispatch comes with the BT/audio shims.
+	 */
+	return IRQ_HANDLED;
+}
+
+/* Map the doorbell mailboxes and claim their interrupts. */
+static int aoc_ipc_init(struct aoc_data *aoc, struct platform_device *pdev)
+{
+	const void *cb = (const u8 *)aoc->carveout + aoc->ipc_offset;
+	int b, irq, ret;
+
+	aoc->ipc = (u8 *)aoc->carveout + aoc->ipc_offset;
+	aoc->n_services = cb_rd(cb, AOC_CB_SERVICES);
+	aoc->service_size = cb_rd(cb, AOC_CB_SERVICE_SIZE);
+	aoc->services_offset = cb_rd(cb, AOC_CB_SERVICES_OFFSET);
+	atomic_set(&aoc->mbox_irqs, 0);
+
+	for (b = 0; b < AOC_MBOX_BLOCKS; b++) {
+		aoc->mbox[b] = devm_ioremap(aoc->dev, aoc_mbox_phys[b],
+					    AOC_MBOX_SIZE);
+		if (!aoc->mbox[b])
+			return -ENOMEM;
+		writel(0xffff, aoc->mbox[b] + MB_INTCR1);	/* clear stale */
+		writel(0, aoc->mbox[b] + MB_INTMR1);		/* unmask all */
+
+		aoc->mbox_irq[b].aoc = aoc;
+		aoc->mbox_irq[b].block = b;
+		irq = platform_get_irq(pdev, b);
+		if (irq < 0)
+			return irq;
+		ret = devm_request_irq(aoc->dev, irq, aoc_mbox_isr, 0,
+				       "aoc-mbox", &aoc->mbox_irq[b]);
+		if (ret)
+			return ret;
+	}
+	return 0;
+}
+
+/*
+ * End-to-end self-test: ask the control service for the A32 core's build info.
+ * A successful round-trip proves the doorbell, the queue write and the queue
+ * read all work against the live firmware.  We poll for the reply rather than
+ * wait on the interrupt so the data path is validated even if delivery is not.
+ */
+static void aoc_ipc_selftest(struct aoc_data *aoc)
+{
+	struct cmd_sys_version_get cmd = { };
+	char scratch[256];
+	void *ctrl;
+	int ret, i;
+
+	ctrl = aoc_find_service(aoc, "control");
+	if (!ctrl) {
+		dev_warn(aoc->dev, "no control service in the table\n");
+		return;
+	}
+	if (svc_type(ctrl) != SVC_TYPE_QUEUE) {
+		dev_warn(aoc->dev, "control service is not a queue (type %d)\n",
+			 svc_type(ctrl));
+		return;
+	}
+
+	/* Discard anything stale left in the reply direction (bounded). */
+	for (i = 0; i < 64 && aoc_service_readable(ctrl); i++)
+		aoc_queue_read(aoc, ctrl, scratch, sizeof(scratch));
+
+	cmd.hdr.parent.type = AOC_DATA_TYPE_CMD;
+	cmd.hdr.parent.len = cpu_to_le16(sizeof(cmd));
+	cmd.hdr.id = cpu_to_le16(CMD_SYS_VERSION_GET_ID);
+	cmd.core = cpu_to_le32(1);			/* the A32 core */
+
+	ret = aoc_queue_write(aoc, ctrl, &cmd, sizeof(cmd));
+	if (ret) {
+		dev_err(aoc->dev, "control write failed: %d\n", ret);
+		return;
+	}
+	aoc_signal(aoc, svc_mbox(ctrl));
+
+	for (i = 0; i < 100; i++) {			/* up to ~1s */
+		if (aoc_service_readable(ctrl))
+			break;
+		msleep(10);
+	}
+
+	ret = aoc_queue_read(aoc, ctrl, &cmd, sizeof(cmd));
+	if (ret < 0) {
+		dev_err(aoc->dev, "control read failed: %d (mbox irqs=%d)\n",
+			ret, atomic_read(&aoc->mbox_irqs));
+		return;
+	}
+
+	dev_info(aoc->dev,
+		 "IPC round-trip OK: A32 build '%.64s' linked '%.64s' (mbox irqs=%d)\n",
+		 cmd.version, cmd.link_time, atomic_read(&aoc->mbox_irqs));
+
+	/* Bonus RX proof: surface whatever the AOC has logged so far. */
+	{
+		void *log = aoc_find_service(aoc, "logging");
+
+		if (log && svc_type(log) == SVC_TYPE_RING) {
+			ret = aoc_ring_read(aoc, log, scratch, sizeof(scratch) - 1);
+			if (ret > 0) {
+				scratch[ret] = '\0';
+				dev_info(aoc->dev, "AOC log: %s\n", scratch);
+			}
+		}
+	}
 }
 
 static int aoc_probe(struct platform_device *pdev)
@@ -785,7 +1196,14 @@ static int aoc_probe(struct platform_device *pdev)
 			dev_err(dev, "Trusty failed to start the AOC: %d\n", ret);
 		} else {
 			dev_info(dev, "AOC started via Trusty (state now %d)\n", ret);
-			aoc_check_alive(aoc);
+			if (aoc_check_alive(aoc)) {
+				ret = aoc_ipc_init(aoc, pdev);
+				if (ret)
+					dev_warn(dev, "AOC IPC init failed: %d\n",
+						 ret);
+				else
+					aoc_ipc_selftest(aoc);
+			}
 		}
 	}
 	release_firmware(fw);
