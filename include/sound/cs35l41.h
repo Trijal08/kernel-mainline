@@ -10,6 +10,7 @@
 #ifndef __CS35L41_H
 #define __CS35L41_H
 
+#include <linux/interrupt.h>
 #include <linux/regmap.h>
 #include <linux/firmware/cirrus/cs_dsp.h>
 
