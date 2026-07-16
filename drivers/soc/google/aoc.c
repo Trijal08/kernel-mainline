@@ -33,6 +33,7 @@
 #include <linux/sizes.h>
 #include <linux/slab.h>
 
+#include <linux/soc/google/aoc.h>
 #include <linux/soc/samsung/exynos-gsa.h>
 #include <linux/trusty/trusty_ipc.h>
 
@@ -194,6 +195,7 @@ struct aoc_data {
 	u32 n_services;
 	u32 service_size;
 	u32 services_offset;
+	struct aoc_service *svc_tbl;	/* one wrapper per published service */
 	void __iomem *mbox[3];		/* the three AOC2AP mailbox blocks */
 	struct aoc_mbox_irq {
 		struct aoc_data *aoc;
@@ -808,20 +810,34 @@ static u32 svc_mbox(void *svc)
 	return (svc_flags(svc) & SVC_IRQ_MASK) >> SVC_IRQ_SHIFT;
 }
 
+/*
+ * A handle to one service, handed to consumers (see <linux/soc/google/aoc.h>).
+ * It caches the header pointer and doorbell channel, and carries the optional
+ * per-service interrupt handler.  The table is built once the AOC is online.
+ */
+struct aoc_service {
+	void *hdr;			/* service header in the carveout */
+	struct aoc_data *aoc;
+	u32 mbox;			/* doorbell channel (0..47) */
+	void (*handler)(struct aoc_service *svc, void *priv);
+	void *priv;
+};
+
 /* Look a service up by name in the published table. */
-static void *aoc_find_service(struct aoc_data *aoc, const char *name)
+static struct aoc_service *aoc_service_lookup(struct aoc_data *aoc,
+					      const char *name)
 {
 	unsigned int i;
 
+	if (!aoc->svc_tbl)
+		return NULL;
 	for (i = 0; i < aoc->n_services; i++) {
-		void *svc = (u8 *)aoc->ipc + aoc->services_offset +
-			    (size_t)i * aoc->service_size;
 		char nm[AOC_SERVICE_NAME_LEN + 1];
 
-		memcpy(nm, svc, AOC_SERVICE_NAME_LEN);
+		memcpy(nm, aoc->svc_tbl[i].hdr, AOC_SERVICE_NAME_LEN);
 		nm[AOC_SERVICE_NAME_LEN] = '\0';
 		if (!strcmp(nm, name))
-			return svc;
+			return &aoc->svc_tbl[i];
 	}
 	return NULL;
 }
@@ -955,7 +971,106 @@ static int aoc_ring_read(struct aoc_data *aoc, void *svc, void *buf, size_t max)
 	return to_read;
 }
 
-/* AOC -> AP doorbell: the core has produced/consumed something. */
+/* Fill a ring (AP -> AOC).  Returns the count written or a negative errno. */
+static int aoc_ring_write(struct aoc_data *aoc, void *svc,
+			  const void *buf, size_t len)
+{
+	void *r = svc_region(svc, AOC_DOWN);
+	u32 size = ipc_r32((u8 *)r + REG_SIZE);
+	u32 tx = ipc_r32((u8 *)r + REG_TX);
+	u32 wp = ipc_r32((u8 *)r + REG_WP);
+	u8 *ring = (u8 *)aoc->ipc + ipc_r32((u8 *)r + REG_OFFSET);
+	const u8 *src = buf;
+	u32 to_write;
+
+	if (!size)
+		return -ENODATA;
+	to_write = min((u32)len, size);
+	if (wp + to_write <= size) {
+		memcpy(ring + wp, src, to_write);
+	} else {
+		u32 part = size - wp;
+
+		memcpy(ring + wp, src, part);
+		memcpy(ring, src + part, to_write - part);
+	}
+	wmb();					/* data before the advanced index */
+	ipc_w32((u8 *)r + REG_TX, tx + to_write);
+	ipc_w32((u8 *)r + REG_WP, (wp + to_write) % size);
+	return to_write;
+}
+
+/*
+ * The in-kernel service API (declared in <linux/soc/google/aoc.h>).  Consumers
+ * hold an opaque struct aoc_service *; here we unwrap it to the header pointer
+ * and the owning device, and dispatch on the service type.
+ */
+struct aoc_service *aoc_service_find(struct device *dev, const char *name)
+{
+	struct aoc_data *aoc = platform_get_drvdata(to_platform_device(dev));
+
+	if (!aoc)
+		return NULL;
+	return aoc_service_lookup(aoc, name);
+}
+EXPORT_SYMBOL_GPL(aoc_service_find);
+
+int aoc_service_read(struct aoc_service *svc, void *buf, size_t len)
+{
+	if (svc_type(svc->hdr) == SVC_TYPE_RING)
+		return aoc_ring_read(svc->aoc, svc->hdr, buf, len);
+	return aoc_queue_read(svc->aoc, svc->hdr, buf, len);
+}
+EXPORT_SYMBOL_GPL(aoc_service_read);
+
+int aoc_service_write(struct aoc_service *svc, const void *buf, size_t len)
+{
+	int ret;
+
+	if (svc_type(svc->hdr) == SVC_TYPE_RING) {
+		ret = aoc_ring_write(svc->aoc, svc->hdr, buf, len);
+	} else {
+		ret = aoc_queue_write(svc->aoc, svc->hdr, buf, len);
+		if (ret == 0)
+			ret = len;		/* report the payload as accepted */
+	}
+	if (ret >= 0)
+		aoc_signal(svc->aoc, svc->mbox);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(aoc_service_write);
+
+bool aoc_service_can_read(struct aoc_service *svc)
+{
+	return aoc_service_readable(svc->hdr);
+}
+EXPORT_SYMBOL_GPL(aoc_service_can_read);
+
+bool aoc_service_can_write(struct aoc_service *svc)
+{
+	void *r = svc_region(svc->hdr, AOC_DOWN);
+
+	if (svc_type(svc->hdr) == SVC_TYPE_RING)
+		return true;			/* ring writes always make progress */
+	return ipc_r32((u8 *)r + REG_TX) - ipc_r32((u8 *)r + REG_RX) <
+	       ipc_r32((u8 *)r + REG_SLOTS);
+}
+EXPORT_SYMBOL_GPL(aoc_service_can_write);
+
+void aoc_service_set_handler(struct aoc_service *svc,
+			     void (*handler)(struct aoc_service *svc, void *priv),
+			     void *priv)
+{
+	svc->priv = priv;
+	smp_wmb();				/* priv visible before the handler */
+	WRITE_ONCE(svc->handler, handler);
+}
+EXPORT_SYMBOL_GPL(aoc_service_set_handler);
+
+/*
+ * AOC -> AP doorbell: the core has produced or consumed something.  Demux each
+ * asserted channel to the services that named it and call their handlers.
+ */
 static irqreturn_t aoc_mbox_isr(int irq, void *dev_id)
 {
 	struct aoc_mbox_irq *mi = dev_id;
@@ -968,17 +1083,33 @@ static irqreturn_t aoc_mbox_isr(int irq, void *dev_id)
 
 	writel(status, base + MB_INTCR1);	/* ack every asserted channel */
 	atomic_inc(&aoc->mbox_irqs);
-	/*
-	 * A consumer re-checks its own service, so a wake is all that is owed
-	 * here; per-service handler dispatch comes with the BT/audio shims.
-	 */
+	rmb();					/* see the AOC's writes after the ack */
+
+	while (status) {
+		unsigned int bit = __ffs(status);
+		u32 channel = mi->block * AOC_MBOX_CH_PER_BLOCK + bit;
+		unsigned int i;
+
+		status &= ~(1U << bit);
+		for (i = 0; i < aoc->n_services; i++) {
+			struct aoc_service *svc = &aoc->svc_tbl[i];
+			void (*h)(struct aoc_service *, void *);
+
+			if (svc->mbox != channel)
+				continue;
+			h = READ_ONCE(svc->handler);
+			if (h)
+				h(svc, svc->priv);
+		}
+	}
 	return IRQ_HANDLED;
 }
 
-/* Map the doorbell mailboxes and claim their interrupts. */
+/* Build the service table and map the doorbell mailboxes + their interrupts. */
 static int aoc_ipc_init(struct aoc_data *aoc, struct platform_device *pdev)
 {
 	const void *cb = (const u8 *)aoc->carveout + aoc->ipc_offset;
+	unsigned int i;
 	int b, irq, ret;
 
 	aoc->ipc = (u8 *)aoc->carveout + aoc->ipc_offset;
@@ -986,6 +1117,23 @@ static int aoc_ipc_init(struct aoc_data *aoc, struct platform_device *pdev)
 	aoc->service_size = cb_rd(cb, AOC_CB_SERVICE_SIZE);
 	aoc->services_offset = cb_rd(cb, AOC_CB_SERVICES_OFFSET);
 	atomic_set(&aoc->mbox_irqs, 0);
+
+	if (!aoc->n_services || aoc->n_services > 256)
+		return -EINVAL;
+
+	/* One handle per service; the interrupt path indexes this table. */
+	aoc->svc_tbl = devm_kcalloc(aoc->dev, aoc->n_services,
+				    sizeof(*aoc->svc_tbl), GFP_KERNEL);
+	if (!aoc->svc_tbl)
+		return -ENOMEM;
+	for (i = 0; i < aoc->n_services; i++) {
+		void *hdr = (u8 *)aoc->ipc + aoc->services_offset +
+			    (size_t)i * aoc->service_size;
+
+		aoc->svc_tbl[i].hdr = hdr;
+		aoc->svc_tbl[i].aoc = aoc;
+		aoc->svc_tbl[i].mbox = svc_mbox(hdr);
+	}
 
 	for (b = 0; b < AOC_MBOX_BLOCKS; b++) {
 		aoc->mbox[b] = devm_ioremap(aoc->dev, aoc_mbox_phys[b],
@@ -1017,44 +1165,43 @@ static int aoc_ipc_init(struct aoc_data *aoc, struct platform_device *pdev)
 static void aoc_ipc_selftest(struct aoc_data *aoc)
 {
 	struct cmd_sys_version_get cmd = { };
+	struct aoc_service *ctrl, *log;
 	char scratch[256];
-	void *ctrl;
 	int ret, i;
 
-	ctrl = aoc_find_service(aoc, "control");
+	ctrl = aoc_service_lookup(aoc, "control");
 	if (!ctrl) {
 		dev_warn(aoc->dev, "no control service in the table\n");
 		return;
 	}
-	if (svc_type(ctrl) != SVC_TYPE_QUEUE) {
+	if (svc_type(ctrl->hdr) != SVC_TYPE_QUEUE) {
 		dev_warn(aoc->dev, "control service is not a queue (type %d)\n",
-			 svc_type(ctrl));
+			 svc_type(ctrl->hdr));
 		return;
 	}
 
 	/* Discard anything stale left in the reply direction (bounded). */
-	for (i = 0; i < 64 && aoc_service_readable(ctrl); i++)
-		aoc_queue_read(aoc, ctrl, scratch, sizeof(scratch));
+	for (i = 0; i < 64 && aoc_service_can_read(ctrl); i++)
+		aoc_service_read(ctrl, scratch, sizeof(scratch));
 
 	cmd.hdr.parent.type = AOC_DATA_TYPE_CMD;
 	cmd.hdr.parent.len = cpu_to_le16(sizeof(cmd));
 	cmd.hdr.id = cpu_to_le16(CMD_SYS_VERSION_GET_ID);
 	cmd.core = cpu_to_le32(1);			/* the A32 core */
 
-	ret = aoc_queue_write(aoc, ctrl, &cmd, sizeof(cmd));
-	if (ret) {
+	ret = aoc_service_write(ctrl, &cmd, sizeof(cmd));	/* writes + signals */
+	if (ret < 0) {
 		dev_err(aoc->dev, "control write failed: %d\n", ret);
 		return;
 	}
-	aoc_signal(aoc, svc_mbox(ctrl));
 
 	for (i = 0; i < 100; i++) {			/* up to ~1s */
-		if (aoc_service_readable(ctrl))
+		if (aoc_service_can_read(ctrl))
 			break;
 		msleep(10);
 	}
 
-	ret = aoc_queue_read(aoc, ctrl, &cmd, sizeof(cmd));
+	ret = aoc_service_read(ctrl, &cmd, sizeof(cmd));
 	if (ret < 0) {
 		dev_err(aoc->dev, "control read failed: %d (mbox irqs=%d)\n",
 			ret, atomic_read(&aoc->mbox_irqs));
@@ -1066,15 +1213,12 @@ static void aoc_ipc_selftest(struct aoc_data *aoc)
 		 cmd.version, cmd.link_time, atomic_read(&aoc->mbox_irqs));
 
 	/* Bonus RX proof: surface whatever the AOC has logged so far. */
-	{
-		void *log = aoc_find_service(aoc, "logging");
-
-		if (log && svc_type(log) == SVC_TYPE_RING) {
-			ret = aoc_ring_read(aoc, log, scratch, sizeof(scratch) - 1);
-			if (ret > 0) {
-				scratch[ret] = '\0';
-				dev_info(aoc->dev, "AOC log: %s\n", scratch);
-			}
+	log = aoc_service_lookup(aoc, "logging");
+	if (log && svc_type(log->hdr) == SVC_TYPE_RING) {
+		ret = aoc_service_read(log, scratch, sizeof(scratch) - 1);
+		if (ret > 0) {
+			scratch[ret] = '\0';
+			dev_info(aoc->dev, "AOC log: %s\n", scratch);
 		}
 	}
 }
