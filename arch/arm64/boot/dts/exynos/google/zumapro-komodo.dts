@@ -14,6 +14,16 @@
 / {
 	model = "Pixel 9 Pro XL";
 	compatible = "google,komodo", "google,zumapro-komodo", "google,zumapro";
+
+	/*
+	 * AOC-routed audio.  The AOC does the DSP and drives the speaker amps;
+	 * this card streams PCM to it over the audio IPC rings.  Regless: it is
+	 * a software card, not a device.
+	 */
+	aoc_sound: aoc-sound {
+		compatible = "google,aoc-sound";
+		aoc = <&aoc>;
+	};
 };
 
 /* Board identity the AOC firmware reads at boot. */
