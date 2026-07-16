@@ -6,4 +6,13 @@ config SND_SOC_CHV3_I2S
 	help
 	  Enable support for the Google Chameleon v3 I2S device.
 
+config SND_SOC_GOOGLE_AOC
+	tristate "Google AOC coprocessor audio"
+	depends on GOOGLE_AOC
+	help
+	  ASoC platform and card for the Google AOC (Always-On Compute)
+	  coprocessor found on Tensor SoCs.  The AOC does the audio DSP and
+	  drives the amplifiers; this streams PCM to it over its audio IPC
+	  rings.  Say M here if you have an AOC and want AOC-routed audio.
+
 endmenu
