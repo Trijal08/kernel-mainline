@@ -23,6 +23,15 @@
 	aoc_sound: aoc-sound {
 		compatible = "google,aoc-sound";
 		aoc = <&aoc>;
+
+		/*
+		 * The amplifiers listening to the AOC's TDM.  The left one is
+		 * left out: it does not answer on SPI (see its node), and a
+		 * codec that never probes would hold the whole card back.
+		 */
+		speakers {
+			sound-dai = <&cs35l41_r 0>;
+		};
 	};
 
 	/*
