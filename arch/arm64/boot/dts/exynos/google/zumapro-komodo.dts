@@ -24,12 +24,115 @@
 		compatible = "google,aoc-sound";
 		aoc = <&aoc>;
 	};
+
+	/*
+	 * Supplies for the CS35L41 speaker amps.  VA is the PMIC's BUCKA rail,
+	 * which is always-on in hardware (1.7-2.1V), so a fixed regulator is a
+	 * faithful stand-in; VP is the battery rail (always present).
+	 */
+	cs35l41_va: regulator-cs35l41-va {
+		compatible = "regulator-fixed";
+		regulator-name = "cs35l41-va";
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <1800000>;
+		regulator-always-on;
+	};
+
+	cs35l41_vp: regulator-cs35l41-vp {
+		compatible = "regulator-fixed";
+		regulator-name = "cs35l41-vp";
+		regulator-min-microvolt = <3700000>;
+		regulator-max-microvolt = <3700000>;
+		regulator-always-on;
+	};
 };
 
 /* Board identity the AOC firmware reads at boot. */
 &aoc {
 	aoc-board-id = <0x40802>;
 	aoc-board-rev = <0x10000>;
+};
+
+/*
+ * Stereo speaker amplifiers: two CS35L41 on spi_19 (HSI0 USI1).  The AOC
+ * drives them over TDM; this bus is only their SPI control link.  The left
+ * amp uses the controller's native chip select; the right amp's is a GPIO
+ * (gpn1-0) driven in the manual chip-select mode the Samsung SPI needs.
+ */
+&spi_19 {
+	status = "okay";
+	num-cs = <2>;
+	cs-gpios = <0>, <&gpn1 0 GPIO_ACTIVE_LOW>;
+
+	/*
+	 * The left amp is wired to the controller's native chip select, which
+	 * does not select it: with its reset released by hand and the driver's
+	 * reset handling removed it is still silent, and it fails identically
+	 * whether or not this bus declares cs-gpios.  Nothing in the tree muxes
+	 * this bus's chip-select pad (there are no spi19 pin configs, unlike
+	 * the peric SPIs, whose native chip selects only work because they mux
+	 * theirs), so the pad is most likely simply not muxed.  Identifying it
+	 * needs the SoC pad map.  The right amp, whose chip select is a plain
+	 * GPIO, works.
+	 */
+	cs35l41_l: cs35l41@0 {
+		compatible = "cirrus,cs35l41";
+		reg = <0>;
+		#sound-dai-cells = <1>;
+		spi-max-frequency = <25000000>;
+
+		/*
+		 * The reset line, gpp6-3, is the SPI3 chip-select pad and comes
+		 * up in its peripheral function; mux it to GPIO output (the
+		 * spi3_cs config does exactly that) or the reset never drives and
+		 * the amp hangs in reset (OTP boot never completes).
+		 */
+		pinctrl-names = "default";
+		pinctrl-0 = <&spi3_cs>;
+
+		interrupt-parent = <&gpa5>;
+		interrupts = <5 IRQ_TYPE_LEVEL_LOW>;
+		reset-gpios = <&gpp6 3 GPIO_ACTIVE_HIGH>;
+
+		VA-supply = <&cs35l41_va>;
+		VP-supply = <&cs35l41_vp>;
+
+		cirrus,boost-peak-milliamp = <3500>;
+		cirrus,boost-ind-nanohenry = <1000>;
+		cirrus,boost-cap-microfarad = <4>;
+		cirrus,asp-sdout-hiz = <3>;
+
+		controller-data {
+			samsung,spi-feedback-delay = <1>;
+			samsung,spi-chip-select-mode = <0>;
+		};
+	};
+
+	cs35l41_r: cs35l41@1 {
+		compatible = "cirrus,cs35l41";
+		reg = <1>;
+		#sound-dai-cells = <1>;
+		sound-name-prefix = "R";
+		spi-max-frequency = <25000000>;
+
+		interrupt-parent = <&gpa7>;
+		interrupts = <2 IRQ_TYPE_LEVEL_LOW>;
+		reset-gpios = <&gph2 1 GPIO_ACTIVE_HIGH>;
+
+		VA-supply = <&cs35l41_va>;
+		VP-supply = <&cs35l41_vp>;
+
+		cirrus,boost-peak-milliamp = <3500>;
+		cirrus,boost-ind-nanohenry = <1000>;
+		cirrus,boost-cap-microfarad = <4>;
+		cirrus,asp-sdout-hiz = <3>;
+		cirrus,right-channel-amp;
+
+		controller-data {
+			samsung,spi-feedback-delay = <1>;
+			samsung,spi-chip-select-mode = <2>;
+		};
+	};
 };
 
 // &cont_splash_mem {
