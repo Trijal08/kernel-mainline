@@ -37,6 +37,12 @@ int aoc_service_write(struct aoc_service *svc, const void *buf, size_t len);
 bool aoc_service_can_read(struct aoc_service *svc);
 bool aoc_service_can_write(struct aoc_service *svc);
 
+/*
+ * The AOC's running byte position in the service's data stream, for a PCM
+ * hardware pointer: bytes consumed for playback, bytes produced for capture.
+ */
+u32 aoc_service_progress(struct aoc_service *svc, bool playback);
+
 /**
  * aoc_service_set_handler() - register a doorbell callback for a service
  * @svc: the service handle
