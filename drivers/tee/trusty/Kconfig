@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# Trusty TEE
+#
+
+config TRUSTY
+	tristate "Trusty TEE support"
+	depends on TEE
+	depends on ARM || ARM64
+	depends on HAVE_ARM_SMCCC
+	help
+	  Trusty is a secure OS that runs in the ARM TrustZone secure world,
+	  reached from the normal world through SMC calls.  This is the core
+	  driver: it owns the SMC interface and exposes the fast- and
+	  standard-call primitives the rest of the Trusty stack builds on.
+
+	  Say Y here if your platform ships the Trusty secure OS and you need
+	  the kernel to talk to it (for example to reach a Trusty-hosted
+	  security service).  If unsure, say N.
