@@ -24,13 +24,11 @@
 		compatible = "google,aoc-sound";
 		aoc = <&aoc>;
 
-		/*
-		 * The amplifiers listening to the AOC's TDM.  The left one is
-		 * left out: it does not answer on SPI (see its node), and a
-		 * codec that never probes would hold the whole card back.
+		/* Both amplifiers listening to the AOC's TDM: left on slot 0,
+		 * right on slot 1.
 		 */
 		speakers {
-			sound-dai = <&cs35l41_r 0>;
+			sound-dai = <&cs35l41_l 0>, <&cs35l41_r 0>;
 		};
 	};
 
@@ -62,15 +60,9 @@
 	cs-gpios = <0>, <&gpn1 0 GPIO_ACTIVE_LOW>;
 
 	/*
-	 * The left amp is wired to the controller's native chip select, which
-	 * does not select it: with its reset released by hand and the driver's
-	 * reset handling removed it is still silent, and it fails identically
-	 * whether or not this bus declares cs-gpios.  Nothing in the tree muxes
-	 * this bus's chip-select pad (there are no spi19 pin configs, unlike
-	 * the peric SPIs, whose native chip selects only work because they mux
-	 * theirs), so the pad is most likely simply not muxed.  Identifying it
-	 * needs the SoC pad map.  The right amp, whose chip select is a plain
-	 * GPIO, works.
+	 * The left amp is on the controller's native chip select, the right
+	 * on a GPIO (gpn1-0) driven in the manual chip-select mode the Samsung
+	 * SPI needs.
 	 */
 	cs35l41_l: cs35l41@0 {
 		compatible = "cirrus,cs35l41";
