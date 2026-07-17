@@ -1793,6 +1793,9 @@ S2MPG10_VOLTAGE_RANGE(s2mpg14_ldo, 4, 1800000, 1800000, 3300000, STEP_25_MV);
 /* voltage range for s2mpg15 BUCK 2, 8, 11 */
 S2MPG10_VOLTAGE_RANGE(s2mpg15_buck, 1, 200000, 450000, 1300000, STEP_6_25_MV);
 
+/* voltage range for s2mpg15 BUCK A */
+S2MPG10_VOLTAGE_RANGE(s2mpg15_buck, 2, 600000, 600000, 3787500, STEP_12_5_MV);
+
 /* voltage range for s2mpg15 LDO 1 */
 S2MPG10_VOLTAGE_RANGE(s2mpg15_ldo, 1, 300000, 700000, 1300000, STEP_12_5_MV);
 
@@ -1893,6 +1896,27 @@ static const struct regulator_desc s2mpg15_regulators[] = {
 	regulator_desc_s2mpg15_buck(2, "vinb2s", s2mpg15_buck_vranges1),
 	regulator_desc_s2mpg15_buck(8, "vinb8s", s2mpg15_buck_vranges1),
 	regulator_desc_s2mpg15_buck(11, "vinb11s", s2mpg15_buck_vranges1),
+	/*
+	 * BUCKA is named, and addressed, apart from the numbered bucks, so it
+	 * does not fit the macro above.
+	 */
+	{
+		.name		= "bucka",
+		.of_match	= of_match_ptr("bucka"),
+		.regulators_node = of_match_ptr("regulators"),
+		.id		= S2MPG15_BUCKA,
+		.ops		= &s2mps15_reg_buck_ops,
+		.type		= REGULATOR_VOLTAGE,
+		.owner		= THIS_MODULE,
+		.linear_ranges	= s2mpg15_buck_vranges2,
+		.n_linear_ranges = ARRAY_SIZE(s2mpg15_buck_vranges2),
+		.n_voltages	= s2mpg15_buck_vranges2_count,
+		.vsel_reg	= S2MPG15_PMIC_BUCKA_OUT,
+		.vsel_mask	= GENMASK(7, 0),
+		.enable_reg	= S2MPG15_PMIC_BUCKA_CTRL,
+		.enable_mask	= GENMASK(7, 6),
+		.ramp_delay	= 12500,
+	},
 	regulator_desc_s2mpg15_ldo(1, "vinl1s", s2mpg15_ldo_vranges1),
 	regulator_desc_s2mpg15_ldo(2, "vinl2s", s2mpg15_ldo_vranges1),
 	/* GNSS core, RF and aux rails */
