@@ -34,19 +34,7 @@
 		};
 	};
 
-	/*
-	 * Supplies for the CS35L41 speaker amps.  VA is the PMIC's BUCKA rail,
-	 * which is always-on in hardware (1.7-2.1V), so a fixed regulator is a
-	 * faithful stand-in; VP is the battery rail (always present).
-	 */
-	cs35l41_va: regulator-cs35l41-va {
-		compatible = "regulator-fixed";
-		regulator-name = "cs35l41-va";
-		regulator-min-microvolt = <1800000>;
-		regulator-max-microvolt = <1800000>;
-		regulator-always-on;
-	};
-
+	/* VP is the battery, which is always there and has nothing to model. */
 	cs35l41_vp: regulator-cs35l41-vp {
 		compatible = "regulator-fixed";
 		regulator-name = "cs35l41-vp";
@@ -103,7 +91,7 @@
 		interrupts = <5 IRQ_TYPE_LEVEL_LOW>;
 		reset-gpios = <&gpp6 3 GPIO_ACTIVE_HIGH>;
 
-		VA-supply = <&cs35l41_va>;
+		VA-supply = <&s_bucka_reg>;
 		VP-supply = <&cs35l41_vp>;
 
 		cirrus,boost-peak-milliamp = <3500>;
@@ -136,7 +124,7 @@
 		interrupts = <2 IRQ_TYPE_LEVEL_LOW>;
 		reset-gpios = <&gph2 1 GPIO_ACTIVE_HIGH>;
 
-		VA-supply = <&cs35l41_va>;
+		VA-supply = <&s_bucka_reg>;
 		VP-supply = <&cs35l41_vp>;
 
 		cirrus,boost-peak-milliamp = <3500>;
