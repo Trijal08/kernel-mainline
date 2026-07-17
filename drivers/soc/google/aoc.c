@@ -978,6 +978,7 @@ static int aoc_ring_write(struct aoc_data *aoc, void *svc,
 	void *r = svc_region(svc, AOC_DOWN);
 	u32 size = ipc_r32((u8 *)r + REG_SIZE);
 	u32 tx = ipc_r32((u8 *)r + REG_TX);
+	u32 rx = ipc_r32((u8 *)r + REG_RX);
 	u32 wp = ipc_r32((u8 *)r + REG_WP);
 	u8 *ring = (u8 *)aoc->ipc + ipc_r32((u8 *)r + REG_OFFSET);
 	const u8 *src = buf;
@@ -985,7 +986,14 @@ static int aoc_ring_write(struct aoc_data *aoc, void *svc,
 
 	if (!size)
 		return -ENODATA;
-	to_write = min((u32)len, size);
+	/*
+	 * Only what the AOC has already read may be written over.  tx and rx
+	 * are free-running byte counters, so their difference is what is still
+	 * in flight, and it stays right across their wraparound.
+	 */
+	to_write = min((u32)len, size - (tx - rx));
+	if (!to_write)
+		return 0;			/* full: the reader is behind */
 	if (wp + to_write <= size) {
 		memcpy(ring + wp, src, to_write);
 	} else {
