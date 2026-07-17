@@ -18,6 +18,8 @@
  */
 
 #include <linux/completion.h>
+#include <linux/hrtimer.h>
+#include <linux/workqueue.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/of.h>
@@ -32,7 +34,9 @@
 #include <sound/pcm_params.h>
 #include <sound/soc.h>
 
-#define AOC_PCM_BUFFER_BYTES	(512 * 1024)
+/* The ring the AOC drains is 16K; keep the staging buffer a few of those. */
+#define AOC_PCM_BUFFER_BYTES	(16384 * 6)
+#define AOC_PCM_TICK_NS		(10 * NSEC_PER_MSEC)
 /*
  * Entry point 2.  Not the first one: that is the AOC's ultra-low-latency
  * endpoint, which expects its buffer filled ahead of the reader rather than
@@ -146,6 +150,10 @@ struct aoc_audio {
 /* Per-open stream state. */
 struct aoc_audio_stream {
 	struct aoc_service *svc;
+	struct snd_pcm_substream *substream;
+	struct hrtimer tick;			/* the AOC does not interrupt us */
+	struct work_struct period_work;		/* the tick cannot enter the core */
+	u32 prev_consumed;
 	bool playback;
 	u8 source;				/* AOC entry point = PCM device */
 	u32 base;				/* AOC byte position at start */
@@ -290,6 +298,11 @@ static int aoc_audio_bind(struct aoc_audio *aud, u8 src, u8 dst, bool on)
 	return aoc_audio_cmd(aud, &cmd, sizeof(cmd), rsp, sizeof(rsp));
 }
 
+/*
+ * Ask the AOC what it makes of the speaker.  The AP can see that the AOC is
+ * draining the ring and clocking the TDM, but not whether it is putting
+ * anything on it; this is the only view of that.
+ */
 static const struct snd_pcm_hardware aoc_pcm_hw = {
 	.info = SNDRV_PCM_INFO_INTERLEAVED | SNDRV_PCM_INFO_BLOCK_TRANSFER,
 	.formats = SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S32_LE,
@@ -305,12 +318,37 @@ static const struct snd_pcm_hardware aoc_pcm_hw = {
 	.periods_max = 64,
 };
 
-/* The AOC signalled this service: a period has been consumed/produced. */
-static void aoc_pcm_isr(struct aoc_service *svc, void *priv)
-{
-	struct snd_pcm_substream *substream = priv;
+/*
+ * The AOC does not interrupt as it drains a playback ring: it just moves the
+ * read pointer.  Poll it, and tell the core how far it has got.
+ */
+static void aoc_pcm_push(struct aoc_audio_stream *s);
 
-	snd_pcm_period_elapsed(substream);
+static void aoc_pcm_period_work(struct work_struct *w)
+{
+	struct aoc_audio_stream *s = container_of(w, struct aoc_audio_stream,
+						  period_work);
+
+	/* top the ring up first, then let the application refill behind us */
+	aoc_pcm_push(s);
+	snd_pcm_period_elapsed(s->substream);
+}
+
+static enum hrtimer_restart aoc_pcm_tick(struct hrtimer *t)
+{
+	struct aoc_audio_stream *s = container_of(t, struct aoc_audio_stream,
+						  tick);
+	u32 consumed;
+
+	hrtimer_forward_now(t, ns_to_ktime(AOC_PCM_TICK_NS));
+
+	consumed = aoc_service_progress(s->svc, s->playback);
+	if (consumed != s->prev_consumed) {
+		s->prev_consumed = consumed;
+		/* the link is nonatomic: the core must not be entered here */
+		schedule_work(&s->period_work);
+	}
+	return HRTIMER_RESTART;
 }
 
 static int aoc_pcm_open(struct snd_soc_component *comp,
@@ -325,18 +363,23 @@ static int aoc_pcm_open(struct snd_soc_component *comp,
 
 	svc = aoc_service_find(aud->aoc_dev, AOC_PLAYBACK_SERVICE);
 	if (!svc)
-		return -ENODEV;
+		return dev_err_probe(comp->dev, -ENODEV,
+				     "no %s service\n", AOC_PLAYBACK_SERVICE);
+	dev_info(comp->dev, "opened %s (source %d)\n", AOC_PLAYBACK_SERVICE,
+		 AOC_PLAYBACK_SOURCE);
 
 	s = kzalloc(sizeof(*s), GFP_KERNEL);
 	if (!s)
 		return -ENOMEM;
 	s->svc = svc;
+	s->substream = substream;
 	s->playback = substream->stream == SNDRV_PCM_STREAM_PLAYBACK;
+	hrtimer_setup(&s->tick, aoc_pcm_tick, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+	INIT_WORK(&s->period_work, aoc_pcm_period_work);
 	s->source = AOC_PLAYBACK_SOURCE;	/* the entry point the ring feeds */
 	substream->runtime->private_data = s;
 
 	snd_soc_set_runtime_hwparams(substream, &aoc_pcm_hw);
-	aoc_service_set_handler(svc, aoc_pcm_isr, substream);
 	return 0;
 }
 
@@ -346,7 +389,8 @@ static int aoc_pcm_close(struct snd_soc_component *comp,
 	struct aoc_audio_stream *s = substream->runtime->private_data;
 
 	if (s) {
-		aoc_service_set_handler(s->svc, NULL, NULL);
+		hrtimer_cancel(&s->tick);
+		cancel_work_sync(&s->period_work);
 		kfree(s);
 		substream->runtime->private_data = NULL;
 	}
@@ -375,20 +419,24 @@ static int aoc_pcm_prepare(struct snd_soc_component *comp,
 		return 0;
 
 	s->base = aoc_service_progress(s->svc, s->playback);
+	s->prev_consumed = s->base;
 	s->pushed = 0;
 	return 0;
 }
 
 /* The application committed frames up to appl_ptr; hand the new ones to the ring. */
-static int aoc_pcm_ack(struct snd_soc_component *comp,
-		       struct snd_pcm_substream *substream)
+/*
+ * Hand the ring whatever the application has committed and the AOC has already
+ * read past.  Called both when userspace writes and from the poll: the ring
+ * holds well under a period, so waiting for the next write would starve it.
+ */
+static void aoc_pcm_push(struct aoc_audio_stream *s)
 {
-	struct snd_pcm_runtime *rt = substream->runtime;
-	struct aoc_audio_stream *s = rt->private_data;
+	struct snd_pcm_runtime *rt = s->substream->runtime;
 	snd_pcm_uframes_t appl = READ_ONCE(rt->control->appl_ptr);
 
 	if (!s->playback)
-		return 0;
+		return;
 
 	while (s->pushed < appl) {
 		snd_pcm_uframes_t off = s->pushed % rt->buffer_size;
@@ -399,12 +447,23 @@ static int aoc_pcm_ack(struct snd_soc_component *comp,
 					  rt->dma_area + frames_to_bytes(rt, off),
 					  nbytes);
 
-		if (w <= 0)			/* ring full: the AOC is not draining yet */
+		if (w <= 0)			/* full: the AOC has not read on */
 			break;
 		s->pushed += bytes_to_frames(rt, w);
 		if (w < nbytes)
 			break;
 	}
+}
+
+static int aoc_pcm_ack(struct snd_soc_component *comp,
+		       struct snd_pcm_substream *substream)
+{
+	struct aoc_audio_stream *s = substream->runtime->private_data;
+
+	if (aoc_pcm_is_be(substream))
+		return 0;
+
+	aoc_pcm_push(s);
 	return 0;
 }
 
@@ -490,6 +549,12 @@ static int aoc_pcm_trigger(struct snd_soc_component *comp,
 	default:
 		return -EINVAL;
 	}
+
+	if (on)
+		hrtimer_start(&s->tick, ns_to_ktime(AOC_PCM_TICK_NS),
+			      HRTIMER_MODE_REL);
+	else
+		hrtimer_try_to_cancel(&s->tick);
 
 	/* The route is already up; this only starts and stops the flow. */
 	ret = aoc_audio_source(aud, s->source, on);
