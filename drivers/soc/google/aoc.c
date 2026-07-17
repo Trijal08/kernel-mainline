@@ -203,6 +203,10 @@ struct aoc_data {
 	} mbox_irq[3];
 	atomic_t mbox_irqs;		/* AOC->AP interrupts seen (diagnostic) */
 
+	/* The core's own console, which is the only view of what it is doing. */
+	struct aoc_service *log_svc;
+	struct delayed_work log_work;
+
 	/* Trusty channel to the GSA AOC hardware manager. */
 	struct tipc_chan *tz_chan;
 	struct completion tz_reply;
@@ -1183,6 +1187,23 @@ static int aoc_ipc_init(struct aoc_data *aoc, struct platform_device *pdev)
  * read all work against the live firmware.  We poll for the reply rather than
  * wait on the interrupt so the data path is validated even if delivery is not.
  */
+static void aoc_log_work(struct work_struct *w)
+{
+	struct aoc_data *aoc = container_of(to_delayed_work(w), struct aoc_data,
+					    log_work);
+	char buf[257];
+	int ret, n;
+
+	for (n = 0; n < 64; n++) {
+		ret = aoc_service_read(aoc->log_svc, buf, sizeof(buf) - 1);
+		if (ret <= 0)
+			break;
+		buf[ret] = '\0';
+		dev_dbg(aoc->dev, "AOC: %s\n", buf);
+	}
+	schedule_delayed_work(&aoc->log_work, msecs_to_jiffies(200));
+}
+
 static void aoc_ipc_selftest(struct aoc_data *aoc)
 {
 	struct cmd_sys_version_get cmd = { };
@@ -1235,12 +1256,17 @@ static void aoc_ipc_selftest(struct aoc_data *aoc)
 
 	/* Bonus RX proof: surface whatever the AOC has logged so far. */
 	log = aoc_service_lookup(aoc, "logging");
-	if (log && svc_type(log->hdr) == SVC_TYPE_RING) {
+	if (log) {
 		ret = aoc_service_read(log, scratch, sizeof(scratch) - 1);
 		if (ret > 0) {
 			scratch[ret] = '\0';
 			dev_info(aoc->dev, "AOC log: %s\n", scratch);
 		}
+		/* Keep draining it: what the core says as it runs is the only
+		 * account we get of what it thinks it is doing.
+		 */
+		aoc->log_svc = log;
+		schedule_delayed_work(&aoc->log_work, msecs_to_jiffies(200));
 	}
 }
 
@@ -1259,6 +1285,7 @@ static int aoc_probe(struct platform_device *pdev)
 		return -ENOMEM;
 	aoc->dev = dev;
 	mutex_init(&aoc->tz_req_lock);
+	INIT_DELAYED_WORK(&aoc->log_work, aoc_log_work);
 	mutex_init(&aoc->tz_rsp_lock);
 	init_completion(&aoc->tz_reply);
 	platform_set_drvdata(pdev, aoc);
@@ -1384,6 +1411,7 @@ static void aoc_remove(struct platform_device *pdev)
 {
 	struct aoc_data *aoc = platform_get_drvdata(pdev);
 
+	cancel_delayed_work_sync(&aoc->log_work);
 	if (aoc->tz_chan) {
 		tipc_chan_shutdown(aoc->tz_chan);
 		tipc_chan_destroy(aoc->tz_chan);
