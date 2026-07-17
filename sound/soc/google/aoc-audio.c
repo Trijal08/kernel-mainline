@@ -18,6 +18,7 @@
  */
 
 #include <linux/completion.h>
+#include <linux/delay.h>
 #include <linux/hrtimer.h>
 #include <linux/workqueue.h>
 #include <linux/module.h>
@@ -47,6 +48,7 @@
 #define AOC_PLAYBACK_SOURCE	1
 #define AOC_OUTPUT_CTRL_SERVICE	"audio_output_control"
 #define AOC_CMD_TIMEOUT_MS	200
+#define AOC_CMD_REPLY_TRIES	50	/* ~10ms of 200us polls for a lagging reply */
 
 /*
  * The AOC's TDM_0 port, which the speakers hang off.  Its frame is fixed in AOC
@@ -139,12 +141,86 @@ struct cmd_audio_output_bind {
 	u8 bind;
 } __packed;
 
+/*
+ * Capture is the mirror of playback: the AOC records from the mics into an
+ * audio_captureN ring (AOC_UP: the AOC writes, the AP reads), configured and
+ * started over its own control channel, audio_input_control.
+ */
+#define AOC_CAPTURE_SERVICE	"audio_capture0"
+#define AOC_INPUT_CTRL_SERVICE	"audio_input_control"
+#define AOC_CAPTURE_SOURCE	0	/* the entry point audio_capture0 feeds */
+
+#define AOC_CMD_AUDIO_INPUT_START_ID		208
+#define AOC_CMD_AUDIO_INPUT_STOP_ID		209
+#define AOC_CMD_AUDIO_INPUT_START_DATA_ID	293
+#define AOC_CMD_AUDIO_INPUT_MIC_PARAMS_ID	224
+#define AOC_CMD_AUDIO_INPUT_MIC_PARAMS2_ID	359
+#define AOC_MIC_SRC_AP				1	/* APInputProcessorInputIndex */
+#define AOC_MIC_PROCESS_RAW			0	/* APMicProcessIndex */
+#define AOC_MIC_PDM_MAX				4
+
+/*
+ * The mic boots muted: both gain stages sit at zero, so a recording is barely
+ * above the noise floor.  These are the values the stock record paths use.
+ */
+#define AOC_CMD_AUDIO_INPUT_SET_MIC_HP_GAIN_ID	254	/* high-power HW gain */
+#define AOC_CMD_AUDIO_INPUT_SET_PARAM_ID	233	/* generic input parameter */
+#define AOC_MIC_HW_GAIN_CB			300	/* mic preamp, centibels (30 dB) */
+#define AOC_MIC_REC_SOFT_GAIN_DB		22	/* record soft gain, dB */
+#define AOC_PARAM_BLOCK_MIC			136
+#define AOC_PARAM_COMP_REC_GAIN			30
+#define AOC_PARAM_KEY_DB			16
+
+/* Turn the AP mic source on or off (the "on" is the START command). */
+struct cmd_audio_input_start {
+	struct aoc_cmd_hdr hdr;
+	u8 mic_input_source;
+} __packed;
+
+/* The mics' format and lane mapping. */
+struct cmd_audio_input_mic_params {
+	struct aoc_cmd_hdr hdr;
+	struct aoc_chan_metadata format;
+	u8 pdm_mask;
+	u8 period_ms;
+	u8 num_periods;
+	u8 interleaving[AOC_MIC_PDM_MAX];
+	u8 sample_rate;
+	u8 mic_process_index;
+} __packed;
+
+/* The capture ring geometry (bytes), like the playback endpoint's setup2. */
+struct cmd_audio_input_mic_params2 {
+	struct aoc_cmd_hdr hdr;
+	u8 channel;
+	__le32 buffer_size;
+	__le32 period_size;
+} __packed;
+
+/* The mic preamp gain, in centibels. */
+struct cmd_audio_input_hw_gain {
+	struct aoc_cmd_hdr hdr;
+	__le32 gain_cb;
+} __packed;
+
+/* A generic input-processor parameter (here, the record soft gain). */
+struct cmd_audio_input_set_param {
+	struct aoc_cmd_hdr hdr;
+	u8 block;
+	u8 component;
+	__le32 key;
+	__le32 val;
+} __packed;
+
 struct aoc_audio {
 	struct device *aoc_dev;			/* the AOC platform device */
 	struct snd_soc_card card;
 	struct aoc_service *ctrl;		/* audio_output_control channel */
+	struct aoc_service *ctrl_in;		/* audio_input_control channel */
 	struct mutex cmd_lock;			/* serialises control commands */
 	struct completion cmd_done;		/* a control reply arrived */
+	int mic_hw_gain_cb;			/* mic preamp gain, centibels */
+	int mic_soft_gain_db;			/* record soft gain, dB */
 };
 
 /* Per-open stream state. */
@@ -194,14 +270,16 @@ static void aoc_audio_ctrl_isr(struct aoc_service *svc, void *priv)
  * dai link is nonatomic), and is woken by the control channel's doorbell rather
  * than by polling.
  */
-static int aoc_audio_cmd(struct aoc_audio *aud, const void *req, size_t req_len,
-			 void *rsp, size_t rsp_len)
+static int aoc_audio_cmd_on(struct aoc_audio *aud, struct aoc_service *ctrl,
+			    const void *req, size_t req_len,
+			    void *rsp, size_t rsp_len)
 {
 	struct device *dev = aud->card.dev;
 	char drain[64];
+	unsigned int i;
 	int ret;
 
-	if (!aud->ctrl) {
+	if (!ctrl) {
 		dev_err(dev, "no audio control channel\n");
 		return -ENODEV;
 	}
@@ -209,11 +287,11 @@ static int aoc_audio_cmd(struct aoc_audio *aud, const void *req, size_t req_len,
 	mutex_lock(&aud->cmd_lock);
 
 	/* Discard any stale replies left in the channel. */
-	while (aoc_service_can_read(aud->ctrl))
-		aoc_service_read(aud->ctrl, drain, sizeof(drain));
+	while (aoc_service_can_read(ctrl))
+		aoc_service_read(ctrl, drain, sizeof(drain));
 
 	reinit_completion(&aud->cmd_done);
-	ret = aoc_service_write(aud->ctrl, req, req_len);
+	ret = aoc_service_write(ctrl, req, req_len);
 	if (ret < 0) {
 		dev_err(dev, "control write failed: %d\n", ret);
 		goto out;
@@ -225,12 +303,31 @@ static int aoc_audio_cmd(struct aoc_audio *aud, const void *req, size_t req_len,
 		ret = -ETIMEDOUT;
 		goto out;
 	}
-	ret = aoc_service_read(aud->ctrl, rsp, rsp_len);
-	if (ret < 0)
-		dev_err(dev, "control read failed: %d\n", ret);
+
+	/*
+	 * The reply lags the doorbell, so poll for it briefly rather than
+	 * reading once.  Its contents are not used -- draining the channel is
+	 * what matters -- so a command that never replies is not an error; the
+	 * next command clears any late reply above.
+	 */
+	for (i = 0; i < AOC_CMD_REPLY_TRIES; i++) {
+		if (aoc_service_can_read(ctrl)) {
+			aoc_service_read(ctrl, rsp, rsp_len);
+			break;
+		}
+		usleep_range(200, 400);
+	}
+	ret = 0;
 out:
 	mutex_unlock(&aud->cmd_lock);
 	return ret < 0 ? ret : 0;
+}
+
+/* The output control channel, for the playback commands. */
+static int aoc_audio_cmd(struct aoc_audio *aud, const void *req, size_t req_len,
+			 void *rsp, size_t rsp_len)
+{
+	return aoc_audio_cmd_on(aud, aud->ctrl, req, req_len, rsp, rsp_len);
 }
 
 /* Turn a playback source (entry point) on or off. */
@@ -299,6 +396,191 @@ static int aoc_audio_bind(struct aoc_audio *aud, u8 src, u8 dst, bool on)
 }
 
 /*
+ * Lift the mic off its muted defaults: the analog preamp (HW gain, centibels)
+ * and the record soft gain (a digital dB boost the stock path always applies).
+ */
+static int aoc_audio_mic_gain(struct aoc_audio *aud)
+{
+	struct cmd_audio_input_hw_gain hw = { };
+	struct cmd_audio_input_set_param soft = { };
+	char rsp[64];
+	int ret;
+
+	if (!aud->ctrl_in)
+		return 0;
+
+	hw.hdr.type = AOC_CMD_TYPE_CMD;
+	hw.hdr.len = cpu_to_le16(sizeof(hw));
+	hw.hdr.id = cpu_to_le16(AOC_CMD_AUDIO_INPUT_SET_MIC_HP_GAIN_ID);
+	hw.gain_cb = cpu_to_le32(aud->mic_hw_gain_cb);
+	ret = aoc_audio_cmd_on(aud, aud->ctrl_in, &hw, sizeof(hw), rsp,
+			       sizeof(rsp));
+	if (ret)
+		return ret;
+
+	soft.hdr.type = AOC_CMD_TYPE_CMD;
+	soft.hdr.len = cpu_to_le16(sizeof(soft));
+	soft.hdr.id = cpu_to_le16(AOC_CMD_AUDIO_INPUT_SET_PARAM_ID);
+	soft.block = AOC_PARAM_BLOCK_MIC;
+	soft.component = AOC_PARAM_COMP_REC_GAIN;
+	soft.key = cpu_to_le32(AOC_PARAM_KEY_DB);
+	soft.val = cpu_to_le32(aud->mic_soft_gain_db);
+	return aoc_audio_cmd_on(aud, aud->ctrl_in, &soft, sizeof(soft), rsp,
+				sizeof(rsp));
+}
+
+/*
+ * Both mic gains are exposed as mixer controls, the way the stock stack drives
+ * them: the values are latched here and (re)sent to a running mic, so they can
+ * be swept live while recording.
+ */
+#define AOC_MIC_HW_GAIN_CB_MAX		400	/* generous headroom over stock's 130 */
+#define AOC_MIC_SOFT_GAIN_DB_MAX	40
+
+static int aoc_mic_gain_info(struct snd_kcontrol *kc,
+			     struct snd_ctl_elem_info *ui)
+{
+	ui->type = SNDRV_CTL_ELEM_TYPE_INTEGER;
+	ui->count = 1;
+	ui->value.integer.min = 0;
+	ui->value.integer.max = (kc->private_value == AOC_PARAM_KEY_DB) ?
+				AOC_MIC_SOFT_GAIN_DB_MAX : AOC_MIC_HW_GAIN_CB_MAX;
+	return 0;
+}
+
+static int aoc_mic_gain_get(struct snd_kcontrol *kc,
+			    struct snd_ctl_elem_value *uc)
+{
+	struct snd_soc_card *card = snd_kcontrol_chip(kc);
+	struct aoc_audio *aud = container_of(card, struct aoc_audio, card);
+
+	uc->value.integer.value[0] = (kc->private_value == AOC_PARAM_KEY_DB) ?
+				     aud->mic_soft_gain_db : aud->mic_hw_gain_cb;
+	return 0;
+}
+
+static int aoc_mic_gain_put(struct snd_kcontrol *kc,
+			    struct snd_ctl_elem_value *uc)
+{
+	struct snd_soc_card *card = snd_kcontrol_chip(kc);
+	struct aoc_audio *aud = container_of(card, struct aoc_audio, card);
+	long val = uc->value.integer.value[0];
+	int *slot, max;
+
+	if (kc->private_value == AOC_PARAM_KEY_DB) {
+		slot = &aud->mic_soft_gain_db;
+		max = AOC_MIC_SOFT_GAIN_DB_MAX;
+	} else {
+		slot = &aud->mic_hw_gain_cb;
+		max = AOC_MIC_HW_GAIN_CB_MAX;
+	}
+	val = clamp(val, 0L, (long)max);
+	if (val == *slot)
+		return 0;
+
+	*slot = val;
+	aoc_audio_mic_gain(aud);	/* a no-op until the AOC is up */
+	return 1;
+}
+
+static const struct snd_kcontrol_new aoc_mic_controls[] = {
+	{
+		.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
+		.name = "Mic HW Gain (cB)",
+		.info = aoc_mic_gain_info,
+		.get = aoc_mic_gain_get,
+		.put = aoc_mic_gain_put,
+		.private_value = AOC_PARAM_KEY_DB + 1,	/* != the soft-gain tag */
+	},
+	{
+		.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
+		.name = "Mic Record Soft Gain (dB)",
+		.info = aoc_mic_gain_info,
+		.get = aoc_mic_gain_get,
+		.put = aoc_mic_gain_put,
+		.private_value = AOC_PARAM_KEY_DB,
+	},
+};
+
+/* Configure the mics' format and the capture ring geometry (bytes). */
+static int aoc_audio_mic_setup(struct aoc_audio *aud, u8 channel,
+			       unsigned int channels, unsigned int rate,
+			       unsigned int width, u32 buffer_bytes,
+			       u32 period_bytes)
+{
+	struct cmd_audio_input_mic_params cmd = { };
+	struct cmd_audio_input_mic_params2 cmd2 = { };
+	char rsp[64];
+	unsigned int i;
+	int ret;
+
+	cmd.hdr.type = AOC_CMD_TYPE_CMD;
+	cmd.hdr.len = cpu_to_le16(sizeof(cmd));
+	cmd.hdr.id = cpu_to_le16(AOC_CMD_AUDIO_INPUT_MIC_PARAMS_ID);
+	cmd.format.chan = channels;
+	cmd.format.bits = (width == 32) ? AOC_WIDTH_32_BIT : AOC_WIDTH_16_BIT;
+	cmd.format.sr = (rate == 48000) ? AOC_SR_48KHZ : AOC_SR_44K1HZ;
+	cmd.format.format = AOC_FRMT_FIXED_POINT;
+	/* One built-in mic per requested channel, on consecutive PDM lanes. */
+	for (i = 0; i < AOC_MIC_PDM_MAX; i++)
+		cmd.interleaving[i] = (i < channels) ? i : 0xff;
+	cmd.pdm_mask = (1u << channels) - 1;
+	cmd.period_ms = 10;
+	cmd.num_periods = 4;
+	cmd.sample_rate = cmd.format.sr;
+	cmd.mic_process_index = AOC_MIC_PROCESS_RAW;
+	ret = aoc_audio_cmd_on(aud, aud->ctrl_in, &cmd, sizeof(cmd), rsp,
+			       sizeof(rsp));
+	if (ret)
+		return ret;
+
+	cmd2.hdr.type = AOC_CMD_TYPE_CMD;
+	cmd2.hdr.len = cpu_to_le16(sizeof(cmd2));
+	cmd2.hdr.id = cpu_to_le16(AOC_CMD_AUDIO_INPUT_MIC_PARAMS2_ID);
+	cmd2.channel = channel;
+	cmd2.buffer_size = cpu_to_le32(buffer_bytes);
+	cmd2.period_size = cpu_to_le32(period_bytes);
+	ret = aoc_audio_cmd_on(aud, aud->ctrl_in, &cmd2, sizeof(cmd2), rsp,
+			       sizeof(rsp));
+	if (ret)
+		return ret;
+
+	return aoc_audio_mic_gain(aud);
+}
+
+/* Start or stop the AP mic capture. */
+static int aoc_audio_mic(struct aoc_audio *aud, bool on)
+{
+	struct cmd_audio_input_start cmd = { };
+	struct aoc_cmd_hdr data = { };
+	char rsp[64];
+	int ret;
+
+	cmd.hdr.type = AOC_CMD_TYPE_CMD;
+	cmd.hdr.len = cpu_to_le16(sizeof(cmd));
+	cmd.hdr.id = cpu_to_le16(on ? AOC_CMD_AUDIO_INPUT_START_ID :
+				      AOC_CMD_AUDIO_INPUT_STOP_ID);
+	cmd.mic_input_source = AOC_MIC_SRC_AP;
+	/* the stop command is just the header */
+	ret = aoc_audio_cmd_on(aud, aud->ctrl_in, &cmd,
+			       on ? sizeof(cmd) : sizeof(cmd.hdr),
+			       rsp, sizeof(rsp));
+	if (ret || !on)
+		return ret;
+
+	/*
+	 * Starting the mic processor is not enough: this second command begins
+	 * the flow of recorded data into the capture ring.  Stopping the input
+	 * above ends it, so there is no matching stop here.
+	 */
+	data.type = AOC_CMD_TYPE_CMD;
+	data.len = cpu_to_le16(sizeof(data));
+	data.id = cpu_to_le16(AOC_CMD_AUDIO_INPUT_START_DATA_ID);
+	return aoc_audio_cmd_on(aud, aud->ctrl_in, &data, sizeof(data),
+				rsp, sizeof(rsp));
+}
+
+/*
  * Ask the AOC what it makes of the speaker.  The AP can see that the AOC is
  * draining the ring and clocking the TDM, but not whether it is putting
  * anything on it; this is the only view of that.
@@ -323,14 +605,18 @@ static const struct snd_pcm_hardware aoc_pcm_hw = {
  * read pointer.  Poll it, and tell the core how far it has got.
  */
 static void aoc_pcm_push(struct aoc_audio_stream *s);
+static void aoc_pcm_pull(struct aoc_audio_stream *s);
 
 static void aoc_pcm_period_work(struct work_struct *w)
 {
 	struct aoc_audio_stream *s = container_of(w, struct aoc_audio_stream,
 						  period_work);
 
-	/* top the ring up first, then let the application refill behind us */
-	aoc_pcm_push(s);
+	/* move the data first: top the playback ring up, or drain the capture ring */
+	if (s->playback)
+		aoc_pcm_push(s);
+	else
+		aoc_pcm_pull(s);
 	snd_pcm_period_elapsed(s->substream);
 }
 
@@ -355,28 +641,27 @@ static int aoc_pcm_open(struct snd_soc_component *comp,
 			struct snd_pcm_substream *substream)
 {
 	struct aoc_audio *aud = substream_to_aud(substream);
+	bool playback = substream->stream == SNDRV_PCM_STREAM_PLAYBACK;
+	const char *name = playback ? AOC_PLAYBACK_SERVICE : AOC_CAPTURE_SERVICE;
 	struct aoc_audio_stream *s;
 	struct aoc_service *svc;
 
 	if (aoc_pcm_is_be(substream))
 		return 0;
 
-	svc = aoc_service_find(aud->aoc_dev, AOC_PLAYBACK_SERVICE);
+	svc = aoc_service_find(aud->aoc_dev, name);
 	if (!svc)
-		return dev_err_probe(comp->dev, -ENODEV,
-				     "no %s service\n", AOC_PLAYBACK_SERVICE);
-	dev_info(comp->dev, "opened %s (source %d)\n", AOC_PLAYBACK_SERVICE,
-		 AOC_PLAYBACK_SOURCE);
+		return dev_err_probe(comp->dev, -ENODEV, "no %s service\n", name);
 
 	s = kzalloc(sizeof(*s), GFP_KERNEL);
 	if (!s)
 		return -ENOMEM;
 	s->svc = svc;
 	s->substream = substream;
-	s->playback = substream->stream == SNDRV_PCM_STREAM_PLAYBACK;
+	s->playback = playback;
 	hrtimer_setup(&s->tick, aoc_pcm_tick, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 	INIT_WORK(&s->period_work, aoc_pcm_period_work);
-	s->source = AOC_PLAYBACK_SOURCE;	/* the entry point the ring feeds */
+	s->source = playback ? AOC_PLAYBACK_SOURCE : AOC_CAPTURE_SOURCE;
 	substream->runtime->private_data = s;
 
 	snd_soc_set_runtime_hwparams(substream, &aoc_pcm_hw);
@@ -455,6 +740,31 @@ static void aoc_pcm_push(struct aoc_audio_stream *s)
 	}
 }
 
+/*
+ * Drain whatever the AOC has recorded into the ring, into the PCM buffer, and
+ * report how far the capture has got.  Runs from the poll only; there is no
+ * application ack for capture.
+ */
+static void aoc_pcm_pull(struct aoc_audio_stream *s)
+{
+	struct snd_pcm_runtime *rt = s->substream->runtime;
+
+	if (s->playback)
+		return;
+
+	while (aoc_service_can_read(s->svc)) {
+		snd_pcm_uframes_t off = s->pushed % rt->buffer_size;
+		int room = frames_to_bytes(rt, rt->buffer_size - off);
+		int r = aoc_service_read(s->svc,
+					 rt->dma_area + frames_to_bytes(rt, off),
+					 room);
+
+		if (r <= 0)
+			break;
+		s->pushed += bytes_to_frames(rt, r);
+	}
+}
+
 static int aoc_pcm_ack(struct snd_soc_component *comp,
 		       struct snd_pcm_substream *substream)
 {
@@ -473,8 +783,13 @@ static snd_pcm_uframes_t aoc_pcm_pointer(struct snd_soc_component *comp,
 	struct snd_pcm_runtime *rt = substream->runtime;
 	struct aoc_audio_stream *s = rt->private_data;
 	u32 buf_bytes = frames_to_bytes(rt, rt->buffer_size);
-	u32 pos = aoc_service_progress(s->svc, s->playback) - s->base;
+	u32 pos;
 
+	/* Capture position is what we have moved into the buffer ourselves. */
+	if (!s->playback)
+		return s->pushed % rt->buffer_size;
+
+	pos = aoc_service_progress(s->svc, s->playback) - s->base;
 	return bytes_to_frames(rt, pos % buf_bytes);
 }
 
@@ -489,6 +804,16 @@ static int aoc_pcm_hw_params(struct snd_soc_component *comp,
 
 	if (aoc_pcm_is_be(substream))
 		return 0;
+
+	if (!s->playback) {
+		ret = aoc_audio_mic_setup(aud, s->source, params_channels(params),
+					  params_rate(params), params_width(params),
+					  params_buffer_bytes(params),
+					  params_period_bytes(params));
+		if (ret)
+			dev_err(comp->dev, "mic setup failed: %d\n", ret);
+		return ret;
+	}
 
 	ret = aoc_audio_ep_setup(aud, s->source, params_channels(params),
 				 params_rate(params), params_width(params),
@@ -517,7 +842,7 @@ static int aoc_pcm_hw_free(struct snd_soc_component *comp,
 	struct aoc_audio *aud = substream_to_aud(substream);
 	struct aoc_audio_stream *s = substream->runtime->private_data;
 
-	if (aoc_pcm_is_be(substream))
+	if (aoc_pcm_is_be(substream) || !s->playback)
 		return 0;
 
 	return aoc_audio_bind(aud, s->source, AOC_SINK_SPEAKER, false);
@@ -556,10 +881,13 @@ static int aoc_pcm_trigger(struct snd_soc_component *comp,
 	else
 		hrtimer_try_to_cancel(&s->tick);
 
-	/* The route is already up; this only starts and stops the flow. */
-	ret = aoc_audio_source(aud, s->source, on);
-	dev_dbg(comp->dev, "playback %s source %u: %d\n",
-		on ? "start" : "stop", s->source, ret);
+	/* Capture starts/stops the mics; playback's route is already up. */
+	if (!s->playback)
+		ret = aoc_audio_mic(aud, on);
+	else
+		ret = aoc_audio_source(aud, s->source, on);
+	dev_dbg(comp->dev, "%s %s: %d\n", s->playback ? "playback" : "capture",
+		on ? "start" : "stop", ret);
 	return ret;
 }
 
@@ -581,6 +909,13 @@ static struct snd_soc_dai_driver aoc_dais[] = {
 		.name = "aoc-fe",
 		.playback = {
 			.stream_name = "AOC Playback",
+			.channels_min = 1,
+			.channels_max = 2,
+			.rates = SNDRV_PCM_RATE_44100 | SNDRV_PCM_RATE_48000,
+			.formats = SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S32_LE,
+		},
+		.capture = {
+			.stream_name = "AOC Capture",
 			.channels_min = 1,
 			.channels_max = 2,
 			.rates = SNDRV_PCM_RATE_44100 | SNDRV_PCM_RATE_48000,
@@ -680,6 +1015,7 @@ static const struct snd_soc_ops aoc_tdm0_ops = {
 };
 
 static struct snd_soc_dai_link_component aoc_fe_cpu = { .dai_name = "aoc-fe" };
+static struct snd_soc_dai_link_component aoc_cap_cpu = { .dai_name = "aoc-fe" };
 static struct snd_soc_dai_link_component aoc_be_cpu = { .dai_name = "aoc-tdm0" };
 static struct snd_soc_dai_link_component aoc_platform;
 
@@ -696,6 +1032,22 @@ static struct snd_soc_dai_link aoc_dai_links[] = {
 		.dynamic = 1,
 		.playback_only = 1,
 		/* control commands round-trip to the AOC, so the trigger must sleep */
+		.nonatomic = true,
+	},
+	{
+		/*
+		 * Capture is a plain PCM: the AOC records the mics into the ring
+		 * on its own once started, with no back-end to route.
+		 */
+		.name = "aoc-capture0",
+		.stream_name = "aoc-capture0",
+		.cpus = &aoc_cap_cpu,
+		.num_cpus = 1,
+		.codecs = &snd_soc_dummy_dlc,
+		.num_codecs = 1,
+		.platforms = &aoc_platform,
+		.num_platforms = 1,
+		.capture_only = 1,
 		.nonatomic = true,
 	},
 	{
@@ -721,6 +1073,7 @@ static int aoc_audio_probe(struct platform_device *pdev)
 	struct platform_device *aoc_pdev;
 	struct aoc_audio *aud;
 	struct device_node *np;
+	unsigned int i;
 	int ret;
 
 	aud = devm_kzalloc(dev, sizeof(*aud), GFP_KERNEL);
@@ -742,12 +1095,21 @@ static int aoc_audio_probe(struct platform_device *pdev)
 	}
 	mutex_init(&aud->cmd_lock);
 	init_completion(&aud->cmd_done);
+	aud->mic_hw_gain_cb = AOC_MIC_HW_GAIN_CB;
+	aud->mic_soft_gain_db = AOC_MIC_REC_SOFT_GAIN_DB;
 	aud->ctrl = aoc_service_find(aud->aoc_dev, AOC_OUTPUT_CTRL_SERVICE);
 	if (aud->ctrl)
 		aoc_service_set_handler(aud->ctrl, aoc_audio_ctrl_isr, aud);
 	else
 		dev_warn(dev, "no %s service; playback trigger will fail\n",
 			 AOC_OUTPUT_CTRL_SERVICE);
+
+	aud->ctrl_in = aoc_service_find(aud->aoc_dev, AOC_INPUT_CTRL_SERVICE);
+	if (aud->ctrl_in)
+		aoc_service_set_handler(aud->ctrl_in, aoc_audio_ctrl_isr, aud);
+	else
+		dev_warn(dev, "no %s service; capture will fail\n",
+			 AOC_INPUT_CTRL_SERVICE);
 
 	ret = devm_snd_soc_register_component(dev, &aoc_component, aoc_dais,
 					      ARRAY_SIZE(aoc_dais));
@@ -758,16 +1120,20 @@ static int aoc_audio_probe(struct platform_device *pdev)
 
 	/* Resolve the CPU DAIs and platform to our own component (by DT node). */
 	aoc_fe_cpu.of_node = dev->of_node;
+	aoc_cap_cpu.of_node = dev->of_node;
 	aoc_be_cpu.of_node = dev->of_node;
 	aoc_platform.of_node = dev->of_node;
 
-	/* The amplifiers listening to the TDM. */
+	/* The amplifiers listening to the TDM (find the back-end by name). */
 	np = of_get_child_by_name(dev->of_node, "speakers");
 	if (!np) {
 		ret = dev_err_probe(dev, -EINVAL, "no speakers node\n");
 		goto err_put;
 	}
-	ret = snd_soc_of_get_dai_link_codecs(dev, np, &aoc_dai_links[1]);
+	for (i = 0; i < ARRAY_SIZE(aoc_dai_links); i++)
+		if (!strcmp(aoc_dai_links[i].name, "aoc-tdm0"))
+			break;
+	ret = snd_soc_of_get_dai_link_codecs(dev, np, &aoc_dai_links[i]);
 	of_node_put(np);
 	if (ret) {
 		dev_err_probe(dev, ret, "cannot resolve the speaker codecs\n");
@@ -781,6 +1147,8 @@ static int aoc_audio_probe(struct platform_device *pdev)
 	aud->card.num_links = ARRAY_SIZE(aoc_dai_links);
 	aud->card.dapm_routes = aoc_dapm_routes;
 	aud->card.num_dapm_routes = ARRAY_SIZE(aoc_dapm_routes);
+	aud->card.controls = aoc_mic_controls;
+	aud->card.num_controls = ARRAY_SIZE(aoc_mic_controls);
 
 	ret = devm_snd_soc_register_card(dev, &aud->card);
 	if (ret) {
@@ -801,6 +1169,8 @@ static void aoc_audio_remove(struct platform_device *pdev)
 
 	if (aud->ctrl)
 		aoc_service_set_handler(aud->ctrl, NULL, NULL);
+	if (aud->ctrl_in)
+		aoc_service_set_handler(aud->ctrl_in, NULL, NULL);
 	put_device(aud->aoc_dev);
 }
 
