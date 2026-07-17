@@ -33,7 +33,14 @@
 #include <sound/soc.h>
 
 #define AOC_PCM_BUFFER_BYTES	(512 * 1024)
-#define AOC_PLAYBACK_SERVICE	"audio_playback0"
+/*
+ * Entry point 2.  Not the first one: that is the AOC's ultra-low-latency
+ * endpoint, which expects its buffer filled ahead of the reader rather than
+ * streamed to, so writing to it leaves the speaker mixer starved and the TDM
+ * clocking out an empty buffer.
+ */
+#define AOC_PLAYBACK_SERVICE	"audio_playback1"
+#define AOC_PLAYBACK_SOURCE	1
 #define AOC_OUTPUT_CTRL_SERVICE	"audio_output_control"
 #define AOC_CMD_TIMEOUT_MS	200
 
@@ -325,7 +332,7 @@ static int aoc_pcm_open(struct snd_soc_component *comp,
 		return -ENOMEM;
 	s->svc = svc;
 	s->playback = substream->stream == SNDRV_PCM_STREAM_PLAYBACK;
-	s->source = substream->pcm->device;	/* audio_playbackN entry point */
+	s->source = AOC_PLAYBACK_SOURCE;	/* the entry point the ring feeds */
 	substream->runtime->private_data = s;
 
 	snd_soc_set_runtime_hwparams(substream, &aoc_pcm_hw);
