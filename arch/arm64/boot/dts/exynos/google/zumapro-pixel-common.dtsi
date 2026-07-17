@@ -232,6 +232,14 @@
 				regulator-always-on;
 			};
 
+			s_bucka_reg: bucka {
+				/* the speaker amplifiers' analog supply */
+				regulator-name = "vdd_bucka";
+				regulator-min-microvolt = <1700000>;
+				regulator-max-microvolt = <2100000>;
+				regulator-always-on;
+			};
+
 			/*
 			 * GNSS rails.  The receiver has no enable GPIO -- these
 			 * are its only power control, and it is held up whenever
