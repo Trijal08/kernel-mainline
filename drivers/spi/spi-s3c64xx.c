@@ -1009,8 +1009,20 @@ static int s3c64xx_spi_transfer_one(struct spi_controller *host,
 		}
 	} while (target_len > 0);
 
-	if (s3c64xx_spi_force_manual_cs(spi))
-		s3c64xx_spi_set_cs(spi, false);
+	/*
+	 * A manual native chip select is driven here rather than by the core,
+	 * so it has to be held across a whole message: a half-duplex read is a
+	 * write of the address then a read of the data, two transfers, and
+	 * dropping the select between them makes the device abandon the read.
+	 * Release it only at the end of the message, or where a transfer asks.
+	 */
+	if (s3c64xx_spi_force_manual_cs(spi)) {
+		struct spi_message *msg = host->cur_msg;
+
+		if (!msg || xfer->cs_change ||
+		    list_is_last(&xfer->transfer_list, &msg->transfers))
+			s3c64xx_spi_set_cs(spi, false);
+	}
 
 	if (origin_len) {
 		/* Restore original xfer buffers and length */
