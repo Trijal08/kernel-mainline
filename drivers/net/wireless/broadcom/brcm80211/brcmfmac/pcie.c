@@ -250,6 +250,7 @@ static const struct brcmf_firmware_mapping brcmf_pcie_fwnames[] = {
 #define BRCMF_PCIE_SHARED2_PKT_TX_STATUS	0x100
 #define BRCMF_PCIE_SHARED2_FW_SMALL_MEMDUMP	0x200
 #define BRCMF_PCIE_SHARED2_FW_HC_ON_TRAP	0x400
+#define BRCMF_PCIE_SHARED2_TXPOST_EXT		0x00400000
 #define BRCMF_PCIE_SHARED2_HSCB			0x800
 #define BRCMF_PCIE_SHARED2_EDL_RING		0x1000
 #define BRCMF_PCIE_SHARED2_DEBUG_BUF_DEST	0x2000
@@ -284,6 +285,7 @@ static const struct brcmf_firmware_mapping brcmf_pcie_fwnames[] = {
 #define BRCMF_HOSTCAP_UR_FW_NO_TRAP		0x800000
 #define BRCMF_HOSTCAP_HSCB			0x2000000
 #define BRCMF_HOSTCAP_EXT_TRAP_DBGBUF		0x4000000
+#define BRCMF_HOSTCAP_TXPOST_EXT		0x8000000
 #define BRCMF_HOSTCAP_EDL_RING			0x10000000
 #define BRCMF_HOSTCAP_PKT_TIMESTAMP		0x20000000
 #define BRCMF_HOSTCAP_PKT_HP2P			0x40000000
@@ -1989,6 +1991,16 @@ brcmf_pcie_init_share_ram_info(struct brcmf_pciedev_info *devinfo,
 	 * underrun gracefully instead of trapping (matches the vendor driver).
 	 */
 	host_cap |= BRCMF_HOSTCAP_UR_FW_NO_TRAP;
+
+	/* Mainline already writes the extended txpost work-item layout
+	 * (msgbuf_tx_msghdr carries the ext_flags/rate/ext_tags tail), but never
+	 * told the firmware to interpret it as extended. When the firmware
+	 * advertises extended txpost support, advertise it back so the SAQM
+	 * txq_hw_fill path reads our items as extended -- host_cap3 stays 0 (no
+	 * optional tags), matching the vendor's STA config.
+	 */
+	if (shared->flags2 & BRCMF_PCIE_SHARED2_TXPOST_EXT)
+		host_cap |= BRCMF_HOSTCAP_TXPOST_EXT;
 
 	/* Host SCB offload (HSCB): when the firmware advertises it, hand it a
 	 * block of host DMA memory to hold station control blocks. This moves
