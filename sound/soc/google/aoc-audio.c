@@ -142,6 +142,26 @@ struct cmd_audio_output_bind {
 } __packed;
 
 /*
+ * Per-(source,sink) playback volume. The AOC boots each sink's mixer gain at a
+ * low default, so without this the speaker plays far quieter than Android --
+ * the stock HAL sets this on every stream (dhd aoc_audio_volume_set). The value
+ * is a 0..AOC_SPEAKER_VOLUME_MAX scale where MAX is unity (no attenuation); the
+ * sink's block id is the sink index + AOC_AUDIO_SINK_BLOCK_ID_BASE, the key is
+ * the source (entry point), component 0.
+ */
+#define AOC_CMD_AUDIO_OUTPUT_SET_PARAM_ID	209
+#define AOC_AUDIO_SINK_BLOCK_ID_BASE		16
+#define AOC_SPEAKER_VOLUME_MAX			1000	/* stock chip->volume */
+
+struct cmd_audio_output_set_param {
+	struct aoc_cmd_hdr hdr;
+	u8 block;
+	u8 component;
+	__le32 key;
+	__le32 val;
+} __packed;
+
+/*
  * Capture is the mirror of playback: the AOC records from the mics into an
  * audio_captureN ring (AOC_UP: the AOC writes, the AP reads), configured and
  * started over its own control channel, audio_input_control.
@@ -165,7 +185,7 @@ struct cmd_audio_output_bind {
  */
 #define AOC_CMD_AUDIO_INPUT_SET_MIC_HP_GAIN_ID	254	/* high-power HW gain */
 #define AOC_CMD_AUDIO_INPUT_SET_PARAM_ID	233	/* generic input parameter */
-#define AOC_MIC_HW_GAIN_CB			300	/* mic preamp, centibels (30 dB) */
+#define AOC_MIC_HW_GAIN_CB			200	/* mic preamp, centibels (20 dB) */
 #define AOC_MIC_REC_SOFT_GAIN_DB		22	/* record soft gain, dB */
 #define AOC_PARAM_BLOCK_MIC			136
 #define AOC_PARAM_COMP_REC_GAIN			30
@@ -234,6 +254,7 @@ struct aoc_audio_stream {
 	u8 source;				/* AOC entry point = PCM device */
 	u32 base;				/* AOC byte position at start */
 	snd_pcm_uframes_t pushed;		/* frames handed to the ring */
+	spinlock_t ring_lock;			/* serialises ring fill: .ack vs tick */
 };
 
 /*
@@ -392,6 +413,22 @@ static int aoc_audio_bind(struct aoc_audio *aud, u8 src, u8 dst, bool on)
 	cmd.src = src;
 	cmd.dst = dst;
 	cmd.bind = on ? 1 : 0;
+	return aoc_audio_cmd(aud, &cmd, sizeof(cmd), rsp, sizeof(rsp));
+}
+
+/* Set the mixer volume of a source into a sink (0..AOC_SPEAKER_VOLUME_MAX). */
+static int aoc_audio_out_volume(struct aoc_audio *aud, u8 src, u8 dst, u32 vol)
+{
+	struct cmd_audio_output_set_param cmd = { };
+	char rsp[64];
+
+	cmd.hdr.type = AOC_CMD_TYPE_CMD;
+	cmd.hdr.len = cpu_to_le16(sizeof(cmd));
+	cmd.hdr.id = cpu_to_le16(AOC_CMD_AUDIO_OUTPUT_SET_PARAM_ID);
+	cmd.block = dst + AOC_AUDIO_SINK_BLOCK_ID_BASE;
+	cmd.component = 0;
+	cmd.key = cpu_to_le32(src);
+	cmd.val = cpu_to_le32(vol);
 	return aoc_audio_cmd(aud, &cmd, sizeof(cmd), rsp, sizeof(rsp));
 }
 
@@ -659,6 +696,7 @@ static int aoc_pcm_open(struct snd_soc_component *comp,
 	s->svc = svc;
 	s->substream = substream;
 	s->playback = playback;
+	spin_lock_init(&s->ring_lock);
 	hrtimer_setup(&s->tick, aoc_pcm_tick, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 	INIT_WORK(&s->period_work, aoc_pcm_period_work);
 	s->source = playback ? AOC_PLAYBACK_SOURCE : AOC_CAPTURE_SOURCE;
@@ -718,11 +756,21 @@ static int aoc_pcm_prepare(struct snd_soc_component *comp,
 static void aoc_pcm_push(struct aoc_audio_stream *s)
 {
 	struct snd_pcm_runtime *rt = s->substream->runtime;
-	snd_pcm_uframes_t appl = READ_ONCE(rt->control->appl_ptr);
+	snd_pcm_uframes_t appl;
+	unsigned long flags;
 
 	if (!s->playback)
 		return;
 
+	/* .ack (a userspace write) and the refill work both call this.  Without
+	 * serialisation they race: both read the same s->pushed, write the same
+	 * staging frames into the ring twice, and double-advance the pointer,
+	 * which the AOC replays as garbled ("robotic") audio with buzzes under
+	 * load.  aoc_service_write only memcpys into the ring and rings a
+	 * doorbell (no sleep), so holding a spinlock across it is fine.
+	 */
+	spin_lock_irqsave(&s->ring_lock, flags);
+	appl = READ_ONCE(rt->control->appl_ptr);
 	while (s->pushed < appl) {
 		snd_pcm_uframes_t off = s->pushed % rt->buffer_size;
 		snd_pcm_uframes_t n = min_t(snd_pcm_uframes_t, appl - s->pushed,
@@ -738,6 +786,7 @@ static void aoc_pcm_push(struct aoc_audio_stream *s)
 		if (w < nbytes)
 			break;
 	}
+	spin_unlock_irqrestore(&s->ring_lock, flags);
 }
 
 /*
@@ -831,8 +880,19 @@ static int aoc_pcm_hw_params(struct snd_soc_component *comp,
 	 * they can lock to that clock.
 	 */
 	ret = aoc_audio_bind(aud, s->source, AOC_SINK_SPEAKER, true);
-	if (ret)
+	if (ret) {
 		dev_err(comp->dev, "speaker bind failed: %d\n", ret);
+		return ret;
+	}
+
+	/* Lift the speaker off the AOC's quiet boot default to unity, matching
+	 * the stock HAL -- otherwise full-scale ALSA output is a fraction of the
+	 * loudness Android reaches.
+	 */
+	ret = aoc_audio_out_volume(aud, s->source, AOC_SINK_SPEAKER,
+				   AOC_SPEAKER_VOLUME_MAX);
+	if (ret)
+		dev_err(comp->dev, "speaker volume set failed: %d\n", ret);
 	return ret;
 }
 
