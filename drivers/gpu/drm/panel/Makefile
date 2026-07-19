@@ -23,6 +23,7 @@ obj-$(CONFIG_DRM_PANEL_FEIYANG_FY07024DI26A30D) += panel-feiyang-fy07024di26a30d
 obj-$(CONFIG_DRM_PANEL_FOCALTECH_OTA7290B) += panel-focaltech-ota7290b.o
 obj-$(CONFIG_DRM_PANEL_GOOGLE_CAIMAN) += panel-google-caiman.o
 obj-$(CONFIG_DRM_PANEL_GOOGLE_KOMODO) += panel-google-komodo.o
+obj-$(CONFIG_DRM_PANEL_GOOGLE_TOKAY) += panel-google-tokay.o
 obj-$(CONFIG_DRM_PANEL_HIMAX_HX8279) += panel-himax-hx8279.o
 obj-$(CONFIG_DRM_PANEL_HIMAX_HX83102) += panel-himax-hx83102.o
 obj-$(CONFIG_DRM_PANEL_HIMAX_HX83112A) += panel-himax-hx83112a.o

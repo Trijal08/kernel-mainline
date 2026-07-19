@@ -438,6 +438,18 @@ config DRM_PANEL_GOOGLE_KOMODO
 	  the active refresh rate (60 or 120 Hz), and exposes DCS brightness
 	  control, so the exynos9 DECON can take over scanning out.
 
+config DRM_PANEL_GOOGLE_TOKAY
+	tristate "Google Pixel 9 (tokay) TK4C panel"
+	depends on OF
+	depends on DRM_MIPI_DSI
+	depends on BACKLIGHT_CLASS_DEVICE
+	help
+	  Say Y here to enable the TK4C MIPI-DSI command-mode panel used on
+	  production Pixel 9 (tokay) devices. The driver supports normal 60 and
+	  120 Hz modes, DSC link setup, cold reset/init and DCS brightness. It
+	  does not support the electrically compatible but command-distinct
+	  TK4A or TK4B panel variants.
+
 config DRM_PANEL_JDI_LPM102A188A
 	tristate "JDI LPM102A188A DSI panel"
 	depends on GPIOLIB
