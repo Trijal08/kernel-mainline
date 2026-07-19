@@ -434,6 +434,28 @@ int brcmf_c_preinit_dcmds(struct brcmf_if *ifp)
 
 	/* Enable tx beamforming, errors can be ignored (not supported) */
 	(void)brcmf_fil_iovar_int_set(ifp, "txbf", 1);
+
+	/* Cap TX A-MPDU aggregation to the vendor's values (CUSTOM_AMPDU_MPDU=16,
+	 * CUSTOM_AMPDU_BA_WSIZE=64 in the BCM4390 DHD build). The dongle's SAQM
+	 * builds each A-MPDU's descriptor set from a fixed 6-chunk (2112-byte)
+	 * budget sized for <=16 MPDUs; without these caps the firmware aggregates
+	 * larger PPDUs (observed 34 MPDUs) and overflows that budget, hitting the
+	 * deterministic txq_hw_fill assert (pc 3e598a) under sustained throughput.
+	 * Set ba_wsize first: the firmware requires ampdu_mpdu <= ampdu_ba_wsize.
+	 */
+	(void)brcmf_fil_iovar_int_set(ifp, "ampdu_ba_wsize", 64);
+	(void)brcmf_fil_iovar_int_set(ifp, "ampdu_mpdu", 16);
+	/* The SAQM sizes each A-MPDU's descriptor set by MSDU-SEGMENT count, not
+	 * MPDU count: with A-MSDU on, each MPDU expands to several sub-frames, so
+	 * ~16 MPDUs balloon to ~34 segments and overflow the 6-chunk (2112B)
+	 * descriptor budget once the shared pool is starved. ampdu_mpdu cannot
+	 * bound that. Disabling A-MSDU makes segments == MPDUs (<=16), which fits
+	 * in one chunk even on the pool-starved strict path. (Capping A-MSDU to 2
+	 * sub-frames = 32 segments was tried and still overflowed under heavy
+	 * parallel load -- the descriptor budget has no safe margin above ~16, so
+	 * A-MSDU stays off. The download path is AP-limited, so this costs no
+	 * measurable throughput.) */
+	(void)brcmf_fil_iovar_int_set(ifp, "amsdu", 0);
 	/* Route tx frames by access category (DHD_FLOW_PRIO_AC_MAP == 0) so the
 	 * firmware's four-AC AQM and the host's per-AC flow rings agree. Without
 	 * this the dongle uses a different prio map than the host posts rings
@@ -442,27 +464,13 @@ int brcmf_c_preinit_dcmds(struct brcmf_if *ifp)
 	 */
 	(void)brcmf_fil_iovar_int_set(ifp, "bus:fl_prio_map", 0);
 
-	(void)brcmf_fil_iovar_int_set(ifp, "bus:llr_enable", 1);
-
-	/* Cap the A-MPDU aggregate so its hardware descriptor footprint always
-	 * fits a single 2112-byte "alfrag" chunk.
-	 *
-	 * txq_hw_fill lays each aggregate's per-MPDU descriptors into 2112-byte
-	 * alfrag pool buffers and asserts (deliberate panic, decompiled at
-	 * 0x3e5bf0) when the placement needs more alfrag chunks than it
-	 * pre-budgeted - but only once the alfrag pool is starved
-	 * (pktpool_avail + rsvpool_avail <= 5). The estimate undercounts the
-	 * real per-MPDU descriptor size, so a large aggregate under pool
-	 * pressure overruns: we captured the panic at MPDU #34 (34 * ~64 =
-	 * 2176 > 2112). Bounding the aggregate to 16 MPDUs keeps the placement
-	 * within one chunk with margin, so it can never overrun regardless of
-	 * pool state. Set both the block-ack window and the per-A-MPDU MPDU cap
-	 * (belt and suspenders - either one bounds the AQM aggregate).
+	/* TEST: do NOT enable bus:llr_enable. The vendor DHD never sets this iovar
+	 * on BCM4390; it is a mainline-only addition. It steers flowrings through
+	 * the low-latency-routing map that feeds the AQM/txq_hw_fill descriptor
+	 * build, so an unmatched enable here is a candidate for the descriptor
+	 * corruption seen under sustained TX.
 	 */
-	bphy_err(drvr, "DBG ampdu_ba_wsize=16: iovar returned %d\n",
-		 brcmf_fil_iovar_int_set(ifp, "ampdu_ba_wsize", 16));
-	bphy_err(drvr, "DBG ampdu_mpdu=16: iovar returned %d\n",
-		 brcmf_fil_iovar_int_set(ifp, "ampdu_mpdu", 16));
+
 
 	/* Disable BT coexistence. The komodo NVRAM enables it (btc_mode=0x1),
 	 * but when the companion Bluetooth core has no firmware loaded the WLAN
@@ -473,6 +481,7 @@ int brcmf_c_preinit_dcmds(struct brcmf_if *ifp)
 	 */
 	bphy_err(drvr, "DBG btc_mode=0: iovar returned %d\n",
 		 brcmf_fil_iovar_int_set(ifp, "btc_mode", 0));
+
 done:
 	return err;
 }
