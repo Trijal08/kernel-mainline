@@ -136,6 +136,53 @@ static const struct drm_dsc_config komodo_fhd_dsc = {
 	.dsc_version_major = 1,
 };
 
+/* tokay TK4C (1080x2424), dual DSC with two 540x101 slices. */
+static const struct drm_dsc_config tokay_tk4c_dsc = {
+	.line_buf_depth = 9,
+	.bits_per_component = 8,
+	.convert_rgb = true,
+	.slice_width = 540,
+	.slice_height = 101,
+	.slice_count = 2,
+	.simple_422 = false,
+	.pic_width = 1080,
+	.pic_height = 2424,
+	.rc_tgt_offset_high = 3,
+	.rc_tgt_offset_low = 3,
+	.bits_per_pixel = 128,
+	.rc_edge_factor = 6,
+	.rc_quant_incr_limit1 = 11,
+	.rc_quant_incr_limit0 = 11,
+	.initial_xmit_delay = 512,
+	.initial_dec_delay = 526,
+	.block_pred_enable = true,
+	.first_line_bpg_offset = 12,
+	.initial_offset = 6144,
+	.rc_buf_thresh = {
+		14, 28, 42, 56, 70, 84, 98, 105,
+		112, 119, 121, 123, 125, 126
+	},
+	.rc_range_params = {
+		{ 0, 4, 2 }, { 0, 4, 0 }, { 1, 5, 0 }, { 1, 6, 62 },
+		{ 3, 7, 60 }, { 3, 7, 58 }, { 3, 7, 56 }, { 3, 8, 56 },
+		{ 3, 9, 56 }, { 3, 10, 54 }, { 5, 11, 54 }, { 5, 12, 52 },
+		{ 5, 13, 52 }, { 7, 13, 52 }, { 13, 15, 52 }
+	},
+	.rc_model_size = 8192,
+	.flatness_min_qp = 3,
+	.flatness_max_qp = 12,
+	.initial_scale_value = 32,
+	.scale_decrement_interval = 7,
+	.scale_increment_interval = 2517,
+	.nfl_bpg_offset = 246,
+	.slice_bpg_offset = 258,
+	.final_offset = 4336,
+	.vbr_enable = false,
+	.slice_chunk_size = 540,
+	.dsc_version_minor = 2,
+	.dsc_version_major = 1,
+};
+
 /* Porter-Duff window functions (WIN_FUNC_CON_0.WIN_FUNC_F) */
 enum {
 	ZD_PD_FUNC_COPY		= 0x1,
@@ -784,13 +831,13 @@ static int zuma_decon_init(struct decon_context *ctx,
 
 /*
  * Return the DSC config for this output, or NULL for an uncompressed path.
- * Only the komodo DSI panel is wired today, matched by its native resolution.
+ * Match each currently wired Pixel panel by its native resolution.
  */
 static const struct drm_dsc_config *
 zuma_decon_dsc(const struct decon_config *cfg)
 {
 	static const struct drm_dsc_config *const dscs[] = {
-		&komodo_wqhd_dsc, &komodo_fhd_dsc,
+		&komodo_wqhd_dsc, &komodo_fhd_dsc, &tokay_tk4c_dsc,
 	};
 	unsigned int i;
 
