@@ -44,6 +44,7 @@
 #include "chip.h"
 #include "core.h"
 #include "common.h"
+#include "fwil.h"
 
 
 enum brcmf_pcie_state {
@@ -315,11 +316,41 @@ static const struct brcmf_firmware_mapping brcmf_pcie_fwnames[] = {
 /* host_cap3: acknowledge the device-advertised extended TX work-item tag */
 #define BRCMF_PCIE_SHARED_HOST_CAP3_TXPOST_EXT	0x00000008
 
+/* pcie_aggr_sh_t (HOSTCAP_AGGR, ipc v9+): an 8-byte sub-structure that follows
+ * host_cap3 (116) + etd_addr (120) + device_txpost_ext_tags_bitmask (124) +
+ * ewp_info_addr (128) in pciedev_shared_t. Dongle-internal pointers are 32-bit
+ * in this build (proven by flags3@108 / host_cap3@116 matching the layout), so
+ * aggr_sh_info lands at 132. Verified further at runtime by sanity-checking the
+ * flags byte against the four valid AGGR bits.
+ *   +132 u8 flags       (dongle: supported aggregated work items)
+ *   +133 u8 hostcap     (host:   requested aggregated work items)
+ *   +134 u8 txpost_max  (host fills; unused here)
+ *   +135 u8 rxpost_max  (host fills; unused here)
+ *   +136 u8 txcpl_max   (dongle fills)
+ *   +137 u8 rxcpl_max   (dongle fills)
+ */
+#define BRCMF_SHARED_AGGR_FLAGS_OFFSET		132
+#define BRCMF_SHARED_AGGR_MAX_OFFSET		136
+#define BRCMF_PCIE_AGGR_TXPOST			0x01
+#define BRCMF_PCIE_AGGR_RXPOST			0x02
+#define BRCMF_PCIE_AGGR_TXCPL			0x04
+#define BRCMF_PCIE_AGGR_RXCPL			0x08
+#define BRCMF_PCIE_AGGR_ALL			0x0f
+/* Ceilings for the dongle-reported per-item aggregation counts (head + one ext
+ * slot): TXCPL 4+6, RXCPL 2+5. A value outside this range means we misread the
+ * struct offset -- do not enable. */
+#define BRCMF_PCIE_AGGR_TXCPL_MAX		10
+#define BRCMF_PCIE_AGGR_RXCPL_MAX		7
+
 /* ChipCommon SR power-request: hard-vote the PCIe/ARM power domains awake as a
  * fallback when no out-of-band WL_DEV_WAKE GPIO is available.
  */
 #define BRCMF_CHIPCREG_POWERCONTROL		0x1e8
 #define BRCMF_SRPWR_REQON_DMN0_DMN1		0x00000300
+/* REQON field (bits 8..) for domains 0..6: PCIE, ARM, MAC-Aux, MAC-Main,
+ * MAC-Scan, BT, SAQM -- i.e. SRPWR_DMN_ALL for BCM4390.
+ */
+#define BRCMF_SRPWR_REQON_ALL			0x00007F00
 
 #define BRCMF_RING_H2D_RING_COUNT_OFFSET	0
 #define BRCMF_RING_D2H_RING_COUNT_OFFSET	1
@@ -405,6 +436,10 @@ struct brcmf_pcie_shared_info {
 	dma_addr_t ringupd_dmahandle;
 	u8 version;
 	bool mb_via_ctl;
+	/* HOSTCAP_AGGR negotiation result (pcie_aggr_sh_t at shared+132) */
+	bool aggr_enab;
+	u8 aggr_txcpl_max;
+	u8 aggr_rxcpl_max;
 };
 
 #define BRCMF_OTP_MAX_PARAM_LEN 16
@@ -1704,27 +1739,22 @@ static int brcmf_pcie_preinit(struct device *dev)
 
 	brcmf_dbg(PCIE, "Enter\n");
 
-	/* The firmware collapses its ARM/backplane power domain when the link
-	 * goes idle and, without an out-of-band device-wake, cannot be revived.
-	 * When WL_DEV_WAKE is wired (and asserted in brcmf_pcie_setup_oob_wake)
-	 * the firmware keeps itself awake through that soft request while still
-	 * managing its own DVFS.  Only when WL_DEV_WAKE is unavailable do we fall
-	 * back to pinning the PCIe and ARM power domains through the ChipCommon
-	 * SR power-request register -- that hard vote keeps the firmware running
-	 * but collides with its DVFS voltage transition and traps txq_hw_fill
-	 * under sustained load.
+	/* Hold every save/restore power domain up, the way the vendor driver
+	 * does (si_srpwr_request with SRPWR_DMN_ALL). The firmware otherwise
+	 * power-collapses the SAQM (D11 TX scheduler, domain 6) during a DVFS
+	 * voltage transition; if txq_hw_fill touches the SAQM mid-collapse it
+	 * dereferences NULL (dfar 0, r3 0) and traps -- which happens within
+	 * seconds of any real TX (apk update, a download). The earlier
+	 * DMN0/DMN1-only request left the MAC/SAQM domains free to collapse.
 	 */
-	if (!devinfo->dev_wake_gpio) {
-		brcmf_pcie_select_core(devinfo, BCMA_CORE_CHIPCOMMON);
-		val = brcmf_pcie_read_reg32(devinfo,
-					    BRCMF_CHIPCREG_POWERCONTROL);
-		brcmf_pcie_write_reg32(devinfo, BRCMF_CHIPCREG_POWERCONTROL,
-				       val | BRCMF_SRPWR_REQON_DMN0_DMN1);
-		dev_info(&devinfo->pdev->dev, "DBG SRPWR 0x1e8: 0x%08x -> 0x%08x\n",
-			 val, brcmf_pcie_read_reg32(devinfo,
-						    BRCMF_CHIPCREG_POWERCONTROL));
-		brcmf_pcie_select_core(devinfo, BCMA_CORE_PCIE2);
-	}
+	brcmf_pcie_select_core(devinfo, BCMA_CORE_CHIPCOMMON);
+	val = brcmf_pcie_read_reg32(devinfo, BRCMF_CHIPCREG_POWERCONTROL);
+	brcmf_pcie_write_reg32(devinfo, BRCMF_CHIPCREG_POWERCONTROL,
+			       val | BRCMF_SRPWR_REQON_ALL);
+	dev_info(&devinfo->pdev->dev, "DBG SRPWR-all 0x1e8: 0x%08x -> 0x%08x\n",
+		 val, brcmf_pcie_read_reg32(devinfo,
+					    BRCMF_CHIPCREG_POWERCONTROL));
+	brcmf_pcie_select_core(devinfo, BCMA_CORE_PCIE2);
 
 	brcmf_pcie_intr_enable(devinfo);
 	brcmf_pcie_hostready(devinfo);
@@ -1830,6 +1860,10 @@ static int brcmf_pcie_reset(struct device *dev)
 	int err;
 
 	brcmf_pcie_intr_disable(devinfo);
+	/* intr_disable stops new interrupts but not an in-flight threaded-IRQ RX
+	 * handler; wait for it so brcmf_detach -> brcmf_net_detach can tear down
+	 * per-interface state (e.g. gro_cells) without racing brcmf_netif_rx. */
+	synchronize_irq(devinfo->pdev->irq);
 
 	brcmf_pcie_bus_console_read(devinfo, true);
 
@@ -1892,6 +1926,26 @@ brcmf_pcie_adjust_ramsize(struct brcmf_pciedev_info *devinfo, u8 *data,
 	devinfo->ci->ramsize = newsize;
 }
 
+
+/* HOSTCAP_AGGR: let the dongle pack many D2H completions per ring slot so it
+ * recycles its lbuf/fragpool buffers fast enough to keep the shared packet pool
+ * healthy under sustained RX -- the pool whose starvation trips the firmware's
+ * txq_hw_fill assert with full A-MSDU enabled. 0=off, 1=probe/log the dongle's
+ * advertised caps but do not enable, 2=enable TXCPL|RXCPL completion
+ * aggregation. Kept behind a param so a warm reload can instantly fall back. */
+static int brcmf_pcie_aggr_mode = 1;
+module_param_named(aggr, brcmf_pcie_aggr_mode, int, 0644);
+MODULE_PARM_DESC(aggr,
+		 "BCM Wi-Fi aggregated D2H completions: 0=off, 1=probe-only, 2=enable TXCPL|RXCPL");
+
+/* Extra host_cap / host_cap2 bits to OR in at firmware-up (sweep/bisect the
+ * vendor capability handshake vs the amsdu txq_hw_fill trap). */
+static int brcmf_pcie_host_cap_or;
+module_param_named(host_cap_or, brcmf_pcie_host_cap_or, int, 0644);
+MODULE_PARM_DESC(host_cap_or, "Extra bits OR'd into host_cap (hex via 0x..)");
+static int brcmf_pcie_host_cap2_or;
+module_param_named(host_cap2_or, brcmf_pcie_host_cap2_or, int, 0644);
+MODULE_PARM_DESC(host_cap2_or, "Extra bits OR'd into host_cap2");
 
 static int
 brcmf_pcie_init_share_ram_info(struct brcmf_pciedev_info *devinfo,
@@ -1999,7 +2053,15 @@ brcmf_pcie_init_share_ram_info(struct brcmf_pciedev_info *devinfo,
 	 * txq_hw_fill path reads our items as extended -- host_cap3 stays 0 (no
 	 * optional tags), matching the vendor's STA config.
 	 */
-	if (shared->flags2 & BRCMF_PCIE_SHARED2_TXPOST_EXT)
+	/* TEST: do NOT advertise HOSTCAP_TXPOST_EXT. This makes the SAQM
+	 * txq_hw_fill path read our 64-byte work items with the BASIC layout
+	 * (base fields only, tail ignored) instead of the extended layout whose
+	 * ext_flags/rate/cso/aggr fields we leave zero. The item size stays 64,
+	 * so the flowring stride is unchanged. Probing whether the extended
+	 * descriptor build is the source of the deterministic first-MPDU
+	 * consistency assert (txq_hw_fill+0x592).
+	 */
+	if (0 && (shared->flags2 & BRCMF_PCIE_SHARED2_TXPOST_EXT))
 		host_cap |= BRCMF_HOSTCAP_TXPOST_EXT;
 
 	/* Host SCB offload (HSCB): when the firmware advertises it, hand it a
@@ -2044,6 +2106,17 @@ brcmf_pcie_init_share_ram_info(struct brcmf_pciedev_info *devinfo,
 		}
 	}
 
+	/* Sweep knobs: OR extra bits into host_cap/host_cap2 at load so the
+	 * vendor's full capability handshake (VALID_PHASE, EXTENDED_TRAP_DATA,
+	 * INBAND_DW, PTM, TRAP_ON_BAD_RECOVERY, ...) can be matched and bisected
+	 * on-device without a rebuild, while chasing the amsdu txq_hw_fill trap. */
+	host_cap |= (u32)brcmf_pcie_host_cap_or;
+	host_cap2 |= (u32)brcmf_pcie_host_cap2_or;
+	dev_info(&devinfo->pdev->dev,
+		 "DBG host_cap=0x%08x host_cap2=0x%08x (or=0x%x/0x%x)\n",
+		 host_cap, host_cap2, brcmf_pcie_host_cap_or,
+		 brcmf_pcie_host_cap2_or);
+
 	brcmf_pcie_write_tcm32(devinfo, sharedram_addr +
 			       BRCMF_SHARED_HOST_CAP_OFFSET, host_cap);
 	brcmf_pcie_write_tcm32(devinfo, sharedram_addr +
@@ -2071,6 +2144,82 @@ brcmf_pcie_init_share_ram_info(struct brcmf_pciedev_info *devinfo,
 		 shared->version, shared->flags, shared->flags2, host_cap,
 		 brcmf_pcie_read_tcm32(devinfo, sharedram_addr +
 				       BRCMF_SHARED_HOST_CAP3_OFFSET));
+
+	/* HOSTCAP_AGGR: negotiate aggregated D2H completions via pcie_aggr_sh_t.
+	 * The dongle publishes the aggregation classes it supports in the flags
+	 * byte (@132); the host writes back the subset it wants in the hostcap
+	 * byte (@133). Packing many completions per ring slot lets the firmware
+	 * recycle its lbufs far faster, keeping the shared packet pool healthy
+	 * under sustained RX -- the pool whose starvation trips the txq_hw_fill
+	 * assert with full A-MSDU. We request TXCPL|RXCPL (D2H completion
+	 * aggregation); the vendor also aggregates RXPOST, which is a separate
+	 * host-side change left for later. Only on ipc v9+.
+	 */
+	shared->aggr_enab = false;
+	shared->aggr_txcpl_max = 0;
+	shared->aggr_rxcpl_max = 0;
+	if (brcmf_pcie_aggr_mode &&
+	    shared->version >= BRCMF_PCIE_SHARED_VERSION_9) {
+		u32 aggr0 = brcmf_pcie_read_tcm32(devinfo, sharedram_addr +
+						  BRCMF_SHARED_AGGR_FLAGS_OFFSET);
+		u32 aggr1 = brcmf_pcie_read_tcm32(devinfo, sharedram_addr +
+						  BRCMF_SHARED_AGGR_MAX_OFFSET);
+		u8 fw_flags = aggr0 & 0xff;
+		u8 txcpl_max = aggr1 & 0xff;
+		u8 rxcpl_max = (aggr1 >> 8) & 0xff;
+
+		dev_info(&devinfo->pdev->dev,
+			 "DBG aggr: mode=%d raw0=0x%08x raw1=0x%08x fw_flags=0x%02x txcpl_max=%u rxcpl_max=%u\n",
+			 brcmf_pcie_aggr_mode, aggr0, aggr1, fw_flags,
+			 txcpl_max, rxcpl_max);
+
+		/* DBG: empirically locate aggr_sh_info by dumping the shared
+		 * struct tail. Look for a byte that is a nonzero subset of the
+		 * four AGGR bits followed by sane per-item maxima. */
+		{
+			u32 off;
+
+			for (off = 96; off <= 160; off += 16)
+				dev_info(&devinfo->pdev->dev,
+					 "DBG aggr dump +%3u: %08x %08x %08x %08x\n",
+					 off,
+					 brcmf_pcie_read_tcm32(devinfo, sharedram_addr + off),
+					 brcmf_pcie_read_tcm32(devinfo, sharedram_addr + off + 4),
+					 brcmf_pcie_read_tcm32(devinfo, sharedram_addr + off + 8),
+					 brcmf_pcie_read_tcm32(devinfo, sharedram_addr + off + 12));
+		}
+
+		/* Gate on a sane offset: the dongle's advertised flags must be a
+		 * nonzero subset of the four AGGR bits, and the reported per-item
+		 * maxima must be within the head+ext capacity. Any violation
+		 * means we are reading the wrong struct offset -- do not write. */
+		if (fw_flags && !(fw_flags & ~BRCMF_PCIE_AGGR_ALL) &&
+		    txcpl_max && txcpl_max <= BRCMF_PCIE_AGGR_TXCPL_MAX &&
+		    rxcpl_max && rxcpl_max <= BRCMF_PCIE_AGGR_RXCPL_MAX) {
+			u8 want = fw_flags &
+				  (BRCMF_PCIE_AGGR_TXCPL | BRCMF_PCIE_AGGR_RXCPL);
+
+			if (brcmf_pcie_aggr_mode >= 2 && want) {
+				/* set only the hostcap byte (byte 1), preserving
+				 * the dongle flags and the host-filled *_max
+				 * bytes in the same word */
+				aggr0 = (aggr0 & ~0x0000ff00u) |
+					((u32)want << 8);
+				brcmf_pcie_write_tcm32(devinfo, sharedram_addr +
+					BRCMF_SHARED_AGGR_FLAGS_OFFSET, aggr0);
+				shared->aggr_enab = true;
+				shared->aggr_txcpl_max = txcpl_max;
+				shared->aggr_rxcpl_max = rxcpl_max;
+				dev_info(&devinfo->pdev->dev,
+					 "aggr: enabled hostcap=0x%02x (txcpl_max=%u rxcpl_max=%u)\n",
+					 want, txcpl_max, rxcpl_max);
+			}
+		} else {
+			dev_info(&devinfo->pdev->dev,
+				 "aggr: fw_flags 0x%02x / maxes %u,%u fail the offset sanity check -- not enabling\n",
+				 fw_flags, txcpl_max, rxcpl_max);
+		}
+	}
 
 	return 0;
 }
@@ -2851,6 +3000,229 @@ static void brcmf_pcie_setup_oob_wake(struct brcmf_pciedev_info *devinfo)
 #define BRCMF_PCIE_FW_TXCAP	3
 #define BRCMF_PCIE_FW_SIG	4
 
+/* PCIe LTR latency is encoded as a scale (a ns multiplier) plus a 10-bit
+ * value.  The firmware's bus:ltr_active_lat reports this encoded form; the
+ * endpoint's L1SS Control-1 register carries the LTR_L1.2 threshold in the
+ * same scale/value form at different bit positions.
+ */
+static const u32 brcmf_pcie_ltr_scale_ns[] = {
+	1, 32, 1024, 32768, 1048576, 33554432,
+};
+
+#define BRCMF_LTR_LAT_VALUE_MASK	0x000003ff
+#define BRCMF_LTR_LAT_VALUE_SHIFT	0
+#define BRCMF_LTR_LAT_SCALE_MASK	0x00001c00
+#define BRCMF_LTR_LAT_SCALE_SHIFT	10
+#define BRCMF_LTR_THRESH_VALUE_MASK	0x03ff0000
+#define BRCMF_LTR_THRESH_VALUE_SHIFT	16
+#define BRCMF_LTR_THRESH_SCALE_MASK	0xe0000000
+#define BRCMF_LTR_THRESH_SCALE_SHIFT	29
+
+static u32 brcmf_pcie_ltr_decode_ns(u32 raw, u32 val_mask, u32 val_shift,
+				    u32 scale_mask, u32 scale_shift)
+{
+	u32 scale = (raw & scale_mask) >> scale_shift;
+	u32 value = (raw & val_mask) >> val_shift;
+
+	if (scale >= ARRAY_SIZE(brcmf_pcie_ltr_scale_ns))
+		return 0;
+	return brcmf_pcie_ltr_scale_ns[scale] * value;
+}
+
+/* L1SS/LTR parameters for the BCM Wi-Fi link, ported from the vendor host
+ * controller (pcie-exynos-rc.c, EP_BCM_WIFI branch of exynos_pcie_rc_set_l1ss).
+ * The pre-computed field values match the vendor's #defines.
+ */
+#define BRCMF_L1SS_TPOWERON_200US	0x000000a1	/* Ctl2: T_POWER_ON 200us */
+#define BRCMF_L1SS_LTR_L12_TH		0x40a00000	/* Ctl1: LTR_L1.2 thr 160us (scale 1024ns x 160) */
+#define BRCMF_L1SS_CM_RESTORE_RC	0x00002000	/* Ctl1: CommonModeRestoreTime 32 (RC) */
+#define BRCMF_L1SS_CM_RESTORE_EP	0x00000a00	/* Ctl1: CommonModeRestoreTime 10 (EP) */
+#define BRCMF_LTR_LATENCY_3MS		0x10031003	/* LTR max snoop/no-snoop = 3ms */
+#define BRCMF_PCIE_L1_SUBSTATES_OFF	0xb44		/* DWC RC L1.2 substate timer */
+#define BRCMF_PCIE_L1_SUB_VAL		0x000000ea
+/* Enable ASPM L1.1+L1.2 only, NOT the PCI-PM (D-state) L1 substates. If we also
+ * enabled PCIPM L1.2, a firmware trap that drops the device into D3 would take
+ * the link to D3cold and it could not be woken by a warm reload -- only a power
+ * cycle. ASPM-only keeps the dongle in D0, so a trap stays reload-recoverable. */
+#define BRCMF_L1SS_ASPM_ENABLE		(PCI_L1SS_CTL1_ASPM_L1_1 | PCI_L1SS_CTL1_ASPM_L1_2)
+
+/* Wi-Fi PCIe L1 power-management mode (module param "l1ss"):
+ *   0 = off (mainline baseline; the txq_hw_fill trap will occur under load)
+ *   1 = LTR + L1.2-threshold config only, link stays in L0 (cannot wedge)
+ *   2 = full L1SS + ASPM-L1 enable (the link actually enters L1.1/L1.2)
+ * Start at 1: the dongle's LTR-triggered DVFS compares its active latency
+ * against the L1.2 threshold, which mainline leaves at 0; just programming a
+ * real threshold may stop the ramp without ever entering a low-power link
+ * state (and thus without the L1.2-exit risk).  Escalate to 2 live via
+ * /sys/module/brcmfmac/parameters/l1ss + a warm reload if 1 is insufficient.
+ */
+/* Default OFF. Enabling PCIe L1 substates (mode 2) let the dongle's LTR-gated
+ * on-chip DVFS ramp under sustained 5/6 GHz load; the resulting clock
+ * transitions destabilised the radio and tripped a firmware "PHY FATAL Error"
+ * (Slice2, wl2) after ~40-100s, and the L1-entry/exit latency also collapsed
+ * throughput (~9 MB/s vs ~76 MB/s with L1SS off). The stock build never enabled
+ * L1SS. Keep it off for a stable, full-rate link; the param remains for power
+ * experiments once the LTR/DVFS timing is understood. */
+static int brcmf_pcie_l1ss_mode;
+module_param_named(l1ss, brcmf_pcie_l1ss_mode, int, 0644);
+MODULE_PARM_DESC(l1ss,
+		 "BCM Wi-Fi PCIe L1 power mgmt: 0=off (default), 1=LTR/threshold config only, 2=full L1SS+ASPM-L1");
+
+/* Clear any L1SS/ASPM-L1 the previous incarnation left on the root port.
+ * ASPM L1 on the RC survives a module reload; if a mode-2 attempt wedged the
+ * link, leaving it set makes the next probe fail (D3cold-can't-exit).  Run this
+ * at probe entry so a warm reload always starts from a clean, L0 link. */
+static void brcmf_pcie_reset_rc_l1ss(struct pci_dev *ep)
+{
+	struct pci_dev *rc = pci_upstream_bridge(ep);
+	int rc_l1ss;
+	u32 ctl1;
+
+	if (!rc)
+		return;
+	pcie_capability_clear_word(rc, PCI_EXP_LNKCTL, PCI_EXP_LNKCTL_ASPMC);
+	rc_l1ss = pci_find_ext_capability(rc, PCI_EXT_CAP_ID_L1SS);
+	if (rc_l1ss) {
+		pci_read_config_dword(rc, rc_l1ss + PCI_L1SS_CTL1, &ctl1);
+		pci_write_config_dword(rc, rc_l1ss + PCI_L1SS_CTL1,
+				       ctl1 & ~PCI_L1SS_CTL1_L1SS_MASK);
+	}
+}
+
+/* Tear down ASPM L1 / L1SS on BOTH ends while the endpoint is still up (D0,
+ * accessible). Called from remove() before we release the device: if the ASPM
+ * L1 that brcmf_pcie_enable_l1ss() turned on is left set, the now-driverless
+ * endpoint enters L1SS and drops to D3cold, and a subsequent warm reload's
+ * probe cannot wake it ("Unable to change power state from D3cold to D0").
+ * Clearing the endpoint side here is the piece reset_rc_l1ss() (probe entry,
+ * RC only) cannot do once the endpoint is already asleep. */
+static void brcmf_pcie_disable_l1ss(struct pci_dev *ep)
+{
+	int l1ss;
+	u32 ctl1;
+
+	pcie_capability_clear_word(ep, PCI_EXP_LNKCTL, PCI_EXP_LNKCTL_ASPMC);
+	l1ss = pci_find_ext_capability(ep, PCI_EXT_CAP_ID_L1SS);
+	if (l1ss) {
+		pci_read_config_dword(ep, l1ss + PCI_L1SS_CTL1, &ctl1);
+		pci_write_config_dword(ep, l1ss + PCI_L1SS_CTL1,
+				       ctl1 & ~PCI_L1SS_CTL1_L1SS_MASK);
+	}
+	/* and the root port */
+	brcmf_pcie_reset_rc_l1ss(ep);
+}
+
+/* Enable L1 PM substates / LTR / ASPM-L1 on the Wi-Fi link, once the firmware
+ * is up.  On the vendor stack the Wi-Fi driver drives this at bus-up (calling
+ * the host controller's exynos_pcie_rc_l1ss_ctrl) rather than the controller
+ * itself, because this Synopsys PHY only leaves L1 reliably once the device is
+ * running.  We replicate the vendor sequence here, programming both the
+ * endpoint and its upstream root port through the generic PCI accessors, in two
+ * gated stages so a failure can never wedge the link:
+ *   Stage 1 (mode >= 1): LTR + L1.2 threshold + CLKREQ#/common-clock config,
+ *     NO L1SS-enable bits and NO ASPM L1 -> the link stays in L0.
+ *   Stage 2 (mode >= 2): only if the endpoint actually took the Stage-1 config
+ *     (its firmware manages its own config space and may overwrite host writes),
+ *     flip the L1SS-enable bits + ASPM L1 so the link enters L1.1/L1.2.
+ * The key element for the txq_hw_fill trap is the LTR_L1.2 threshold: mainline
+ * leaves it 0, so the firmware's reported LTR active latency is never below it,
+ * the dongle never settles low, and its LTR-triggered DVFS ramp (every trap
+ * logs dvfs 0->1, reason WL_DVFS_REASON_LTR_ACTIVE) corrupts the SAQM TX
+ * descriptors under sustained throughput.
+ */
+static void brcmf_pcie_enable_l1ss(struct brcmf_pciedev_info *devinfo)
+{
+	struct brcmf_bus *bus = dev_get_drvdata(&devinfo->pdev->dev);
+	struct pci_dev *ep = devinfo->pdev;
+	struct pci_dev *rc = pci_upstream_bridge(ep);
+	int ep_l1ss, ep_ltr, rc_l1ss;
+	u32 rc_ctl1, ep_ctl1;
+	u16 ep_lnkctl;
+
+	if (brcmf_pcie_l1ss_mode == 0)
+		return;
+	if (!rc) {
+		bphy_err(bus->drvr, "L1SS: no upstream root port\n");
+		return;
+	}
+
+	ep_l1ss = pci_find_ext_capability(ep, PCI_EXT_CAP_ID_L1SS);
+	ep_ltr = pci_find_ext_capability(ep, PCI_EXT_CAP_ID_LTR);
+	rc_l1ss = pci_find_ext_capability(rc, PCI_EXT_CAP_ID_L1SS);
+	if (!ep_l1ss || !rc_l1ss) {
+		bphy_err(bus->drvr, "L1SS: cap not found (ep=%d rc=%d)\n",
+			 ep_l1ss, rc_l1ss);
+		return;
+	}
+
+	/* --- Stage 1: config only, NO enable bits, NO ASPM L1 (link stays L0) --- */
+
+	/* root complex */
+	pci_write_config_dword(rc, BRCMF_PCIE_L1_SUBSTATES_OFF,
+			       BRCMF_PCIE_L1_SUB_VAL);
+	pci_write_config_dword(rc, rc_l1ss + PCI_L1SS_CTL2,
+			       BRCMF_L1SS_TPOWERON_200US);
+	pcie_capability_set_word(rc, PCI_EXP_DEVCTL2, PCI_EXP_DEVCTL2_LTR_EN);
+	pci_read_config_dword(rc, rc_l1ss + PCI_L1SS_CTL1, &rc_ctl1);
+	rc_ctl1 &= ~(PCI_L1SS_CTL1_LTR_L12_TH_VALUE | PCI_L1SS_CTL1_LTR_L12_TH_SCALE |
+		     PCI_L1SS_CTL1_CM_RESTORE_TIME | PCI_L1SS_CTL1_L1SS_MASK);
+	rc_ctl1 |= BRCMF_L1SS_LTR_L12_TH | BRCMF_L1SS_CM_RESTORE_RC;
+	pci_write_config_dword(rc, rc_l1ss + PCI_L1SS_CTL1, rc_ctl1);
+	pcie_capability_set_word(rc, PCI_EXP_LNKCTL, PCI_EXP_LNKCTL_CCC);
+
+	/* endpoint */
+	pci_write_config_dword(ep, ep_l1ss + PCI_L1SS_CTL2,
+			       BRCMF_L1SS_TPOWERON_200US);
+	if (ep_ltr)
+		pci_write_config_dword(ep, ep_ltr + PCI_LTR_MAX_SNOOP_LAT,
+				       BRCMF_LTR_LATENCY_3MS);
+	pcie_capability_set_word(ep, PCI_EXP_DEVCTL2, PCI_EXP_DEVCTL2_LTR_EN);
+	pci_read_config_dword(ep, ep_l1ss + PCI_L1SS_CTL1, &ep_ctl1);
+	ep_ctl1 &= ~(PCI_L1SS_CTL1_LTR_L12_TH_VALUE | PCI_L1SS_CTL1_LTR_L12_TH_SCALE |
+		     PCI_L1SS_CTL1_CM_RESTORE_TIME | PCI_L1SS_CTL1_L1SS_MASK);
+	ep_ctl1 |= BRCMF_L1SS_LTR_L12_TH | BRCMF_L1SS_CM_RESTORE_EP;
+	pci_write_config_dword(ep, ep_l1ss + PCI_L1SS_CTL1, ep_ctl1);
+	pcie_capability_set_word(ep, PCI_EXP_LNKCTL,
+				 PCI_EXP_LNKCTL_CLKREQ_EN | PCI_EXP_LNKCTL_CCC);
+
+	/* Verify the endpoint took the config (its fw owns its config space). */
+	pci_read_config_dword(ep, ep_l1ss + PCI_L1SS_CTL1, &ep_ctl1);
+	pcie_capability_read_word(ep, PCI_EXP_LNKCTL, &ep_lnkctl);
+	bphy_err(bus->drvr,
+		 "L1SS(mode %d): EP CTL1=0x%08x LNKCTL=0x%04x thr=%u ns; RC thr set\n",
+		 brcmf_pcie_l1ss_mode, ep_ctl1, ep_lnkctl,
+		 brcmf_pcie_ltr_decode_ns(ep_ctl1, BRCMF_LTR_THRESH_VALUE_MASK,
+					  BRCMF_LTR_THRESH_VALUE_SHIFT,
+					  BRCMF_LTR_THRESH_SCALE_MASK,
+					  BRCMF_LTR_THRESH_SCALE_SHIFT));
+
+	if (brcmf_pcie_l1ss_mode < 2)
+		return;
+
+	/* --- Stage 2: enable real L1 entry, but only if the endpoint kept the
+	 * Stage-1 config (threshold + CLKREQ#). Without CLKREQ# on the endpoint,
+	 * entering L1.2 would wedge the link on exit. --- */
+	if (!(ep_ctl1 & (PCI_L1SS_CTL1_LTR_L12_TH_VALUE | PCI_L1SS_CTL1_LTR_L12_TH_SCALE)) ||
+	    !(ep_lnkctl & PCI_EXP_LNKCTL_CLKREQ_EN)) {
+		bphy_err(bus->drvr,
+			 "L1SS: endpoint config did not stick - NOT enabling L1 entry (link stays L0)\n");
+		return;
+	}
+
+	pci_read_config_dword(rc, rc_l1ss + PCI_L1SS_CTL1, &rc_ctl1);
+	pci_write_config_dword(rc, rc_l1ss + PCI_L1SS_CTL1,
+			       rc_ctl1 | BRCMF_L1SS_ASPM_ENABLE);
+	pci_write_config_dword(ep, ep_l1ss + PCI_L1SS_CTL1,
+			       ep_ctl1 | BRCMF_L1SS_ASPM_ENABLE);
+	pcie_capability_clear_and_set_word(rc, PCI_EXP_LNKCTL,
+					   PCI_EXP_LNKCTL_ASPMC,
+					   PCI_EXP_LNKCTL_ASPM_L1);
+	pcie_capability_clear_and_set_word(ep, PCI_EXP_LNKCTL,
+					   PCI_EXP_LNKCTL_ASPMC,
+					   PCI_EXP_LNKCTL_ASPM_L1);
+	bphy_err(bus->drvr, "L1SS: full L1SS + ASPM-L1 enabled\n");
+}
+
 static void brcmf_pcie_setup(struct device *dev, int ret,
 			     struct brcmf_fw_request *fwreq)
 {
@@ -2941,12 +3313,20 @@ static void brcmf_pcie_setup(struct device *dev, int ret,
 	bus->msgbuf->rx_dataoffset = devinfo->shared.rx_dataoffset;
 	bus->msgbuf->max_rxbufpost = devinfo->shared.max_rxbufpost;
 	bus->msgbuf->max_flowrings = devinfo->shared.max_flowrings;
+	bus->msgbuf->aggr_enab = devinfo->shared.aggr_enab;
+	bus->msgbuf->aggr_txcpl_max = devinfo->shared.aggr_txcpl_max;
+	bus->msgbuf->aggr_rxcpl_max = devinfo->shared.aggr_rxcpl_max;
 
 	init_waitqueue_head(&devinfo->mbdata_resp_wait);
 
 	ret = brcmf_attach(&devinfo->pdev->dev);
 	if (ret)
 		goto fail;
+
+	/* Firmware is up: program the Wi-Fi link's L1 power management (LTR +
+	 * L1.2 threshold, and optionally L1SS/ASPM-L1 entry). Gated + staged so
+	 * it cannot wedge the link -- see brcmf_pcie_enable_l1ss(). */
+	brcmf_pcie_enable_l1ss(devinfo);
 
 	brcmf_pcie_bus_console_read(devinfo, false);
 
@@ -3193,6 +3573,11 @@ brcmf_pcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 
 	brcmf_dbg(PCIE, "Enter %x:%x\n", pdev->vendor, pdev->device);
 
+	/* Clear any L1SS/ASPM-L1 a prior incarnation left on the root port before
+	 * we touch the device -- otherwise a wedged link from a previous attempt
+	 * makes this probe fail (D3cold-can't-exit). */
+	brcmf_pcie_reset_rc_l1ss(pdev);
+
 	ret = -ENOMEM;
 	devinfo = kzalloc_obj(*devinfo);
 	if (devinfo == NULL)
@@ -3332,6 +3717,12 @@ brcmf_pcie_remove(struct pci_dev *pdev)
 		return;
 
 	devinfo = bus->bus_priv.pcie->devinfo;
+
+	/* Leave the link in plain L0 before releasing the device, so ASPM L1 is
+	 * not left enabled on the driverless endpoint (which would drop it to
+	 * D3cold and break the next warm reload's probe). */
+	brcmf_pcie_disable_l1ss(pdev);
+
 	brcmf_pcie_bus_console_read(devinfo, false);
 	brcmf_pcie_fwcon_timer(devinfo, false);
 
@@ -3342,6 +3733,10 @@ brcmf_pcie_remove(struct pci_dev *pdev)
 	}
 	if (devinfo->ci)
 		brcmf_pcie_intr_disable(devinfo);
+	/* Wait for any in-flight threaded-IRQ RX handler before tearing down
+	 * per-interface state (gro_cells) in brcmf_detach -> brcmf_net_detach,
+	 * so brcmf_netif_rx cannot race gro_cells_destroy (use-after-free). */
+	synchronize_irq(pdev->irq);
 
 	if (devinfo->irq_allocated)
 		synchronize_irq(pdev->irq);
