@@ -63,6 +63,39 @@ static int brcmf_fcmode;
 module_param_named(fcmode, brcmf_fcmode, int, 0);
 MODULE_PARM_DESC(fcmode, "Mode of firmware signalled flow control");
 
+/* TX A-MSDU. Default ON -- made safe by RX GRO (gro=1, the default). Without
+ * GRO the BCM4390 firmware trapped in txq_hw_fill under sustained RX: mainline
+ * handed every RX MSDU straight to netif_rx(), so the TCP stack emitted an ACK
+ * per couple of packets, and with A-MSDU on the firmware aggregated that ACK
+ * storm into oversized TX descriptor sets that overran its alfrag-chunk budget
+ * once the shared pool ran low. GRO (gro_cells, see brcmf_netif_rx) coalesces
+ * the RX stream so far fewer ACKs are sent, the TX aggregates stay small, and
+ * the trap cannot fire -- exactly how the vendor (NAPI+GRO) runs A-MSDU. Turn
+ * amsdu off only for debugging or if gro is disabled. */
+static int brcmf_amsdu = 1;
+module_param_named(amsdu, brcmf_amsdu, int, 0644);
+MODULE_PARM_DESC(amsdu, "Enable TX A-MSDU aggregation (default on; needs gro=1)");
+
+/* RX GRO coalescing via gro_cells (see brcmf_netif_rx). On by default; a param
+ * so it can be A/B'd against the txq_hw_fill trap and any PHY-side fallout. */
+int brcmf_gro = 1;
+module_param_named(gro, brcmf_gro, int, 0644);
+MODULE_PARM_DESC(gro, "Coalesce RX with GRO (gro_cells) (default on)");
+
+/* Tuning knobs for the A-MSDU-vs-txq_hw_fill-trap investigation, settable at
+ * load so configs can be swept without a rebuild. -1 = leave firmware default. */
+static int brcmf_amsdu_aggsf = -1;
+module_param_named(amsdu_aggsf, brcmf_amsdu_aggsf, int, 0644);
+MODULE_PARM_DESC(amsdu_aggsf, "TX A-MSDU max sub-frames (-1=fw default)");
+
+static int brcmf_ampdu_rx_factor = -1;
+module_param_named(ampdu_rx_factor, brcmf_ampdu_rx_factor, int, 0644);
+MODULE_PARM_DESC(ampdu_rx_factor, "RX A-MPDU density exponent (-1=fw default)");
+
+static int brcmf_ampdu_mpdu = 16;
+module_param_named(ampdu_mpdu, brcmf_ampdu_mpdu, int, 0644);
+MODULE_PARM_DESC(ampdu_mpdu, "TX A-MPDU max MPDUs (-1=fw default)");
+
 static int brcmf_roamoff;
 module_param_named(roamoff, brcmf_roamoff, int, 0400);
 MODULE_PARM_DESC(roamoff, "Do not use internal roaming engine");
@@ -443,19 +476,28 @@ int brcmf_c_preinit_dcmds(struct brcmf_if *ifp)
 	 * deterministic txq_hw_fill assert (pc 3e598a) under sustained throughput.
 	 * Set ba_wsize first: the firmware requires ampdu_mpdu <= ampdu_ba_wsize.
 	 */
+	/* Cap TX A-MPDU to the vendor values and (by default) disable A-MSDU. The
+	 * SAQM sizes each A-MPDU's descriptor set by MSDU-segment count and asserts
+	 * (txq_hw_fill, pc 3e598a) when it overflows a fixed alfrag-chunk budget
+	 * while the firmware packet pool is starved under sustained RX. amsdu=0
+	 * keeps TX segments == MPDUs so the aggregate always fits the budget even
+	 * when the pool is dry; see the brcmf_amsdu param comment for the full
+	 * (exhausted) investigation into keeping A-MSDU on.
+	 * ba_wsize first: the firmware requires ampdu_mpdu <= ampdu_ba_wsize. */
 	(void)brcmf_fil_iovar_int_set(ifp, "ampdu_ba_wsize", 64);
-	(void)brcmf_fil_iovar_int_set(ifp, "ampdu_mpdu", 16);
-	/* The SAQM sizes each A-MPDU's descriptor set by MSDU-SEGMENT count, not
-	 * MPDU count: with A-MSDU on, each MPDU expands to several sub-frames, so
-	 * ~16 MPDUs balloon to ~34 segments and overflow the 6-chunk (2112B)
-	 * descriptor budget once the shared pool is starved. ampdu_mpdu cannot
-	 * bound that. Disabling A-MSDU makes segments == MPDUs (<=16), which fits
-	 * in one chunk even on the pool-starved strict path. (Capping A-MSDU to 2
-	 * sub-frames = 32 segments was tried and still overflowed under heavy
-	 * parallel load -- the descriptor budget has no safe margin above ~16, so
-	 * A-MSDU stays off. The download path is AP-limited, so this costs no
-	 * measurable throughput.) */
-	(void)brcmf_fil_iovar_int_set(ifp, "amsdu", 0);
+	if (brcmf_ampdu_mpdu >= 0)
+		(void)brcmf_fil_iovar_int_set(ifp, "ampdu_mpdu",
+					      brcmf_ampdu_mpdu);
+	(void)brcmf_fil_iovar_int_set(ifp, "amsdu", brcmf_amsdu ? 1 : 0);
+	if (brcmf_amsdu_aggsf >= 0)
+		bphy_err(drvr, "DBG set amsdu_aggsf=%d -> %d\n", brcmf_amsdu_aggsf,
+			 brcmf_fil_iovar_int_set(ifp, "amsdu_aggsf",
+						 brcmf_amsdu_aggsf));
+	if (brcmf_ampdu_rx_factor >= 0)
+		bphy_err(drvr, "DBG set ampdu_rx_factor=%d -> %d\n",
+			 brcmf_ampdu_rx_factor,
+			 brcmf_fil_iovar_int_set(ifp, "ampdu_rx_factor",
+						 brcmf_ampdu_rx_factor));
 	/* Route tx frames by access category (DHD_FLOW_PRIO_AC_MAP == 0) so the
 	 * firmware's four-AC AQM and the host's per-AC flow rings agree. Without
 	 * this the dongle uses a different prio map than the host posts rings
