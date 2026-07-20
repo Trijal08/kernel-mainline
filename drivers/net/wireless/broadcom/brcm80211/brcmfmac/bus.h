@@ -131,6 +131,10 @@ struct brcmf_bus_msgbuf {
 	u16 max_flowrings;
 	u16 max_submissionrings;
 	u16 max_completionrings;
+	/* HOSTCAP_AGGR handshake result, filled by the bus layer at firmware-up */
+	bool aggr_enab;
+	u8 aggr_txcpl_max;
+	u8 aggr_rxcpl_max;
 };
 
 
