@@ -11,6 +11,7 @@
 #define BRCMFMAC_CORE_H
 
 #include <net/cfg80211.h>
+#include <net/gro_cells.h>
 #include "fweh.h"
 
 #if IS_MODULE(CONFIG_BRCMFMAC)
@@ -268,6 +269,14 @@ struct brcmf_if {
 	struct in6_addr ipv6_addr_tbl[NDOL_MAX_ENTRIES];
 	u8 ipv6addr_idx;
 	bool fwil_fwerr;
+	/* Per-interface GRO context. brcmfmac receives in a threaded IRQ with no
+	 * NAPI poll, so it hands each frame straight to netif_rx() -- no GRO. The
+	 * vendor bcmdhd runs NAPI+GRO (DHD_LB_RXP), which coalesces RX so the TCP
+	 * stack emits far fewer ACKs; with those ACKs A-MSDU-aggregated on TX, the
+	 * un-coalesced mainline ACK storm churns the dongle's alfrag pool and trips
+	 * the txq_hw_fill trap. gro_cells gives GRO from this threaded context. */
+	struct gro_cells gcells;
+	bool gcells_ok;
 };
 
 int brcmf_netdev_wait_pend8021x(struct brcmf_if *ifp);
