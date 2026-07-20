@@ -30,6 +30,9 @@
 #include "pcie.h"
 #include "common.h"
 
+/* RX GRO toggle (module param 'gro', defined in common.c) */
+extern int brcmf_gro;
+
 #define MAX_WAIT_FOR_8021X_TX			msecs_to_jiffies(950)
 
 #define BRCMF_BSSIDX_INVALID			-1
@@ -428,7 +431,13 @@ void brcmf_netif_rx(struct brcmf_if *ifp, struct sk_buff *skb)
 	ifp->ndev->stats.rx_packets++;
 
 	brcmf_dbg(DATA, "rx proto=0x%X\n", ntohs(skb->protocol));
-	netif_rx(skb);
+	/* Coalesce via GRO when available (see struct brcmf_if::gcells): fewer,
+	 * larger segments up the stack -> far fewer TCP ACKs on TX, which keeps
+	 * the dongle's TX A-MSDU/alfrag pool from starving (txq_hw_fill trap). */
+	if (ifp->gcells_ok)
+		gro_cells_receive(&ifp->gcells, skb);
+	else
+		netif_rx(skb);
 }
 
 void brcmf_netif_mon_rx(struct brcmf_if *ifp, struct sk_buff *skb)
@@ -674,6 +683,13 @@ int brcmf_net_attach(struct brcmf_if *ifp, bool locked)
 
 	netif_carrier_off(ndev);
 
+	/* Enable GRO coalescing for this interface's RX (see brcmf_netif_rx).
+	 * Non-fatal on failure: RX falls back to plain netif_rx(). */
+	if (brcmf_gro && gro_cells_init(&ifp->gcells, ndev) == 0)
+		ifp->gcells_ok = true;
+	else if (brcmf_gro)
+		bphy_err(drvr, "gro_cells_init failed; RX GRO disabled\n");
+
 	ndev->priv_destructor = brcmf_cfg80211_free_vif;
 	brcmf_dbg(INFO, "%s: Broadcom Dongle Host Driver\n", ndev->name);
 	return 0;
@@ -686,12 +702,23 @@ fail:
 
 void brcmf_net_detach(struct net_device *ndev, bool locked)
 {
-	if (ndev->reg_state == NETREG_REGISTERED) {
+	struct brcmf_if *ifp = netdev_priv(ndev);
+	bool registered = (ndev->reg_state == NETREG_REGISTERED);
+
+	if (registered) {
 		if (locked)
 			cfg80211_unregister_netdevice(ndev);
 		else
 			unregister_netdev(ndev);
-	} else {
+	}
+	/* After unregister the interface is down (IFF_UP cleared), so
+	 * brcmf_netif_rx no longer reaches gro_cells_receive -- tear the GRO
+	 * context down before the netdev (and this priv) can be freed. */
+	if (ifp->gcells_ok) {
+		ifp->gcells_ok = false;
+		gro_cells_destroy(&ifp->gcells);
+	}
+	if (!registered) {
 		brcmf_cfg80211_free_vif(ndev);
 		free_netdev(ndev);
 	}
