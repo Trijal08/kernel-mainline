@@ -472,12 +472,16 @@ static int exynos_zuma_pcie_host_init(struct dw_pcie_rp *pp)
 	return 0;
 }
 
+static void exynos_zuma_pcie_gen3(struct dw_pcie *pci);
+static bool exynos_zuma_pcie_link_up(struct dw_pcie *pci);
+
 static int exynos_zuma_pcie_start_link(struct dw_pcie *pci)
 {
 	struct exynos_pcie *ep = to_exynos_pcie(pci);
 	void __iomem *elbi = pci->elbi_base;
 	u8 exp_cap;
 	u32 val;
+	int i;
 
 	/* deassert PERST to the endpoint and let it come up */
 	gpiod_set_value_cansleep(ep->perst_gpio, 1);
@@ -526,6 +530,27 @@ static int exynos_zuma_pcie_start_link(struct dw_pcie *pci)
 
 	/* assert LTSSM enable */
 	exynos_pcie_writel(elbi, LTSSM_ENABLE, PCIE_ZUMA_APP_LTSSM_ENABLE);
+
+	/*
+	 * The link trains at Gen1 (2.5 GT/s) but this SoC/PHY is Gen3-capable.
+	 * The modem channel is deferred to zumapro_pcie_modem_gen3() (gated on
+	 * the CP bootloader), but a non-modem RC -- the BCM4390 Wi-Fi channel,
+	 * identified by having no CP power sequencer -- has a plain PCIe endpoint
+	 * with no bootloader gating, so upshift it to Gen3 here once the link
+	 * reaches L0. Without this the Wi-Fi D2H DMA is capped at Gen1 bandwidth,
+	 * which throttles throughput and lets the completion rings back up under
+	 * sustained load until the dongle's TX path stalls. The vendor retrains
+	 * this link to full speed too. Non-fatal: stays at Gen1 if it cannot.
+	 */
+	if (!ep->cp_power) {
+		for (i = 0; i < 100; i++) {
+			if (exynos_zuma_pcie_link_up(pci))
+				break;
+			usleep_range(1000, 2000);
+		}
+		if (exynos_zuma_pcie_link_up(pci))
+			exynos_zuma_pcie_gen3(pci);
+	}
 
 	return 0;
 }
@@ -1054,6 +1079,9 @@ static void exynos_zuma_pcie_gen3(struct dw_pcie *pci)
 	int i;
 
 	dw_pcie_dbi_ro_wr_en(pci);
+	/* This PHY trains Gen3 without EQ phases 2/3; the modem relink path sets
+	 * this too, but the Wi-Fi upshift comes straight here, so set it now. */
+	dw_pcie_writel_dbi(pci, PCIE_GEN3_RELATED, GEN3_EQ_OFF);
 	reg = dw_pcie_readl_dbi(pci, exp + PCI_EXP_LNKCAP);
 	reg = (reg & ~PCI_EXP_LNKCAP_SLS) | PCI_EXP_LNKCAP_SLS_8_0GB;
 	dw_pcie_writel_dbi(pci, exp + PCI_EXP_LNKCAP, reg);
@@ -1077,7 +1105,7 @@ static void exynos_zuma_pcie_gen3(struct dw_pcie *pci)
 			break;
 		usleep_range(1000, 2000);
 	}
-	dev_info(pci->dev, "CH0 link speed after retrain: %s (LNKSTA %#x)\n",
+	dev_info(pci->dev, "link speed after retrain: %s (LNKSTA %#x)\n",
 		 (reg16 & PCI_EXP_LNKSTA_CLS) == PCI_EXP_LNKSTA_CLS_8_0GB ?
 			"Gen3" : "not Gen3", reg16);
 }
