@@ -8012,6 +8012,12 @@ static int brcmf_setup_wiphy(struct wiphy *wiphy, struct brcmf_if *ifp)
 	return 0;
 }
 
+/* Power-save override, see brcmf_pm in common.c. -1 (default) leaves the
+ * BCM4390 firmware self-preinit PM value untouched (vendor parity); 0/1 force
+ * PM_OFF/PM_FAST. Forcing PM historically perturbed the idle-5GHz-slice VCO
+ * recal (trap 2b4f58); vendor's optimised path never sets PM. */
+extern int brcmf_pm;
+
 static s32 brcmf_config_dongle(struct brcmf_cfg80211_info *cfg)
 {
 	struct brcmf_pub *drvr = cfg->pub;
@@ -8033,12 +8039,16 @@ static s32 brcmf_config_dongle(struct brcmf_cfg80211_info *cfg)
 
 	brcmf_dongle_scantime(ifp);
 
-	power_mode = cfg->pwr_save ? PM_FAST : PM_OFF;
-	err = brcmf_fil_cmd_int_set(ifp, BRCMF_C_SET_PM, power_mode);
-	if (err)
-		goto default_conf_out;
-	brcmf_dbg(INFO, "power save set to %s\n",
-		  (power_mode ? "enabled" : "disabled"));
+	/* PM: only touch it if explicitly asked (brcmf_pm >= 0); otherwise leave
+	 * the firmware self-preinit default, matching the vendor optimised path. */
+	if (brcmf_pm >= 0) {
+		power_mode = brcmf_pm ? PM_FAST : PM_OFF;
+		err = brcmf_fil_cmd_int_set(ifp, BRCMF_C_SET_PM, power_mode);
+		if (err)
+			goto default_conf_out;
+		brcmf_dbg(INFO, "power save set to %s\n",
+			  (power_mode ? "enabled" : "disabled"));
+	}
 
 	err = brcmf_dongle_roam(ifp);
 	if (err)

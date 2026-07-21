@@ -10,23 +10,15 @@
 
 #include <linux/types.h>
 #include <linux/netdevice.h>
-#include <linux/kthread.h>
 #include <linux/etherdevice.h>
 
 #include <brcmu_utils.h>
 #include <brcmu_wifi.h>
 
-#include <linux/moduleparam.h>
 #include "core.h"
 #include "debug.h"
 #include "proto.h"
 #include "msgbuf.h"
-
-/* Sweep override for the posted-RX-buffer ceiling (amsdu trap investigation);
- * 0 = use the driver-computed value. */
-static int brcmf_msgbuf_rxbufpost_max;
-module_param_named(rxbufpost_max, brcmf_msgbuf_rxbufpost_max, int, 0644);
-MODULE_PARM_DESC(rxbufpost_max, "Override max posted RX buffers (0=auto)");
 #include "commonring.h"
 #include "flowring.h"
 #include "bus.h"
@@ -81,56 +73,23 @@ MODULE_PARM_DESC(rxbufpost_max, "Override max posted RX buffers (0=auto)");
 #define MSGBUF_TYPE_D2H_RING_DELETE		0x2C
 #define MSGBUF_TYPE_H2D_RING_DELETE_CMPLT	0x2D
 #define MSGBUF_TYPE_D2H_RING_DELETE_CMPLT	0x2E
-/* Aggregated D2H completion work items (HOSTCAP_AGGR). One ring slot packs many
- * completions: a "head" slot carries the aggregate headers + the first items,
- * and (for larger bursts) one or more "ext" slots carry only items. Detected on
- * the head slot's msgtype; ext slots have no msgtype and are never dispatched
- * directly. See pcie_aggr_sh_t / host_{rxbuf,txbuf}_cmpl_aggr in the BCM4390
- * bcmmsgbuf.h. */
-#define MSGBUF_TYPE_TX_STATUS_AGGR		0x30
-#define MSGBUF_TYPE_RX_CMPLT_AGGR		0x32
-
-/* Items packed per aggregated-completion slot (vendor bcmmsgbuf.h). The head
- * slot spends 8 bytes on the two aggregate headers; ext slots are all items. */
-#define BRCMF_TXCPL_AGGR_CNT		4	/* u32 request_id in the head */
-#define BRCMF_TXCPL_AGGR_CNT_EXT	6	/* u32 request_id per ext slot */
-#define BRCMF_RXCPL_AGGR_CNT		2	/* rx items in the head */
-#define BRCMF_RXCPL_AGGR_CNT_EXT	5	/* rx items per ext slot */
 
 #define NR_TX_PKTIDS				2048
-/* The firmware audits every host packet id against a per-ring map and traps
- * (osl_sys_halt) on anything outside it. There are separate maps: control
- * posts (ioctl-response and event buffers, on the control submit ring) are
- * audited against a 1024-id map, while rx-data posts (on the rxpost ring) are
- * audited against a much larger 8192-id map. The rx control pool therefore
- * must not exceed 1024 ids; the dedicated rx-data pool below may grow to 8192.
- */
+/* The firmware audits host packet ids against a per-ring map and traps on
+ * anything outside it. Control posts (ioctl-response + event, on the control
+ * submit ring) are audited against a 1024-id map; rx-data posts (rxpost ring)
+ * against a separate, larger 8192-id map. So the control pool must stay <=1024,
+ * while rx-data gets its own dedicated pool below. BCM4388 tolerated a shared
+ * 2048 pool; BCM4390's per-ring audit traps on a control id >=1024, or when a
+ * large rx-data fill overruns the shared pool and the failed alloc hands back
+ * id 0. */
 #define NR_RX_PKTIDS				1024
-/* Upper bound of the firmware's rx-data host-pktid audit map. The dedicated
- * rx-data pool is sized to what the firmware advertises in max_rxbufpost, but
- * never beyond this (handing back a larger id traps the dongle).
- */
+/* Upper bound of the firmware's rx-data host-pktid audit map. */
 #define BRCMF_RXDATA_PKTID_MAP_MAX		8192
-/* Upper bound on RX buffers kept posted to the dongle. The BCM4390 firmware
- * advertises a large max_rxbufpost (~6783) and the vendor DHD posts exactly that
- * -- its V3 RXPOST ring is 8192 deep (H2DRING_RXPOST_SIZE_V3) and it never
- * clamps the advertised value down. Host RX buffers are the *sink* the dongle
- * DMAs received frames into; posting too FEW leaves the dongle holding frames in
- * its shared lbuf/packet pool waiting for a free RXPOST slot, which drains that
- * pool until a concurrent TX A-MPDU cannot allocate alfrag chunks and the
- * firmware traps in txq_hw_fill. So match the vendor: post the full advertised
- * depth, bounded only by the RXPOST ring size (8192) and the rx-data pktid map
- * (also 8192). An earlier 2048 cap here under-posted and is what let the pool
- * starve under sustained A-MSDU download. */
-#define BRCMF_MSGBUF_MAX_RXBUFPOST		BRCMF_H2D_MSGRING_RXPOST_SUBMIT_MAX_ITEM
 
 #define BRCMF_IOCTL_REQ_PKTID			0xFFFE
 
 #define BRCMF_MSGBUF_MAX_PKT_SIZE		2048
-/* Depth of the pre-filled RX skb reserve (see struct brcmf_msgbuf::rxpool_q).
- * A flat target like the vendor DHD RX_PKT_POOL (MAX_RX_PKT_POOL=1024), not
- * derived from max_rxbufpost; ~2MB of 2048-byte skbs. */
-#define BRCMF_MSGBUF_RXPOOL_MAX			1024
 #define BRCMF_MSGBUF_MAX_CTL_PKT_SIZE           8192
 #define BRCMF_MSGBUF_RXBUFPOST_THRESHOLD	32
 #define BRCMF_MSGBUF_MAX_IOCTLRESPBUF_POST	8
@@ -178,30 +137,7 @@ struct msgbuf_tx_msghdr {
 	struct msgbuf_buf_addr		data_buf_addr;
 	__le16				metadata_buf_len;
 	__le16				data_len;
-	/* extended tx work-item tail required by firmware that advertises
-	 * the extended txpost layout; left zero when the optional rate
-	 * override and checksum-offload features are unused.
-	 */
-	u8				ext_flags;
-	u8				scale_factor;
-	u8				rate;
-	u8				exp_time;
-	/* host_txbuf_post_v3 tail: CSO info + aggregation fields. All zero for a
-	 * normal STA (no checksum offload, no host-side aggregation). The
-	 * firmware's txq_hw_fill reads these at fixed offsets, so the work item
-	 * MUST be exactly 64 bytes -- the earlier 32-byte "radiotap reserve"
-	 * made it 80, which misaligned every item past the first in the flowring
-	 * and crashed txq_hw_fill on any sustained TX.
-	 */
-	u8				cso_ver;
-	u8				cso_pkt_csum_type;
-	u8				cso_nwk_hdr_len;
-	u8				cso_trans_hdr_len;
-	u8				aggr_flags;
-	u8				num_aggr_pkts;
-	__le16				tot_aggr_len;
-	__le16				aggr_buf_offset;
-	u8				pad[6];
+	__le32				rsvd0;
 };
 
 struct msgbuf_rx_bufpost {
@@ -276,48 +212,6 @@ struct msgbuf_rx_complete {
 	__le32				rx_status_0;
 	__le32				rx_status_1;
 	__le32				rsvd0;
-};
-
-/* Aggregated-completion wire format (HOSTCAP_AGGR). All fields are naturally
- * aligned, so these lay out identically packed to the vendor structs. */
-struct msgbuf_aggr_hdr {		/* cmn_aggr_msg_hdr_t, 4 bytes */
-	u8				msgtype;
-	u8				aggr_cnt;	/* total items in this burst */
-	u8				flags;		/* flags / phase */
-	u8				epoch;		/* seqnum (unused: wr-idx sync) */
-};
-
-struct msgbuf_compl_aggr_hdr {		/* compl_aggr_msg_hdr_t, 4 bytes */
-	u8				if_id;
-	s8				status;
-	__le16				ring_id;
-};
-
-struct msgbuf_rx_cmpl_item {		/* host_rxbuf_cmpl_item_t, 8 bytes */
-	u8				data_offset;
-	u8				flags;
-	__le16				data_len;
-	__le32				request_id;
-};
-
-struct msgbuf_rx_complete_aggr {	/* head slot, host_rxbuf_cmpl_aggr_t */
-	struct msgbuf_aggr_hdr		aggr;
-	struct msgbuf_compl_aggr_hdr	compl_aggr;
-	struct msgbuf_rx_cmpl_item	item[BRCMF_RXCPL_AGGR_CNT];
-};
-
-struct msgbuf_rx_complete_aggr_ext {	/* ext slot, host_rxbuf_cmpl_aggr_ext_t */
-	struct msgbuf_rx_cmpl_item	item[BRCMF_RXCPL_AGGR_CNT_EXT];
-};
-
-struct msgbuf_tx_status_aggr {		/* head slot, host_txbuf_cmpl_aggr_t */
-	struct msgbuf_aggr_hdr		aggr;
-	struct msgbuf_compl_aggr_hdr	compl_aggr;
-	__le32				request_id[BRCMF_TXCPL_AGGR_CNT];
-};
-
-struct msgbuf_tx_status_aggr_ext {	/* ext slot, host_txbuf_cmpl_aggr_ext_t */
-	__le32				request_id[BRCMF_TXCPL_AGGR_CNT_EXT];
 };
 
 struct msgbuf_tx_flowring_create_req {
@@ -397,27 +291,6 @@ struct brcmf_msgbuf {
 	u16 rx_metadata_offset;
 	u32 rxbufpost;
 
-	/* HOSTCAP_AGGR: the dongle packs several TX/RX completions into one D2H
-	 * ring slot. Negotiated at firmware-up in the PCIe layer and handed over
-	 * via brcmf_bus_msgbuf; when set, the completion drain understands the
-	 * aggregated msgtypes (0x30/0x32). */
-	bool aggr_enab;
-
-	/* Pre-filled RX skb reserve, refilled off the hot path by rxpool_thread.
-	 * Used as the backstop when the inline GFP_ATOMIC skb alloc in
-	 * brcmf_msgbuf_rxbuf_data_post() fails under memory pressure, so RX buffer
-	 * re-posting never stalls and the dongle's shared packet pool cannot
-	 * starve (a starved pool trips the firmware's txq_hw_fill assert under
-	 * sustained load). Mirrors the vendor DHD RX_PKT_POOL. sk_buff_head
-	 * carries its own spinlock; the thread only touches this list, never the
-	 * lock-free single-writer RXPOST commonring. */
-	struct sk_buff_head rxpool_q;
-	u32 rxpool_max;
-	u16 rxpool_bufsz;
-	struct task_struct *rxpool_thread;
-	wait_queue_head_t rxpool_wq;
-	atomic_t rxpool_kick;
-
 	u32 max_ioctlrespbuf;
 	u32 cur_ioctlrespbuf;
 	u32 max_eventbuf;
@@ -476,18 +349,16 @@ brcmf_msgbuf_init_pktids(u32 nr_array_entries,
 	struct brcmf_msgbuf_pktid *array;
 	struct brcmf_msgbuf_pktids *pktids;
 
-	/* The rx-data pool can hold thousands of entries; use kvcalloc so a
-	 * large pool does not depend on a high-order contiguous allocation.
-	 * The array is host bookkeeping only (it is never DMA'd), so virtually
-	 * contiguous memory is fine.
-	 */
+	/* The rx-data pool can hold thousands of entries; use kvcalloc so a large
+	 * pool does not depend on a high-order contiguous allocation. The array is
+	 * host bookkeeping only (never DMA'd), so virtually contiguous is fine. */
 	array = kvcalloc(nr_array_entries, sizeof(*array), GFP_KERNEL);
 	if (!array)
 		return NULL;
 
 	pktids = kzalloc_obj(*pktids);
 	if (!pktids) {
-		kfree(array);
+		kvfree(array);
 		return NULL;
 	}
 	pktids->array = array;
@@ -862,10 +733,11 @@ static void brcmf_msgbuf_flowring_worker(struct work_struct *work)
 }
 
 
-static u32 brcmf_msgbuf_flowring_create_prio(struct brcmf_msgbuf *msgbuf,
-					     int ifidx, u8 *sa, u8 *da, u8 prio)
+static u32 brcmf_msgbuf_flowring_create(struct brcmf_msgbuf *msgbuf, int ifidx,
+					struct sk_buff *skb)
 {
 	struct brcmf_msgbuf_work_item *create;
+	struct ethhdr *eh = (struct ethhdr *)(skb->data);
 	u32 flowid;
 	ulong flags;
 
@@ -873,7 +745,8 @@ static u32 brcmf_msgbuf_flowring_create_prio(struct brcmf_msgbuf *msgbuf,
 	if (create == NULL)
 		return BRCMF_FLOWRING_INVALID_ID;
 
-	flowid = brcmf_flowring_create(msgbuf->flow, da, prio, ifidx);
+	flowid = brcmf_flowring_create(msgbuf->flow, eh->h_dest,
+				       skb->priority, ifidx);
 	if (flowid == BRCMF_FLOWRING_INVALID_ID) {
 		kfree(create);
 		return flowid;
@@ -881,46 +754,13 @@ static u32 brcmf_msgbuf_flowring_create_prio(struct brcmf_msgbuf *msgbuf,
 
 	create->flowid = flowid;
 	create->ifidx = ifidx;
-	memcpy(create->sa, sa, ETH_ALEN);
-	memcpy(create->da, da, ETH_ALEN);
+	memcpy(create->sa, eh->h_source, ETH_ALEN);
+	memcpy(create->da, eh->h_dest, ETH_ALEN);
 
 	spin_lock_irqsave(&msgbuf->flowring_work_lock, flags);
 	list_add_tail(&create->queue, &msgbuf->work_queue);
 	spin_unlock_irqrestore(&msgbuf->flowring_work_lock, flags);
 	schedule_work(&msgbuf->flowring_work);
-
-	return flowid;
-}
-
-static u32 brcmf_msgbuf_flowring_create(struct brcmf_msgbuf *msgbuf, int ifidx,
-					struct sk_buff *skb)
-{
-	struct ethhdr *eh = (struct ethhdr *)(skb->data);
-	u32 flowid;
-	u8 prio;
-
-	flowid = brcmf_msgbuf_flowring_create_prio(msgbuf, ifidx, eh->h_source,
-						   eh->h_dest, skb->priority);
-
-	/* Pre-create a flow ring for every other 802.1d priority to this peer.
-	 * The BCM4390 firmware originates frames itself - notably its offloaded
-	 * supplicant's group-key handshake, transmitted on the Voice AC - soon
-	 * after association, and steers every frame to the AQM fifo matching its
-	 * raw 802.1d priority. If the host has not posted that fifo's DMA ring
-	 * the MAC asserts a fatal TXDMA_QMISS. Posting all eight priority rings
-	 * on the first transmit (which happens at link-up, before the firmware
-	 * originates those frames) guarantees the rings exist, rather than
-	 * relying on host traffic happening to use each priority in time.
-	 */
-	for (prio = 0; prio < 8; prio++) {
-		if (prio == skb->priority)
-			continue;
-		if (brcmf_flowring_lookup(msgbuf->flow, eh->h_dest, prio,
-					  ifidx) == BRCMF_FLOWRING_INVALID_ID)
-			brcmf_msgbuf_flowring_create_prio(msgbuf, ifidx,
-							  eh->h_source,
-							  eh->h_dest, prio);
-	}
 
 	return flowid;
 }
@@ -954,14 +794,10 @@ static void brcmf_msgbuf_txflow(struct brcmf_msgbuf *msgbuf, u16 flowid)
 			break;
 		}
 		skb_orphan(skb);
-		/* The work item carries a single data_buf_addr that is DMA
-		 * mapped with dma_map_single() below, which only covers the
-		 * linear part of the skb. A non-linear skb (paged frags) would
-		 * leave its frags unmapped and hand the dongle adjacent garbage,
-		 * corrupting the frame it aggregates and tripping the firmware's
-		 * txq_hw_fill assert under load. Flatten the skb first; the
-		 * vendor driver likewise rejects frag'd tx skbs.
-		 */
+		/* The work item carries a single data_buf_addr DMA-mapped with
+		 * dma_map_single() below, which covers only the skb's linear
+		 * part. A non-linear (paged) skb would leave its frags unmapped
+		 * and hand the dongle adjacent garbage. Flatten it first. */
 		if (skb_linearize(skb)) {
 			bphy_err(drvr, "skb_linearize failed, dropping tx\n");
 			brcmu_pkt_buf_free_skb(skb);
@@ -985,12 +821,16 @@ static void brcmf_msgbuf_txflow(struct brcmf_msgbuf *msgbuf, u16 flowid)
 
 		tx_msghdr = (struct msgbuf_tx_msghdr *)ret_ptr;
 
+		/* Zero the whole work item first: txflow does not set msg.flags
+		 * (the H2D valid-phase/epoch byte), msg.rsvd0 or the trailing
+		 * rsvd0, so without this they retain stale data from the slot's
+		 * previous TX. At high throughput the ring slots recycle fast; a
+		 * stale valid-phase byte makes the firmware skip the work item as
+		 * not-yet-written -> silent TX stall -> ACKs stop -> RX flatlines
+		 * (the ~480 Mbps datapath wedge, WARN skb->next in txfinalize). */
 		memset(tx_msghdr, 0, sizeof(*tx_msghdr));
 		tx_msghdr->msg.msgtype = MSGBUF_TYPE_TX_POST;
-		/* request_id == pktid verbatim, matching bcmdhd (no +1 offset);
-		 * the allocator never hands out pktid 0 so it stays nonzero.
-		 */
-		tx_msghdr->msg.request_id = cpu_to_le32(pktid);
+		tx_msghdr->msg.request_id = cpu_to_le32(pktid + 1);
 		tx_msghdr->msg.ifidx = brcmf_flowring_ifidx_get(flow, flowid);
 		tx_msghdr->flags = BRCMF_MSGBUF_PKT_FLAGS_FRAME_802_3;
 		tx_msghdr->flags |= (skb->priority & 0x07) <<
@@ -1146,20 +986,20 @@ brcmf_msgbuf_process_ioctl_complete(struct brcmf_msgbuf *msgbuf, void *buf)
 
 
 static void
-brcmf_msgbuf_tx_done(struct brcmf_msgbuf *msgbuf, u32 pktid, u16 flowid,
-		     u8 ifidx)
+brcmf_msgbuf_process_txstatus(struct brcmf_msgbuf *msgbuf, void *buf)
 {
 	struct brcmf_commonring *commonring;
+	struct msgbuf_tx_status *tx_status;
+	u32 idx;
 	struct sk_buff *skb;
+	u16 flowid;
 
-	if (flowid >= msgbuf->max_flowrings) {
-		bphy_err(msgbuf->drvr, "tx status for invalid flowid %u\n",
-			 flowid);
-		return;
-	}
-
+	tx_status = (struct msgbuf_tx_status *)buf;
+	idx = le32_to_cpu(tx_status->msg.request_id) - 1;
+	flowid = le16_to_cpu(tx_status->compl_hdr.flow_ring_id);
+	flowid -= BRCMF_H2D_MSGRING_FLOWRING_IDSTART;
 	skb = brcmf_msgbuf_get_pktid(msgbuf->drvr->bus_if->dev,
-				     msgbuf->tx_pktids, pktid);
+				     msgbuf->tx_pktids, idx);
 	if (!skb)
 		return;
 
@@ -1167,136 +1007,10 @@ brcmf_msgbuf_tx_done(struct brcmf_msgbuf *msgbuf, u32 pktid, u16 flowid,
 	commonring = msgbuf->flowrings[flowid];
 	atomic_dec(&commonring->outstanding_tx);
 
-	brcmf_txfinalize(brcmf_get_ifp(msgbuf->drvr, ifidx), skb, true);
+	brcmf_txfinalize(brcmf_get_ifp(msgbuf->drvr, tx_status->msg.ifidx),
+			 skb, true);
 }
 
-static void
-brcmf_msgbuf_process_txstatus(struct brcmf_msgbuf *msgbuf, void *buf)
-{
-	struct msgbuf_tx_status *tx_status = (struct msgbuf_tx_status *)buf;
-	u16 flowid = le16_to_cpu(tx_status->compl_hdr.flow_ring_id);
-
-	flowid -= BRCMF_H2D_MSGRING_FLOWRING_IDSTART;
-	brcmf_msgbuf_tx_done(msgbuf, le32_to_cpu(tx_status->msg.request_id),
-			     flowid, tx_status->msg.ifidx);
-}
-
-/* MSGBUF_TYPE_TX_STATUS_AGGR: one head slot carries the flowring/if context and
- * up to BRCMF_TXCPL_AGGR_CNT request_ids; larger bursts continue in ext slots
- * (BRCMF_TXCPL_AGGR_CNT_EXT ids each). Returns the number of ring slots the
- * burst consumed (>=1), so the drain loop advances the read pointer correctly.
- * @avail bounds how many contiguous slots the caller has; a burst that would
- * exceed it (a ring-wrap straddle the firmware is not expected to emit) is
- * truncated rather than read out of bounds. */
-static u16
-brcmf_msgbuf_process_txstatus_aggr(struct brcmf_msgbuf *msgbuf, void *buf,
-				   u16 avail, u16 item_len)
-{
-	struct msgbuf_tx_status_aggr *head = (struct msgbuf_tx_status_aggr *)buf;
-	struct msgbuf_tx_status_aggr_ext *ext;
-	u8 pending = head->aggr.aggr_cnt;
-	u8 ifidx = head->compl_aggr.if_id;
-	u16 flowid = le16_to_cpu(head->compl_aggr.ring_id);
-	u16 consumed = 1;
-	u8 n, j;
-
-	if (!pending)
-		return 1;
-	flowid -= BRCMF_H2D_MSGRING_FLOWRING_IDSTART;
-
-	n = min_t(u8, pending, BRCMF_TXCPL_AGGR_CNT);
-	for (j = 0; j < n; j++)
-		brcmf_msgbuf_tx_done(msgbuf, le32_to_cpu(head->request_id[j]),
-				     flowid, ifidx);
-	pending -= n;
-
-	while (pending) {
-		if (consumed >= avail) {
-			bphy_err(msgbuf->drvr,
-				 "txstatus aggr burst straddles ring end (%u left)\n",
-				 pending);
-			break;
-		}
-		ext = (struct msgbuf_tx_status_aggr_ext *)
-			((u8 *)buf + (size_t)consumed * item_len);
-		n = min_t(u8, pending, BRCMF_TXCPL_AGGR_CNT_EXT);
-		for (j = 0; j < n; j++)
-			brcmf_msgbuf_tx_done(msgbuf,
-					     le32_to_cpu(ext->request_id[j]),
-					     flowid, ifidx);
-		pending -= n;
-		consumed++;
-	}
-
-	return consumed;
-}
-
-
-/* Refill the RX skb reserve up to rxpool_max, off the RX hot path. Runs in its
- * own kthread so it can allocate with GFP_KERNEL (sleep/compact) without ever
- * stalling the RX-completion drain. It only touches the rxpool_q list -- never
- * the msgbuf rings -- so the lock-free single-writer RXPOST ring is unaffected.
- */
-static int brcmf_msgbuf_rxpool_thread(void *data)
-{
-	struct brcmf_msgbuf *msgbuf = data;
-	struct sk_buff *skb;
-	int attempts;
-
-	while (!kthread_should_stop()) {
-		wait_event_interruptible(msgbuf->rxpool_wq,
-					 atomic_xchg(&msgbuf->rxpool_kick, 0) ||
-					 kthread_should_stop());
-		if (kthread_should_stop())
-			break;
-
-		attempts = 0;
-		while (skb_queue_len(&msgbuf->rxpool_q) < msgbuf->rxpool_max) {
-			skb = __netdev_alloc_skb(NULL, msgbuf->rxpool_bufsz,
-						 GFP_KERNEL);
-			if (!skb) {
-				if (++attempts >= 10)
-					break;
-				msleep(500);
-				continue;
-			}
-			/* match brcmu_pkt_buf_get_skb() layout exactly */
-			skb_put(skb, msgbuf->rxpool_bufsz);
-			skb->priority = 0;
-			skb_queue_tail(&msgbuf->rxpool_q, skb);
-		}
-	}
-	skb_queue_purge(&msgbuf->rxpool_q);
-	return 0;
-}
-
-static int brcmf_msgbuf_rxpool_init(struct brcmf_msgbuf *msgbuf)
-{
-	skb_queue_head_init(&msgbuf->rxpool_q);
-	init_waitqueue_head(&msgbuf->rxpool_wq);
-	atomic_set(&msgbuf->rxpool_kick, 0);
-	msgbuf->rxpool_max = BRCMF_MSGBUF_RXPOOL_MAX;
-	msgbuf->rxpool_bufsz = BRCMF_MSGBUF_MAX_PKT_SIZE;
-	msgbuf->rxpool_thread = kthread_run(brcmf_msgbuf_rxpool_thread, msgbuf,
-					    "brcmf_rxpool");
-	if (IS_ERR(msgbuf->rxpool_thread)) {
-		msgbuf->rxpool_thread = NULL;
-		return -ENOMEM;
-	}
-	/* warm the reserve before the first data_fill */
-	atomic_set(&msgbuf->rxpool_kick, 1);
-	wake_up(&msgbuf->rxpool_wq);
-	return 0;
-}
-
-static void brcmf_msgbuf_rxpool_deinit(struct brcmf_msgbuf *msgbuf)
-{
-	if (msgbuf->rxpool_thread) {
-		kthread_stop(msgbuf->rxpool_thread);
-		msgbuf->rxpool_thread = NULL;
-	}
-	skb_queue_purge(&msgbuf->rxpool_q);
-}
 
 static u32 brcmf_msgbuf_rxbuf_data_post(struct brcmf_msgbuf *msgbuf, u32 count)
 {
@@ -1326,17 +1040,6 @@ static u32 brcmf_msgbuf_rxbuf_data_post(struct brcmf_msgbuf *msgbuf, u32 count)
 		memset(rx_bufpost, 0, sizeof(*rx_bufpost));
 
 		skb = brcmu_pkt_buf_get_skb(BRCMF_MSGBUF_MAX_PKT_SIZE);
-		if (!skb) {
-			/* GFP_ATOMIC alloc failed (memory pressure): take a
-			 * pre-allocated skb from the reserve so the re-post does
-			 * not stall and the dongle's packet pool cannot starve.
-			 * Kick the thread to top the reserve back up. */
-			skb = skb_dequeue(&msgbuf->rxpool_q);
-			if (skb) {
-				atomic_set(&msgbuf->rxpool_kick, 1);
-				wake_up(&msgbuf->rxpool_wq);
-			}
-		}
 
 		if (skb == NULL) {
 			bphy_err(drvr, "Failed to alloc SKB\n");
@@ -1410,26 +1113,8 @@ brcmf_msgbuf_update_rxbufpost_count(struct brcmf_msgbuf *msgbuf, u16 rxcnt)
 {
 	msgbuf->rxbufpost -= rxcnt;
 	if (msgbuf->rxbufpost <= (msgbuf->max_rxbufpost -
-				  BRCMF_MSGBUF_RXBUFPOST_THRESHOLD)) {
-		/* refill the reserve concurrently with this burst of reposts */
-		atomic_set(&msgbuf->rxpool_kick, 1);
-		wake_up(&msgbuf->rxpool_wq);
+				  BRCMF_MSGBUF_RXBUFPOST_THRESHOLD))
 		brcmf_msgbuf_rxbuf_data_fill(msgbuf);
-	}
-	{
-		/* DBG: how low does the posted-buffer count get under load? A
-		 * drop toward 0 means the host re-post can't keep up (drain-rate
-		 * bottleneck); staying near max means the pool starves elsewhere. */
-		static u32 dbg_min = 0xffffffff;
-
-		if (msgbuf->rxbufpost < dbg_min) {
-			dbg_min = msgbuf->rxbufpost;
-			if (dbg_min < msgbuf->max_rxbufpost / 2)
-				bphy_err(msgbuf->drvr,
-					 "DBG rxbufpost min=%u (max=%u)\n",
-					 dbg_min, msgbuf->max_rxbufpost);
-		}
-	}
 }
 
 
@@ -1571,15 +1256,27 @@ exit:
 
 
 static void
-brcmf_msgbuf_rx_deliver(struct brcmf_msgbuf *msgbuf, u32 pktid, u16 data_offset,
-			u16 data_len, u16 flags, u8 ifidx)
+brcmf_msgbuf_process_rx_complete(struct brcmf_msgbuf *msgbuf, void *buf)
 {
 	struct brcmf_pub *drvr = msgbuf->drvr;
+	struct msgbuf_rx_complete *rx_complete;
 	struct sk_buff *skb;
+	u16 data_offset;
+	u16 buflen;
+	u16 flags;
+	u32 idx;
 	struct brcmf_if *ifp;
 
+	brcmf_msgbuf_update_rxbufpost_count(msgbuf, 1);
+
+	rx_complete = (struct msgbuf_rx_complete *)buf;
+	data_offset = le16_to_cpu(rx_complete->data_offset);
+	buflen = le16_to_cpu(rx_complete->data_len);
+	idx = le32_to_cpu(rx_complete->msg.request_id);
+	flags = le16_to_cpu(rx_complete->flags);
+
 	skb = brcmf_msgbuf_get_pktid(msgbuf->drvr->bus_if->dev,
-				     msgbuf->rxdata_pktids, pktid);
+				     msgbuf->rxdata_pktids, idx);
 	if (!skb)
 		return;
 
@@ -1588,7 +1285,7 @@ brcmf_msgbuf_rx_deliver(struct brcmf_msgbuf *msgbuf, u32 pktid, u16 data_offset,
 	else if (msgbuf->rx_dataoffset)
 		skb_pull(skb, msgbuf->rx_dataoffset);
 
-	skb_trim(skb, data_len);
+	skb_trim(skb, buflen);
 
 	if ((flags & BRCMF_MSGBUF_PKT_FLAGS_FRAME_MASK) ==
 	    BRCMF_MSGBUF_PKT_FLAGS_FRAME_802_11) {
@@ -1604,90 +1301,16 @@ brcmf_msgbuf_rx_deliver(struct brcmf_msgbuf *msgbuf, u32 pktid, u16 data_offset,
 		return;
 	}
 
-	ifp = brcmf_get_ifp(msgbuf->drvr, ifidx);
+	ifp = brcmf_get_ifp(msgbuf->drvr, rx_complete->msg.ifidx);
 	if (!ifp || !ifp->ndev) {
-		bphy_err(drvr, "Received pkt for invalid ifidx %d\n", ifidx);
+		bphy_err(drvr, "Received pkt for invalid ifidx %d\n",
+			 rx_complete->msg.ifidx);
 		brcmu_pkt_buf_free_skb(skb);
 		return;
 	}
 
 	skb->protocol = eth_type_trans(skb, ifp->ndev);
 	brcmf_netif_rx(ifp, skb);
-}
-
-static void
-brcmf_msgbuf_process_rx_complete(struct brcmf_msgbuf *msgbuf, void *buf)
-{
-	struct msgbuf_rx_complete *rx_complete = (struct msgbuf_rx_complete *)buf;
-
-	brcmf_msgbuf_update_rxbufpost_count(msgbuf, 1);
-	brcmf_msgbuf_rx_deliver(msgbuf,
-				le32_to_cpu(rx_complete->msg.request_id),
-				le16_to_cpu(rx_complete->data_offset),
-				le16_to_cpu(rx_complete->data_len),
-				le16_to_cpu(rx_complete->flags),
-				rx_complete->msg.ifidx);
-}
-
-/* MSGBUF_TYPE_RX_CMPLT_AGGR: one head slot carries the interface context and up
- * to BRCMF_RXCPL_AGGR_CNT compact rx items; larger bursts continue in ext slots
- * (BRCMF_RXCPL_AGGR_CNT_EXT items each). Returns the number of ring slots the
- * burst consumed (>=1). @avail bounds the contiguous slots available; see
- * brcmf_msgbuf_process_txstatus_aggr for the truncation contract. */
-static u16
-brcmf_msgbuf_process_rx_complete_aggr(struct brcmf_msgbuf *msgbuf, void *buf,
-				      u16 avail, u16 item_len)
-{
-	struct msgbuf_rx_complete_aggr *head =
-		(struct msgbuf_rx_complete_aggr *)buf;
-	struct msgbuf_rx_complete_aggr_ext *ext;
-	struct msgbuf_rx_cmpl_item *it;
-	u8 pending = head->aggr.aggr_cnt;
-	u8 ifidx = head->compl_aggr.if_id;
-	u16 consumed = 1;
-	u16 delivered = 0;
-	u8 n, j;
-
-	if (!pending)
-		return 1;
-
-	n = min_t(u8, pending, BRCMF_RXCPL_AGGR_CNT);
-	for (j = 0; j < n; j++) {
-		it = &head->item[j];
-		brcmf_msgbuf_rx_deliver(msgbuf, le32_to_cpu(it->request_id),
-					it->data_offset,
-					le16_to_cpu(it->data_len),
-					it->flags, ifidx);
-	}
-	pending -= n;
-	delivered += n;
-
-	while (pending) {
-		if (consumed >= avail) {
-			bphy_err(msgbuf->drvr,
-				 "rxcpl aggr burst straddles ring end (%u left)\n",
-				 pending);
-			break;
-		}
-		ext = (struct msgbuf_rx_complete_aggr_ext *)
-			((u8 *)buf + (size_t)consumed * item_len);
-		n = min_t(u8, pending, BRCMF_RXCPL_AGGR_CNT_EXT);
-		for (j = 0; j < n; j++) {
-			it = &ext->item[j];
-			brcmf_msgbuf_rx_deliver(msgbuf,
-						le32_to_cpu(it->request_id),
-						it->data_offset,
-						le16_to_cpu(it->data_len),
-						it->flags, ifidx);
-		}
-		pending -= n;
-		delivered += n;
-		consumed++;
-	}
-
-	/* one posted rx buffer was consumed per delivered packet */
-	brcmf_msgbuf_update_rxbufpost_count(msgbuf, delivered);
-	return consumed;
 }
 
 static void brcmf_msgbuf_process_gen_status(struct brcmf_msgbuf *msgbuf,
@@ -1843,44 +1466,23 @@ static void brcmf_msgbuf_process_rx(struct brcmf_msgbuf *msgbuf,
 	void *buf;
 	u16 count;
 	u16 processed;
-	u16 item_len;
 
 again:
 	buf = brcmf_commonring_get_read_ptr(commonring, &count);
 	if (buf == NULL)
 		return;
 
-	item_len = brcmf_commonring_len_item(commonring);
 	processed = 0;
 	while (count) {
-		void *msg = buf + msgbuf->rx_dataoffset;
-		u16 consumed = 1;
-
-		/* With HOSTCAP_AGGR the dongle may pack several completions into
-		 * one or more contiguous ring slots (the head slot's msgtype
-		 * flags the burst). get_read_ptr never returns a run that spans
-		 * the ring wrap, so a whole burst is always contiguous here and
-		 * @count bounds how far the aggr handler may walk. */
-		if (msgbuf->aggr_enab &&
-		    ((struct msgbuf_common_hdr *)msg)->msgtype ==
-		    MSGBUF_TYPE_RX_CMPLT_AGGR)
-			consumed = brcmf_msgbuf_process_rx_complete_aggr(msgbuf,
-					msg, count, item_len);
-		else if (msgbuf->aggr_enab &&
-			 ((struct msgbuf_common_hdr *)msg)->msgtype ==
-			 MSGBUF_TYPE_TX_STATUS_AGGR)
-			consumed = brcmf_msgbuf_process_txstatus_aggr(msgbuf,
-					msg, count, item_len);
-		else
-			brcmf_msgbuf_process_msgtype(msgbuf, msg);
-
-		buf += (size_t)consumed * item_len;
-		processed += consumed;
-		count -= consumed;
-		if (processed >= BRCMF_MSGBUF_UPDATE_RX_PTR_THRS) {
+		brcmf_msgbuf_process_msgtype(msgbuf,
+					     buf + msgbuf->rx_dataoffset);
+		buf += brcmf_commonring_len_item(commonring);
+		processed++;
+		if (processed == BRCMF_MSGBUF_UPDATE_RX_PTR_THRS) {
 			brcmf_commonring_read_complete(commonring, processed);
 			processed = 0;
 		}
+		count--;
 	}
 	if (processed)
 		brcmf_commonring_read_complete(commonring, processed);
@@ -1917,6 +1519,15 @@ int brcmf_proto_msgbuf_rx_trigger(struct device *dev)
 				BRCMF_MSGBUF_TRICKLE_TXWORKER_THRS)))
 			brcmf_msgbuf_schedule_txdata(msgbuf, flowid, true);
 	}
+
+	/* Top up the rx buffer ring unconditionally. Reposting is otherwise only
+	 * driven off rx completions; under a high-rate burst the firmware can
+	 * drain the rxpost ring faster than the on-completion repost refills it,
+	 * and once it is empty the firmware has nothing to DMA rx into -> it stops
+	 * posting completions -> the repost never runs again -> rx deadlocks.
+	 * Refilling on every trigger (irq or the poll fallback below) breaks that.
+	 */
+	brcmf_msgbuf_rxbuf_data_fill(msgbuf);
 
 	return 0;
 }
@@ -2151,38 +1762,28 @@ int brcmf_proto_msgbuf_attach(struct brcmf_pub *drvr)
 
 	msgbuf->rx_dataoffset = if_msgbuf->rx_dataoffset;
 	msgbuf->max_rxbufpost = if_msgbuf->max_rxbufpost;
-	msgbuf->aggr_enab = if_msgbuf->aggr_enab;
-	if (msgbuf->aggr_enab)
-		bphy_err(drvr,
-			 "DBG aggr: enabled (txcpl_max=%u rxcpl_max=%u) -- aggregated D2H completions active\n",
-			 if_msgbuf->aggr_txcpl_max, if_msgbuf->aggr_rxcpl_max);
 
 	msgbuf->max_ioctlrespbuf = BRCMF_MSGBUF_MAX_IOCTLRESPBUF_POST;
 	msgbuf->max_eventbuf = BRCMF_MSGBUF_MAX_EVENTBUF_POST;
 
-	/* rx-data buffers get their own packet-id pool, separate from the
-	 * control (event + ioctl-response) pool. The firmware audits the two
-	 * against different maps -- rx-data against an 8192-id map, control
-	 * against a 1024-id map -- so a large rx-data fill can no longer starve
-	 * the control posts (which it did when both shared the NR_RX_PKTIDS
-	 * pool, forcing rx-data down to half the pool and starving the dongle's
-	 * rx, draining its lbuf pool until A-MPDU TX trapped in txq_hw_fill).
-	 * Size the rx-data pool to what the firmware advertises in
-	 * max_rxbufpost, bounded by its audit-map limit (id 0 stays reserved).
-	 */
-	if (msgbuf->max_rxbufpost > BRCMF_MSGBUF_MAX_RXBUFPOST)
-		msgbuf->max_rxbufpost = BRCMF_MSGBUF_MAX_RXBUFPOST;
-	/* Sweep override: force the posted-RX-buffer ceiling from a module param
-	 * to test whether under/over-posting changes the dongle's pool floor
-	 * (the amsdu txq_hw_fill trap). 0 = use the value computed above. */
-	if (brcmf_msgbuf_rxbufpost_max > 0 &&
-	    msgbuf->max_rxbufpost > brcmf_msgbuf_rxbufpost_max)
-		msgbuf->max_rxbufpost = brcmf_msgbuf_rxbufpost_max;
+	/* rx-data buffers use their own packet-id pool (below), audited by the
+	 * firmware against an 8192-id map; control (event + ioctl-response) uses
+	 * the separate rx_pktids pool audited against a 1024-id map. Bound the
+	 * rx-data fill to its map so a large advertised max_rxbufpost never hands
+	 * the dongle an id outside it. */
+	if (msgbuf->max_rxbufpost > BRCMF_RXDATA_PKTID_MAP_MAX - 1)
+		msgbuf->max_rxbufpost = BRCMF_RXDATA_PKTID_MAP_MAX - 1;
 
-	bphy_err(drvr, "DBG rxpool: advertised max_rxbufpost=%u -> using %u; RXPOST_ring=%d pktid_map=%d thresh=%d\n",
-		 if_msgbuf->max_rxbufpost, msgbuf->max_rxbufpost,
-		 BRCMF_H2D_MSGRING_RXPOST_SUBMIT_MAX_ITEM,
-		 BRCMF_RXDATA_PKTID_MAP_MAX, BRCMF_MSGBUF_RXBUFPOST_THRESHOLD);
+	/* Headroom: a consumed rx buffer still holds its pktid until the host
+	 * drains its rx-completion (get_pktid frees it in process_rx_complete),
+	 * yet the on-completion repost allocates a fresh pktid for the refill
+	 * BEFORE that free runs. So concurrent pktid usage under a sustained rx
+	 * burst is max_rxbufpost + the in-flight-completion depth, not just
+	 * max_rxbufpost. Sizing the pool to max_rxbufpost+1 (zero headroom) then
+	 * fails every refill at the ceiling -> a quarter-second storm of
+	 * "No PKTID available !!" and stalled reposts. Size the pool to the full
+	 * firmware-audited 8192-id map so BCM4390's ~6783 posted buffers leave
+	 * ~1408 ids of headroom for the completion pipeline. */
 
 	msgbuf->tx_pktids = brcmf_msgbuf_init_pktids(NR_TX_PKTIDS,
 						     DMA_TO_DEVICE);
@@ -2192,16 +1793,6 @@ int brcmf_proto_msgbuf_attach(struct brcmf_pub *drvr)
 						     DMA_FROM_DEVICE);
 	if (!msgbuf->rx_pktids)
 		goto fail;
-	/* Size the rx-data packet-id pool to the firmware's full audit map, not
-	 * to max_rxbufpost+1. The BCM4390 firmware asks the host to keep 6783 rx
-	 * buffers posted; sizing the pool to exactly that leaves zero free ids, so
-	 * whenever a refill races the completion that frees an id, the allocator
-	 * hits "No PKTID available", drops the post, and the firmware runs short of
-	 * rx buffers -- it then holds its shared lbuf pool, starving it until a
-	 * concurrent A-MPDU trips the txq_hw_fill pool-guard assert. Posting is
-	 * capped at max_rxbufpost, so a full 8192-id pool always keeps >1000 ids
-	 * free and the exhaustion can never happen. Id 0 stays reserved.
-	 */
 	msgbuf->rxdata_pktids = brcmf_msgbuf_init_pktids(BRCMF_RXDATA_PKTID_MAP_MAX,
 							 DMA_FROM_DEVICE);
 	if (!msgbuf->rxdata_pktids)
@@ -2212,10 +1803,6 @@ int brcmf_proto_msgbuf_attach(struct brcmf_pub *drvr)
 	if (!msgbuf->flow)
 		goto fail;
 
-	/* Start the RX skb reserve + its refill thread before the first fill so
-	 * the pool can back up RX reposting under memory pressure. Not fatal if
-	 * it fails to start -- the inline atomic alloc path still works. */
-	brcmf_msgbuf_rxpool_init(msgbuf);
 
 	brcmf_dbg(MSGBUF, "Feeding buffers, rx data %d, rx event %d, rx ioctl resp %d\n",
 		  msgbuf->max_rxbufpost, msgbuf->max_eventbuf,
@@ -2265,7 +1852,6 @@ void brcmf_proto_msgbuf_detach(struct brcmf_pub *drvr)
 	brcmf_dbg(TRACE, "Enter\n");
 	if (drvr->proto->pd) {
 		msgbuf = (struct brcmf_msgbuf *)drvr->proto->pd;
-		brcmf_msgbuf_rxpool_deinit(msgbuf);
 		cancel_work_sync(&msgbuf->flowring_work);
 		while (!list_empty(&msgbuf->work_queue)) {
 			work = list_first_entry(&msgbuf->work_queue,
