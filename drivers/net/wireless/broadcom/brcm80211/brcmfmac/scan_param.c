@@ -5,11 +5,27 @@
 #include <linux/gcd.h>
 #include <net/cfg80211.h>
 
+#include <linux/moduleparam.h>
 #include "core.h"
 #include "debug.h"
 #include "fwil_types.h"
 #include "cfg80211.h"
 #include "scan_param.h"
+
+/* Home-channel dwell (ms) the firmware returns to between scanned channels.
+ * The firmware default (-1) does NOT interleave the home channel on the BCM4390
+ * during a connected-STA escan, so an iwd periodic background scan takes the
+ * radio fully off-channel across all of 2.4/5/6GHz (passive/DFS dwell) and the
+ * datapath freezes for the whole scan -- observed as a multi-second stall every
+ * ~iwd-scan-interval under sustained traffic, sometimes cascading into a link
+ * drop + rescan. A positive home_time makes the firmware service the home
+ * channel between channels so the association and the datapath stay alive
+ * during the scan (roaming still works). Ignored by the firmware when not
+ * associated (no home channel), so it is safe for the initial connect scan.
+ * 0 or -1 restores the firmware default. */
+static int brcmf_scan_home_time = 45;
+module_param_named(scan_home_time, brcmf_scan_home_time, int, 0644);
+MODULE_PARM_DESC(scan_home_time, "Home-channel dwell (ms) between scanned channels so a background scan does not freeze the datapath (default 45; 0/-1 = firmware default)");
 
 static void brcmf_scan_param_set_defaults(u8 (*bssid)[ETH_ALEN], s8 *bss_type, __le32 *channel_num,
 					  __le32 *nprobes, __le32 *active_time,
@@ -22,7 +38,8 @@ static void brcmf_scan_param_set_defaults(u8 (*bssid)[ETH_ALEN], s8 *bss_type, _
 	*nprobes = cpu_to_le32(-1);
 	*active_time = cpu_to_le32(-1);
 	*passive_time = cpu_to_le32(-1);
-	*home_time = cpu_to_le32(-1);
+	*home_time = cpu_to_le32(brcmf_scan_home_time > 0 ?
+				 brcmf_scan_home_time : -1);
 }
 
 static void brcmf_scan_param_copy_chanspecs(
