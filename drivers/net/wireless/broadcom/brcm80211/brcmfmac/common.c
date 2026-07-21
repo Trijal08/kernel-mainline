@@ -63,18 +63,84 @@ static int brcmf_fcmode;
 module_param_named(fcmode, brcmf_fcmode, int, 0);
 MODULE_PARM_DESC(fcmode, "Mode of firmware signalled flow control");
 
-/* TX A-MSDU. Default ON -- made safe by RX GRO (gro=1, the default). Without
- * GRO the BCM4390 firmware trapped in txq_hw_fill under sustained RX: mainline
- * handed every RX MSDU straight to netif_rx(), so the TCP stack emitted an ACK
- * per couple of packets, and with A-MSDU on the firmware aggregated that ACK
- * storm into oversized TX descriptor sets that overran its alfrag-chunk budget
- * once the shared pool ran low. GRO (gro_cells, see brcmf_netif_rx) coalesces
- * the RX stream so far fewer ACKs are sent, the TX aggregates stay small, and
- * the trap cannot fire -- exactly how the vendor (NAPI+GRO) runs A-MSDU. Turn
- * amsdu off only for debugging or if gro is disabled. */
-static int brcmf_amsdu = 1;
+/* Minimize-Power-Consumption at preinit. CRITICAL: the BCM4390 firmware
+ * self-preinits (it exposes the preinit_status iovar), configuring the PHY,
+ * band, aggregation and per-slice radio POWER STATE during its own boot -- the
+ * vendor DHD detects this and deliberately leaves the radio/power alone,
+ * NEVER setting mpc at bring-up (it touches mpc only in the deep-sleep path).
+ * Mainline historically force-set mpc from the host, which overrides the
+ * firmware's own idle-slice power model: whether forced 1 (power-gate) or 0
+ * (hold powered), the state no longer matches what the firmware's cal routine
+ * expects, so the temperature-triggered VCO recal of the idle 5GHz slice (wl2)
+ * fails to relock -- BCME_VCOCAL_FAIL, phy_ac_radio_vcocal_isdone -> _hnd_die,
+ * "PHY FATAL Reason Code 3", THREADX trap pc 2b4f58 (fires while associated on
+ * 2.4GHz with the 5GHz slice idle). True vendor parity is to NOT touch mpc:
+ * default -1 leaves the firmware self-preinit value untouched. 0/1 force it
+ * (legacy behaviour, kept only for A/B bisecting the trap). */
+static int brcmf_mpc = -1;
+module_param_named(mpc, brcmf_mpc, int, 0644);
+MODULE_PARM_DESC(mpc, "Minimize Power Consumption at preinit: -1=leave firmware self-preinit default (default, true vendor parity, avoids the BCM4390 idle-5GHz VCO-cal trap), 0=force off, 1=force on");
+
+/* Power-save (WLC_SET_PM) at config-dongle. The vendor DHD's optimised (fw
+ * self-preinit) path does NOT set PM -- it leaves the firmware default -- while
+ * mainline forces PM_FAST in brcmf_config_dongle(). PM drives the chip's doze
+ * transitions (clock/PLL gating on both slices), a second candidate for
+ * perturbing the idle 5GHz slice's VCO recal. -1 = leave the firmware default
+ * (vendor parity); 0 = force PM_OFF; 1 = force PM_FAST. Read from cfg80211.c. */
+int brcmf_pm = -1;
+module_param_named(pm, brcmf_pm, int, 0644);
+MODULE_PARM_DESC(pm, "802.11 power-save at bring-up: -1=leave firmware default (default, vendor parity), 0=force PM_OFF, 1=force PM_FAST");
+
+/* Force the STA to a single band. The BCM4390 5GHz slice (wl2) periodically
+ * FATAL-traps on mainline: its radio VCO recalibration fails to lock
+ * (BCME_VCOCAL_FAIL) -> phy_ac_radio_vcocal_isdone -> _hnd_die, "PHY FATAL
+ * Reason Code 3", THREADX trap pc 2b4f58. The cal runs whenever the idle 5GHz
+ * slice is tuned -- either by a host scan (~55s cadence, iwd background scan)
+ * or by the firmware's own periodic cal (~148s residual with scans off). The
+ * identical vendor firmware/NVRAM cals fine on stock, so this is a mainline
+ * platform gap (still root-causing the VCO reference). band2g=1 forces
+ * WLC_SET_BAND=2G so the firmware never tunes a 5GHz channel and the slice
+ * that dies is never activated -- guaranteed-stable at a 2.4GHz-only cost.
+ * Default 0 (both bands, i.e. current behaviour) until the 5GHz cal is fixed. */
+static int brcmf_band2g;
+module_param_named(band2g, brcmf_band2g, int, 0644);
+MODULE_PARM_DESC(band2g, "Force 2.4GHz-only (WLC_SET_BAND=2G) to dodge the BCM4390 idle-5GHz VCO-cal trap: 0=both bands (default), 1=2.4GHz only");
+
+/* Firmware periodic-calibration control (phy_percal iovar). The idle-5GHz VCO
+ * cal that traps also runs on the firmware's internal periodic-cal timer, which
+ * a host scan disable cannot stop (the ~148s residual). percal=0 disables it.
+ * -1 = leave the firmware default (the vendor value). Belt-and-suspenders for
+ * band2g, and lets us A/B whether killing periodic cal alone keeps 5GHz alive. */
+static int brcmf_percal = -1;
+module_param_named(percal, brcmf_percal, int, 0644);
+MODULE_PARM_DESC(percal, "Firmware periodic PHY cal (phy_percal): -1=fw default (default), 0=disable (stops the ~148s idle-5GHz recal trap)");
+
+/* TX A-MSDU. The BCM4390 firmware self-preinits the TX-aggregation config
+ * (A-MSDU, ampdu_mpdu depth, ampdu_ba_wsize) as one set sized to its SAQM
+ * descriptor budget, and the vendor DHD leaves it intact at bring-up. But the
+ * firmware default has A-MSDU ON, and at full throughput (once the rx pktid
+ * pool no longer throttles RX -- see BRCMF_RXDATA_PKTID_MAP_MAX in msgbuf.c)
+ * the multi-segment A-MSDU aggregates overflow that budget -> deterministic
+ * txq_hw_fill assert, THREADX trap pc 3e598a (reproduced under 12 parallel
+ * download streams). A-MSDU OFF keeps TX segments == MPDUs so the aggregate
+ * always fits: verified stable at full throughput under the same load.
+ *
+ * Default 0 (A-MSDU off) ships the stable config. The real vendor-parity fix
+ * for keeping A-MSDU ON is to apply the vendor's ampdu_mpdu=16 cap at
+ * association time (not at preinit, where forcing it broke EHT PPDU landing
+ * -> PHYTX errors) -- TODO. -1 leaves the firmware default (A-MSDU on, traps
+ * under heavy load); 1 forces on. gro=1 (host RX coalescing) is orthogonal. */
+static int brcmf_amsdu;
 module_param_named(amsdu, brcmf_amsdu, int, 0644);
-MODULE_PARM_DESC(amsdu, "Enable TX A-MSDU aggregation (default on; needs gro=1)");
+MODULE_PARM_DESC(amsdu, "TX A-MSDU: 0=off (default, stable at full throughput, avoids the txq_hw_fill trap), 1=force on (max LAN throughput but trips 3e598a under heavy load until the association-time ampdu cap lands), -1=leave firmware default");
+
+/* TX A-MPDU BA window. Part of the same firmware self-preinit aggregation set as
+ * amsdu (above). The vendor never forces it; mainline forcing 64 while leaving
+ * ampdu_mpdu at fw default is exactly the incoherent override that overflowed the
+ * SAQM descriptor budget. -1 = leave the firmware default (vendor parity). */
+static int brcmf_ampdu_ba_wsize = -1;
+module_param_named(ampdu_ba_wsize, brcmf_ampdu_ba_wsize, int, 0644);
+MODULE_PARM_DESC(ampdu_ba_wsize, "TX A-MPDU BA window: -1=leave firmware default (default, vendor parity), >0=force");
 
 /* RX GRO coalescing via gro_cells (see brcmf_netif_rx). On by default; a param
  * so it can be A/B'd against the txq_hw_fill trap and any PHY-side fallout. */
@@ -92,9 +158,13 @@ static int brcmf_ampdu_rx_factor = -1;
 module_param_named(ampdu_rx_factor, brcmf_ampdu_rx_factor, int, 0644);
 MODULE_PARM_DESC(ampdu_rx_factor, "RX A-MPDU density exponent (-1=fw default)");
 
-static int brcmf_ampdu_mpdu = 16;
+/* Default -1: do NOT force TX A-MPDU depth. The vendor DHD leaves ampdu_mpdu at
+ * the firmware default (adaptive) on the PCIe build; mainline forcing 16 built
+ * oversized EHT PPDUs that the PHY could not land at real-world signal ->
+ * "wl0 PHYTX error" / txe_status 0465 TX-engine stall under sustained TX. */
+static int brcmf_ampdu_mpdu = -1;
 module_param_named(ampdu_mpdu, brcmf_ampdu_mpdu, int, 0644);
-MODULE_PARM_DESC(ampdu_mpdu, "TX A-MPDU max MPDUs (-1=fw default)");
+MODULE_PARM_DESC(ampdu_mpdu, "TX A-MPDU max MPDUs (-1=fw default, the vendor default)");
 
 static int brcmf_roamoff;
 module_param_named(roamoff, brcmf_roamoff, int, 0400);
@@ -438,12 +508,27 @@ int brcmf_c_preinit_dcmds(struct brcmf_if *ifp)
 		brcmf_dbg(INFO, "CLM version = %s\n", clmver);
 	}
 
-	/* set mpc */
-	err = brcmf_fil_iovar_int_set(ifp, "mpc", 1);
-	if (err) {
-		bphy_err(drvr, "failed setting mpc\n");
-		goto done;
+	/* mpc: default -1 leaves the firmware self-preinit value untouched (vendor
+	 * parity, avoids the idle-5GHz VCO-cal trap); only force it if asked. */
+	if (brcmf_mpc >= 0) {
+		err = brcmf_fil_iovar_int_set(ifp, "mpc", brcmf_mpc);
+		if (err) {
+			bphy_err(drvr, "failed setting mpc\n");
+			goto done;
+		}
 	}
+
+	/* Optionally force 2.4GHz-only to dodge the idle-5GHz VCO-cal trap, and/or
+	 * disable the firmware periodic cal that drives its ~148s residual. Both are
+	 * best-effort: errors are logged but not fatal (the firmware may reject an
+	 * unknown iovar name), see the brcmf_band2g / brcmf_percal param comments. */
+	if (brcmf_band2g)
+		bphy_err(drvr, "DBG band2g=1: WLC_SET_BAND 2G returned %d\n",
+			 brcmf_fil_cmd_int_set(ifp, BRCMF_C_SET_BAND, WLC_BAND_2G));
+	if (brcmf_percal >= 0)
+		bphy_err(drvr, "DBG percal=%d: phy_percal iovar returned %d\n",
+			 brcmf_percal,
+			 brcmf_fil_iovar_int_set(ifp, "phy_percal", brcmf_percal));
 
 	brcmf_c_set_joinpref_default(ifp);
 
@@ -465,30 +550,26 @@ int brcmf_c_preinit_dcmds(struct brcmf_if *ifp)
 		goto done;
 	}
 
-	/* Enable tx beamforming, errors can be ignored (not supported) */
-	(void)brcmf_fil_iovar_int_set(ifp, "txbf", 1);
+	/* Frame bursting: the vendor DHD only writes frameburst if the firmware
+	 * self-preinit value is not already 1 (it is), so this is a no-op match to
+	 * vendor -- harmless to leave. txbf is left to the firmware self-preinit
+	 * (the vendor never forces it either). */
+	(void)brcmf_fil_iovar_int_set(ifp, "frameburst", 1);
 
-	/* Cap TX A-MPDU aggregation to the vendor's values (CUSTOM_AMPDU_MPDU=16,
-	 * CUSTOM_AMPDU_BA_WSIZE=64 in the BCM4390 DHD build). The dongle's SAQM
-	 * builds each A-MPDU's descriptor set from a fixed 6-chunk (2112-byte)
-	 * budget sized for <=16 MPDUs; without these caps the firmware aggregates
-	 * larger PPDUs (observed 34 MPDUs) and overflows that budget, hitting the
-	 * deterministic txq_hw_fill assert (pc 3e598a) under sustained throughput.
-	 * Set ba_wsize first: the firmware requires ampdu_mpdu <= ampdu_ba_wsize.
-	 */
-	/* Cap TX A-MPDU to the vendor values and (by default) disable A-MSDU. The
-	 * SAQM sizes each A-MPDU's descriptor set by MSDU-segment count and asserts
-	 * (txq_hw_fill, pc 3e598a) when it overflows a fixed alfrag-chunk budget
-	 * while the firmware packet pool is starved under sustained RX. amsdu=0
-	 * keeps TX segments == MPDUs so the aggregate always fits the budget even
-	 * when the pool is dry; see the brcmf_amsdu param comment for the full
-	 * (exhausted) investigation into keeping A-MSDU on.
-	 * ba_wsize first: the firmware requires ampdu_mpdu <= ampdu_ba_wsize. */
-	(void)brcmf_fil_iovar_int_set(ifp, "ampdu_ba_wsize", 64);
+	/* TX A-MPDU/A-MSDU aggregation: the firmware self-preinits amsdu,
+	 * ampdu_ba_wsize and ampdu_mpdu as ONE coherent set matched to its SAQM
+	 * descriptor budget. Vendor parity = touch NONE of them (see brcmf_amsdu).
+	 * Forcing only part of the set is what overflowed the budget -> txq_hw_fill
+	 * trap 3e598a. Each below is off (-1) by default; only set if forced for A/B.
+	 * When forced, set ba_wsize first: the fw requires ampdu_mpdu <= ampdu_ba_wsize. */
+	if (brcmf_ampdu_ba_wsize >= 0)
+		(void)brcmf_fil_iovar_int_set(ifp, "ampdu_ba_wsize",
+					      brcmf_ampdu_ba_wsize);
 	if (brcmf_ampdu_mpdu >= 0)
 		(void)brcmf_fil_iovar_int_set(ifp, "ampdu_mpdu",
 					      brcmf_ampdu_mpdu);
-	(void)brcmf_fil_iovar_int_set(ifp, "amsdu", brcmf_amsdu ? 1 : 0);
+	if (brcmf_amsdu >= 0)
+		(void)brcmf_fil_iovar_int_set(ifp, "amsdu", brcmf_amsdu);
 	if (brcmf_amsdu_aggsf >= 0)
 		bphy_err(drvr, "DBG set amsdu_aggsf=%d -> %d\n", brcmf_amsdu_aggsf,
 			 brcmf_fil_iovar_int_set(ifp, "amsdu_aggsf",
@@ -521,8 +602,7 @@ int brcmf_c_preinit_dcmds(struct brcmf_if *ifp)
 	 * txq_hw_fill (NULL deref) under sustained TX. With no BT to coexist
 	 * with, turn coex off so it stops touching the TX path.
 	 */
-	bphy_err(drvr, "DBG btc_mode=0: iovar returned %d\n",
-		 brcmf_fil_iovar_int_set(ifp, "btc_mode", 0));
+	(void)brcmf_fil_iovar_int_set(ifp, "btc_mode", 0);
 
 done:
 	return err;
