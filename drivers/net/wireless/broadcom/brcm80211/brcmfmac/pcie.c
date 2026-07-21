@@ -496,6 +496,10 @@ struct brcmf_pciedev_info {
 	bool fwseed;
 	struct delayed_work poll_work;
 	bool poll_active;
+	/* Serializes brcmf_proto_msgbuf_rx_trigger between the MSI isr thread and
+	 * the poll worker, which runs alongside MSI as a missed-doorbell safety
+	 * net; without it the two contexts race on the D2H ring read pointers. */
+	struct mutex rx_lock;
 	int oob_irq;
 	struct gpio_desc *dev_wake_gpio;
 #ifdef DEBUG
@@ -1196,8 +1200,13 @@ static irqreturn_t brcmf_pcie_isr_thread(int irq, void *arg)
 			brcmf_pcie_poll_mb_data(devinfo);
 	}
 	if (devinfo->have_msi || status & devinfo->reginfo->int_d2h_db) {
-		if (devinfo->state == BRCMFMAC_PCIE_STATE_UP && devinfo->irq_ready)
+		if (devinfo->state == BRCMFMAC_PCIE_STATE_UP && devinfo->irq_ready) {
+			/* rx_lock serializes against the poll-worker safety net so
+			 * the two never advance the same D2H ring read pointer. */
+			mutex_lock(&devinfo->rx_lock);
 			brcmf_proto_msgbuf_rx_trigger(&devinfo->pdev->dev);
+			mutex_unlock(&devinfo->rx_lock);
+		}
 	}
 
 	brcmf_pcie_bus_console_read(devinfo, false);
@@ -1725,7 +1734,10 @@ static void brcmf_pcie_poll_worker(struct work_struct *work)
 	if (!devinfo->poll_active || devinfo->state != BRCMFMAC_PCIE_STATE_UP)
 		return;
 
+	/* Serialize against the MSI isr thread (see rx_lock). */
+	mutex_lock(&devinfo->rx_lock);
 	brcmf_proto_msgbuf_rx_trigger(&devinfo->pdev->dev);
+	mutex_unlock(&devinfo->rx_lock);
 
 	schedule_delayed_work(&devinfo->poll_work, msecs_to_jiffies(2));
 }
@@ -1759,12 +1771,18 @@ static int brcmf_pcie_preinit(struct device *dev)
 	brcmf_pcie_intr_enable(devinfo);
 	brcmf_pcie_hostready(devinfo);
 
-	/* Only fall back to polling the completion rings when no MSI is in
-	 * use.  With MSI the interrupt thread already drains the D2H rings on
-	 * every doorbell; running the poll worker in parallel would let two
-	 * contexts advance the same ring read pointer and corrupt it.
+	/* Run the completion-ring poll worker as a safety net alongside MSI.
+	 * MSI is edge-triggered: under sustained high-throughput RX the BCM4390
+	 * firmware can enqueue a D2H completion while the isr thread is mid-drain
+	 * (or a doorbell lands in the brief intr-disabled window) without
+	 * re-signaling, so that completion is never serviced and RX silently
+	 * stalls -- 0 Mbps with no trap -- until the watchdog reset, which does
+	 * not recover the datapath. Reproduced at ~480-595 Mbps within ~10-20s.
+	 * A 2ms poll of the D2H rings catches any missed doorbell; rx_lock
+	 * serializes it against the isr thread so the two never advance the same
+	 * ring read pointer (the reason this used to be gated on !have_msi).
 	 */
-	if (!devinfo->have_msi && !devinfo->poll_active) {
+	if (!devinfo->poll_active) {
 		devinfo->poll_active = true;
 		INIT_DELAYED_WORK(&devinfo->poll_work, brcmf_pcie_poll_worker);
 		schedule_delayed_work(&devinfo->poll_work, 0);
@@ -2167,27 +2185,6 @@ brcmf_pcie_init_share_ram_info(struct brcmf_pciedev_info *devinfo,
 		u8 fw_flags = aggr0 & 0xff;
 		u8 txcpl_max = aggr1 & 0xff;
 		u8 rxcpl_max = (aggr1 >> 8) & 0xff;
-
-		dev_info(&devinfo->pdev->dev,
-			 "DBG aggr: mode=%d raw0=0x%08x raw1=0x%08x fw_flags=0x%02x txcpl_max=%u rxcpl_max=%u\n",
-			 brcmf_pcie_aggr_mode, aggr0, aggr1, fw_flags,
-			 txcpl_max, rxcpl_max);
-
-		/* DBG: empirically locate aggr_sh_info by dumping the shared
-		 * struct tail. Look for a byte that is a nonzero subset of the
-		 * four AGGR bits followed by sane per-item maxima. */
-		{
-			u32 off;
-
-			for (off = 96; off <= 160; off += 16)
-				dev_info(&devinfo->pdev->dev,
-					 "DBG aggr dump +%3u: %08x %08x %08x %08x\n",
-					 off,
-					 brcmf_pcie_read_tcm32(devinfo, sharedram_addr + off),
-					 brcmf_pcie_read_tcm32(devinfo, sharedram_addr + off + 4),
-					 brcmf_pcie_read_tcm32(devinfo, sharedram_addr + off + 8),
-					 brcmf_pcie_read_tcm32(devinfo, sharedram_addr + off + 12));
-		}
 
 		/* Gate on a sane offset: the dongle's advertised flags must be a
 		 * nonzero subset of the four AGGR bits, and the reported per-item
@@ -3584,6 +3581,7 @@ brcmf_pcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 		return ret;
 
 	devinfo->pdev = pdev;
+	mutex_init(&devinfo->rx_lock);
 	pcie_bus_dev = NULL;
 	devinfo->ci = brcmf_chip_attach(devinfo, pdev->device,
 					&brcmf_pcie_buscore_ops);
