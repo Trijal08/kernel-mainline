@@ -481,6 +481,7 @@ static int exynos_zuma_pcie_start_link(struct dw_pcie *pci)
 	void __iomem *elbi = pci->elbi_base;
 	u8 exp_cap;
 	u32 val;
+	u16 sta;
 	int i;
 
 	/* deassert PERST to the endpoint and let it come up */
@@ -525,22 +526,47 @@ static int exynos_zuma_pcie_start_link(struct dw_pcie *pci)
 	exp_cap = dw_pcie_find_capability(pci, PCI_CAP_ID_EXP);
 	val = dw_pcie_readl_dbi(pci, exp_cap + PCI_EXP_LNKCAP);
 	val &= ~PCI_EXP_LNKCAP_ASPM_L1;
+	if (!ep->cp_power)
+		/* Wi-Fi: advertise Gen3 in LNKCAP so the link may upshift */
+		val = (val & ~PCI_EXP_LNKCAP_SLS) | PCI_EXP_LNKCAP_SLS_8_0GB;
 	dw_pcie_writel_dbi(pci, exp_cap + PCI_EXP_LNKCAP, val);
+	if (!ep->cp_power)
+		/* this PHY trains Gen3 without EQ phases 2/3 */
+		dw_pcie_writel_dbi(pci, PCIE_GEN3_RELATED, GEN3_EQ_OFF);
 	dw_pcie_dbi_ro_wr_dis(pci);
+
+	if (!ep->cp_power) {
+		/*
+		 * Wi-Fi: target Gen3 and arm the directed speed change *before*
+		 * LTSSM enable, so the link upshifts to Gen3 during initial
+		 * training on a freshly-calibrated PHY (the vendor's
+		 * converge-at-target scheme, which stock uses). The previous
+		 * code let the link settle at Gen1 L0 and then live-retrained to
+		 * Gen3; converging at the target during initial training is the
+		 * cleaner match to the vendor bring-up. (Note: the BCM4390 5GHz
+		 * PHY FATAL, THREADX trap pc 2b4f58, was once suspected to be
+		 * Gen3 marginality but was later root-caused to the idle-5GHz
+		 * VCO recal and fixed in brcmfmac by leaving mpc/PM at the
+		 * firmware self-preinit default -- it is not a link-speed issue.)
+		 */
+		u16 tls = dw_pcie_readw_dbi(pci, exp_cap + PCI_EXP_LNKCTL2);
+
+		tls = (tls & ~PCI_EXP_LNKCTL2_TLS) | PCI_EXP_LNKCTL2_TLS_8_0GT;
+		dw_pcie_writew_dbi(pci, exp_cap + PCI_EXP_LNKCTL2, tls);
+
+		val = dw_pcie_readl_dbi(pci, PCIE_LINK_WIDTH_SPEED_CONTROL);
+		val |= PORT_LOGIC_SPEED_CHANGE;
+		dw_pcie_writel_dbi(pci, PCIE_LINK_WIDTH_SPEED_CONTROL, val);
+	}
 
 	/* assert LTSSM enable */
 	exynos_pcie_writel(elbi, LTSSM_ENABLE, PCIE_ZUMA_APP_LTSSM_ENABLE);
 
 	/*
-	 * The link trains at Gen1 (2.5 GT/s) but this SoC/PHY is Gen3-capable.
-	 * The modem channel is deferred to zumapro_pcie_modem_gen3() (gated on
-	 * the CP bootloader), but a non-modem RC -- the BCM4390 Wi-Fi channel,
-	 * identified by having no CP power sequencer -- has a plain PCIe endpoint
-	 * with no bootloader gating, so upshift it to Gen3 here once the link
-	 * reaches L0. Without this the Wi-Fi D2H DMA is capped at Gen1 bandwidth,
-	 * which throttles throughput and lets the completion rings back up under
-	 * sustained load until the dongle's TX path stalls. The vendor retrains
-	 * this link to full speed too. Non-fatal: stays at Gen1 if it cannot.
+	 * Wi-Fi armed a directed speed change to Gen3 above, so the link
+	 * upshifts during initial training. Wait for L0, let the speed change
+	 * settle, and report where it landed. (The modem channel defers its
+	 * upshift to zumapro_pcie_modem_gen3(), gated on the CP bootloader.)
 	 */
 	if (!ep->cp_power) {
 		for (i = 0; i < 100; i++) {
@@ -548,8 +574,14 @@ static int exynos_zuma_pcie_start_link(struct dw_pcie *pci)
 				break;
 			usleep_range(1000, 2000);
 		}
-		if (exynos_zuma_pcie_link_up(pci))
-			exynos_zuma_pcie_gen3(pci);
+		if (exynos_zuma_pcie_link_up(pci)) {
+			usleep_range(3000, 3500);
+			sta = dw_pcie_readw_dbi(pci, exp_cap + PCI_EXP_LNKSTA);
+			dev_info(pci->dev, "Wi-Fi link trained: %s (LNKSTA %#x)\n",
+				 (sta & PCI_EXP_LNKSTA_CLS) ==
+					 PCI_EXP_LNKSTA_CLS_8_0GB ?
+					 "Gen3" : "sub-Gen3", sta);
+		}
 	}
 
 	return 0;
