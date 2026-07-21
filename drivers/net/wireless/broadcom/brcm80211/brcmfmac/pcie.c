@@ -1010,7 +1010,6 @@ brcmf_pcie_send_mb_data(struct brcmf_pciedev_info *devinfo, u32 htod_mb_data)
 static void brcmf_pcie_handle_mb_data(struct brcmf_pciedev_info *devinfo, u32 data)
 {
 	brcmf_dbg(PCIE, "D2H_MB_DATA: 0x%04x\n", data);
-	dev_info(&devinfo->pdev->dev, "DBG D2H_MB_DATA: 0x%08x\n", data);
 	if (data & BRCMF_D2H_DEV_DS_ENTER_REQ)  {
 		/* Refuse deep sleep. brcmfmac does not implement the vendor
 		 * driver's inband deep-sleep worker (which refcounts host
@@ -1023,7 +1022,6 @@ static void brcmf_pcie_handle_mb_data(struct brcmf_pciedev_info *devinfo, u32 da
 		 */
 		brcmf_dbg(PCIE, "D2H_MB_DATA: DEEP SLEEP REQ\n");
 		brcmf_pcie_send_mb_data(devinfo, BRCMF_H2D_HOST_DS_NAK);
-		dev_info(&devinfo->pdev->dev, "DBG D2H_MB_DATA: sent DEEP SLEEP NAK\n");
 	}
 	if (data & BRCMF_D2H_DEV_DS_EXIT_NOTE)
 		brcmf_dbg(PCIE, "D2H_MB_DATA: DEEP SLEEP EXIT\n");
@@ -1196,8 +1194,13 @@ static irqreturn_t brcmf_pcie_isr_thread(int irq, void *arg)
 	if (status) {
 		brcmf_pcie_write_pcie32(devinfo, devinfo->reginfo->mailboxint,
 				       status);
-		if (status & devinfo->reginfo->int_fn0)
+		if (status & devinfo->reginfo->int_fn0) {
+			/* serialize the mailbox read-modify-write against the
+			 * poll-worker safety net (see rx_lock / poll_worker) */
+			mutex_lock(&devinfo->rx_lock);
 			brcmf_pcie_poll_mb_data(devinfo);
+			mutex_unlock(&devinfo->rx_lock);
+		}
 	}
 	if (devinfo->have_msi || status & devinfo->reginfo->int_d2h_db) {
 		if (devinfo->state == BRCMFMAC_PCIE_STATE_UP && devinfo->irq_ready) {
@@ -1734,8 +1737,16 @@ static void brcmf_pcie_poll_worker(struct work_struct *work)
 	if (!devinfo->poll_active || devinfo->state != BRCMFMAC_PCIE_STATE_UP)
 		return;
 
-	/* Serialize against the MSI isr thread (see rx_lock). */
+	/* Serialize against the MSI isr thread (see rx_lock). Poll the H2D/D2H
+	 * mailbox too: the firmware's deep-sleep DS_ENTER_REQ arrives via the fn0
+	 * mailbox interrupt, which can be missed under the same edge-triggered-MSI
+	 * hole as the ring doorbell. If it is missed the host never NAKs it, the
+	 * device powers down mid-traffic, and all DMA (both D2H completion rings)
+	 * freezes until it is forced awake -- the ~16s datapath stall. Draining the
+	 * mailbox here guarantees the NAK goes out within 2ms and the device stays
+	 * awake while the host is active. */
 	mutex_lock(&devinfo->rx_lock);
+	brcmf_pcie_poll_mb_data(devinfo);
 	brcmf_proto_msgbuf_rx_trigger(&devinfo->pdev->dev);
 	mutex_unlock(&devinfo->rx_lock);
 
