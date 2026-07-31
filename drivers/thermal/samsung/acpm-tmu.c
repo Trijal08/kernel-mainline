@@ -3,6 +3,12 @@
  * Copyright 2019 Samsung Electronics Co., Ltd.
  * Copyright 2025 Google LLC.
  * Copyright 2026 Linaro Ltd.
+ *
+ * The AP maps only the TMU INTPEND registers and takes the TMU interrupt;
+ * everything else -- temperature reads, trip thresholds, interrupt enable and
+ * acknowledge -- goes to the ACPM firmware over its TMU IPC channel.  Trip
+ * crossings are therefore delivered as hardware interrupts rather than found
+ * by polling.
  */
 
 #include <linux/cleanup.h>
@@ -17,6 +23,7 @@
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
+#include <linux/property.h>
 #include <linux/regmap.h>
 #include <linux/thermal.h>
 #include <linux/units.h>
@@ -37,6 +44,34 @@
 				  EXYNOS_TMU_SENSOR(2))
 
 #define GS101_REG_INTPEND(i)		((i) * 0x50 + 0xf8)
+
+/*
+ * Probe-to-zone mapping, from downstream gs_tmu_v3.c (CONFIG_SOC_ZUMA branch,
+ * which covers zuma and zumapro).  TMU_TOP carries the three CPU clusters,
+ * TMU_SUB the four accelerator zones; the two instances have independent
+ * register blocks, so the overlapping probe numbers do not collide.
+ */
+#define ZUMAPRO_BIG_SENSOR_MASK	  (EXYNOS_TMU_SENSOR(1) |	\
+				   EXYNOS_TMU_SENSOR(2))
+#define ZUMAPRO_MID_SENSOR_MASK	  (EXYNOS_TMU_SENSOR(4) |	\
+				   EXYNOS_TMU_SENSOR(5) |	\
+				   EXYNOS_TMU_SENSOR(6) |	\
+				   EXYNOS_TMU_SENSOR(7))
+#define ZUMAPRO_LIT_SENSOR_MASK	  (EXYNOS_TMU_SENSOR(8) |	\
+				   EXYNOS_TMU_SENSOR(9))
+#define ZUMAPRO_G3D_SENSOR_MASK	  (EXYNOS_TMU_SENSOR(10) |	\
+				   EXYNOS_TMU_SENSOR(11) |	\
+				   EXYNOS_TMU_SENSOR(12))
+#define ZUMAPRO_ISP_SENSOR_MASK	  (EXYNOS_TMU_SENSOR(14))
+#define ZUMAPRO_TPU_SENSOR_MASK	  (EXYNOS_TMU_SENSOR(2) |	\
+				   EXYNOS_TMU_SENSOR(3) |	\
+				   EXYNOS_TMU_SENSOR(4))
+#define ZUMAPRO_AUR_SENSOR_MASK	  (EXYNOS_TMU_SENSOR(6) |	\
+				   EXYNOS_TMU_SENSOR(7) |	\
+				   EXYNOS_TMU_SENSOR(8))
+
+/* zumapro: P0_INTPEND at 0x0128, stride 0x40 (gs101 uses 0x00f8 / 0x50) */
+#define ZUMAPRO_REG_INTPEND(i)		((i) * 0x40 + 0x128)
 
 enum {
 	P0_INTPEND,
@@ -87,6 +122,7 @@ struct acpm_tmu_driver_data {
 	const struct acpm_tmu_sensor_group *sensor_groups;
 	unsigned int num_sensor_groups;
 	unsigned int mbox_chan_id;
+	unsigned int max_register;
 };
 
 #define ACPM_TMU_SENSOR_GROUP(_mask, _id)		\
@@ -120,19 +156,65 @@ static const struct reg_field gs101_reg_fields[REG_INTPEND_COUNT] = {
 	[P15_INTPEND] = REG_FIELD(GS101_REG_INTPEND(15), 0, 31),
 };
 
-static const struct regmap_config gs101_regmap_config = {
-	.reg_bits = 32,
-	.reg_stride = 4,
-	.val_bits = 32,
-	.use_relaxed_mmio = true,
-	.max_register = GS101_REG_INTPEND(15),
-};
-
 static const struct acpm_tmu_driver_data acpm_tmu_gs101 = {
 	.reg_fields = gs101_reg_fields,
 	.sensor_groups = gs101_sensor_groups,
 	.num_sensor_groups = ARRAY_SIZE(gs101_sensor_groups),
 	.mbox_chan_id = 9,
+	.max_register = GS101_REG_INTPEND(15),
+};
+
+/*
+ * .id is the global ACPM thermal-zone id (BIG 0, MID 1, LITTLE 2, G3D 3,
+ * ISP 4, TPU 5, AUR 6); the DT thermal-sensor cell is the index into this
+ * array, i.e. local to the TMU instance.
+ */
+static const struct acpm_tmu_sensor_group zumapro_top_sensor_groups[] = {
+	ACPM_TMU_SENSOR_GROUP(ZUMAPRO_BIG_SENSOR_MASK, 0),
+	ACPM_TMU_SENSOR_GROUP(ZUMAPRO_MID_SENSOR_MASK, 1),
+	ACPM_TMU_SENSOR_GROUP(ZUMAPRO_LIT_SENSOR_MASK, 2),
+};
+
+static const struct acpm_tmu_sensor_group zumapro_sub_sensor_groups[] = {
+	ACPM_TMU_SENSOR_GROUP(ZUMAPRO_G3D_SENSOR_MASK, 3),
+	ACPM_TMU_SENSOR_GROUP(ZUMAPRO_ISP_SENSOR_MASK, 4),
+	ACPM_TMU_SENSOR_GROUP(ZUMAPRO_TPU_SENSOR_MASK, 5),
+	ACPM_TMU_SENSOR_GROUP(ZUMAPRO_AUR_SENSOR_MASK, 6),
+};
+
+static const struct reg_field zumapro_reg_fields[REG_INTPEND_COUNT] = {
+	[P0_INTPEND] = REG_FIELD(ZUMAPRO_REG_INTPEND(0), 0, 31),
+	[P1_INTPEND] = REG_FIELD(ZUMAPRO_REG_INTPEND(1), 0, 31),
+	[P2_INTPEND] = REG_FIELD(ZUMAPRO_REG_INTPEND(2), 0, 31),
+	[P3_INTPEND] = REG_FIELD(ZUMAPRO_REG_INTPEND(3), 0, 31),
+	[P4_INTPEND] = REG_FIELD(ZUMAPRO_REG_INTPEND(4), 0, 31),
+	[P5_INTPEND] = REG_FIELD(ZUMAPRO_REG_INTPEND(5), 0, 31),
+	[P6_INTPEND] = REG_FIELD(ZUMAPRO_REG_INTPEND(6), 0, 31),
+	[P7_INTPEND] = REG_FIELD(ZUMAPRO_REG_INTPEND(7), 0, 31),
+	[P8_INTPEND] = REG_FIELD(ZUMAPRO_REG_INTPEND(8), 0, 31),
+	[P9_INTPEND] = REG_FIELD(ZUMAPRO_REG_INTPEND(9), 0, 31),
+	[P10_INTPEND] = REG_FIELD(ZUMAPRO_REG_INTPEND(10), 0, 31),
+	[P11_INTPEND] = REG_FIELD(ZUMAPRO_REG_INTPEND(11), 0, 31),
+	[P12_INTPEND] = REG_FIELD(ZUMAPRO_REG_INTPEND(12), 0, 31),
+	[P13_INTPEND] = REG_FIELD(ZUMAPRO_REG_INTPEND(13), 0, 31),
+	[P14_INTPEND] = REG_FIELD(ZUMAPRO_REG_INTPEND(14), 0, 31),
+	[P15_INTPEND] = REG_FIELD(ZUMAPRO_REG_INTPEND(15), 0, 31),
+};
+
+static const struct acpm_tmu_driver_data acpm_tmu_zumapro_top = {
+	.reg_fields = zumapro_reg_fields,
+	.sensor_groups = zumapro_top_sensor_groups,
+	.num_sensor_groups = ARRAY_SIZE(zumapro_top_sensor_groups),
+	.mbox_chan_id = 9,
+	.max_register = ZUMAPRO_REG_INTPEND(15),
+};
+
+static const struct acpm_tmu_driver_data acpm_tmu_zumapro_sub = {
+	.reg_fields = zumapro_reg_fields,
+	.sensor_groups = zumapro_sub_sensor_groups,
+	.num_sensor_groups = ARRAY_SIZE(zumapro_sub_sensor_groups),
+	.mbox_chan_id = 9,
+	.max_register = ZUMAPRO_REG_INTPEND(15),
 };
 
 static int acpm_tmu_op_tz_control(struct acpm_tmu_sensor *sensor, bool on)
@@ -396,14 +478,29 @@ static irqreturn_t acpm_tmu_thread_fn(int irq, void *id)
 }
 
 static const struct of_device_id acpm_tmu_match[] = {
-	{ .compatible = "google,gs101-tmu-top" },
+	{
+		.compatible = "google,gs101-tmu-top",
+		.data = &acpm_tmu_gs101,
+	}, {
+		.compatible = "google,zumapro-tmu-top",
+		.data = &acpm_tmu_zumapro_top,
+	}, {
+		.compatible = "google,zumapro-tmu-sub",
+		.data = &acpm_tmu_zumapro_sub,
+	},
 	{ /* sentinel */ },
 };
 MODULE_DEVICE_TABLE(of, acpm_tmu_match);
 
 static int acpm_tmu_probe(struct platform_device *pdev)
 {
-	const struct acpm_tmu_driver_data *data = &acpm_tmu_gs101;
+	const struct acpm_tmu_driver_data *data;
+	struct regmap_config regmap_config = {
+		.reg_bits = 32,
+		.reg_stride = 4,
+		.val_bits = 32,
+		.use_relaxed_mmio = true,
+	};
 	struct acpm_handle *acpm_handle;
 	struct device *dev = &pdev->dev;
 	struct acpm_tmu_priv *priv;
@@ -411,10 +508,18 @@ static int acpm_tmu_probe(struct platform_device *pdev)
 	void __iomem *base;
 	int i, ret;
 
+	data = device_get_match_data(dev);
+	if (!data)
+		return -ENODEV;
+
 	acpm_handle = devm_acpm_get_by_phandle(dev);
 	if (IS_ERR(acpm_handle))
 		return dev_err_probe(dev, PTR_ERR(acpm_handle),
 				     "Failed to get ACPM handle\n");
+
+	if (!acpm_handle->ops->tmu.tz_control)
+		return dev_err_probe(dev, -ENODEV,
+				     "ACPM firmware lacks TMU support\n");
 
 	priv = devm_kzalloc(dev,
 			    struct_size(priv, sensors, data->num_sensor_groups),
@@ -433,7 +538,8 @@ static int acpm_tmu_probe(struct platform_device *pdev)
 	if (IS_ERR(base))
 		return dev_err_probe(dev, PTR_ERR(base), "Failed to ioremap resource\n");
 
-	regmap = devm_regmap_init_mmio(dev, base, &gs101_regmap_config);
+	regmap_config.max_register = data->max_register;
+	regmap = devm_regmap_init_mmio(dev, base, &regmap_config);
 	if (IS_ERR(regmap))
 		return dev_err_probe(dev, PTR_ERR(regmap), "Failed to init regmap\n");
 
@@ -443,7 +549,12 @@ static int acpm_tmu_probe(struct platform_device *pdev)
 		return dev_err_probe(dev, ret,
 				     "Unable to map syscon registers\n");
 
-	priv->clk = devm_clk_get(dev, NULL);
+	/*
+	 * The TMU APB PCLK gates the INTPEND reads.  zumapro has no CMU_MISC
+	 * TMU gates modelled yet and the bootloader leaves the clock running,
+	 * so treat it as optional until those gates exist.
+	 */
+	priv->clk = devm_clk_get_optional(dev, NULL);
 	if (IS_ERR(priv->clk))
 		return dev_err_probe(dev, PTR_ERR(priv->clk),
 				     "Failed to get the clock\n");
