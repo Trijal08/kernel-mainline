@@ -11,14 +11,15 @@ config EXYNOS_THERMAL
 	  This driver uses the Exynos core thermal APIs and TMU configuration
 	  data from the supported SoCs.
 
-config ZUMAPRO_ACPM_TMU
-	tristate "Google Tensor (zumapro) ACPM TMU thermal sensor"
+config EXYNOS_ACPM_THERMAL
+	tristate "Exynos ACPM thermal management unit driver"
 	depends on THERMAL_OF
+	depends on HAS_IOMEM
 	depends on EXYNOS_ACPM_PROTOCOL
 	help
-	  Thermal sensor driver for the Thermal Management Unit on the Google
-	  Tensor G4 (zumapro) SoC.  The TMU is owned by the ACPM firmware, so
-	  this driver reads per-zone temperatures over ACPM IPC and exposes them
-	  as read-only thermal zones (and, with CONFIG_THERMAL_HWMON, hwmon
-	  inputs).  It programs no trip points and leaves the firmware's own
-	  thermal protection in place.
+	  Support for the Thermal Management Unit (TMU) on Samsung Exynos SoCs
+	  where the TMU is owned by the ACPM firmware, such as the Google Tensor
+	  G4 (zumapro).  Temperature reads, trip thresholds and interrupt
+	  control go to the firmware over ACPM IPC; the AP maps only the TMU
+	  INTPEND registers and takes the TMU interrupt, so trip crossings are
+	  delivered as interrupts rather than found by polling.
