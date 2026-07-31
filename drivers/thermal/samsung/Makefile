@@ -4,4 +4,4 @@
 #
 obj-$(CONFIG_EXYNOS_THERMAL)			+= exynos_thermal.o
 exynos_thermal-y				:= exynos_tmu.o
-obj-$(CONFIG_ZUMAPRO_ACPM_TMU)			+= zumapro-acpm-tmu.o
+obj-$(CONFIG_EXYNOS_ACPM_THERMAL)		+= acpm-tmu.o
