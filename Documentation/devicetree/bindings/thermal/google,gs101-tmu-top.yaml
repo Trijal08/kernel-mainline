@@ -23,9 +23,16 @@ description:
   - are handled by the ACPM firmware. The AP coordinates these
   operations through the ACPM IPC protocol.
 
+  zumapro instantiates the block twice. The TOP instance covers the three
+  CPU clusters, the SUB instance the GPU, ISP, TPU and AUR zones. Each
+  instance numbers its thermal-sensor cells from zero.
+
 properties:
   compatible:
-    const: google,gs101-tmu-top
+    enum:
+      - google,gs101-tmu-top
+      - google,zumapro-tmu-top
+      - google,zumapro-tmu-sub
 
   reg:
     maxItems: 1
@@ -47,10 +54,19 @@ properties:
 required:
   - compatible
   - reg
-  - clocks
   - interrupts
   - "#thermal-sensor-cells"
   - samsung,acpm-ipc
+
+allOf:
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: google,gs101-tmu-top
+    then:
+      required:
+        - clocks
 
 additionalProperties: false
 
