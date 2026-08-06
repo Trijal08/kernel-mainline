@@ -17,6 +17,12 @@
 	chosen {
 		stdout-path = "serial0:115200n8";
 	};
+
+	memory@a0000000 {
+		device_type = "memory";
+		/* We expect the bootloader to fill in the size */
+		reg = <0x0 0xa0000000 0x0 0x0>;
+	};
 };
 
 &qupv3_id_0 {
