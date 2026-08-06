@@ -22,7 +22,7 @@
 
 	chosen {
 		/* Bootloader expects bootargs specified otherwise it crashes */
-		bootargs = "earlycon=exynos4210,0x10870000";
+		bootargs = "earlycon=exynos4210,0x10870000 splash plymouth.ignore-serial-consoles plymouth.prefer-fbcon clk_ignore_unused regulator_ignore_unused pmos_boot_uuid=054e6c2a-294c-4542-be46-56ac95c6d2d9 pmos_root_uuid=738b808b-8486-42b8-9520-0cd5fa0e4ac7 pmos_rootfsopts=defaults";
 		stdout-path = &serial_0;
 
 		// /* Use display framebuffer as setup by bootloader */
@@ -32,6 +32,41 @@
 		// 	/* format properties to be added by actual board */
 		// 	status = "disabled";
 		// };
+	};
+
+	memory@b80000000 {
+		device_type = "memory";
+		reg = <0x0b 0x80000000 0x60f83000>;
+	};
+
+	memory@b00000000 {
+		device_type = "memory";
+		reg = <0x0b 0x00 0x80000000>;
+	};
+
+	memory@a80000000 {
+		device_type = "memory";
+		reg = <0x0a 0x80000000 0x80000000>;
+	};
+
+	memory@a00000000 {
+		device_type = "memory";
+		reg = <0x0a 0x00 0x80000000>;
+	};
+
+	memory@980000000 {
+		device_type = "memory";
+		reg = <0x09 0x80000000 0x80000000>;
+	};
+
+	memory@900000000 {
+		device_type = "memory";
+		reg = <0x09 0x00 0x80000000>;
+	};
+
+	memory@880000000 {
+		device_type = "memory";
+		reg = <0x08 0x80000000 0x80000000>;
 	};
 
 	// decon_autorefresh_bit: mmio-init@19470030 {
