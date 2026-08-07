@@ -115,6 +115,14 @@ static int brcmf_percal = -1;
 module_param_named(percal, brcmf_percal, int, 0644);
 MODULE_PARM_DESC(percal, "Firmware periodic PHY cal (phy_percal): -1=fw default (default), 0=disable (stops the ~148s idle-5GHz recal trap)");
 
+/* PHY watchdog / noise-measurement periodic activity. percal=0 disables the
+ * periodic cal but the ~1s PHY watchdog still runs noise/tempsense maintenance
+ * that disrupts the RX pipeline under sustained load (the residual sustained-RX
+ * wedge percal=0 only delays). phy_wd=0 disables the watchdog + noise metric. */
+static int brcmf_phy_wd = -1;
+module_param_named(phy_wd, brcmf_phy_wd, int, 0644);
+MODULE_PARM_DESC(phy_wd, "Firmware PHY watchdog + noise metric: -1=fw default (default), 0=disable all periodic PHY maintenance");
+
 /* TX A-MSDU. The BCM4390 firmware self-preinits the TX-aggregation config
  * (A-MSDU, ampdu_mpdu depth, ampdu_ba_wsize) as one set sized to its SAQM
  * descriptor budget, and the vendor DHD leaves it intact at bring-up. But the
@@ -133,6 +141,15 @@ MODULE_PARM_DESC(percal, "Firmware periodic PHY cal (phy_percal): -1=fw default 
 static int brcmf_amsdu;
 module_param_named(amsdu, brcmf_amsdu, int, 0644);
 MODULE_PARM_DESC(amsdu, "TX A-MSDU: 0=off (default, stable at full throughput, avoids the txq_hw_fill trap), 1=force on (max LAN throughput but trips 3e598a under heavy load until the association-time ampdu cap lands), -1=leave firmware default");
+
+/* Diagnostic: raise the firmware's wl msglevel so it narrates errors (e.g. the
+ * wlc_bmac rx_hw_stuck / dma_rxactive=0 RX-DMA-inactive path) to the console.
+ * Production firmware ships with these gated off. -1 leaves the firmware
+ * default. WL_ERROR_VAL=0x1. Avoid per-packet bits (0x2/0x4/0x8/0x10) -- they
+ * flood and evict the interesting lines from the console ring. */
+static int brcmf_fw_msglevel = -1;
+module_param_named(fw_msglevel, brcmf_fw_msglevel, int, 0644);
+MODULE_PARM_DESC(fw_msglevel, "Firmware wl msglevel bitmask (-1=leave default). Diagnostic.");
 
 /* TX A-MPDU BA window. Part of the same firmware self-preinit aggregation set as
  * amsdu (above). The vendor never forces it; mainline forcing 64 while leaving
@@ -529,6 +546,12 @@ int brcmf_c_preinit_dcmds(struct brcmf_if *ifp)
 		bphy_err(drvr, "DBG percal=%d: phy_percal iovar returned %d\n",
 			 brcmf_percal,
 			 brcmf_fil_iovar_int_set(ifp, "phy_percal", brcmf_percal));
+	if (brcmf_phy_wd >= 0) {
+		bphy_err(drvr, "DBG phy_wd=%d: phy_watchdog -> %d\n", brcmf_phy_wd,
+			 brcmf_fil_iovar_int_set(ifp, "phy_watchdog", brcmf_phy_wd));
+		bphy_err(drvr, "DBG phy_wd=%d: noise_metric -> %d\n", brcmf_phy_wd,
+			 brcmf_fil_iovar_int_set(ifp, "noise_metric", brcmf_phy_wd));
+	}
 
 	brcmf_c_set_joinpref_default(ifp);
 
@@ -549,6 +572,11 @@ int brcmf_c_preinit_dcmds(struct brcmf_if *ifp)
 			 err);
 		goto done;
 	}
+
+	/* Diagnostic: raise the firmware console msglevel so it narrates the
+	 * RX-DMA-inactive / rx_hw_stuck path during the sustained-download wedge. */
+	if (brcmf_fw_msglevel >= 0)
+		(void)brcmf_fil_iovar_int_set(ifp, "msglevel", brcmf_fw_msglevel);
 
 	/* Frame bursting: the vendor DHD only writes frameburst if the firmware
 	 * self-preinit value is not already 1 (it is), so this is a no-op match to

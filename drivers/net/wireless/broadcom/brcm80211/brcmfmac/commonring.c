@@ -34,6 +34,10 @@ void brcmf_commonring_config(struct brcmf_commonring *commonring, u16 depth,
 	commonring->depth = depth;
 	commonring->item_len = item_len;
 	commonring->buf_addr = buf_addr;
+	/* Reset the D2H completion-sync epoch to match the firmware, which resets
+	 * its per-ring epoch when the ring is (re)configured. Harmless for H2D
+	 * rings (only the D2H completion read path consumes it). */
+	commonring->seqnum = BRCMF_D2H_EPOCH_INIT_VAL;
 	if (!commonring->inited) {
 		spin_lock_init(&commonring->lock);
 		commonring->inited = true;

@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# In-tree gate for the downstream Broadcom bcmdhd driver (BCM4390).
+#
+# NOTE: this deliberately does NOT source the driver's own bcm4390/Kconfig
+# (which defines CONFIG_BCMDHD). Leaving CONFIG_BCMDHD empty lets the driver's
+# Kbuild self-define its full config/-D set (the out-of-tree self-config path);
+# this symbol only gates whether the kernel descends into bcm4390/ to build it.
+config BCMDHD_BCM4390
+	tristate "Broadcom BCM4390 FullMAC (bcmdhd, in-tree) for komodo"
+	depends on PCI && CFG80211
+	help
+	  In-tree build of the downstream Broadcom bcmdhd driver adapted for
+	  mainline, driving the BCM4390 Wi-Fi on komodo (Pixel 9 Pro XL),
+	  replacing brcmfmac. Produces bcmdhd4390.ko. Uses the mainline
+	  pci-exynos host controller for the PCIe link. Say M.
