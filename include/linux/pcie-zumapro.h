@@ -23,9 +23,14 @@ struct phy;
 #if IS_ENABLED(CONFIG_PHY_EXYNOS_PCIE)
 void exynos_pcie_phy_safe_clk(struct phy *phy, bool safe);
 void exynos_pcie_phy_keep_refclk(struct phy *phy, bool keep);
+/* Deep PHY power-down / restore around a full Wi-Fi link teardown/retrain. */
+void exynos_pcie_phy_all_pwrdn(struct phy *phy);
+void exynos_pcie_phy_all_pwrdn_clear(struct phy *phy);
 #else
 static inline void exynos_pcie_phy_safe_clk(struct phy *phy, bool safe) { }
 static inline void exynos_pcie_phy_keep_refclk(struct phy *phy, bool keep) { }
+static inline void exynos_pcie_phy_all_pwrdn(struct phy *phy) { }
+static inline void exynos_pcie_phy_all_pwrdn_clear(struct phy *phy) { }
 #endif
 
 #if IS_ENABLED(CONFIG_PCI_EXYNOS)
@@ -38,6 +43,13 @@ int zumapro_pcie_modem_wake(struct device *rc_dev);
 int zumapro_pcie_modem_reset(struct device *rc_dev);
 int zumapro_pcie_modem_power_cycle(struct device *rc_dev);
 int zumapro_pcie_modem_link_speed(struct device *rc_dev);
+/* Wi-Fi (BCM4390) runtime relink for dhd D3 power management. */
+int zumapro_pcie_wifi_link_up(struct device *rc_dev);
+int zumapro_pcie_wifi_link_down(struct device *rc_dev);
+int zumapro_pcie_wifi_link_status(struct device *rc_dev);
+int zumapro_pcie_wifi_l1ss_enable(struct device *rc_dev);
+int zumapro_pcie_wifi_l1ss_disable(struct device *rc_dev);
+int zumapro_pcie_wifi_l1_exit(struct device *rc_dev);
 #else
 static inline int zumapro_pcie_set_msi_target(struct device *rc_dev,
 					      phys_addr_t target)
@@ -74,6 +86,30 @@ static inline int zumapro_pcie_modem_link_speed(struct device *rc_dev)
 	return -ENODEV;
 }
 static inline int zumapro_pcie_modem_power_cycle(struct device *rc_dev)
+{
+	return -ENODEV;
+}
+static inline int zumapro_pcie_wifi_link_up(struct device *rc_dev)
+{
+	return -ENODEV;
+}
+static inline int zumapro_pcie_wifi_link_down(struct device *rc_dev)
+{
+	return -ENODEV;
+}
+static inline int zumapro_pcie_wifi_link_status(struct device *rc_dev)
+{
+	return 0;
+}
+static inline int zumapro_pcie_wifi_l1ss_enable(struct device *rc_dev)
+{
+	return -ENODEV;
+}
+static inline int zumapro_pcie_wifi_l1ss_disable(struct device *rc_dev)
+{
+	return -ENODEV;
+}
+static inline int zumapro_pcie_wifi_l1_exit(struct device *rc_dev)
 {
 	return -ENODEV;
 }
