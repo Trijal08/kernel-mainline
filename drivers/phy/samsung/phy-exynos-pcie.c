@@ -356,6 +356,10 @@ static int zuma_pcie_phy_reset(struct phy *phy)
 	 * and relies on firmware for the enable, which a cold boot doesn't do.
 	 */
 	val = readl(ep->soc_base + ZUMA_SOC_PHY_CLK_SEL);
+	/* Bisect breadcrumb for the Wi-Fi L1.2-exit hunt: downstream's x1 cal
+	 * never writes CLK_SEL (it inherits the boot-chain value), so log what
+	 * we found before forcing the ext-PLL select. */
+	dev_info(&phy->dev, "CLK_SEL pre-modify %#x\n", val);
 	val &= ~ZUMA_SOC_PHY_CLK_TCXO;
 	val |= ZUMA_SOC_PHY_CLK_EXTPLL | ZUMA_SOC_PHY_CLK_INPUT_EN;
 	writel(val, ep->soc_base + ZUMA_SOC_PHY_CLK_SEL);
@@ -499,6 +503,74 @@ void exynos_pcie_phy_safe_clk(struct phy *phy, bool safe)
 		writel(ZUMA_SOC_PHY_PWR_ON, ep->soc_base + ZUMA_SOC_PHY_PWR);
 }
 EXPORT_SYMBOL_GPL(exynos_pcie_phy_safe_clk);
+
+/*
+ * Deep PHY power-down / restore for the 1-lane Wi-Fi (GEN3A_1) instance,
+ * faithful port of downstream exynos_pcie_rc_phy_all_pwrdn / _clear
+ * (pcie-exynos-zuma-rc-cal.c, ch_num==1 branch).  Drives the lane bias/PLL and
+ * the external PLL into their lowest-power state and exactly back.  The RC calls
+ * pwrdn() inside a full link teardown (poweroff, after PERST-low + LTSSM-disable)
+ * and pwrdn_clear() at the start of a link retrain (poweron, before the PHY is
+ * re-configured + LTSSM re-enabled).  These are NOT used for autonomous ASPM
+ * L1.2 (that is hardware-sequenced); they only bound an explicit power cycle.
+ * Guarded to the single-lane instance (the 2-lane modem PHY has its own branch
+ * which the modem relink path does not need here).
+ */
+void exynos_pcie_phy_all_pwrdn(struct phy *phy)
+{
+	struct exynos_pcie_phy *ep = phy_get_drvdata(phy);
+	void __iomem *p = ep->base;
+	u32 val;
+
+	if (ep->num_lanes > 1)
+		return;
+
+	val = readl(p + 0x0204) & ~(0x3 << 2);
+	writel(val, p + 0x0204);
+	writel(0x2A, p + 0x1044);
+	writel(0xAA, p + 0x1048);
+	writel(0xA8, p + 0x104C);
+	writel(0x80, p + 0x1050);
+	writel(0x0A, p + 0x185C);
+	udelay(1);
+	writel(0xFF, p + 0x0208);
+	udelay(1);
+	writel(0x0A, p + 0x0580);
+	writel(0xAA, p + 0x0928);
+	writel(0x0A, p + 0x000C);
+	udelay(50);
+	/* external PLL gating off (clear bit0) */
+	val = readl(ep->udbg_base + ZUMA_UDBG_EXT_PLL) & ~ZUMA_UDBG_EXT_PLL_INIT;
+	writel(val, ep->udbg_base + ZUMA_UDBG_EXT_PLL);
+	udelay(10);
+}
+EXPORT_SYMBOL_GPL(exynos_pcie_phy_all_pwrdn);
+
+void exynos_pcie_phy_all_pwrdn_clear(struct phy *phy)
+{
+	struct exynos_pcie_phy *ep = phy_get_drvdata(phy);
+	void __iomem *p = ep->base;
+	u32 val;
+
+	if (ep->num_lanes > 1)
+		return;
+
+	/* external PLL gating on (set bit0), let it settle before the block */
+	val = readl(ep->udbg_base + ZUMA_UDBG_EXT_PLL) | ZUMA_UDBG_EXT_PLL_INIT;
+	writel(val, ep->udbg_base + ZUMA_UDBG_EXT_PLL);
+	udelay(100);
+	writel(0x00, p + 0x000C);
+	writel(0x55, p + 0x0928);
+	writel(0x02, p + 0x0580);
+	writel(0x00, p + 0x0208);
+	writel(0x00, p + 0x1044);
+	writel(0x00, p + 0x1048);
+	writel(0x00, p + 0x104C);
+	writel(0x00, p + 0x1050);
+	writel(0x00, p + 0x185C);
+	udelay(10);
+}
+EXPORT_SYMBOL_GPL(exynos_pcie_phy_all_pwrdn_clear);
 
 static const struct phy_ops zuma_phy_ops = {
 	.reset		= zuma_pcie_phy_reset,
