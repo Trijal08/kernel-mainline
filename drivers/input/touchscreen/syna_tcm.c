@@ -46,6 +46,8 @@
 #include <linux/string_choices.h>
 #include <linux/unaligned.h>
 
+#include <drm/drm_panel.h>
+
 #include "touch_bus_negotiator.h"
 
 #define SYNA_TCM_HEADER_SIZE		4
@@ -180,10 +182,23 @@ struct syna_tcm {
 	struct syna_tcm_object objects[SYNA_TCM_MAX_SLOTS];
 	unsigned long slots_seen;
 
-	/* Touch Bus Negotiator (AoC bus handoff for tap-to-wake). */
+	/* Touch Bus Negotiator (AoC bus handoff for wake gestures). */
 	bool tbn_enabled;	/* opted in via goog,tbn-enabled and registered */
 	u32 tbn_mask;		/* device bit from register_tbn() */
 	bool tbn_suspended;	/* bus was released to AoC across this suspend */
+
+	/*
+	 * Low-power entry is driven by the panel when we can follow one, and by
+	 * system sleep otherwise -- and by both, in either order, when the
+	 * system suspends with the display still on. @pm_lock serialises them;
+	 * the two "off because" flags decide when it is safe to come back.
+	 */
+	struct drm_panel_follower follower;
+	bool following;
+	struct mutex pm_lock;
+	bool powered_off;
+	bool off_by_panel;
+	bool off_by_pm;
 };
 
 /*
@@ -989,6 +1004,155 @@ static void syna_tcm_setup_tbn(struct syna_tcm *ts)
 	dev_info(dev, "TBN bus handoff enabled, mask %#x\n", ts->tbn_mask);
 }
 
+/*
+ * Enter low power: when the AoC bus handoff is available, put the controller
+ * into low-power gesture mode and release the SPI bus to AoC so it can watch
+ * for a gesture.  Otherwise -- or on any failure -- fall back to deep sleep
+ * with the AP still owning the bus.  The IRQ is disabled either way: once AoC
+ * owns the bus the AP must not drive SPI, and AoC signals a wake over its own
+ * mailbox, not this line.
+ *
+ * Idempotent; caller holds pm_lock.
+ */
+static void syna_tcm_enter_low_power(struct syna_tcm *ts)
+{
+	struct device *dev = &ts->spi->dev;
+	bool use_tbn = ts->tbn_enabled && tbn_ready();
+	int error;
+
+	if (ts->powered_off)
+		return;
+	ts->powered_off = true;
+
+	disable_irq(ts->spi->irq);
+
+	mutex_lock(&ts->io_lock);
+	if (use_tbn) {
+		error = syna_tcm_set_gesture_mode(ts, true);
+		if (error) {
+			/*
+			 * Gesture mode did not arm: do not hand a bus AoC
+			 * cannot use to it.  Fall back to deep sleep, AP keeps
+			 * the bus.
+			 */
+			dev_warn(dev,
+				 "gesture mode failed (%d), using deep sleep\n",
+				 error);
+			use_tbn = false;
+			error = syna_tcm_exchange(ts, TCM_CMD_ENTER_DEEP_SLEEP,
+						  NULL, 0);
+		}
+	} else {
+		error = syna_tcm_exchange(ts, TCM_CMD_ENTER_DEEP_SLEEP, NULL, 0);
+	}
+	mutex_unlock(&ts->io_lock);
+	if (error)
+		dev_warn(dev, "failed to enter low power: %d\n", error);
+
+	if (use_tbn) {
+		/*
+		 * Hand the bus to AoC.  tbn_suspended is set unconditionally so
+		 * resume always reclaims it -- even if the release times out we
+		 * must never leave touch stranded with AoC owning the bus.
+		 */
+		ts->tbn_suspended = true;
+		error = tbn_release_bus(ts->tbn_mask);
+		if (error)
+			dev_warn(dev, "tbn_release_bus failed: %d\n", error);
+	}
+}
+
+/*
+ * Leave low power: mirror syna_tcm_enter_low_power().  If the bus went to AoC,
+ * reclaim it before any SPI traffic and leave gesture mode; otherwise just exit
+ * deep sleep.
+ *
+ * Idempotent; caller holds pm_lock.
+ */
+static void syna_tcm_exit_low_power(struct syna_tcm *ts)
+{
+	struct device *dev = &ts->spi->dev;
+	int error;
+
+	if (!ts->powered_off)
+		return;
+	ts->powered_off = false;
+
+	if (ts->tbn_suspended) {
+		error = tbn_request_bus(ts->tbn_mask);
+		if (error)
+			dev_warn(dev, "tbn_request_bus failed: %d\n", error);
+		ts->tbn_suspended = false;
+
+		mutex_lock(&ts->io_lock);
+		error = syna_tcm_set_gesture_mode(ts, false);
+		if (error) {
+			dev_warn(dev, "failed to exit gesture mode: %d\n", error);
+			/* Best effort: also try to leave deep sleep. */
+			syna_tcm_exchange(ts, TCM_CMD_EXIT_DEEP_SLEEP, NULL, 0);
+		}
+		mutex_unlock(&ts->io_lock);
+	} else {
+		mutex_lock(&ts->io_lock);
+		error = syna_tcm_exchange(ts, TCM_CMD_EXIT_DEEP_SLEEP, NULL, 0);
+		mutex_unlock(&ts->io_lock);
+		if (error)
+			dev_warn(dev, "failed to exit deep sleep: %d\n", error);
+	}
+
+	enable_irq(ts->spi->irq);
+}
+
+/*
+ * The panel going dark is what should hand the bus to AoC: AoC can only watch
+ * for a gesture while it owns the bus, and the screen can be off long before
+ * (or without) the AP suspending.  Tying the handoff to system sleep alone
+ * would mean no gesture is seen while the AP is awake with the display off.
+ */
+/*
+ * Called on the way out, before the follower is removed. Removing a follower
+ * from a live panel replays "unpreparing", which would release the bus to AoC
+ * just as the driver that reclaims it disappears.
+ */
+static void syna_tcm_stop_following(void *data)
+{
+	struct syna_tcm *ts = data;
+
+	mutex_lock(&ts->pm_lock);
+	ts->following = false;
+	mutex_unlock(&ts->pm_lock);
+}
+
+static int syna_tcm_panel_prepared(struct drm_panel_follower *follower)
+{
+	struct syna_tcm *ts = container_of(follower, struct syna_tcm, follower);
+
+	mutex_lock(&ts->pm_lock);
+	ts->off_by_panel = false;
+	if (!ts->off_by_pm)
+		syna_tcm_exit_low_power(ts);
+	mutex_unlock(&ts->pm_lock);
+	return 0;
+}
+
+static int syna_tcm_panel_unpreparing(struct drm_panel_follower *follower)
+{
+	struct syna_tcm *ts = container_of(follower, struct syna_tcm, follower);
+
+	mutex_lock(&ts->pm_lock);
+	if (ts->following) {
+		ts->off_by_panel = true;
+		syna_tcm_enter_low_power(ts);
+	}
+	mutex_unlock(&ts->pm_lock);
+	return 0;
+}
+
+static const struct drm_panel_follower_funcs syna_tcm_follower_funcs = {
+	.panel_prepared = syna_tcm_panel_prepared,
+	.panel_unpreparing = syna_tcm_panel_unpreparing,
+};
+
 static int syna_tcm_probe(struct spi_device *spi)
 {
 	struct device *dev = &spi->dev;
@@ -1012,6 +1176,7 @@ static int syna_tcm_probe(struct spi_device *spi)
 
 	ts->spi = spi;
 	mutex_init(&ts->io_lock);
+	mutex_init(&ts->pm_lock);
 	spi_set_drvdata(spi, ts);
 
 	/* Assumed present until the detect-time trailer sniff says no. */
@@ -1064,95 +1229,62 @@ static int syna_tcm_probe(struct spi_device *spi)
 	if (error)
 		return dev_err_probe(dev, error, "failed to request irq\n");
 
+	/*
+	 * Follow the panel if the DT says which one. Without it the driver
+	 * keeps its previous behaviour and enters low power on system sleep
+	 * only, which costs wake gestures while the AP is awake with the
+	 * display off, but works.
+	 */
+	ts->follower.funcs = &syna_tcm_follower_funcs;
+	error = drm_panel_add_follower(dev, &ts->follower);
+	if (error == -EPROBE_DEFER)
+		return error;
+	if (error) {
+		dev_info(dev, "not following a panel (%d), using system sleep\n",
+			 error);
+	} else {
+		ts->following = true;
+		/*
+		 * Registered after the follower so it unwinds first: the
+		 * removal path would otherwise hand the bus to AoC on the way
+		 * out, with nothing left to reclaim it.
+		 */
+		error = devm_add_action_or_reset(dev, syna_tcm_stop_following,
+						 ts);
+		if (error)
+			return error;
+	}
+
 	return 0;
 }
 
 /*
- * Suspend: when the AoC bus handoff is available, put the controller into
- * low-power gesture mode and release the SPI bus to AoC so it can watch for a
- * tap.  Otherwise -- or on any failure -- fall back to deep sleep with the AP
- * still owning the bus.  The IRQ is disabled either way: once AoC owns the bus
- * the AP must not drive SPI, and AoC signals a wake over its own mailbox, not
- * this line.
+ * System sleep still powers the controller down, even when the panel drives it:
+ * the system can suspend with the display on, and the part must not be left
+ * scanning.  Coming back is conditional -- if the panel is dark, it stays down
+ * until the panel says otherwise.
  */
 static int syna_tcm_suspend(struct device *dev)
 {
 	struct syna_tcm *ts = spi_get_drvdata(to_spi_device(dev));
-	bool use_tbn = ts->tbn_enabled && tbn_ready();
-	int error;
 
-	disable_irq(ts->spi->irq);
-
-	mutex_lock(&ts->io_lock);
-	if (use_tbn) {
-		error = syna_tcm_set_gesture_mode(ts, true);
-		if (error) {
-			/*
-			 * Gesture mode did not arm: do not hand a bus AoC
-			 * cannot use to it.  Fall back to deep sleep, AP keeps
-			 * the bus.
-			 */
-			dev_warn(dev,
-				 "gesture mode failed (%d), using deep sleep\n",
-				 error);
-			use_tbn = false;
-			error = syna_tcm_exchange(ts, TCM_CMD_ENTER_DEEP_SLEEP,
-						  NULL, 0);
-		}
-	} else {
-		error = syna_tcm_exchange(ts, TCM_CMD_ENTER_DEEP_SLEEP, NULL, 0);
-	}
-	mutex_unlock(&ts->io_lock);
-	if (error)
-		dev_warn(dev, "failed to enter low power: %d\n", error);
-
-	if (use_tbn) {
-		/*
-		 * Hand the bus to AoC.  tbn_suspended is set unconditionally so
-		 * resume always reclaims it -- even if the release times out we
-		 * must never leave touch stranded with AoC owning the bus.
-		 */
-		ts->tbn_suspended = true;
-		error = tbn_release_bus(ts->tbn_mask);
-		if (error)
-			dev_warn(dev, "tbn_release_bus failed: %d\n", error);
-	}
+	mutex_lock(&ts->pm_lock);
+	ts->off_by_pm = true;
+	syna_tcm_enter_low_power(ts);
+	mutex_unlock(&ts->pm_lock);
 
 	return 0;
 }
 
-/*
- * Resume: mirror suspend.  If the bus went to AoC, reclaim it before any SPI
- * traffic and leave gesture mode; otherwise just exit deep sleep.
- */
 static int syna_tcm_resume(struct device *dev)
 {
 	struct syna_tcm *ts = spi_get_drvdata(to_spi_device(dev));
-	int error;
 
-	if (ts->tbn_suspended) {
-		error = tbn_request_bus(ts->tbn_mask);
-		if (error)
-			dev_warn(dev, "tbn_request_bus failed: %d\n", error);
-		ts->tbn_suspended = false;
-
-		mutex_lock(&ts->io_lock);
-		error = syna_tcm_set_gesture_mode(ts, false);
-		if (error) {
-			dev_warn(dev, "failed to exit gesture mode: %d\n", error);
-			/* Best effort: also try to leave deep sleep. */
-			syna_tcm_exchange(ts, TCM_CMD_EXIT_DEEP_SLEEP, NULL, 0);
-		}
-		mutex_unlock(&ts->io_lock);
-	} else {
-		mutex_lock(&ts->io_lock);
-		error = syna_tcm_exchange(ts, TCM_CMD_EXIT_DEEP_SLEEP, NULL, 0);
-		mutex_unlock(&ts->io_lock);
-		if (error)
-			dev_warn(dev, "failed to exit deep sleep: %d\n", error);
-	}
-
-	enable_irq(ts->spi->irq);
+	mutex_lock(&ts->pm_lock);
+	ts->off_by_pm = false;
+	if (!ts->off_by_panel)
+		syna_tcm_exit_low_power(ts);
+	mutex_unlock(&ts->pm_lock);
 
 	return 0;
 }
