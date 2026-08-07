@@ -382,6 +382,12 @@ static const struct brcmf_firmware_mapping brcmf_pcie_fwnames[] = {
 #define BRCMF_H2D_HOST_DS_NAK			0x00000004
 #define BRCMF_H2D_HOST_D0_INFORM_IN_USE		0x00000008
 #define BRCMF_H2D_HOST_D0_INFORM		0x00000010
+/* In-band device-wake (PCIE_INB_DW). Asserting DEVICE_WAKE via the H2D mailbox
+ * keeps the dongle out of autonomous deep sleep while the host is active; the
+ * firmware advertises INBAND_DS in the shared flags and expects this handshake.
+ * Values match the vendor bcmdhd H2DMB_DS_* (bcmpcie.h). */
+#define BRCMF_H2D_HOST_DS_ACTIVE		0x00000020
+#define BRCMF_H2D_HOST_DS_DEVICE_WAKE		0x00000040
 
 #define BRCMF_PCIE_MBDATA_TIMEOUT		msecs_to_jiffies(2000)
 
@@ -957,6 +963,23 @@ static int brcmf_pcie_exit_download_state(struct brcmf_pciedev_info *devinfo,
 }
 
 
+/* DBG deep-sleep instrumentation: does the firmware actually request DS during
+ * the wedge, and is our mailbox handshake the gate? */
+static u32 brcmf_dbg_dsreq, brcmf_dbg_dsexit, brcmf_dbg_mbwait, brcmf_dbg_d3ack;
+
+/* Fast RX-DMA-stall recovery. Under sustained download the firmware parks its RX
+ * DMA (RxCpl write index frozen) while it still holds thousands of host RX
+ * buffers -- not starvation, not torn completions, not deep sleep, no trap. It
+ * self-heals ~50-80s later via its own RX-DMA-stall health-check ring reinit.
+ * rx_recover re-arms the datapath from the host the moment the poll worker sees
+ * the stall (re-ring HOSTREADY + the RXPOST WR and RxCpl RD doorbells) so RX
+ * resumes in ms instead. The value is the poll-worker stall count (~2ms each) at
+ * which to first kick; 0 = off. */
+static int brcmf_rx_recover;
+module_param_named(rx_recover, brcmf_rx_recover, int, 0644);
+MODULE_PARM_DESC(rx_recover, "Fast RX-DMA-stall recovery: poll-worker stall-count trigger (~2ms/count) to re-arm the datapath, 0=off (default)");
+static u32 brcmf_dbg_recover;
+
 static int
 brcmf_pcie_send_mb_data(struct brcmf_pciedev_info *devinfo, u32 htod_mb_data)
 {
@@ -987,14 +1010,24 @@ brcmf_pcie_send_mb_data(struct brcmf_pciedev_info *devinfo, u32 htod_mb_data)
 		brcmf_dbg(PCIE, "MB transaction is already pending 0x%04x\n",
 			  cur_htod_mb_data);
 
+	/* Wait briefly for the firmware to consume any previous mailbox word, then
+	 * write anyway. The old code slept up to 1 second here; that is fatal for
+	 * the deep-sleep NAK. The BCM4390 firmware autonomously requests deep sleep
+	 * (D2H_DEV_DS_ENTER_REQ) and suspends ALL D2H completion submission (both RX
+	 * and TX rings) until the host answers. Riding a 1s busy-wait made every
+	 * such request stall the whole datapath for up to a second while the
+	 * firmware stayed alive -- the sustained-download wedge, which "recovered"
+	 * only when the late NAK finally landed. During active traffic the only
+	 * unconsumed word is a stale DS NAK, so overwriting it with our new word is
+	 * safe; bound the wait to a couple of milliseconds so the NAK is prompt. */
 	i = 0;
 	while (cur_htod_mb_data != 0) {
-		msleep(10);
-		i++;
-		if (i > 100)
-			return -EIO;
+		usleep_range(50, 100);
+		if (++i > 20)
+			break;
 		cur_htod_mb_data = brcmf_pcie_read_tcm32(devinfo, addr);
 	}
+	brcmf_dbg_mbwait += i;
 
 	brcmf_pcie_write_tcm32(devinfo, addr, htod_mb_data);
 	pci_write_config_dword(devinfo->pdev, BRCMF_PCIE_REG_SBMBX, 1);
@@ -1021,11 +1054,15 @@ static void brcmf_pcie_handle_mb_data(struct brcmf_pciedev_info *devinfo, u32 da
 		 * active.
 		 */
 		brcmf_dbg(PCIE, "D2H_MB_DATA: DEEP SLEEP REQ\n");
+		brcmf_dbg_dsreq++;
 		brcmf_pcie_send_mb_data(devinfo, BRCMF_H2D_HOST_DS_NAK);
 	}
-	if (data & BRCMF_D2H_DEV_DS_EXIT_NOTE)
+	if (data & BRCMF_D2H_DEV_DS_EXIT_NOTE) {
 		brcmf_dbg(PCIE, "D2H_MB_DATA: DEEP SLEEP EXIT\n");
+		brcmf_dbg_dsexit++;
+	}
 	if (data & BRCMF_D2H_DEV_D3_ACK) {
+		brcmf_dbg_d3ack++;
 		brcmf_dbg(PCIE, "D2H_MB_DATA: D3 ACK\n");
 		devinfo->mbdata_completed = true;
 		wake_up(&devinfo->mbdata_resp_wait);
@@ -1280,6 +1317,7 @@ static int brcmf_pcie_ring_mb_write_rptr(void *ctx)
 	struct brcmf_pcie_ringbuf *ring = (struct brcmf_pcie_ringbuf *)ctx;
 	struct brcmf_pciedev_info *devinfo = ring->devinfo;
 	struct brcmf_commonring *commonring = &ring->commonring;
+	u32 rd_db;
 
 	if (devinfo->state != BRCMFMAC_PCIE_STATE_UP)
 		return -EIO;
@@ -1288,6 +1326,24 @@ static int brcmf_pcie_ring_mb_write_rptr(void *ctx)
 		  commonring->w_ptr, ring->id);
 
 	devinfo->write_ptr(devinfo, ring->r_idx_addr, commonring->r_ptr);
+
+	/* Ring the D2H read-pointer doorbell so the firmware learns the host has
+	 * drained these completions and can recycle the associated lbufs -- the
+	 * shared-pool recycling the vendor DHD does via DHD_RDPTR_UPDATE_H2D_DB.
+	 * In DMA-index mode the firmware does not re-read the host read index
+	 * until doorbelled; without this the pool slowly starves under sustained
+	 * RX and the datapath wedges. wmb() so the r_idx store lands before the
+	 * MMIO doorbell that tells the firmware to consume it. */
+	wmb();
+	rd_db = 0xDD000000 | ((u32)ring->id << 16) | (commonring->r_ptr & 0xffff);
+	if (devinfo->shared.flags & BRCMF_PCIE_SHARED_DAR)
+		brcmf_pcie_write_pcie32(devinfo,
+					BRCMF_PCIE_64_PCIE2REG_H2D_MAILBOX_0,
+					rd_db);
+	else
+		brcmf_pcie_write_pcie32(devinfo,
+					BRCMF_PCIE_PCIE2REG_H2D_MAILBOX_0,
+					rd_db);
 
 	return 0;
 }
@@ -1315,16 +1371,30 @@ static int brcmf_pcie_ring_mb_ring_bell(void *ctx)
 {
 	struct brcmf_pcie_ringbuf *ring = (struct brcmf_pcie_ringbuf *)ctx;
 	struct brcmf_pciedev_info *devinfo = ring->devinfo;
+	u32 wr_db;
 
 	if (devinfo->state != BRCMFMAC_PCIE_STATE_UP)
 		return -EIO;
 
 	brcmf_dbg(PCIE, "RING !\n");
-	/* Any arbitrary value will do, lets use 1 */
+	/* Encode the ring index and write pointer in the H2D doorbell, matching
+	 * the vendor DHD_WRPTR_UPDATE_H2D_DB_MAGIC (0xFF | idx<<16 | wr) used on
+	 * the non-IDMA DMA-index path this firmware runs. The write pointer is
+	 * also placed in the host idxbuf by write_wptr, but under sustained RX the
+	 * firmware's read of that idxbuf can lag, so it under-counts the RX buffers
+	 * we posted and drops an incoming MPDU -- the first A-MPDU reorder hole
+	 * that snowballs into the datapath wedge. Passing the write pointer in the
+	 * doorbell itself (fresh via MMIO, no idxbuf coherency race) keeps the
+	 * firmware's ring view exact. A bare doorbell value (the old "just use 1")
+	 * left the firmware to rely solely on the lagging idxbuf. */
+	wr_db = 0xFF000000 | ((u32)ring->id << 16) |
+		(ring->commonring.w_ptr & 0xffff);
 	if (devinfo->shared.flags & BRCMF_PCIE_SHARED_DAR)
-		brcmf_pcie_write_pcie32(devinfo, BRCMF_PCIE_64_PCIE2REG_H2D_MAILBOX_0, 1);
+		brcmf_pcie_write_pcie32(devinfo,
+					BRCMF_PCIE_64_PCIE2REG_H2D_MAILBOX_0, wr_db);
 	else
-		brcmf_pcie_write_pcie32(devinfo, BRCMF_PCIE_PCIE2REG_H2D_MAILBOX_0, 1);
+		brcmf_pcie_write_pcie32(devinfo,
+					BRCMF_PCIE_PCIE2REG_H2D_MAILBOX_0, wr_db);
 
 	return 0;
 }
@@ -1748,6 +1818,102 @@ static void brcmf_pcie_poll_worker(struct work_struct *work)
 	mutex_lock(&devinfo->rx_lock);
 	brcmf_pcie_poll_mb_data(devinfo);
 	brcmf_proto_msgbuf_rx_trigger(&devinfo->pdev->dev);
+
+	/* DBG: detect the silent D2H stall and dump both completion rings'
+	 * dongle-side write index and host-side read index so we can tell a
+	 * "firmware believes ring full (stale read idx)" wedge apart from a
+	 * "firmware stopped submitting on an empty ring (resource starvation)"
+	 * wedge. Only fires after we have recently seen the RX write index move
+	 * (real traffic) so an idle link does not spam. */
+	{
+		static u32 dbg_last_rxw, dbg_stall, dbg_active;
+		struct brcmf_pcie_ringbuf *rxr =
+			devinfo->shared.commonrings[BRCMF_NROF_COMMON_MSGRINGS - 1];
+		struct brcmf_pcie_ringbuf *txr =
+			devinfo->shared.commonrings[BRCMF_NROF_COMMON_MSGRINGS - 2];
+		/* commonrings[1] == H2D RXPOST submit (see brcmf_ring_max_item[]) */
+		struct brcmf_pcie_ringbuf *rxp =
+			devinfo->shared.commonrings[1];
+
+		if (rxr && txr && rxp) {
+			u32 rxw = devinfo->read_ptr(devinfo, rxr->w_idx_addr);
+
+			if (rxw != dbg_last_rxw) {
+				dbg_last_rxw = rxw;
+				dbg_stall = 0;
+				dbg_active = 400;	/* ~0.8s of "was active" */
+			} else if (dbg_active) {
+				dbg_stall++;
+				dbg_active--;
+				if (dbg_stall == 25 || dbg_stall == 500 ||
+				    dbg_stall == 2000) {
+					u32 rxr_r = devinfo->read_ptr(devinfo,
+							rxr->r_idx_addr);
+					u32 txw = devinfo->read_ptr(devinfo,
+							txr->w_idx_addr);
+					u32 txr_r = devinfo->read_ptr(devinfo,
+							txr->r_idx_addr);
+					/* RXPOST: host_w = buffers the host posted,
+					 * fw_r = buffers the firmware consumed.
+					 * avail = buffers currently handed to the
+					 * dongle. host_w==fw_r => firmware starved;
+					 * host_w>>fw_r => firmware stuck WITH buffers
+					 * (reorder / RX-DMA park, not starvation). */
+					u32 rxp_w = devinfo->read_ptr(devinfo,
+							rxp->w_idx_addr);
+					u32 rxp_r = devinfo->read_ptr(devinfo,
+							rxp->r_idx_addr);
+
+					dev_err(&devinfo->pdev->dev,
+						"DBG WEDGE stall=%u: RX fw_w=%u mem_r=%u | RXPOST host_w=%u fw_r=%u avail=%u | TX fw_w=%u mem_r=%u | dsreq=%u dsexit=%u d3ack=%u mbwait=%u\n",
+						dbg_stall, rxw, rxr_r,
+						rxp_w, rxp_r,
+						(rxp_w - rxp_r) & 0xffff,
+						txw, txr_r,
+						brcmf_dbg_dsreq, brcmf_dbg_dsexit,
+						brcmf_dbg_d3ack, brcmf_dbg_mbwait);
+				}
+
+				/* Fast recovery: re-arm the datapath while the
+				 * firmware's RX write index is frozen, so RX
+				 * resumes without the ~50-80s firmware reinit.
+				 * Re-ring HOSTREADY + the RXPOST WR and RxCpl RD
+				 * doorbells (current indices) once at the trigger,
+				 * then every ~100ms while still stalled. */
+				if (brcmf_rx_recover &&
+				    (dbg_stall == brcmf_rx_recover ||
+				     (dbg_stall > brcmf_rx_recover &&
+				      dbg_stall % 50 == 0))) {
+					u32 db;
+
+					brcmf_pcie_hostready(devinfo);
+					db = 0xFF000000 | ((u32)rxp->id << 16) |
+					     (rxp->commonring.w_ptr & 0xffff);
+					if (devinfo->shared.flags &
+					    BRCMF_PCIE_SHARED_DAR)
+						brcmf_pcie_write_pcie32(devinfo,
+							BRCMF_PCIE_64_PCIE2REG_H2D_MAILBOX_0, db);
+					else
+						brcmf_pcie_write_pcie32(devinfo,
+							BRCMF_PCIE_PCIE2REG_H2D_MAILBOX_0, db);
+					db = 0xDD000000 | ((u32)rxr->id << 16) |
+					     (rxr->commonring.r_ptr & 0xffff);
+					if (devinfo->shared.flags &
+					    BRCMF_PCIE_SHARED_DAR)
+						brcmf_pcie_write_pcie32(devinfo,
+							BRCMF_PCIE_64_PCIE2REG_H2D_MAILBOX_0, db);
+					else
+						brcmf_pcie_write_pcie32(devinfo,
+							BRCMF_PCIE_PCIE2REG_H2D_MAILBOX_0, db);
+					brcmf_dbg_recover++;
+					if (dbg_stall == brcmf_rx_recover)
+						dev_err(&devinfo->pdev->dev,
+							"DBG RECOVER kick #%u at stall=%u\n",
+							brcmf_dbg_recover, dbg_stall);
+				}
+			}
+		}
+	}
 	mutex_unlock(&devinfo->rx_lock);
 
 	schedule_delayed_work(&devinfo->poll_work, msecs_to_jiffies(2));
