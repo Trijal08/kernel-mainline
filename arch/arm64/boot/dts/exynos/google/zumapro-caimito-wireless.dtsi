@@ -26,3 +26,22 @@
 	device-wake-gpios = <&gph3 5 GPIO_ACTIVE_HIGH>;	/* WL_DEV_WAKE */
 	status = "okay";
 };
+
+/*
+ * Standalone platform node the Broadcom bcmdhd (dhd) driver looks up by
+ * compatible string (of_find_compatible_node) to obtain the WLAN GPIOs and the
+ * PCIe channel index. It is NOT the PCIe endpoint (that binds by PCI id under
+ * &pcie_1). WLAN_EN is owned/driven by pci-exynos for link enumeration; dhd
+ * re-requests the same pin and tolerates the request failing (it reads the pin
+ * already-high and skips re-driving). Only used when the bcmdhd driver replaces
+ * brcmfmac; harmless otherwise.
+ */
+/ {
+	bcmdhd_wlan: wlan {
+		compatible = "android,bcmdhd_wlan";
+		wl_reg_on = <&gph3 4 GPIO_ACTIVE_HIGH>;		/* WLAN_EN (shared w/ pci-exynos) */
+		wl_host_wake = <&gpa5 3 GPIO_ACTIVE_HIGH>;	/* WL_HOST_WAKE (OOB D2H) */
+		ch-num = <1>;					/* PCIe HSI2 channel */
+		status = "okay";
+	};
+};

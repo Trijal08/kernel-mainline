@@ -5,6 +5,9 @@
 #ifndef BRCMFMAC_COMMONRING_H
 #define BRCMFMAC_COMMONRING_H
 
+/* D2H DMA-completion sync epoch (matches the firmware bcmmsgbuf.h). */
+#define BRCMF_D2H_EPOCH_MODULO		253
+#define BRCMF_D2H_EPOCH_INIT_VAL	(BRCMF_D2H_EPOCH_MODULO + 1)
 
 struct brcmf_commonring {
 	u16 r_ptr;
@@ -12,6 +15,13 @@ struct brcmf_commonring {
 	u16 f_ptr;
 	u16 depth;
 	u16 item_len;
+	/* D2H DMA-completion sync (XORCSUM/SEQNUM): per-ring expected epoch. The
+	 * firmware stamps each completion's cmn_msg_hdr epoch byte with
+	 * seqnum % BRCMF_D2H_EPOCH_MODULO once the whole message has DMA'd; the host
+	 * waits for it before consuming so a completion-index update that races
+	 * ahead of the message DMA cannot be read torn. Initialised to
+	 * BRCMF_D2H_EPOCH_INIT_VAL and advanced once per consumed D2H message. */
+	u16 seqnum;
 
 	void *buf_addr;
 

@@ -11,6 +11,8 @@
 #include <linux/types.h>
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
+#include <linux/moduleparam.h>
+#include <linux/delay.h>
 
 #include <brcmu_utils.h>
 #include <brcmu_wifi.h>
@@ -24,6 +26,11 @@
 #include "bus.h"
 #include "tracepoint.h"
 
+
+static int brcmf_rxbufpost_max;
+module_param_named(rxbufpost_max, brcmf_rxbufpost_max, int, 0644);
+MODULE_PARM_DESC(rxbufpost_max,
+		 "Cap on posted RX buffers (0=firmware default). Lower frees the dongle lbuf pool under sustained RX.");
 
 #define MSGBUF_IOCTL_RESP_TIMEOUT		msecs_to_jiffies(2000)
 
@@ -105,7 +112,7 @@
 
 #define BRCMF_MSGBUF_DELAY_TXWORKER_THRS	96
 #define BRCMF_MSGBUF_TRICKLE_TXWORKER_THRS	32
-#define BRCMF_MSGBUF_UPDATE_RX_PTR_THRS		48
+#define BRCMF_MSGBUF_UPDATE_RX_PTR_THRS		8
 
 #define BRCMF_MAX_TXSTATUS_WAIT_RETRIES		10
 
@@ -1460,6 +1467,114 @@ static void brcmf_msgbuf_process_msgtype(struct brcmf_msgbuf *msgbuf, void *buf)
 }
 
 
+/* D2H completion "DMA-landed" sync -- the per-completion epoch/XORCSUM wait the
+ * vendor DHD does on every D2H completion (brcmfmac historically did none). On
+ * this coherent-DMA SoC the completion write-index can still be observed before
+ * the item payload DMA lands (two unordered device DMA writes), so consuming the
+ * item the instant the index moves can read a torn completion (stale pktid/len),
+ * free the wrong rx buffer, and diverge host/firmware rx-buffer accounting until
+ * the firmware parks its RX DMA -- the sustained-download wedge. */
+static int brcmf_d2h_sync;
+module_param_named(d2h_sync, brcmf_d2h_sync, int, 0644);
+MODULE_PARM_DESC(d2h_sync, "D2H completion DMA-landed wait: 0=off (default), 1=on (wait; drop a never-landing item), 2=diagnostic (wait+count, never drop). Set at module load.");
+
+/* Diagnostic tallies (d2h_sync>=1): completions valid on the first read (clean),
+ * valid only after spinning for the item DMA (torn-recovered), or never valid
+ * within the retry budget (stuck = a genuinely torn/lost item). */
+static atomic_t brcmf_d2h_clean = ATOMIC_INIT(0);
+static atomic_t brcmf_d2h_torn = ATOMIC_INIT(0);
+static atomic_t brcmf_d2h_stuck = ATOMIC_INIT(0);
+
+/* Retry budget for the D2H completion-sync wait: the torn message normally
+ * lands within a few relax cycles; the stepped udelay covers the rare case where
+ * another bus master is holding the DDR port (matches the vendor DHD tunables). */
+#define BRCMF_D2H_SYNC_TRIES	512
+#define BRCMF_D2H_SYNC_STEPS	5
+
+static u32 brcmf_msgbuf_xor32(const void *buf, int nwords)
+{
+	const volatile __le32 *w = buf;
+	u32 x = 0;
+
+	while (nwords-- > 0) {
+		__le32 v = *w++;
+
+		x ^= le32_to_cpu(v);
+	}
+	return x;
+}
+
+/* Wait for a D2H completion's item DMA to fully land before it is consumed.
+ *
+ * The BCM4390 firmware advertises D2H_SYNC_XORCSUM: for every completion it
+ * stamps the cmn_msg_hdr epoch byte (offset 3) with seqnum % 253 and sets the
+ * item's last word so the 32-bit XOR over the whole item is zero -- but only
+ * after the entire message has DMA'd into host memory. The completion
+ * write-index update can be observed before that item DMA lands (two separate,
+ * unordered device DMA writes -- true even on coherent memory), so consuming the
+ * item the instant the index moves reads a torn, half-written completion (wrong
+ * msg_type / pktid / length). The vendor DHD (dhd_prot_d2h_sync_xorcsum) always
+ * waits for the epoch+XOR to validate; brcmfmac never did. dma_rmb() each spin
+ * so the CPU re-observes the dongle's writes in order (the earlier attempt used
+ * a bare cpu_relax(), which on this SoC never re-saw the landed item -> it
+ * livelocked on VALID completions and dropped them, which is why enabling it
+ * made the wedge worse).
+ *
+ * Returns 0 = clean (valid on the first read), 1 = torn-but-recovered (valid
+ * after spinning), -1 = stuck (never valid within the budget). ring->seqnum is
+ * advanced exactly once on every path so the per-ring epoch stays lockstep with
+ * the dongle.
+ */
+static int brcmf_msgbuf_d2h_sync(struct brcmf_commonring *ring, void *msg)
+{
+	u8 want = ring->seqnum % BRCMF_D2H_EPOCH_MODULO;
+	int nwords = ring->item_len / sizeof(u32);
+	const volatile u8 *hdr = msg;
+	u32 step, tries;
+
+	if (brcmf_d2h_sync == 2) {
+		static u32 diag_tick;
+
+		if ((++diag_tick & 0xffff) == 0)
+			pr_info("brcmfmac: D2H diag clean=%d torn=%d stuck=%d\n",
+				atomic_read(&brcmf_d2h_clean),
+				atomic_read(&brcmf_d2h_torn),
+				atomic_read(&brcmf_d2h_stuck));
+	}
+
+	for (step = 1; step <= BRCMF_D2H_SYNC_STEPS; step++) {
+		for (tries = 0; tries < BRCMF_D2H_SYNC_TRIES; tries++) {
+			/* observe the dongle's coherent item DMA in order */
+			dma_rmb();
+			/* epoch lands first; only then is the XOR meaningful */
+			if (hdr[3] == want &&
+			    brcmf_msgbuf_xor32(msg, nwords) == 0) {
+				ring->seqnum++;
+				if (step == 1 && tries == 0) {
+					atomic_inc(&brcmf_d2h_clean);
+					return 0;
+				}
+				atomic_inc(&brcmf_d2h_torn);
+				return 1;
+			}
+			cpu_relax();
+		}
+		udelay(step * 100);
+	}
+	/* Stuck. Dump enough to tell a real torn DMA (garbage msgtype, nonzero
+	 * xor) apart from an epoch/seqnum desync (valid msgtype, epoch off by a
+	 * fixed delta). */
+	atomic_inc(&brcmf_d2h_stuck);
+	pr_err_ratelimited("brcmfmac: D2H sync stuck itemlen=%u want_epoch=%u got_epoch=%u msgtype=0x%02x xor=0x%08x seqnum=%u clean=%d torn=%d stuck=%d\n",
+			   ring->item_len, want, hdr[3], hdr[0],
+			   brcmf_msgbuf_xor32(msg, nwords), ring->seqnum,
+			   atomic_read(&brcmf_d2h_clean),
+			   atomic_read(&brcmf_d2h_torn),
+			   atomic_read(&brcmf_d2h_stuck));
+	ring->seqnum++;
+	return -1;
+}
+
 static void brcmf_msgbuf_process_rx(struct brcmf_msgbuf *msgbuf,
 				    struct brcmf_commonring *commonring)
 {
@@ -1474,8 +1589,21 @@ again:
 
 	processed = 0;
 	while (count) {
-		brcmf_msgbuf_process_msgtype(msgbuf,
-					     buf + msgbuf->rx_dataoffset);
+		if (!brcmf_d2h_sync) {
+			/* sync off (default): consume the instant the index moves */
+			brcmf_msgbuf_process_msgtype(msgbuf,
+						     buf + msgbuf->rx_dataoffset);
+		} else {
+			int st = brcmf_msgbuf_d2h_sync(commonring, buf);
+
+			/* d2h_sync=1: a stuck item (st<0) never fully landed --
+			 * drop it so a half-written pktid is never consumed
+			 * (seqnum was already advanced inside the sync).
+			 * d2h_sync=2: diagnostic -- always process, just tally. */
+			if (st >= 0 || brcmf_d2h_sync == 2)
+				brcmf_msgbuf_process_msgtype(msgbuf,
+						     buf + msgbuf->rx_dataoffset);
+		}
 		buf += brcmf_commonring_len_item(commonring);
 		processed++;
 		if (processed == BRCMF_MSGBUF_UPDATE_RX_PTR_THRS) {
@@ -1762,6 +1890,16 @@ int brcmf_proto_msgbuf_attach(struct brcmf_pub *drvr)
 
 	msgbuf->rx_dataoffset = if_msgbuf->rx_dataoffset;
 	msgbuf->max_rxbufpost = if_msgbuf->max_rxbufpost;
+
+	/* The dongle holds an lbuf from its shared pool for every RX buffer the
+	 * host posts. This firmware advertises ~6783, which pins most of the pool
+	 * and leaves too little for in-flight RX/reorder + TX ACKs under sustained
+	 * download -- the pool starves and the datapath silently wedges. Cap the
+	 * posted count (module param) to hand the pool back; the 2ms poll worker
+	 * reposts fast enough that a smaller ring does not drain empty. */
+	if (brcmf_rxbufpost_max > 0 &&
+	    msgbuf->max_rxbufpost > (u32)brcmf_rxbufpost_max)
+		msgbuf->max_rxbufpost = brcmf_rxbufpost_max;
 
 	msgbuf->max_ioctlrespbuf = BRCMF_MSGBUF_MAX_IOCTLRESPBUF_POST;
 	msgbuf->max_eventbuf = BRCMF_MSGBUF_MAX_EVENTBUF_POST;
