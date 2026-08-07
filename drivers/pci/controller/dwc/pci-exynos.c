@@ -118,9 +118,30 @@
 #define   GEN3_EQ_OFF			0x12000	/* skip Gen3 EQ phases 2/3 */
 /* PMU PCIE_PHY control bit set during link bring-up */
 #define PCIE_ZUMA_PMU_PHY_CTRL		BIT(10)
-/* Auxiliary-clock frequency (drives the LTSSM timers) */
+/*
+ * NOTE on the retired "TCXO always-on" theory for the Wi-Fi L1.2 exit wedge:
+ * the PMU 0x3C10 (mask 0x40C) + HSI2-CMU 0x14400800 BIT(28) writes come from
+ * the gs101/gs201 driver (downstream dwc-whi/pcie-exynos-rc.c), where they are
+ * plain ioremap+writel -- those SFRs are NS-writable on whitechapel.  The
+ * zuma-family downstream RC (dwc/pcie-exynos-rc.c + zuma-rc-cal) never touches
+ * either register; its L1.2 refclk survival is handled in the PHY cal instead
+ * (external-PLL refclk + the "no relation of CLKREQ @L1.2" PMA writes, both
+ * already ported to phy-exynos-pcie.c).  On zumapro the stock EL3 declines
+ * every SMC form for 0x3C10/0x14400800 (plain WRITE, atomic set-bits alias,
+ * and PRIV_REG RMW option 2 all return -22), which is consistent: no zuma
+ * downstream code path ever needs them.  Do not resurrect this experiment.
+ */
+/*
+ * Auxiliary-clock frequency: the DWC core converts the spec'd absolute L1.2
+ * substate times (TPowerOn, T_L1.2, TCommon) into aux-clock cycles using this
+ * value, so it MUST match the real aux clock or L1.2 exit mis-times and the
+ * PHY is not ready on wake (link parks in recovery, EP reads back 00:.. MAC).
+ * Downstream (the pristine config) programs 26MHz unconditionally for every
+ * channel -- match it exactly.  24MHz here made the WiFi L1.2 exit wedge.
+ */
 #define PCIE_AUX_CLK_FREQ_OFF		0xb40
 #define PCIE_AUX_CLK_FREQ_24MHZ		0x18
+#define PCIE_AUX_CLK_FREQ_26MHZ		0x1a
 
 struct exynos_pcie;
 
@@ -157,6 +178,13 @@ struct exynos_pcie {
 	u32				saved_msi_mask;
 	u32				saved_msi_addr_lo;
 	u32				saved_msi_addr_hi;
+	/* Wi-Fi (BCM4390) L1SS arm state + SW L1-exit serialization -- the
+	 * downstream pair l1ss_ctrl_id_state / pcie_l1_exit_lock collapsed to
+	 * one lock (enable/disable/l1_exit never nest). */
+	spinlock_t			wifi_l1ss_lock;
+	bool				wifi_l1ss_armed;
+	/* wifi runtime-relink state (mirrors cp_phy_off for CH1) */
+	bool				wifi_phy_off;
 };
 
 static void exynos_pcie_writel(void __iomem *base, u32 val, u32 reg)
@@ -507,13 +535,18 @@ static int exynos_zuma_pcie_start_link(struct dw_pcie *pci)
 			   PCIE_ZUMA_DBI_L1_EXIT_DISABLE);
 
 	/*
-	 * Tell the controller its real auxiliary-clock rate (24.576MHz
-	 * oscclk) so the LTSSM timers are calibrated correctly. The vendor
-	 * value of 26MHz is for the OOT's 26MHz aux clock and miscalibrates
-	 * detection on this 24.576MHz mainline clock.
+	 * Auxiliary-clock frequency.  This register ONLY feeds the L1.2
+	 * entry/exit aux-clock cycle counters (T_POWER_ON etc.); it does NOT
+	 * affect Detect/Polling/L0 link training, so an earlier "24MHz fixes
+	 * detection" note was mistaken.  Program 26MHz to match downstream (the
+	 * pristine config) exactly: with a too-low value the L1.2 exit timers
+	 * fire early, the WiFi PHY is not ready on wake, the link parks in
+	 * recovery and the endpoint reads back a 00:.. MAC.  26MHz is also the
+	 * strictly safer direction (longer T_POWER_ON = more PHY settling margin
+	 * even if the real aux clock is the 24.576MHz oscclk).
 	 */
 	dw_pcie_dbi_ro_wr_en(pci);
-	dw_pcie_writel_dbi(pci, PCIE_AUX_CLK_FREQ_OFF, PCIE_AUX_CLK_FREQ_24MHZ);
+	dw_pcie_writel_dbi(pci, PCIE_AUX_CLK_FREQ_OFF, PCIE_AUX_CLK_FREQ_26MHZ);
 
 	/*
 	 * Do not advertise ASPM L1 on this link. Reliable L1 exit on the
@@ -705,6 +738,7 @@ static int exynos_pcie_probe(struct platform_device *pdev)
 
 	ep->pci.dev = dev;
 	ep->pci.ops = ep->drvdata->dw_pcie_ops;
+	spin_lock_init(&ep->wifi_l1ss_lock);
 
 	ep->phy = devm_of_phy_get(dev, np, NULL);
 	if (IS_ERR(ep->phy))
@@ -1270,9 +1304,16 @@ int zumapro_pcie_modem_link_up(struct device *rc_dev)
 					   PCIE_ZUMA_IRQ2_EN);
 		}
 
-		/* Gen3 EQ off: this PHY trains Gen3 without EQ phases 2/3. */
+		/* Gen3 EQ off + aux-clk 26MHz: the controller soft-reset wiped
+		 * both.  0xb40 clocks the L1SS substate timers -- with it stale
+		 * every armed link wedges its L1.2 exit in RCVRY_LOCK (the
+		 * known 24-vs-26MHz wedge; the boot-path write in start_link
+		 * does not survive the relink).  Downstream programs 26MHz
+		 * unconditionally on every channel, so both relink loops get it. */
 		dw_pcie_dbi_ro_wr_en(pci);
 		dw_pcie_writel_dbi(pci, PCIE_GEN3_RELATED, GEN3_EQ_OFF);
+		dw_pcie_writel_dbi(pci, PCIE_AUX_CLK_FREQ_OFF,
+				   PCIE_AUX_CLK_FREQ_26MHZ);
 		dw_pcie_dbi_ro_wr_dis(pci);
 
 		exynos_pcie_writel(pci->elbi_base, LTSSM_ENABLE,
@@ -1329,6 +1370,563 @@ int zumapro_pcie_modem_link_up(struct device *rc_dev)
 	return 0;
 }
 EXPORT_SYMBOL_GPL(zumapro_pcie_modem_link_up);
+
+/*
+ * Wi-Fi (BCM4390) runtime link down/up -- the real (downstream-shaped) pair,
+ * replacing the earlier passive/no-op stubs.  Downstream dhd routes BOTH the
+ * D3 system-suspend path and the WLAN power-off path through
+ * exynos_pcie_pm_suspend() -> rc_poweroff(): orderly PME_Turn_Off to L2, PERST
+ * asserted, LTSSM stopped, controller soft-reset, PHY powered down -- and
+ * rebuilds everything in rc_poweron() on the way back.  WL_REG_ON (not PERST)
+ * is what keeps the BCM4390's firmware alive, so the teardown is safe in both
+ * paths.
+ *
+ * WHY the passive design had to go: it left the RC live and armed while WBRC
+ * yanked WL_REG_ON.  Unarmed (LTR-only) that degrades to Detect and the LTSSM
+ * re-trains on its own -- the bring-up behavior the old comment relied on.
+ * With ASPM L1/L1.2 armed (task #20) the power yank drops the link from L1,
+ * and with LINKDOWN_RST_MANUAL set this controller does NOT self-recover from
+ * a link-down event (the recovery IRQ is task #19): the RC stays poisoned and
+ * every later WBRC cycle fails in ~200ms until reboot (observed Aug 6).  The
+ * old "poking LTSSM mid-Detect parks the link" observation was about a LIGHT
+ * bounce; the modem relink loop below-ported here re-runs the FULL PHY re-cal
+ * per attempt, which is exactly what makes driving the LTSSM safe.
+ *
+ * These operate on the Wi-Fi RC instance selected by rc_dev; ELBI stays
+ * reachable regardless of link state.
+ */
+int zumapro_pcie_wifi_link_up(struct device *rc_dev)
+{
+	struct exynos_pcie *ep = zumapro_pcie_from_dev(rc_dev);
+	struct dw_pcie *pci;
+	int ret = -ETIMEDOUT, try;
+	u32 val;
+
+	if (!ep)
+		return -ENODEV;
+	pci = &ep->pci;
+
+	/*
+	 * Fast path (downstream rc_poweron's STATE_LINK_UP short-circuit): the
+	 * link is already trained -- the boot-time link at first WLAN-on, or a
+	 * WBRC cycle the LTSSM already re-detected.  Preserves the proven
+	 * bring-up flow untouched.
+	 */
+	val = exynos_pcie_readl(pci->elbi_base, PCIE_ZUMA_RDLH_LINKUP) &
+	      LTSSM_STATE_MASK;
+	if (!ep->wifi_phy_off &&
+	    val >= LTSSM_STATE_RCVRY_LOCK && val <= LTSSM_STATE_L1_IDLE)
+		return 0;
+
+	/*
+	 * Full relink, the modem establish_link loop with Wi-Fi parameters (x1;
+	 * no Gen3 gate -- the BCM4390's boot state doesn't hold IPC hostage to
+	 * link speed the way the CP does).  See the modem loop's comment for
+	 * why every attempt re-runs the complete PHY re-cal: a light retry
+	 * parks the LTSSM in Polling/PRE_DETECT_QUIET.
+	 */
+	for (try = 0; try < PCIE_MODEM_RELINK_RETRIES; try++) {
+		gpiod_set_value_cansleep(ep->perst_gpio, 0);
+		usleep_range(1000, 2000);
+
+		/* link_down() already parked the clock + PHY on the first pass. */
+		if (!ep->wifi_phy_off) {
+			exynos_pcie_phy_safe_clk(ep->phy, true);
+			phy_power_off(ep->phy);
+		}
+		ep->wifi_phy_off = false;
+
+		phy_exit(ep->phy);	/* drop init count so phy_init re-runs */
+		phy_reset(ep->phy);	/* un-isolate PHY (PMU), re-lock clk */
+
+		regmap_update_bits(ep->pmureg, ep->pmu_offset,
+				   PCIE_ZUMA_PMU_PHY_CTRL,
+				   PCIE_ZUMA_PMU_PHY_CTRL);
+
+		exynos_zuma_assert_pma_reset(ep);
+		phy_init(ep->phy);	/* re-write PMA/PCS config tables */
+		exynos_zuma_release_pma_reset(ep);
+		ret = phy_power_on(ep->phy);
+		if (ret)
+			return ret;
+		phy_calibrate(ep->phy);
+
+		exynos_zuma_controller_reset_pulse(ep);
+		exynos_zuma_config_elbi(ep);
+
+		gpiod_set_value_cansleep(ep->perst_gpio, 1);
+		usleep_range(PCIE_PERST_DELAY_US, PCIE_PERST_DELAY_US + 2000);
+
+		dw_pcie_setup_rc(&pci->pp);
+
+		/* Restore the integrated-MSI receiver the controller reset
+		 * zeroed (link_down snapshot); setup_rc does not re-arm it. */
+		if (ep->msi_saved) {
+			dw_pcie_writel_dbi(pci, PCIE_MSI_ADDR_LO,
+					   ep->saved_msi_addr_lo);
+			dw_pcie_writel_dbi(pci, PCIE_MSI_ADDR_HI,
+					   ep->saved_msi_addr_hi);
+			dw_pcie_writel_dbi(pci, PCIE_MSI_INTR0_ENABLE,
+					   ep->saved_msi_enable);
+			dw_pcie_writel_dbi(pci, PCIE_MSI_INTR0_MASK,
+					   ep->saved_msi_mask);
+		}
+
+		/* setup_rc reset the RC's integrated-MSI summary routing. */
+		if (IS_ENABLED(CONFIG_PCI_MSI)) {
+			u32 v = exynos_pcie_readl(pci->elbi_base,
+						  PCIE_ZUMA_IRQ2_EN);
+
+			exynos_pcie_writel(pci->elbi_base, v | PCIE_ZUMA_IRQ2_MSI,
+					   PCIE_ZUMA_IRQ2_EN);
+		}
+
+		/* Gen3 EQ off + aux-clk 26MHz: the controller soft-reset wiped
+		 * both.  0xb40 clocks the L1SS substate timers -- with it stale
+		 * every armed link wedges its L1.2 exit in RCVRY_LOCK (the
+		 * known 24-vs-26MHz wedge; the boot-path write in start_link
+		 * does not survive the relink).  Downstream programs 26MHz
+		 * unconditionally on every channel, so both relink loops get it. */
+		dw_pcie_dbi_ro_wr_en(pci);
+		dw_pcie_writel_dbi(pci, PCIE_GEN3_RELATED, GEN3_EQ_OFF);
+		dw_pcie_writel_dbi(pci, PCIE_AUX_CLK_FREQ_OFF,
+				   PCIE_AUX_CLK_FREQ_26MHZ);
+		dw_pcie_dbi_ro_wr_dis(pci);
+
+		exynos_pcie_writel(pci->elbi_base, LTSSM_ENABLE,
+				   PCIE_ZUMA_APP_LTSSM_ENABLE);
+		usleep_range(1000, 1500);
+
+		ret = exynos_zuma_modem_wait_link(ep);
+		if (!ret)
+			break;
+		dev_warn(pci->dev,
+			 "wifi relink attempt %d/%d failed (%d, ltssm %#x)\n",
+			 try + 1, PCIE_MODEM_RELINK_RETRIES, ret,
+			 exynos_pcie_readl(pci->elbi_base,
+					   PCIE_ZUMA_RDLH_LINKUP) &
+			 LTSSM_STATE_MASK);
+	}
+
+	if (ret) {
+		/* Park the PHY clock on the safe OSC so the RC stays touchable. */
+		exynos_pcie_phy_safe_clk(ep->phy, true);
+		return ret;
+	}
+
+	/* Upshift the fresh Gen1 link to Gen3 (logs the final speed). */
+	exynos_zuma_pcie_gen3(pci);
+	exynos_pcie_writel(pci->elbi_base, 0, PCIE_ZUMA_APP_XFER_PENDING);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(zumapro_pcie_wifi_link_up);
+
+int zumapro_pcie_wifi_link_down(struct device *rc_dev)
+{
+	struct exynos_pcie *ep = zumapro_pcie_from_dev(rc_dev);
+	void __iomem *elbi;
+	unsigned long flags;
+	u32 val, mode;
+	int ret;
+
+	if (!ep)
+		return -ENODEV;
+	if (ep->wifi_phy_off)		/* already torn down -- idempotent */
+		return 0;
+	elbi = ep->pci.elbi_base;
+
+	/*
+	 * Bookkeeping disarm: the soft reset below wipes the RC-side L1SS arm
+	 * state and dhd re-arms only after the next firmware download (its
+	 * JIRA SWWLAN-139454 rule), so the armed flag must drop with the link.
+	 */
+	spin_lock_irqsave(&ep->wifi_l1ss_lock, flags);
+	ep->wifi_l1ss_armed = false;
+	spin_unlock_irqrestore(&ep->wifi_l1ss_lock, flags);
+
+	/*
+	 * Orderly L2 power-down BEFORE PERST (downstream
+	 * exynos_pcie_rc_send_pme_turn_off): only while the link is up; ELBI
+	 * access is safe -- the EP still drives CLKREQ#.  Proceed on timeout
+	 * (like downstream) but log the reached state.
+	 */
+	val = exynos_pcie_readl(elbi, PCIE_ZUMA_RDLH_LINKUP) & LTSSM_STATE_MASK;
+	dev_info(ep->pci.dev, "wifi link_down: entry ltssm %#x\n", val);
+	if (val >= LTSSM_STATE_RCVRY_LOCK && val <= LTSSM_STATE_L1_IDLE) {
+		/* PCIE_IRQ_PULSE is write-1-to-clear; clear stale PM_TO_ACK. */
+		val = exynos_pcie_readl(elbi, PCIE_IRQ_PULSE);
+		exynos_pcie_writel(elbi, val, PCIE_IRQ_PULSE);
+
+		exynos_pcie_writel(elbi, 1, PCIE_APP_REQ_EXIT_L1);
+		mode = exynos_pcie_readl(elbi, PCIE_ZUMA_APP_REQ_EXIT_L1);
+		mode &= ~APP_REQ_EXIT_L1_MODE;
+		mode |= L1_REQ_NAK_CTRL_MASTER;
+		exynos_pcie_writel(elbi, mode, PCIE_ZUMA_APP_REQ_EXIT_L1);
+
+		exynos_pcie_writel(elbi, 1, PCIE_XMIT_PME_TURNOFF);
+		ret = readl_poll_timeout(elbi + PCIE_IRQ_PULSE, val,
+					 val & IRQ_RADM_PM_TO_ACK,
+					 PCIE_L2_ENTER_WAIT_STEP_US,
+					 PCIE_L2_ENTER_WAIT_US);
+		if (ret)
+			dev_warn(ep->pci.dev,
+				 "no PM_TO_ACK from BCM4390 (irq %#x)\n", val);
+		udelay(10);
+		exynos_pcie_writel(elbi, 0, PCIE_XMIT_PME_TURNOFF);
+
+		ret = readl_poll_timeout(elbi + PCIE_ZUMA_RDLH_LINKUP, val,
+					 (val & LTSSM_STATE_MASK) ==
+					 LTSSM_STATE_L2_IDLE,
+					 PCIE_L2_ENTER_WAIT_STEP_US,
+					 PCIE_L2_ENTER_WAIT_US);
+		if (ret) {
+			dev_info(ep->pci.dev,
+				 "wifi link_down: did NOT reach L2_IDLE (ltssm %#x)\n",
+				 val & LTSSM_STATE_MASK);
+			zumapro_pcie_ltssm_samples(ep, "wifi link_down");
+		} else {
+			dev_info(ep->pci.dev, "wifi link_down: reached L2_IDLE\n");
+		}
+	}
+
+	/* Snapshot the integrated-MSI receiver before the reset zeroes it. */
+	ep->saved_msi_addr_lo = dw_pcie_readl_dbi(&ep->pci, PCIE_MSI_ADDR_LO);
+	ep->saved_msi_addr_hi = dw_pcie_readl_dbi(&ep->pci, PCIE_MSI_ADDR_HI);
+	ep->saved_msi_enable = dw_pcie_readl_dbi(&ep->pci, PCIE_MSI_INTR0_ENABLE);
+	ep->saved_msi_mask = dw_pcie_readl_dbi(&ep->pci, PCIE_MSI_INTR0_MASK);
+	ep->msi_saved = true;
+
+	gpiod_set_value_cansleep(ep->perst_gpio, 0);	/* assert PERST */
+
+	/*
+	 * With the link down the EP stops driving CLKREQ#, so the external-PLL
+	 * PHY clock gates -- an ELBI access on it would stall the interconnect.
+	 * Switch the PHY sub-block clock to the safe OSC before the soft reset.
+	 */
+	exynos_pcie_phy_safe_clk(ep->phy, true);
+
+	exynos_pcie_writel(elbi, 0, PCIE_ZUMA_APP_LTSSM_ENABLE);
+
+	/* Controller soft reset: clears the (possibly armed/half-dead) MAC
+	 * state so the next link_up re-config trains cleanly. */
+	exynos_pcie_writel(elbi, SOFT_RESET_PWR_PULSE, PCIE_ZUMA_SOFT_PWR_RESET);
+	udelay(20);
+	exynos_pcie_writel(elbi, SOFT_RESET_ALL, PCIE_ZUMA_SOFT_PWR_RESET);
+
+	/* Power the PHY down (isolate) but keep it INIT'd; link_up() cycles
+	 * PHY power + PMA reset per attempt (see the modem pair). */
+	phy_power_off(ep->phy);
+	ep->wifi_phy_off = true;
+	usleep_range(1000, 2000);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(zumapro_pcie_wifi_link_down);
+
+int zumapro_pcie_wifi_link_status(struct device *rc_dev)
+{
+	struct exynos_pcie *ep = zumapro_pcie_from_dev(rc_dev);
+
+	if (!ep)
+		return 0;
+	return exynos_zuma_pcie_link_up(&ep->pci) ? 1 : 0;
+}
+EXPORT_SYMBOL_GPL(zumapro_pcie_wifi_link_status);
+
+/*
+ * Wi-Fi (BCM4390) PCIe L1SS + LTR + L1.2 enable -- a faithful port of the
+ * downstream RC driver's exynos_pcie_rc_set_l1ss() EP_BCM_WIFI branch from the
+ * ZUMA driver (google-modules .../dwc/pcie-exynos-rc.c), NOT the gs101/gs201
+ * one (.../dwc-whi/), which an earlier attempt ported by mistake.  The two
+ * differ in exactly one value: TPowerOn, 130us (whi) vs 200us (zuma), written
+ * to BOTH the RC and EP L1SS_CONTROL2.  TPowerOn is the time the link partner
+ * budgets for the PHY/refclk to return on L1.2 exit; the earlier 130us arm
+ * wedged the link on first exit (LTSSM parked in RCVRY_LOCK, EP reads 00:..)
+ * -- consistent with resuming against a PHY that wasn't ready -- and also
+ * predated the zuma PHY-cal L1.2 pieces now in phy-exynos-pcie.c (ext-PLL
+ * refclk, CLKREQ-decoupled L1.2 PMA config, 7.68us L1.2 delay) and the 26MHz
+ * aux-clk fix.  Parity note: downstream komodo does NO software L1-exit before
+ * MMIO (DHD_PCIE_L1_EXIT_DURING_IO is defined in no downstream Makefile and
+ * dhd_plat_l1_exit has zero callers) -- armed L1.2 must exit in hardware.
+ * mainline pci-exynos trains the link with ASPM-L1 cleared; this function IS
+ * the post-enumeration negotiation that turns it on.  Without it the BCM4390
+ * firmware never sees LTR active and wedges its TX path under sustained load.
+ * Run AFTER the endpoint is enumerated + firmware is up (dhd calls it via
+ * dhd_plat_l1ss_ctrl).  RC config = DBI; EP config = domain:01:00.0 config space.
+ */
+/* RC-side (DBI) L1SS registers + values (pcie-exynos-common.h) */
+#define PCIE_LINK_L1SS_CONTROL		0x19c
+#define PCIE_LINK_L1SS_CONTROL2		0x1a0
+#define PCIE_L1_SUBSTATES_OFF		0xb44
+#define PCIE_L1_SUB_VAL			0xea
+#define PORT_LINK_TCOMMON_32US		(0x20 << 8)
+#define PORT_LINK_L12_LTR_THRESHOLD	(0x40a0 << 16)
+/* L1SS enable bitfield [3:0] = { bit0 PCI-PM-L1.2, bit1 PCI-PM-L1.1,
+ * bit2 ASPM-L1.2, bit3 ASPM-L1.1 }; downstream arms all four. */
+#define PORT_LINK_L1SS_ENABLE		(0xf << 0)
+/* zuma value; the whi driver (and the failed earlier arm) uses 130us (0x69). */
+#define PORT_LINK_TPOWERON_200US	(0xa1 << 0)
+/* EP-side (BCM4390) config offsets + values */
+#define WIFI_L1SS_CONTROL		0x248
+#define WIFI_L1SS_CONTROL2		0x24c
+#define WIFI_L1SS_LTR_LATENCY		0x1b4
+#define WIFI_L1SS_LINKCTRL		0xbc
+#define WIFI_PCI_EXP_DEVCTL2		0xd4
+#define WIFI_ASPM_CONTROL_MASK		(0x3 << 0)
+#define WIFI_ASPM_L1_ENTRY_EN		(0x2 << 0)
+#define WIFI_USE_SAME_REF_CLK		(0x1 << 6)
+#define WIFI_CLK_REQ_EN			(0x1 << 8)
+#define WIFI_ALL_PM_ENABEL		(0xf << 0)
+#define WIFI_COMMON_RESTORE_TIME	(0xa << 8)
+#define MAX_NO_SNOOP_LAT_VALUE_3	(3 << 16)
+#define MAX_SNOOP_LAT_VALUE_3		(3 << 0)
+#define MAX_NO_SNOOP_LAT_SCALE_MS	(0x4 << 26)
+#define MAX_SNOOP_LAT_SCALE_MS		(0x4 << 10)
+
+/*
+ * Runtime bisect knob for the L1.2-exit wedge (RCVRY_LOCK): L1SS substate mask
+ * applied to BOTH the RC 0x19c and EP 0x248 enable fields at arm time.
+ * { bit0 PCI-PM-L1.2, bit1 PCI-PM-L1.1, bit2 ASPM-L1.2, bit3 ASPM-L1.1 }.
+ * 0xf = downstream parity.  0xa = L1.1-only (refclk stays up by design): if
+ * 0xa survives where 0xf wedges, the fault is strictly L1.2 refclk gating;
+ * if 0xa wedges too it is generic L1 exit (CLKREQ/electrical).  Writable at
+ * runtime (pci_exynos.wifi_l1ss_mask) -- takes effect at the next arm, i.e.
+ * the next WLAN off/on cycle.
+ */
+static uint wifi_l1ss_mask = 0xf;
+module_param(wifi_l1ss_mask, uint, 0644);
+MODULE_PARM_DESC(wifi_l1ss_mask,
+		 "BCM4390 L1SS substate enable mask (bit0 PM-L1.2, bit1 PM-L1.1, bit2 ASPM-L1.2, bit3 ASPM-L1.1)");
+
+/* Sample the LTSSM a few times to tell a stuck state from a cycling one. */
+static void zumapro_pcie_ltssm_samples(struct exynos_pcie *ep, const char *tag)
+{
+	void __iomem *elbi = ep->pci.elbi_base;
+	u32 s[5];
+	int i;
+
+	for (i = 0; i < 5; i++) {
+		s[i] = exynos_pcie_readl(elbi, PCIE_ZUMA_RDLH_LINKUP) &
+		       LTSSM_STATE_MASK;
+		udelay(10);
+	}
+	dev_err(ep->pci.dev, "%s: ltssm samples %#x %#x %#x %#x %#x\n",
+		tag, s[0], s[1], s[2], s[3], s[4]);
+}
+
+static struct pci_bus *zumapro_pcie_wifi_ep_bus(struct exynos_pcie *ep)
+{
+	int domain = pci_domain_nr(ep->pci.pp.bridge->bus);
+
+	return pci_find_bus(domain, 1);		/* EP at domain:01:00.0 */
+}
+
+int zumapro_pcie_wifi_l1ss_enable(struct device *rc_dev)
+{
+	struct exynos_pcie *ep = zumapro_pcie_from_dev(rc_dev);
+	unsigned int devfn = PCI_DEVFN(0, 0);
+	struct pci_bus *ep_bus;
+	unsigned long flags;
+	struct dw_pcie *pci;
+	u8 exp;
+	u32 val;
+
+	if (!ep)
+		return -ENODEV;
+	pci = &ep->pci;
+	ep_bus = zumapro_pcie_wifi_ep_bus(ep);
+	if (!ep_bus)
+		return -ENODEV;
+	exp = dw_pcie_find_capability(pci, PCI_CAP_ID_EXP);
+
+	spin_lock_irqsave(&ep->wifi_l1ss_lock, flags);
+
+	/* Defensive re-assert of the 26MHz aux-clock frequency: 0xb40 clocks
+	 * the L1SS substate timers and a wrong value wedges the L1.2 exit in
+	 * RCVRY_LOCK.  start_link writes it at boot but a runtime-relinked
+	 * controller (soft reset) comes back with the reset default -- make
+	 * the arm self-sufficient on whichever link it runs. */
+	dw_pcie_dbi_ro_wr_en(pci);
+	dw_pcie_writel_dbi(pci, PCIE_AUX_CLK_FREQ_OFF, PCIE_AUX_CLK_FREQ_26MHZ);
+	dw_pcie_dbi_ro_wr_dis(pci);
+
+	/* 1. PCIPM RC: TPowerOn 200us, TPowerOff/T_L1.2/T_PCLKACK (3/10/2 us),
+	 * LTR mechanism, then L1.2 LTR threshold 160us + TCommon (reset 0xa |
+	 * 0x20 = 42us) + L1SS enable 0xf. */
+	dw_pcie_writel_dbi(pci, PCIE_LINK_L1SS_CONTROL2,
+			   PORT_LINK_TPOWERON_200US);
+	dw_pcie_writel_dbi(pci, PCIE_L1_SUBSTATES_OFF, PCIE_L1_SUB_VAL);
+	val = dw_pcie_readl_dbi(pci, exp + PCI_EXP_DEVCTL2);
+	val |= PCI_EXP_DEVCTL2_LTR_EN;
+	dw_pcie_writel_dbi(pci, exp + PCI_EXP_DEVCTL2, val);
+	val = dw_pcie_readl_dbi(pci, PCIE_LINK_L1SS_CONTROL);
+	val |= PORT_LINK_L12_LTR_THRESHOLD | PORT_LINK_TCOMMON_32US |
+	       (wifi_l1ss_mask & PORT_LINK_L1SS_ENABLE);
+	dw_pcie_writel_dbi(pci, PCIE_LINK_L1SS_CONTROL, val);
+
+	/* 2. PCIPM EP: TPowerOn 200us, reported LTR latency 3ms/3ms, LTR
+	 * mechanism, then threshold 160us + TCommon 10us + L1SS enable 0xf. */
+	pci_bus_write_config_dword(ep_bus, devfn, WIFI_L1SS_CONTROL2,
+				   PORT_LINK_TPOWERON_200US);
+	pci_bus_write_config_dword(ep_bus, devfn, WIFI_L1SS_LTR_LATENCY,
+				   MAX_NO_SNOOP_LAT_SCALE_MS | MAX_NO_SNOOP_LAT_VALUE_3 |
+				   MAX_SNOOP_LAT_SCALE_MS | MAX_SNOOP_LAT_VALUE_3);
+	pci_bus_read_config_dword(ep_bus, devfn, WIFI_PCI_EXP_DEVCTL2, &val);
+	val |= PCI_EXP_DEVCTL2_LTR_EN;
+	pci_bus_write_config_dword(ep_bus, devfn, WIFI_PCI_EXP_DEVCTL2, val);
+	pci_bus_read_config_dword(ep_bus, devfn, WIFI_L1SS_CONTROL, &val);
+	val |= PORT_LINK_L12_LTR_THRESHOLD | WIFI_COMMON_RESTORE_TIME |
+	       (wifi_l1ss_mask & WIFI_ALL_PM_ENABEL);
+	pci_bus_write_config_dword(ep_bus, devfn, WIFI_L1SS_CONTROL, val);
+
+	/* Re-advertise ASPM L1 support in LNKCAP first: start_link cleared it
+	 * (safe baseline so enumeration never auto-arms ASPM), and the arm
+	 * below is hollow while the capability reads "no ASPM" -- the earlier
+	 * on-device "LNKCAP-re-advertise" finding.  Downstream never clears
+	 * LNKCAP, so this write has no downstream counterpart. */
+	dw_pcie_dbi_ro_wr_en(pci);
+	val = dw_pcie_readl_dbi(pci, exp + PCI_EXP_LNKCAP);
+	val |= PCI_EXP_LNKCAP_ASPM_L1;
+	dw_pcie_writel_dbi(pci, exp + PCI_EXP_LNKCAP, val);
+	dw_pcie_dbi_ro_wr_dis(pci);
+
+	/* 3. ASPM RC: common clock + ASPM L1 entry (only if an ASPM substate
+	 * is in the mask -- PM-only bisects must not arm ASPM L1). */
+	val = dw_pcie_readl_dbi(pci, exp + PCI_EXP_LNKCTL);
+	val &= ~PCI_EXP_LNKCTL_ASPMC;
+	val |= PCI_EXP_LNKCTL_CCC;
+	if (wifi_l1ss_mask & 0xc)
+		val |= PCI_EXP_LNKCTL_ASPM_L1;
+	dw_pcie_writel_dbi(pci, exp + PCI_EXP_LNKCTL, val);
+
+	/* 4. ASPM EP: CLKREQ + same refclk + ASPM L1 entry. */
+	pci_bus_read_config_dword(ep_bus, devfn, WIFI_L1SS_LINKCTRL, &val);
+	val &= ~WIFI_ASPM_CONTROL_MASK;
+	val |= WIFI_CLK_REQ_EN | WIFI_USE_SAME_REF_CLK;
+	if (wifi_l1ss_mask & 0xc)
+		val |= WIFI_ASPM_L1_ENTRY_EN;
+	pci_bus_write_config_dword(ep_bus, devfn, WIFI_L1SS_LINKCTRL, val);
+
+	ep->wifi_l1ss_armed = true;
+
+	spin_unlock_irqrestore(&ep->wifi_l1ss_lock, flags);
+
+	dev_info(pci->dev,
+		 "Wi-Fi BCM4390 L1SS %#x + LTR armed (zuma seq, TPowerOn 200us)\n",
+		 wifi_l1ss_mask & 0xf);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(zumapro_pcie_wifi_l1ss_enable);
+
+int zumapro_pcie_wifi_l1ss_disable(struct device *rc_dev)
+{
+	struct exynos_pcie *ep = zumapro_pcie_from_dev(rc_dev);
+	unsigned int devfn = PCI_DEVFN(0, 0);
+	struct pci_bus *ep_bus;
+	unsigned long flags;
+	struct dw_pcie *pci;
+	u8 exp;
+	u32 val;
+
+	if (!ep)
+		return -ENODEV;
+	pci = &ep->pci;
+	ep_bus = zumapro_pcie_wifi_ep_bus(ep);
+	if (!ep_bus)
+		return -ENODEV;
+	exp = dw_pcie_find_capability(pci, PCI_CAP_ID_EXP);
+
+	spin_lock_irqsave(&ep->wifi_l1ss_lock, flags);
+
+	/* Downstream disable order: ASPM EP -> ASPM RC -> PCIPM EP -> PCIPM RC
+	 * (exact reverse of enable, so L1 entry is off before L1SS unwinds). */
+	pci_bus_read_config_dword(ep_bus, devfn, WIFI_L1SS_LINKCTRL, &val);
+	val &= ~WIFI_ASPM_CONTROL_MASK;
+	pci_bus_write_config_dword(ep_bus, devfn, WIFI_L1SS_LINKCTRL, val);
+
+	val = dw_pcie_readl_dbi(pci, exp + PCI_EXP_LNKCTL);
+	val &= ~PCI_EXP_LNKCTL_ASPMC;
+	dw_pcie_writel_dbi(pci, exp + PCI_EXP_LNKCTL, val);
+
+	pci_bus_read_config_dword(ep_bus, devfn, WIFI_L1SS_CONTROL, &val);
+	val &= ~WIFI_ALL_PM_ENABEL;
+	pci_bus_write_config_dword(ep_bus, devfn, WIFI_L1SS_CONTROL, val);
+
+	val = dw_pcie_readl_dbi(pci, PCIE_LINK_L1SS_CONTROL);
+	val &= ~PORT_LINK_L1SS_ENABLE;
+	dw_pcie_writel_dbi(pci, PCIE_LINK_L1SS_CONTROL, val);
+
+	ep->wifi_l1ss_armed = false;
+
+	spin_unlock_irqrestore(&ep->wifi_l1ss_lock, flags);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(zumapro_pcie_wifi_l1ss_disable);
+
+/*
+ * Transient SW L1-exit -- faithful port of the zuma downstream
+ * exynos_pcie_l1_exit() (dwc/pcie-exynos-rc.c): flip the L1-exit controller to
+ * SW mode with the exit request raised, poll LTSSM to L0 (<=3ms), then hand
+ * back to HW mode.  ELBI-only, so it is safe against a link parked in L1.x
+ * (the APB side stays clocked; no config/DBI TLPs are generated).  Skipped
+ * when L1SS is not armed: the link then never leaves L0 and the dance would
+ * only perturb LTSSM (poking APP_REQ_EXIT_L1 mid-Detect parks the link -- see
+ * zumapro_pcie_wifi_link_up()).  Parity note: downstream komodo EXPORTS this
+ * but never calls it (no DHD_PCIE_L1_EXIT_DURING_IO, no dhd_plat_l1_exit
+ * callers); it is wired to dhd as a recovery/diagnostic hook, and its -EPIPE
+ * path logs the stuck LTSSM state -- the exact datum needed if an armed-0xf
+ * exit ever hangs again.
+ */
+#define MAX_L1_EXIT_TIMEOUT	300	/* x10us = 3ms, downstream value */
+
+int zumapro_pcie_wifi_l1_exit(struct device *rc_dev)
+{
+	struct exynos_pcie *ep = zumapro_pcie_from_dev(rc_dev);
+	void __iomem *elbi;
+	unsigned long flags;
+	u32 val, count = 0;
+	int ret = 0;
+
+	if (!ep)
+		return -ENODEV;
+	elbi = ep->pci.elbi_base;
+
+	spin_lock_irqsave(&ep->wifi_l1ss_lock, flags);
+
+	if (ep->wifi_l1ss_armed) {
+		/* Raise the exit request, then switch exit control to SW. */
+		exynos_pcie_writel(elbi, 1, PCIE_APP_REQ_EXIT_L1);
+		val = exynos_pcie_readl(elbi, PCIE_ZUMA_APP_REQ_EXIT_L1);
+		val &= ~APP_REQ_EXIT_L1_MODE;
+		exynos_pcie_writel(elbi, val, PCIE_ZUMA_APP_REQ_EXIT_L1);
+
+		while (count < MAX_L1_EXIT_TIMEOUT) {
+			val = exynos_pcie_readl(elbi, PCIE_ZUMA_RDLH_LINKUP) &
+			      LTSSM_STATE_MASK;
+			if (val == LTSSM_STATE_L0)
+				break;
+			count++;
+			udelay(10);
+		}
+
+		if (count >= MAX_L1_EXIT_TIMEOUT) {
+			dev_err(ep->pci.dev,
+				"l1_exit: no L0 within 3ms (ltssm %#x)\n", val);
+			zumapro_pcie_ltssm_samples(ep, "l1_exit");
+			ret = -EPIPE;
+		}
+
+		/* Back to HW exit control, drop the request. */
+		val = exynos_pcie_readl(elbi, PCIE_ZUMA_APP_REQ_EXIT_L1);
+		val |= APP_REQ_EXIT_L1_MODE;
+		exynos_pcie_writel(elbi, val, PCIE_ZUMA_APP_REQ_EXIT_L1);
+		exynos_pcie_writel(elbi, 0, PCIE_APP_REQ_EXIT_L1);
+	}
+
+	spin_unlock_irqrestore(&ep->wifi_l1ss_lock, flags);
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(zumapro_pcie_wifi_l1_exit);
 
 /*
  * Nudge AP2CP_WAKEUP so a parked CP raises CP2AP_WAKEUP and the modem driver's
