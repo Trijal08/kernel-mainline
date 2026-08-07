@@ -1084,13 +1084,25 @@ static void syna_tcm_exit_low_power(struct syna_tcm *ts)
 			dev_warn(dev, "tbn_request_bus failed: %d\n", error);
 		ts->tbn_suspended = false;
 
+		/*
+		 * Whatever state the controller is in now is AoC's doing, not
+		 * ours: it puts the part into deep sleep when it takes the bus
+		 * and reprograms it to watch for a gesture, and it may have
+		 * reset it. So do not just undo the one bit we set -- wake it,
+		 * leave gesture mode, and re-read what it says about itself.
+		 */
 		mutex_lock(&ts->io_lock);
+		error = syna_tcm_exchange(ts, TCM_CMD_EXIT_DEEP_SLEEP, NULL, 0);
+		if (error)
+			dev_warn(dev, "failed to exit deep sleep: %d\n", error);
+
 		error = syna_tcm_set_gesture_mode(ts, false);
-		if (error) {
+		if (error)
 			dev_warn(dev, "failed to exit gesture mode: %d\n", error);
-			/* Best effort: also try to leave deep sleep. */
-			syna_tcm_exchange(ts, TCM_CMD_EXIT_DEEP_SLEEP, NULL, 0);
-		}
+
+		error = syna_tcm_setup_app(ts);
+		if (error)
+			dev_warn(dev, "failed to re-read app info: %d\n", error);
 		mutex_unlock(&ts->io_lock);
 	} else {
 		mutex_lock(&ts->io_lock);
