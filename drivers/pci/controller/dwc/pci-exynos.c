@@ -1372,6 +1372,56 @@ int zumapro_pcie_modem_link_up(struct device *rc_dev)
 EXPORT_SYMBOL_GPL(zumapro_pcie_modem_link_up);
 
 /*
+ * L1SS substate mask applied to BOTH the RC 0x19c and EP 0x248 enable fields
+ * at arm time.  { bit0 PCI-PM-L1.2, bit1 PCI-PM-L1.1, bit2 ASPM-L1.2,
+ * bit3 ASPM-L1.1 }.  0xf = downstream parity; runtime-writable
+ * (pci_exynos.wifi_l1ss_mask), takes effect at the next WLAN off/on arm.
+ *
+ * DEFAULT 0 (LTR-only) -- two independently-proven blockers remain before
+ * 0xf can be the default (Aug 8 2026 on-device session, all via live
+ * register experiments over ssh):
+ *  1. The RC/PHY never re-asserts CLKREQ# for an L1.x-substate exit, and the
+ *     EP's refclk buffer is hardware-gated by the PHYSICAL line level, so
+ *     every refclk-gated substate exit dies (LTSSM RCVRY_LOCK 0xd stuck, or
+ *     link drop to CONFIG 0x5).  PROVEN by forcing the gph3-1 pad to
+ *     GPIO-output-low: with CLKREQ# electrically asserted, armed-0xf L1.2
+ *     park/exit/re-park works flawlessly (EP BAR reads + PME teardowns
+ *     reach L2_IDLE).  The MAC drives the pad push-pull (a pull-down cannot
+ *     override) and pad-as-GPIO blinds the MAC's CLKREQ sensing (posted
+ *     doorbell writes then get eaten by the SLV-NAK path), so the pad hack
+ *     is not shippable as-is; the MAC-side assert-enable remains unfound
+ *     (ruled out live: 0xC700 bit8, 0xC800 bits[6:5], PMA 0x32C, the
+ *     SAMSUNG_WIFI always-on quartet + PCS 0x8=0x3D, pwrdn_clear values --
+ *     all cold-boot defaults already match; ext-PLL stays LOCKED through
+ *     the park, 0xC734 bit2).
+ *  2. Even with the link exit fixed (pad forced), dhd_open still times out
+ *     ~5s after the arm: the BCM4390 firmware appears to engage its
+ *     deep-sleep (DS) protocol once L1SS+LTR are armed, and mainline dhd's
+ *     DS/device-wake handling is part of the unrestored defaults (task
+ *     #21).  With mask=0 dhd_open succeeds 100%.
+ */
+static uint wifi_l1ss_mask = 0x0;
+module_param(wifi_l1ss_mask, uint, 0644);
+MODULE_PARM_DESC(wifi_l1ss_mask,
+		 "BCM4390 L1SS substate enable mask (bit0 PM-L1.2, bit1 PM-L1.1, bit2 ASPM-L1.2, bit3 ASPM-L1.1)");
+
+/* Sample the LTSSM a few times to tell a stuck state from a cycling one. */
+static void zumapro_pcie_ltssm_samples(struct exynos_pcie *ep, const char *tag)
+{
+	void __iomem *elbi = ep->pci.elbi_base;
+	u32 s[5];
+	int i;
+
+	for (i = 0; i < 5; i++) {
+		s[i] = exynos_pcie_readl(elbi, PCIE_ZUMA_RDLH_LINKUP) &
+		       LTSSM_STATE_MASK;
+		udelay(10);
+	}
+	dev_err(ep->pci.dev, "%s: ltssm samples %#x %#x %#x %#x %#x\n",
+		tag, s[0], s[1], s[2], s[3], s[4]);
+}
+
+/*
  * Wi-Fi (BCM4390) runtime link down/up -- the real (downstream-shaped) pair,
  * replacing the earlier passive/no-op stubs.  Downstream dhd routes BOTH the
  * D3 system-suspend path and the WLAN power-off path through
@@ -1681,37 +1731,6 @@ EXPORT_SYMBOL_GPL(zumapro_pcie_wifi_link_status);
 #define MAX_SNOOP_LAT_VALUE_3		(3 << 0)
 #define MAX_NO_SNOOP_LAT_SCALE_MS	(0x4 << 26)
 #define MAX_SNOOP_LAT_SCALE_MS		(0x4 << 10)
-
-/*
- * Runtime bisect knob for the L1.2-exit wedge (RCVRY_LOCK): L1SS substate mask
- * applied to BOTH the RC 0x19c and EP 0x248 enable fields at arm time.
- * { bit0 PCI-PM-L1.2, bit1 PCI-PM-L1.1, bit2 ASPM-L1.2, bit3 ASPM-L1.1 }.
- * 0xf = downstream parity.  0xa = L1.1-only (refclk stays up by design): if
- * 0xa survives where 0xf wedges, the fault is strictly L1.2 refclk gating;
- * if 0xa wedges too it is generic L1 exit (CLKREQ/electrical).  Writable at
- * runtime (pci_exynos.wifi_l1ss_mask) -- takes effect at the next arm, i.e.
- * the next WLAN off/on cycle.
- */
-static uint wifi_l1ss_mask = 0xf;
-module_param(wifi_l1ss_mask, uint, 0644);
-MODULE_PARM_DESC(wifi_l1ss_mask,
-		 "BCM4390 L1SS substate enable mask (bit0 PM-L1.2, bit1 PM-L1.1, bit2 ASPM-L1.2, bit3 ASPM-L1.1)");
-
-/* Sample the LTSSM a few times to tell a stuck state from a cycling one. */
-static void zumapro_pcie_ltssm_samples(struct exynos_pcie *ep, const char *tag)
-{
-	void __iomem *elbi = ep->pci.elbi_base;
-	u32 s[5];
-	int i;
-
-	for (i = 0; i < 5; i++) {
-		s[i] = exynos_pcie_readl(elbi, PCIE_ZUMA_RDLH_LINKUP) &
-		       LTSSM_STATE_MASK;
-		udelay(10);
-	}
-	dev_err(ep->pci.dev, "%s: ltssm samples %#x %#x %#x %#x %#x\n",
-		tag, s[0], s[1], s[2], s[3], s[4]);
-}
 
 static struct pci_bus *zumapro_pcie_wifi_ep_bus(struct exynos_pcie *ep)
 {
