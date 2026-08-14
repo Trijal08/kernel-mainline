@@ -43,6 +43,17 @@ struct panthor_soc_data {
 
 	/** @asn_hash: ASN_HASH values when asn_hash_enable is true. */
 	u32 asn_hash[3];
+
+	/**
+	 * @opp_clk_names: NULL-terminated list of the clocks the OPP table
+	 * carries a rate for, in the order their rates appear in "opp-hz".
+	 *
+	 * Leave NULL on SoCs whose OPP table describes clock #0 only, which
+	 * is the default the OPP core assumes. Set it when the GPU clocks are
+	 * separately programmable domains that have to be moved together, so
+	 * every OPP names a rate for each of them.
+	 */
+	const char * const *opp_clk_names;
 };
 
 /**
