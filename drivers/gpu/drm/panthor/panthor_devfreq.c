@@ -63,15 +63,25 @@ static void panthor_devfreq_update_utilization(struct panthor_devfreq *pdevfreq)
 static int panthor_devfreq_target(struct device *dev, unsigned long *freq,
 				  u32 flags)
 {
+	struct panthor_device *ptdev = dev_get_drvdata(dev);
 	struct dev_pm_opp *opp;
 	int err;
 
 	opp = devfreq_recommended_opp(dev, freq, flags);
 	if (IS_ERR(opp))
 		return PTR_ERR(opp);
-	dev_pm_opp_put(opp);
 
-	err = dev_pm_opp_set_rate(dev, *freq);
+	/*
+	 * dev_pm_opp_set_rate() only ever drives clock #0. When the OPP table
+	 * carries a rate for more than one clock, apply the OPP itself so all
+	 * of them move together.
+	 */
+	if (ptdev->soc_data && ptdev->soc_data->opp_clk_names)
+		err = dev_pm_opp_set_opp(dev, opp);
+	else
+		err = dev_pm_opp_set_rate(dev, *freq);
+
+	dev_pm_opp_put(opp);
 
 	return err;
 }
@@ -171,6 +181,29 @@ int panthor_devfreq_init(struct panthor_device *ptdev)
 			return ret;
 		}
 
+		/*
+		 * Has to happen before the table is parsed: it is what tells
+		 * the OPP core how many rates to expect per "opp-hz".
+		 */
+		if (ptdev->soc_data && ptdev->soc_data->opp_clk_names) {
+			struct dev_pm_opp_config config = {
+				.clk_names = ptdev->soc_data->opp_clk_names,
+				/*
+				 * Required once there is more than one clock:
+				 * the OPP core has no default for setting
+				 * several, and rejects the config without it.
+				 */
+				.config_clks = dev_pm_opp_config_clks_simple,
+			};
+
+			ret = devm_pm_opp_set_config(dev, &config);
+			if (ret) {
+				if (ret != -EPROBE_DEFER)
+					DRM_DEV_ERROR(dev, "Couldn't set OPP clocks\n");
+				return ret;
+			}
+		}
+
 		ret = devm_pm_opp_of_add_table(dev);
 		if (ret)
 			return ret;
@@ -232,7 +265,7 @@ int panthor_devfreq_init(struct panthor_device *ptdev)
 	}
 
 	/* Find the fastest defined rate  */
-	opp = dev_pm_opp_find_freq_floor(dev, &freq);
+	opp = dev_pm_opp_find_freq_floor_indexed(dev, &freq, 0);
 	if (IS_ERR(opp))
 		return PTR_ERR(opp);
 	ptdev->fast_rate = freq;

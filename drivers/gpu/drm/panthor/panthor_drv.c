@@ -1881,9 +1881,18 @@ static const struct panthor_soc_data soc_data_mediatek_mt8196 = {
 	.asn_hash = { 0xb, 0xe, 0x0, },
 };
 
+/*
+ * The GPU sits on two independent DVFS domains, each with its own PLL and its
+ * own rail: "core" clocks the shader stacks and "coregroup" the top-level/L2
+ * block. The firmware that owns them moves only the one it is asked for, so
+ * both rates come from the OPP table.
+ */
+static const char * const zuma_opp_clk_names[] = { "core", "coregroup", NULL };
+
 static const struct panthor_soc_data soc_data_google_zuma = {
 	.asn_hash_enable = true,
 	.asn_hash = { 0x0036db6d, 0x005b6db6, 0x0, },
+	.opp_clk_names = zuma_opp_clk_names,
 };
 
 static const struct of_device_id dt_match[] = {
