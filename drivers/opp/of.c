@@ -1442,7 +1442,7 @@ _get_dt_power(struct device *dev, unsigned long *uW, unsigned long *kHz)
 	opp_freq = *kHz * 1000;
 
 	struct dev_pm_opp *opp __free(put_opp) =
-		dev_pm_opp_find_freq_ceil(dev, &opp_freq);
+		dev_pm_opp_find_freq_ceil_indexed(dev, &opp_freq, 0);
 
 	if (IS_ERR(opp))
 		return -EINVAL;
@@ -1495,7 +1495,7 @@ int dev_pm_opp_calc_power(struct device *dev, unsigned long *uW,
 	Hz = *kHz * 1000;
 
 	struct dev_pm_opp *opp __free(put_opp) =
-		dev_pm_opp_find_freq_ceil(dev, &Hz);
+		dev_pm_opp_find_freq_ceil_indexed(dev, &Hz, 0);
 
 	if (IS_ERR(opp))
 		return -EINVAL;
@@ -1521,7 +1521,7 @@ static bool _of_has_opp_microwatt_property(struct device *dev)
 
 	/* Check if at least one OPP has needed property */
 	struct dev_pm_opp *opp __free(put_opp) =
-		dev_pm_opp_find_freq_ceil(dev, &freq);
+		dev_pm_opp_find_freq_ceil_indexed(dev, &freq, 0);
 
 	if (IS_ERR(opp))
 		return false;
