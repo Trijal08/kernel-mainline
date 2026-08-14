@@ -151,9 +151,9 @@ static unsigned long get_voltage(struct devfreq *df, unsigned long freq)
 	unsigned long voltage;
 	struct dev_pm_opp *opp;
 
-	opp = dev_pm_opp_find_freq_exact(dev, freq, true);
+	opp = dev_pm_opp_find_freq_exact_indexed(dev, freq, 0, true);
 	if (PTR_ERR(opp) == -ERANGE)
-		opp = dev_pm_opp_find_freq_exact(dev, freq, false);
+		opp = dev_pm_opp_find_freq_exact_indexed(dev, freq, 0, false);
 
 	if (IS_ERR(opp)) {
 		dev_err_ratelimited(dev, "Failed to find OPP for frequency %lu: %ld\n",
@@ -361,7 +361,7 @@ static int devfreq_cooling_gen_tables(struct devfreq_cooling_device *dfc,
 	for (i = 0, freq = ULONG_MAX; i < num_opps; i++, freq--) {
 		struct dev_pm_opp *opp;
 
-		opp = dev_pm_opp_find_freq_floor(dev, &freq);
+		opp = dev_pm_opp_find_freq_floor_indexed(dev, &freq, 0);
 		if (IS_ERR(opp)) {
 			kfree(dfc->freq_table);
 			return PTR_ERR(opp);
