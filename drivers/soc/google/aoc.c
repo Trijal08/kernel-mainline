@@ -16,6 +16,7 @@
  * Copyright 2026 Trijal Saha <trijalsaha2012@gmail.com>
  */
 
+#include <linux/debugfs.h>
 #include <linux/delay.h>
 #include <linux/dma-mapping.h>
 #include <linux/firmware.h>
@@ -30,6 +31,7 @@
 #include <linux/of_reserved_mem.h>
 #include <linux/platform_device.h>
 #include <linux/random.h>
+#include <linux/seq_file.h>
 #include <linux/sizes.h>
 #include <linux/slab.h>
 
@@ -206,6 +208,7 @@ struct aoc_data {
 	/* The core's own console, which is the only view of what it is doing. */
 	struct aoc_service *log_svc;
 	struct delayed_work log_work;
+	struct dentry *dbgfs;		/* service-table dump */
 
 	/* Trusty channel to the GSA AOC hardware manager. */
 	struct tipc_chan *tz_chan;
@@ -1270,6 +1273,68 @@ static void aoc_ipc_selftest(struct aoc_data *aoc)
 	}
 }
 
+/*
+ * The published service table, dumped live on read.  The AOC creates services
+ * as its subsystems come up, so this is not a boot-time constant: a consumer
+ * driver (Bluetooth, say) needs to know whether its service exists yet, and
+ * whether powering the peripheral makes one appear.  One line per service:
+ *
+ *	index name type mbox
+ *
+ * This is debugfs rather than sysfs on purpose -- a sysfs show() is capped at
+ * one page, which silently truncated the tail of a 94-entry table (and the
+ * interesting entries are exactly the ones a firmware appends last).  seq_file
+ * paginates properly.
+ */
+static int aoc_services_show(struct seq_file *s, void *unused)
+{
+	static const char * const types[] = { "queue", "ring", "buffer" };
+	struct aoc_data *aoc = s->private;
+	u32 live, size, soff;
+	unsigned int i;
+
+	if (!aoc || !aoc->ipc) {
+		seq_puts(s, "AOC offline\n");
+		return 0;
+	}
+
+	/*
+	 * Re-read the control block rather than walking the table cached at
+	 * probe: the question this file exists to answer is whether the AOC
+	 * publishes a service later (when a peripheral is powered), and a
+	 * cached count can never show that.  Entries past the cached
+	 * n_services have no handle in svc_tbl yet, so they are flagged: they
+	 * would need a re-probe (or a table rebuild) before a consumer driver
+	 * could bind to them.
+	 */
+	live = cb_rd(aoc->ipc, AOC_CB_SERVICES);
+	size = cb_rd(aoc->ipc, AOC_CB_SERVICE_SIZE);
+	soff = cb_rd(aoc->ipc, AOC_CB_SERVICES_OFFSET);
+
+	seq_printf(s, "# %u services live (%u at probe), size %u, off %#x\n",
+		   live, aoc->n_services, size, soff);
+
+	if (!size || live > 256) {
+		seq_puts(s, "# implausible table; not walking it\n");
+		return 0;
+	}
+
+	for (i = 0; i < live; i++) {
+		void *hdr = (u8 *)aoc->ipc + soff + (size_t)i * size;
+		char nm[AOC_SERVICE_NAME_LEN + 1];
+		int t = svc_type(hdr);
+
+		memcpy(nm, hdr, AOC_SERVICE_NAME_LEN);
+		nm[AOC_SERVICE_NAME_LEN] = '\0';
+		seq_printf(s, "%3u %-32s %-6s %2u%s\n", i, nm,
+			   t < (int)ARRAY_SIZE(types) ? types[t] : "?",
+			   svc_mbox(hdr),
+			   i >= aoc->n_services ? "  [appeared after probe]" : "");
+	}
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(aoc_services);
+
 static int aoc_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -1364,6 +1429,10 @@ static int aoc_probe(struct platform_device *pdev)
 	aoc_request_on(aoc);
 	aoc_configure_ssmt(aoc);
 
+	aoc->dbgfs = debugfs_create_dir("aoc", NULL);
+	debugfs_create_file("services", 0444, aoc->dbgfs, aoc,
+			    &aoc_services_fops);
+
 	if (aoc_load_image(aoc, fw) == 0) {
 		dev_dbg(dev, "post-load pre-start: GSA state %d\n",
 			gsa_aoc_get_state(aoc->gsa));
@@ -1411,6 +1480,7 @@ static void aoc_remove(struct platform_device *pdev)
 {
 	struct aoc_data *aoc = platform_get_drvdata(pdev);
 
+	debugfs_remove_recursive(aoc->dbgfs);
 	cancel_delayed_work_sync(&aoc->log_work);
 	if (aoc->tz_chan) {
 		tipc_chan_shutdown(aoc->tz_chan);
@@ -1422,6 +1492,7 @@ static void aoc_remove(struct platform_device *pdev)
 	}
 	put_device(aoc->gsa);
 }
+
 
 static const struct of_device_id aoc_of_match[] = {
 	{ .compatible = "google,aoc" },
