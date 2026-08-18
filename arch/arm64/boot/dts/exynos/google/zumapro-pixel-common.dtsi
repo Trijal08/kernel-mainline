@@ -597,6 +597,13 @@
 };
 
 &serial_18 {
+	/*
+	 * Bluetooth HCI UART.  Only RXD/TXD are wired (gpa3-2/3 are the CP-PMIC
+	 * SPMI lines), but serdev unconditionally sets CRTSCTS on open, which
+	 * would arm this controller's hardware auto-flow control and gate TX on
+	 * an nCTS nothing drives.  Suppress AFC for this port.
+	 */
+	samsung,no-auto-flow-control;
 	status = "okay";
 };
 
