@@ -93,6 +93,15 @@ properties:
     $ref: /schemas/types.yaml#/definitions/uint32
     enum: [16, 64, 256]
 
+  samsung,no-auto-flow-control:
+    description:
+      Never arm the controller's hardware auto-flow control on this port, even
+      when the tty layer requests CRTSCTS. Set it when only RXD and TXD are
+      wired, so that a client which unconditionally asks for flow control (the
+      serdev bus does) cannot gate transmission on an nCTS input that no device
+      drives.
+    type: boolean
+
 required:
   - compatible
   - clocks
