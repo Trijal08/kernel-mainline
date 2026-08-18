@@ -300,6 +300,21 @@ config BT_HCIBCM203X
 	  kernel or say M to compile it as module (bcm203x).
 
 
+config BT_HCIAOC
+	tristate "HCI transport over the Google AOC coprocessor"
+	depends on GOOGLE_AOC
+	select BT_BCM
+	select FW_LOADER
+	help
+	  Bluetooth HCI transport for Google Tensor phones (zuma and later,
+	  e.g. Pixel 9), where the BCM4390 combo chip's Bluetooth controller
+	  is owned by the AOC coprocessor rather than wired to an AP UART.
+	  HCI packets are carried over an AOC IPC service; controller setup
+	  (patchram, bdaddr) uses the shared Broadcom helpers.
+
+	  Say Y here to compile support into the kernel or say M to compile it
+	  as module (hci_aoc).
+
 config BT_HCIBCM4377
 	tristate "HCI BCM4377/4378/4387/4388 PCIe driver"
 	depends on PCI

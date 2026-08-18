@@ -3756,6 +3756,61 @@ dhd_bus_check_driver_up(void)
 #define BT_BASE 0x19000000u
 #define ADDR_SIZE 4u
 
+/*
+ * Backplane access for the Bluetooth-over-PCIe HCI transport.
+ *
+ * On this combo chip the Bluetooth core has no PCIe function of its own: it
+ * sits on the chip backplane (BT_BASE 0x19000000) and the only host path to it
+ * is this driver's BAR2 window, which dhdpcie_bus_membytes() moves as needed.
+ * That is already how BT firmware is pushed (dhd_bt_fw_dwnld_blob below); an
+ * HCI transport driver needs the same primitive for the BT core's registers
+ * and mailbox, so export it rather than duplicating the window handling.
+ *
+ * The caller passes a full backplane address (BT_BASE | offset for BT core
+ * registers).  Serialisation against this driver's own BAR2 users is handled
+ * here; the PCIe link must be up, which the WLAN side owns.
+ */
+int
+bcmdhd_bt_bp_xfer(uint32 bp_addr, void *buf, uint len, bool write)
+{
+	dhd_bus_t *bus = (dhd_bus_t *)g_dhd_bus;
+	unsigned long flags = 0;
+	int ret;
+
+	if (!bus || !bus->dhd)
+		return BCME_NOTUP;
+	if (!bus->bar2)
+		return BCME_NOTFOUND;
+	if (!bus->dhd->up || bus->dhd->busstate != DHD_BUS_DATA)
+		return BCME_NOTUP;
+	if (dhd_query_bus_erros(bus->dhd))
+		return BCME_NOTUP;
+
+	/* Keep the dongle awake for the access, as the FW download path does. */
+	dhd_bt_dwnld_pwr_req(bus);
+
+	DHD_BUS_BAR2_SWITCH_LOCK(bus, flags);
+	ret = dhdpcie_bus_membytes(bus->dhd->bus, write, DHD_PCIE_MEM_BAR2,
+				   bp_addr, buf, len);
+	DHD_BUS_BAR2_SWITCH_UNLOCK(bus, flags);
+
+	dhd_bt_dwnld_pwr_req_clear(bus);
+
+	return ret;
+}
+EXPORT_SYMBOL(bcmdhd_bt_bp_xfer);
+
+/* Whether the WLAN side currently has the PCIe link up and usable. */
+bool
+bcmdhd_bt_bp_ready(void)
+{
+	dhd_bus_t *bus = (dhd_bus_t *)g_dhd_bus;
+
+	return bus && bus->dhd && bus->bar2 && bus->dhd->up &&
+	       bus->dhd->busstate == DHD_BUS_DATA;
+}
+EXPORT_SYMBOL(bcmdhd_bt_bp_ready);
+
 #ifdef BT_FW_DWNLD
 int
 dhd_bt_fw_dwnld_blob(void *wl_hdl, char *buf, size_t len)
