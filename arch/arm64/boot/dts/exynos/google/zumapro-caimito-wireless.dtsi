@@ -8,6 +8,24 @@
 
 #include <dt-bindings/gpio/gpio.h>
 
+/*
+ * Bluetooth HCI on UART18.  The BCM4390's BT controller talks H4 on this port,
+ * but the AOC coprocessor can own it too (APM USI1 is reachable from both), and
+ * the vendor stack prefers the AOC path -- its HAL config asks for
+ * SerialAocUartPort first and falls back to this UART second.  With the AOC's
+ * Bluetooth firmware not running (do not load the AOC driver), the port is the
+ * AP's and the ordinary mainline hci_uart/hci_bcm stack drives the controller.
+ */
+&serial_18 {
+	bluetooth {
+		compatible = "brcm,bcm4390-bt";
+		shutdown-gpios = <&gpn8 0 GPIO_ACTIVE_HIGH>;	  /* BT_REG_ON */
+		device-wakeup-gpios = <&gpn9 0 GPIO_ACTIVE_HIGH>; /* BT_DEV_WAKE */
+		host-wakeup-gpios = <&gpa5 6 GPIO_ACTIVE_HIGH>;	  /* BT_HOST_WAKE */
+		max-speed = <115200>;
+	};
+};
+
 /* PCIe channel 1 (HSI2) connects to the Broadcom BCM4390 Wi-Fi. */
 &pcie_1_phy {
 	status = "okay";
@@ -43,5 +61,33 @@
 		wl_host_wake = <&gpa5 3 GPIO_ACTIVE_HIGH>;	/* WL_HOST_WAKE (OOB D2H) */
 		ch-num = <1>;					/* PCIe HSI2 channel */
 		status = "okay";
+	};
+
+	/*
+	 * Bluetooth half of the same BCM4390.  Unlike Wi-Fi (PCIe, AP-direct)
+	 * the BT controller's HCI UART lands on the AOC, not the AP: the AOC
+	 * firmware carries platform_bt_uart_driver.cc / uart_[UART_MAP_BT] and
+	 * a Pigweed "btproxy" that relays H4 to the host, so the transport is
+	 * hci_aoc over the AOC's chre_bt_offload_* ring services and the AP
+	 * owns only the power/wake pins.  Probed on device: an AP-UART HCI
+	 * sweep (6 bauds x flow control, verified pinmux) was silent, the chip
+	 * exposes no second PCIe function, and the AOC's 94-service table has
+	 * no com.google.bt -- the offload rings are the only BT pipe.
+	 */
+	bluetooth: bluetooth {
+		compatible = "google,aoc-bluetooth";
+		aoc = <&aoc>;
+		shutdown-gpios = <&gpn8 0 GPIO_ACTIVE_HIGH>;	  /* BT_REG_ON */
+		device-wakeup-gpios = <&gpn9 0 GPIO_ACTIVE_HIGH>; /* BT_DEV_WAKE */
+		/*
+		 * Mutually exclusive with the serdev node under &serial_18
+		 * above: both claim BT_REG_ON, so enabling both makes whichever
+		 * probes second fail with -EBUSY.  The UART path is the one
+		 * built out of upstream drivers, so it is the default; enable
+		 * this instead only when driving Bluetooth through the AOC's
+		 * chre_bt_offload rings (which additionally needs the AOC's
+		 * framed ApTxHdr/AocTxHdr transport, not raw H4).
+		 */
+		status = "disabled";
 	};
 };
