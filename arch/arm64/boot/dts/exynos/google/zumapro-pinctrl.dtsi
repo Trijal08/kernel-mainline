@@ -153,8 +153,16 @@
 			samsung,pin-pud = <GS101_PIN_PULL_NONE>;
 		};
 
+		/*
+		 * UART18 (APM USI1) is the Bluetooth HCI UART, and the board
+		 * wires only RXD/TXD to the controller: gpa3-2/gpa3-3 are the
+		 * CP-PMIC bit-banged SPMI lines (see the S5910 SPMI controller,
+		 * which gpiod_get()s exactly those two), so the vendor DT's
+		 * four-pin group is a template artifact -- claiming all four
+		 * here would take the SPMI pins away from the modem's PMIC.
+		 */
 		uart18_bus: uart18-bus-pins {
-			samsung,pins = "gpa3-0", "gpa3-1", "gpa3-2", "gpa3-3";
+			samsung,pins = "gpa3-0", "gpa3-1";
 			samsung,pin-function = <GS101_PIN_FUNC_2>;
 			samsung,pin-pud = <GS101_PIN_PULL_NONE>;
 		};

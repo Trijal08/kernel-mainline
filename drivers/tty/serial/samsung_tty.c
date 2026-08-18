@@ -152,6 +152,14 @@ struct s3c24xx_uart_port {
 	const struct s3c2410_uartcfg	*cfg;
 
 	struct s3c24xx_uart_dma		*dma;
+
+	/*
+	 * Board wires only RXD/TXD on this port, so hardware auto-flow control
+	 * must never be armed even when the tty layer asks for CRTSCTS: serdev
+	 * always sets it, and AFC would then gate TX on an nCTS that no device
+	 * drives.  See "samsung,no-auto-flow-control".
+	 */
+	bool				no_auto_flow_control;
 };
 
 static void s3c24xx_serial_tx_chars(struct s3c24xx_uart_port *ourport);
@@ -1566,7 +1574,9 @@ static void s3c24xx_serial_set_termios(struct uart_port *port,
 	port->status &= ~UPSTAT_AUTOCTS;
 
 	umcon = rd_regl(port, S3C2410_UMCON);
-	if (termios->c_cflag & CRTSCTS) {
+	if (ourport->no_auto_flow_control) {
+		umcon &= ~S3C2410_UMCOM_AFC;
+	} else if (termios->c_cflag & CRTSCTS) {
 		umcon |= S3C2410_UMCOM_AFC;
 		/* Disable RTS when RX FIFO contains 63 bytes */
 		umcon &= ~S3C2412_UMCON_AFC_8;
@@ -1981,6 +1991,9 @@ static int s3c24xx_serial_probe(struct platform_device *pdev)
 	ourport->port.iotype = ourport->info->iotype;
 
 	if (np) {
+		ourport->no_auto_flow_control =
+			of_property_read_bool(np, "samsung,no-auto-flow-control");
+
 		fifosize_prop = of_property_read_u32(np, "samsung,uart-fifosize",
 				&ourport->port.fifosize);
 
