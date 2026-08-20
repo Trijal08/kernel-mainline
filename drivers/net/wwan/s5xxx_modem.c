@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Samsung Exynos Modem 5300 PCIe boot driver (Google Tensor G4 boards).
+ * Samsung Exynos s5300/s5400 modem PCIe boot driver (Google Tensor boards).
  *
  * Bring-up scope: boots the CP to its ONLINE state and answers the shared
  * memory command handshake.  No IPC ports or data path yet -- those follow
@@ -57,70 +57,109 @@
 #include <linux/workqueue.h>
 #include <linux/wwan.h>
 
-#define S5300_PCI_VENDOR_ID		0x144d
-#define S5300_PCI_DEVICE_ID		0xa5a5
+#define S5XXX_PCI_VENDOR_ID		0x144d
+#define S5XXX_PCI_DEVICE_ID		0xa5a5
 
 /*
  * MSI capability offset in the mask ROM's config space (DesignWare EP
  * default; downstream hardcodes it, print_msi_register()).
  */
-#define S5300_ROM_MSI_CAP		0x50
+#define S5XXX_ROM_MSI_CAP		0x50
 
 /*
  * The 4K MSI carveout doubles as the boot status block (downstream
  * modem_ctrl.h struct msi_reg_type).  Offset 0 is the MSI termination
  * address; the fields above it are plain DMA targets.
  */
-#define S5300_MSI_ERR_REPORT		0x08
-#define S5300_MSI_BOOT_STAGE		0x10
-#define S5300_MSI_IMG_ADDR_LO		0x14
-#define S5300_MSI_IMG_ADDR_HI		0x18
-#define S5300_MSI_IMG_SIZE		0x1c
-#define S5300_MSI_OTP_VERSION		0x20
+#define S5XXX_MSI_ERR_REPORT		0x08
+#define S5XXX_MSI_BOOT_STAGE		0x10
+#define S5XXX_MSI_IMG_ADDR_LO		0x14
+#define S5XXX_MSI_IMG_ADDR_HI		0x18
+#define S5XXX_MSI_IMG_SIZE		0x1c
+#define S5XXX_MSI_OTP_VERSION		0x20
 /* s5400 diagnostic fields (vendor struct msi_reg_type). */
-#define S5300_MSI_FLAG_CAFE		0x30	/* CP-alive marker */
-#define S5300_MSI_SUB_BOOT_STAGE	0x34
-#define S5300_MSI_DB_LOOP_CNT		0x38
-#define S5300_MSI_DB_RECEIVED		0x3c
-#define S5300_MSI_BOOT_SIZE		0x40
+#define S5XXX_MSI_FLAG_CAFE		0x30	/* CP-alive marker */
+#define S5XXX_MSI_SUB_BOOT_STAGE	0x34
+#define S5XXX_MSI_DB_LOOP_CNT		0x38
+#define S5XXX_MSI_DB_RECEIVED		0x3c
+#define S5XXX_MSI_BOOT_SIZE		0x40
 
 /*
  * The mask ROM only tolerates MME=2 (exactly four vectors); MAIN raises
  * INIT_START on MSI message-data base 4, so the RC reserves vectors 0-3 first
  * (zumapro_pcie_reserve_msi_base) and the modem's four land at base 4.
  */
-#define S5300_MSI_VECTORS		4
+#define S5XXX_MSI_VECTORS		4
 
 /*
- * boot_stage completion masks (vendor modem_ctrl.h).  The s5400 mask ROM
- * boots in two doorbell stages: it reports BL1_DOWNLOAD_DONE (bits 0..13,
- * 0x3fff) after the first boot image and DONE (bits 0..15, 0xffff) after
- * the second.  On the s5300 0x3fff is the single-stage DONE value.
+ * boot_stage completion masks (vendor modem_ctrl.h).  The s5400 mask ROM boots
+ * in two doorbell stages: it reports BL1_DOWNLOAD_DONE (bits 0..13, 0x3fff)
+ * after the first boot image and DONE (bits 0..15, 0xffff) after the second.
+ * The s5300 ROM takes the BOOT section in one go and 0x3fff is its DONE value,
+ * so the difference is expressed per variant rather than baked in here.
  */
-#define S5300_BOOT_STAGE_BL1_DONE	0x3fff
-#define S5300_BOOT_STAGE_DONE		0xffff
+#define S5XXX_BOOT_STAGE_BL1_DONE	0x3fff
+#define S5XXX_BOOT_STAGE_DONE		0xffff
 
 /*
  * The BOOT section is split into the two doorbell images at a fixed point
  * (vendor cbd: BL1 = first 0xb400 bytes, bootloader = the remainder).  Both
  * are staged into the same boot slot; only the published size differs.
  */
-#define S5300_BL1_IMG_SIZE		0xb400
+#define S5XXX_BL1_IMG_SIZE		0xb400
+
+/*
+ * One std_dl stage of the cold-boot download.  Which sections a CP wants, and
+ * in what order, differs per device, so the list is part of the variant (the
+ * tables are further down, next to the download loop that walks them).
+ */
+struct s5xxx_dl_sec {
+	const char	*toc_name;	/* NULL = the raw TOC table */
+	const char	*fw_name;	/* non-NULL = request_firmware, variant-relative */
+	bool		verify;		/* send the CRC-verify frame (MAIN) */
+	/*
+	 * A section the CP tolerates being empty.  The stage is still sent (the
+	 * download server counts stages and will not launch MAIN until it has
+	 * them all) -- only its contents may be absent.
+	 */
+	bool		optional;
+	/*
+	 * Stream exactly the length the TOC declares, zero-padding or clamping
+	 * the staged file to it, rather than sending the file's own size.
+	 */
+	bool		pad_to_toc;
+};
+
+/*
+ * Per-device differences.  Everything else -- the MSI status block, the TOC
+ * layout, the SIT download protocol, the command handshake -- is common to the
+ * family, so a variant carries only the mask-ROM boot shape, the directory its
+ * firmware is packaged under, and the set of sections a cold CP expects.
+ */
+struct s5xxx_variant {
+	const char	*fw_dir;		/* google/<fw_dir>/... */
+	bool		two_stage_boot;	/* mask ROM wants BL1 then bootloader */
+	u32		bl1_done;	/* boot_stage after the first image */
+	u32		boot_done;	/* boot_stage once the ROM is finished */
+	size_t		bl1_size;	/* split point of the BOOT section */
+	const struct s5xxx_dl_sec *dl_secs;
+	size_t		n_dl_secs;
+};
 
 /*
  * IPC region layout (downstream create_legacy_link_device() with tegu's DT
  * offsets, and the DRAM_V1 control-message words).
  */
-#define S5300_IPC_MAGIC			0x00
-#define S5300_IPC_ACCESS		0x04
-#define S5300_IPC_Q_HEAD_TAIL		0x08	/* 8 words: FMT/RAW head+tail */
-#define S5300_IPC_Q_WORDS		8
-#define S5300_IPC_SRINFO_OFS_PTR	0x64
-#define S5300_IPC_CAP_OFS_PTR		0x70
-#define S5300_IPC_CAP_BASE		0xa0
-#define S5300_IPC_CAP_WORDS		4	/* AP cap x2, CP cap x2 */
-#define S5300_IPC_CAP_AP0		(S5300_IPC_CAP_BASE + 0x0)
-#define S5300_IPC_CAP_AP1		(S5300_IPC_CAP_BASE + 0x8)
+#define S5XXX_IPC_MAGIC			0x00
+#define S5XXX_IPC_ACCESS		0x04
+#define S5XXX_IPC_Q_HEAD_TAIL		0x08	/* 8 words: FMT/RAW head+tail */
+#define S5XXX_IPC_Q_WORDS		8
+#define S5XXX_IPC_SRINFO_OFS_PTR	0x64
+#define S5XXX_IPC_CAP_OFS_PTR		0x70
+#define S5XXX_IPC_CAP_BASE		0xa0
+#define S5XXX_IPC_CAP_WORDS		4	/* AP cap x2, CP cap x2 */
+#define S5XXX_IPC_CAP_AP0		(S5XXX_IPC_CAP_BASE + 0x0)
+#define S5XXX_IPC_CAP_AP1		(S5XXX_IPC_CAP_BASE + 0x8)
 /*
  * AP capability part 0 (downstream set_ap_capabilities()), published at
  * INIT_START before PIF_INIT_DONE.  Bit0 PKTPROC_UL, bit1 CH_EXTENSION
@@ -130,7 +169,7 @@
  * and drops the link.  So keep bit0 clear.  The gate that actually lets MAIN arm
  * its runtime IPC is the DL pktproc info region (below), NOT this word.
  */
-#define S5300_AP_CAPABILITY_0		0x2
+#define S5XXX_AP_CAPABILITY_0		0x2
 
 /*
  * Downlink pktproc info region (downstream pktproc_init(), link_rx_pktproc.c).
@@ -153,56 +192,56 @@
  * base + 0x1c00000 (the cp_rmem_1 carveout holds both).  All *_PBASE values are
  * the CP aperture view (pktproc_cp_base + offset).
  */
-#define S5300_PKTPROC_CP_BASE		0x20000000	/* pktproc_cp_base */
-#define S5300_PKTPROC_DESC_SKTBUF_SZ	16		/* sizeof(pktproc_desc_sktbuf) */
-#define S5300_PKTPROC_DESC_UL_SZ	32		/* sizeof(pktproc_desc_ul) */
+#define S5XXX_PKTPROC_CP_BASE		0x20000000	/* pktproc_cp_base */
+#define S5XXX_PKTPROC_DESC_SKTBUF_SZ	16		/* sizeof(pktproc_desc_sktbuf) */
+#define S5XXX_PKTPROC_DESC_UL_SZ	32		/* sizeof(pktproc_desc_ul) */
 
 /* DL: 4 queues, sktbuf, true_packet_size 2048, 3456 desc/queue */
-#define S5300_PKTPROC_DL_INFO_OFS	0x0
-#define S5300_PKTPROC_DL_DESC_OFS	0x1000
-#define S5300_PKTPROC_DL_BUFF_OFS	0x100000
-#define S5300_PKTPROC_DL_MAX_PKT	0x630		/* 1584 */
-#define S5300_PKTPROC_DL_TRUE_PKT	2048
-#define S5300_PKTPROC_DL_DESC_MODE	1		/* DESC_MODE_SKTBUF */
-#define S5300_PKTPROC_DL_NUM_QUEUE	4
-#define S5300_PKTPROC_DL_NUM_DESC	3456
-#define S5300_PKTPROC_DL_Q_DESC_SZ	(S5300_PKTPROC_DL_NUM_DESC * \
-					 S5300_PKTPROC_DESC_SKTBUF_SZ)	/* 0xd800 */
-#define S5300_PKTPROC_DL_Q_BUFF_SZ	(S5300_PKTPROC_DL_NUM_DESC * \
-					 S5300_PKTPROC_DL_TRUE_PKT)	/* 0x6c0000 */
+#define S5XXX_PKTPROC_DL_INFO_OFS	0x0
+#define S5XXX_PKTPROC_DL_DESC_OFS	0x1000
+#define S5XXX_PKTPROC_DL_BUFF_OFS	0x100000
+#define S5XXX_PKTPROC_DL_MAX_PKT	0x630		/* 1584 */
+#define S5XXX_PKTPROC_DL_TRUE_PKT	2048
+#define S5XXX_PKTPROC_DL_DESC_MODE	1		/* DESC_MODE_SKTBUF */
+#define S5XXX_PKTPROC_DL_NUM_QUEUE	4
+#define S5XXX_PKTPROC_DL_NUM_DESC	3456
+#define S5XXX_PKTPROC_DL_Q_DESC_SZ	(S5XXX_PKTPROC_DL_NUM_DESC * \
+					 S5XXX_PKTPROC_DESC_SKTBUF_SZ)	/* 0xd800 */
+#define S5XXX_PKTPROC_DL_Q_BUFF_SZ	(S5XXX_PKTPROC_DL_NUM_DESC * \
+					 S5XXX_PKTPROC_DL_TRUE_PKT)	/* 0x6c0000 */
 
 /* UL: 2 queues, 32-byte descriptors, into the second carveout at base+0x1c00000 */
-#define S5300_PKTPROC_UL_INFO_OFS	0x1c00000
-#define S5300_PKTPROC_UL_DESC_OFS	0x1c01000
-#define S5300_PKTPROC_UL_BUFF_OFS	0x1c90000
-#define S5300_PKTPROC_UL_MAX_PKT	2048
-#define S5300_PKTPROC_UL_NUM_QUEUE	2
-#define S5300_PKTPROC_UL_Q0_NUM_DESC	1760
-#define S5300_PKTPROC_UL_Q1_NUM_DESC	880
-#define S5300_PKTPROC_UL_Q0_MAX_PKT	1024	/* q0 (HIPRIO) buffer stride */
-#define S5300_PKTPROC_UL_TXQ		1	/* NORM queue (q1) carries PS data */
+#define S5XXX_PKTPROC_UL_INFO_OFS	0x1c00000
+#define S5XXX_PKTPROC_UL_DESC_OFS	0x1c01000
+#define S5XXX_PKTPROC_UL_BUFF_OFS	0x1c90000
+#define S5XXX_PKTPROC_UL_MAX_PKT	2048
+#define S5XXX_PKTPROC_UL_NUM_QUEUE	2
+#define S5XXX_PKTPROC_UL_Q0_NUM_DESC	1760
+#define S5XXX_PKTPROC_UL_Q1_NUM_DESC	880
+#define S5XXX_PKTPROC_UL_Q0_MAX_PKT	1024	/* q0 (HIPRIO) buffer stride */
+#define S5XXX_PKTPROC_UL_TXQ		1	/* NORM queue (q1) carries PS data */
 
 /* DL sktbuf control byte (desc byte 5): ring-boundary markers. */
-#define S5300_PKTPROC_CTRL_HEAD		0x80
-#define S5300_PKTPROC_CTRL_RINGEND	0x08
+#define S5XXX_PKTPROC_CTRL_HEAD		0x80
+#define S5XXX_PKTPROC_CTRL_RINGEND	0x08
 
 /*
  * UL descriptor: last_desc ownership (UL info word0 bit24, CP-written) and the
  * CP DMA padding the komodo DT mandates (pktproc_ul_padding_required=1).
  */
-#define S5300_PKTPROC_END_BIT_AP	0
-#define S5300_PKTPROC_UL_CP_PADDING	76
+#define S5XXX_PKTPROC_END_BIT_AP	0
+#define S5XXX_PKTPROC_UL_CP_PADDING	76
 
 /*
  * First PDP (raw-IP data) channel.  With CH_EXTENSION advertised (ap_cap bit1)
  * the CP keys PS data on the extended id EXYNOS_CH_EX_ID_PDP_0 (181); the legacy
  * id would be 1.  Keep ap_cap bit1 set or this must change.
  */
-#define S5300_CH_PDP_FIRST		0xb5
-#define S5300_IPC_AP2CP_MSG		0x800
-#define S5300_IPC_CP2AP_MSG		0x804
-#define S5300_IPC_AP2CP_STATUS		0x808
-#define S5300_IPC_CP2AP_STATUS		0x80c
+#define S5XXX_CH_PDP_FIRST		0xb5
+#define S5XXX_IPC_AP2CP_MSG		0x800
+#define S5XXX_IPC_CP2AP_MSG		0x804
+#define S5XXX_IPC_AP2CP_STATUS		0x808
+#define S5XXX_IPC_CP2AP_STATUS		0x80c
 /*
  * Handover block (downstream ap2cp_handover_block_info = <0x02 0x82c>): a
  * 161-byte struct t_handover_block_info the AP stages before BL1, carrying the
@@ -210,26 +249,26 @@
  * IMEIs and the CP signature.  MAIN reads it to configure itself; with the
  * region left zero it reaches ONLINE but never arms its runtime IPC.  Loaded
  * from firmware (device-specific: IMEIs + signature), staged in
- * s5300_init_control_messages().  cbd sends it via IOCTL_HANDOVER_BLOCK_INFO.
+ * s5xxx_init_control_messages().  cbd sends it via IOCTL_HANDOVER_BLOCK_INFO.
  */
-#define S5300_IPC_HANDOVER_OFS		0x82c
-#define S5300_HANDOVER_SIZE		161
-#define S5300_HANDOVER_FW		"google/s5400/cp_handover.bin"
+#define S5XXX_IPC_HANDOVER_OFS		0x82c
+#define S5XXX_HANDOVER_SIZE		161
+#define S5XXX_HANDOVER_FW		"cp_handover.bin"
 /*
  * The handover block is assembled at runtime rather than staged whole, so the
  * per-unit secrets never sit in an image: the HW/RF config words (bytes 0..63)
- * come from the resolved hwcfg digest (struct s5300_hwcfg), the two IMEIs (bytes
+ * come from the resolved hwcfg digest (struct s5xxx_hwcfg), the two IMEIs (bytes
  * 64..95) from the bootloader-populated /chosen/config, and the 64-byte CP
  * signature (bytes 96..159) from the cpsha file (a trailing NUL completes
  * cpsig[65]).  cp_handover.bin is the fallback if any source is unavailable.
  */
-#define S5300_HANDOVER_IMEI_OFS		64
-#define S5300_HANDOVER_CPSIG_OFS	96
-#define S5300_CPSHA_FW			"google/s5400/persist/modem/cpsha"
+#define S5XXX_HANDOVER_IMEI_OFS		64
+#define S5XXX_HANDOVER_CPSIG_OFS	96
+#define S5XXX_CPSHA_FW			"persist/modem/cpsha"
 /*
  * Everything the CP needs beyond modem.bin is staged under a fixed name and
  * prepared outside the kernel: the resolved HW/RF identifiers (hwcfg.bin, see
- * struct s5300_hwcfg), the RF calibration image picked for this unit and already
+ * struct s5xxx_hwcfg), the RF calibration image picked for this unit and already
  * decompressed (rf_cfg.bin), and the replay archive packed from the live
  * modem_userdata (replay_region.bin).  Selecting, decompressing and packing
  * those is not a kernel's job -- it just loads them.
@@ -239,9 +278,9 @@
  * replay_region.bin must repack it from the live modem_userdata, not ship a
  * build-time copy that can go stale.
  */
-#define S5300_HWCFG_FW			"google/s5400/hwcfg.bin"
-#define S5300_RF_CFG_FW			"google/s5400/rf_cfg.bin"
-#define S5300_REPLAY_FW			"google/s5400/replay_region.bin"
+#define S5XXX_HWCFG_FW			"hwcfg.bin"
+#define S5XXX_RF_CFG_FW			"rf_cfg.bin"
+#define S5XXX_REPLAY_FW			"replay_region.bin"
 
 /*
  * The GNSS receiver (a KEPLER core alongside the CP, driven over its own SPI
@@ -252,46 +291,46 @@
  * IOCTL_LOAD_GNSS_IMAGE on /dev/umts_ipc0) once the CP is up.  Do it in-kernel
  * at the same point instead, so the receiver needs no proprietary helper.
  */
-#define S5300_GNSS_FW			"google/s5400/kepler.bin"
-#define S5300_GNSS_FW_OFFSET		0x800000
-#define S5300_GNSS_FW_SIZE		0x400000
+#define S5XXX_GNSS_FW			"kepler.bin"
+#define S5XXX_GNSS_FW_OFFSET		0x800000
+#define S5XXX_GNSS_FW_SIZE		0x400000
 /*
  * ap2cp_united_status ds_det field (downstream sbi_ds_det_pos=14, mask 0x3;
  * get_ds_detect() returns 1 on this device, so the live modem reads 0x4000).
  * Load-bearing for runtime IPC: with ds_det=0 the CP never runs its deep-sleep
  * link handshake, so after MAIN loads it never takes a link-up ISR to arm its
  * runtime IPC and the FMT/RAW control queues are never drained.  With ds_det=1
- * the CP cycles CP2AP_WAKEUP; each wake relink (s5300_pm_work) re-arms MAIN's
- * IPC.  Published in s5300_init_control_messages().
+ * the CP cycles CP2AP_WAKEUP; each wake relink (s5xxx_pm_work) re-arms MAIN's
+ * IPC.  Published in s5xxx_init_control_messages().
  */
-#define S5300_IPC_DS_DET		(1u << 14)		/* 0x4000 */
+#define S5XXX_IPC_DS_DET		(1u << 14)		/* 0x4000 */
 
-#define S5300_IPC_SRINFO_OFFSET		0x400000
-#define S5300_IPC_MAGIC_VALUE		0xaa	/* SIT protocol magic */
+#define S5XXX_IPC_SRINFO_OFFSET		0x400000
+#define S5XXX_IPC_MAGIC_VALUE		0xaa	/* SIT protocol magic */
 
 /* Interrupt-word encoding (downstream link_device_memory.h). */
-#define S5300_INT_VALID			BIT(7)
-#define S5300_CMD_VALID			BIT(6)
-#define S5300_CMD_MASK			GENMASK(5, 0)
-#define S5300_CMD(x)			(S5300_INT_VALID | S5300_CMD_VALID | (x))
-#define S5300_CMD_INIT_START		0x1
-#define S5300_CMD_INIT_END		0x2
-#define S5300_CMD_CRASH_RESET		0x7
-#define S5300_CMD_PHONE_START		0x8
-#define S5300_CMD_CRASH_EXIT		0x9
-#define S5300_CMD_PIF_INIT_DONE		0xd
+#define S5XXX_INT_VALID			BIT(7)
+#define S5XXX_CMD_VALID			BIT(6)
+#define S5XXX_CMD_MASK			GENMASK(5, 0)
+#define S5XXX_CMD(x)			(S5XXX_INT_VALID | S5XXX_CMD_VALID | (x))
+#define S5XXX_CMD_INIT_START		0x1
+#define S5XXX_CMD_INIT_END		0x2
+#define S5XXX_CMD_CRASH_RESET		0x7
+#define S5XXX_CMD_PHONE_START		0x8
+#define S5XXX_CMD_CRASH_EXIT		0x9
+#define S5XXX_CMD_PIF_INIT_DONE		0xd
 
 /*
  * Runtime data-notification masks in ap2cp/cp2ap_msg (downstream
  * link_device_memory.h): once ONLINE the CP raises these (with INT_VALID, no
  * CMD_VALID) to say a ring has data, and the AP ORs them when it sends a frame.
  */
-#define S5300_INT_SEND_FMT		BIT(1)	/* MASK_SEND_FMT: FMT ring */
-#define S5300_INT_SEND_RAW		BIT(0)	/* MASK_SEND_RAW: NORM_RAW ring */
-#define S5300_INT_REQ_ACK_FMT		0x0020	/* CP wants the AP to ack an FMT rx */
-#define S5300_INT_RES_ACK_FMT		0x0008	/* AP's ack that it drained an FMT rx */
-#define S5300_INT_REQ_ACK_RAW		0x0010	/* CP wants the AP to ack a RAW rx */
-#define S5300_INT_RES_ACK_RAW		0x0004	/* AP's ack that it drained a RAW rx */
+#define S5XXX_INT_SEND_FMT		BIT(1)	/* MASK_SEND_FMT: FMT ring */
+#define S5XXX_INT_SEND_RAW		BIT(0)	/* MASK_SEND_RAW: NORM_RAW ring */
+#define S5XXX_INT_REQ_ACK_FMT		0x0020	/* CP wants the AP to ack an FMT rx */
+#define S5XXX_INT_RES_ACK_FMT		0x0008	/* AP's ack that it drained an FMT rx */
+#define S5XXX_INT_REQ_ACK_RAW		0x0010	/* CP wants the AP to ack a RAW rx */
+#define S5XXX_INT_RES_ACK_RAW		0x0004	/* AP's ack that it drained a RAW rx */
 
 /*
  * Exynos link-header channel IDs (downstream exynos-cpif.h).  Runtime control
@@ -299,15 +338,15 @@
  * in the 12-byte header: FMT (245) = umts_ipc0 RIL control on the FMT ring;
  * AT (21, EXYNOS_CH_ID_BT_DUN) = umts_router AT commands on the NORM_RAW ring.
  */
-#define S5300_CH_FMT			245
-#define S5300_CH_AT			21
+#define S5XXX_CH_FMT			245
+#define S5XXX_CH_AT			21
 /*
  * RFS file channel (EXYNOS_CH_ID_RFS_0, umts_rfs0) on the NORM_RAW ring: once
  * ONLINE the modem pulls its carrier config and persists NV over it, and rejects
  * SETUP_DATA_CALL ("no carrier config") until an AP-side RFS server answers.
  */
-#define S5300_CH_RFS			0x29
-#define S5300_RFS_MAX			SZ_4K
+#define S5XXX_CH_RFS			0x29
+#define S5XXX_RFS_MAX			SZ_4K
 
 /*
  * In-kernel RFS server: after attach the CP OPENs + READs its carrier config
@@ -317,35 +356,35 @@
  * Framing (RE'd from downstream rfsd): u16 cmd, u16 token, u32 payload_len, then
  * the payload.  Every request MUST be answered or the CP stalls its IPC.
  */
-#define S5300_RFS_MAXFID		32
-#define S5300_RFS_CHUNK			2012	/* downstream rfsd chunk size */
-#define S5300_CC_DIR			"google/s5400/carrierconfig"
-#define S5300_RFS_C_READ		0x0001	/* AP->CP chunk / CP->AP next-ack */
-#define S5300_RFS_C_WRITE		0x0002	/* AP->CP req / CP->AP data */
-#define S5300_RFS_C_STATUS		0x0003	/* status + fid + file-size */
-#define S5300_RFS_C_OPEN		0x0004	/* open a path */
-#define S5300_RFS_C_CLOSE		0x0005
-#define S5300_RFS_C_IO			0x0006	/* start a read or write */
-#define S5300_RFS_C_OPEN_FID		0x0007	/* open an NV file by id */
-#define S5300_RFS_IO_READ		1
-#define S5300_RFS_IO_WRITE		2
+#define S5XXX_RFS_MAXFID		32
+#define S5XXX_RFS_CHUNK			2012	/* downstream rfsd chunk size */
+#define S5XXX_CC_DIR			"carrierconfig"
+#define S5XXX_RFS_C_READ		0x0001	/* AP->CP chunk / CP->AP next-ack */
+#define S5XXX_RFS_C_WRITE		0x0002	/* AP->CP req / CP->AP data */
+#define S5XXX_RFS_C_STATUS		0x0003	/* status + fid + file-size */
+#define S5XXX_RFS_C_OPEN		0x0004	/* open a path */
+#define S5XXX_RFS_C_CLOSE		0x0005
+#define S5XXX_RFS_C_IO			0x0006	/* start a read or write */
+#define S5XXX_RFS_C_OPEN_FID		0x0007	/* open an NV file by id */
+#define S5XXX_RFS_IO_READ		1
+#define S5XXX_RFS_IO_WRITE		2
 
 /* Doorbell values: bit 16 triggers, low bits select the mailbox index. */
-#define S5300_DB_TRIGGER		BIT(16)
-#define S5300_DB_MSG			(S5300_DB_TRIGGER | 0x0)	/* int_ap2cp_msg */
-#define S5300_DB_LINK_ACK		(S5300_DB_TRIGGER | 0xe)	/* pcie_link_ack */
+#define S5XXX_DB_TRIGGER		BIT(16)
+#define S5XXX_DB_MSG			(S5XXX_DB_TRIGGER | 0x0)	/* int_ap2cp_msg */
+#define S5XXX_DB_LINK_ACK		(S5XXX_DB_TRIGGER | 0xe)	/* pcie_link_ack */
 
 /* PBL lands at IPC base + this offset (round_up(raw buffer offset, 64K)). */
-#define S5300_BOOT_IMG_OFFSET		0x10000
+#define S5XXX_BOOT_IMG_OFFSET		0x10000
 
 /* boot_stage / CP2AP_WAKEUP polling, downstream check_cp_status(). */
-#define S5300_POLL_INTERVAL_MS		20
-#define S5300_POLL_COUNT		200
-#define S5300_POLL_INTERVAL_US		(S5300_POLL_INTERVAL_MS * 1000)
-#define S5300_POLL_TIMEOUT_US		(S5300_POLL_COUNT * S5300_POLL_INTERVAL_US)
+#define S5XXX_POLL_INTERVAL_MS		20
+#define S5XXX_POLL_COUNT		200
+#define S5XXX_POLL_INTERVAL_US		(S5XXX_POLL_INTERVAL_MS * 1000)
+#define S5XXX_POLL_TIMEOUT_US		(S5XXX_POLL_COUNT * S5XXX_POLL_INTERVAL_US)
 
 /* PHONE_START handshake timeout, downstream MIF_INIT_TIMEOUT. */
-#define S5300_INIT_TIMEOUT		(15 * HZ)
+#define S5XXX_INIT_TIMEOUT		(15 * HZ)
 
 /*
  * Shared-memory IPC arming + the NORM_RAW boot-download ring (vendor
@@ -356,16 +395,16 @@
  * this ring; the CP polls txq.head and drains autonomously -- no doorbell.
  * Offsets are the komodo DT legacy_raw_* values (fdt.dts cpif node).
  */
-#define S5300_IPC_MEM_ACCESS		0x04
-#define S5300_SHM_BOOT_MAGIC		0xbdbd		/* SIT boot magic at IPC+0 */
-#define S5300_RAW_TXQ_HEAD		0x18		/* AP advances */
-#define S5300_RAW_TXQ_TAIL		0x1c		/* CP advances (drain) */
-#define S5300_RAW_RXQ_HEAD		0x20		/* CP advances (ack) */
-#define S5300_RAW_RXQ_TAIL		0x24		/* AP advances */
-#define S5300_RAW_TXQ_BUFF		0x3000
-#define S5300_RAW_TXQ_SIZE		0x1fd000
-#define S5300_RAW_RXQ_BUFF		0x200000
-#define S5300_RAW_RXQ_SIZE		0x200000
+#define S5XXX_IPC_MEM_ACCESS		0x04
+#define S5XXX_SHM_BOOT_MAGIC		0xbdbd		/* SIT boot magic at IPC+0 */
+#define S5XXX_RAW_TXQ_HEAD		0x18		/* AP advances */
+#define S5XXX_RAW_TXQ_TAIL		0x1c		/* CP advances (drain) */
+#define S5XXX_RAW_RXQ_HEAD		0x20		/* CP advances (ack) */
+#define S5XXX_RAW_RXQ_TAIL		0x24		/* AP advances */
+#define S5XXX_RAW_TXQ_BUFF		0x3000
+#define S5XXX_RAW_TXQ_SIZE		0x1fd000
+#define S5XXX_RAW_RXQ_BUFF		0x200000
+#define S5XXX_RAW_RXQ_SIZE		0x200000
 /*
  * Legacy FMT queue (DT legacy_fmt_*): the runtime SIT control channel
  * (umts_ipc0, ch 0xF5).  head/tail block at IPC+0x08 (TXQ head/tail then RXQ
@@ -374,19 +413,19 @@
  * gates its secondary channels (umts_router AT on the RAW ring) on this control
  * plane being alive and its REQ_ACK_FMT round-trips answered.
  */
-#define S5300_FMT_TXQ_HEAD		0x08		/* AP advances */
-#define S5300_FMT_TXQ_TAIL		0x0c		/* CP advances (drain) */
-#define S5300_FMT_RXQ_HEAD		0x10		/* CP advances */
-#define S5300_FMT_RXQ_TAIL		0x14		/* AP advances */
-#define S5300_FMT_TXQ_BUFF		0x1000
-#define S5300_FMT_TXQ_SIZE		0x1000
-#define S5300_FMT_RXQ_BUFF		0x2000
-#define S5300_FMT_RXQ_SIZE		0x1000
+#define S5XXX_FMT_TXQ_HEAD		0x08		/* AP advances */
+#define S5XXX_FMT_TXQ_TAIL		0x0c		/* CP advances (drain) */
+#define S5XXX_FMT_RXQ_HEAD		0x10		/* CP advances */
+#define S5XXX_FMT_RXQ_TAIL		0x14		/* AP advances */
+#define S5XXX_FMT_TXQ_BUFF		0x1000
+#define S5XXX_FMT_TXQ_SIZE		0x1000
+#define S5XXX_FMT_RXQ_BUFF		0x2000
+#define S5XXX_FMT_RXQ_SIZE		0x1000
 
 /* Exynos SIT link header (12B) + Samsung std_dl download header (12B). */
-#define S5300_SIT_HDR			12
-#define S5300_SIT_SYNC			0xabcd
-#define S5300_SIT_CFG_SINGLE		0xc000		/* EXYNOS_SINGLE_MASK<<8 */
+#define S5XXX_SIT_HDR			12
+#define S5XXX_SIT_SYNC			0xabcd
+#define S5XXX_SIT_CFG_SINGLE		0xc000		/* EXYNOS_SINGLE_MASK<<8 */
 
 /*
  * OEM/GEMS channel (downstream io-device oem_ipc, an IPC_FMT multi-channel iod
@@ -398,31 +437,31 @@
  * the WWAN_PORT_OEM char port.  Payloads are capped so header+payload+pad still
  * fit one ring slot with the circ one-slot gap; both FMT writers share the cap.
  */
-#define S5300_CH_OEM			0x82	/* EXYNOS_CH_ID_OEM_0 + 1 (oem_ipc1) */
+#define S5XXX_CH_OEM			0x82	/* EXYNOS_CH_ID_OEM_0 + 1 (oem_ipc1) */
 
 /*
  * The GNSS receiver is booted by the CP, not by us: once its firmware is in
- * the shared window (see S5300_GNSS_FW), the CP starts it in response to this
+ * the shared window (see S5XXX_GNSS_FW), the CP starts it in response to this
  * RAW channel -- the vendor's gnss_boot io_device.  Plain passthrough, so the
  * channel is exposed as a port and the boot conversation is left to user space.
  */
-#define S5300_CH_GNSS_BOOT		0xf0
-#define S5300_FMT_MAX			(S5300_FMT_TXQ_SIZE - S5300_SIT_HDR - 8)
-#define S5300_SIT_CH_BOOT		0xf1		/* EXYNOS_CH_ID_BOOT */
-#define S5300_DL_HDR			12
-#define S5300_DL_CHUNK			0xc000		/* 49152-byte payload cap */
+#define S5XXX_CH_GNSS_BOOT		0xf0
+#define S5XXX_FMT_MAX			(S5XXX_FMT_TXQ_SIZE - S5XXX_SIT_HDR - 8)
+#define S5XXX_SIT_CH_BOOT		0xf1		/* EXYNOS_CH_ID_BOOT */
+#define S5XXX_DL_HDR			12
+#define S5XXX_DL_CHUNK			0xc000		/* 49152-byte payload cap */
 /*
  * std_dl control words: per-section start/end carry a tag; the standalone
  * finalise word (cbd emits 0xa400, CP acks 0xc400) tells the CP the image is
  * complete and to boot MAIN.
  */
-#define S5300_DL_SEC_START(tag)		(0xa100 | ((tag) << 4))
-#define S5300_DL_SEC_END(tag)		(0xa10d | ((tag) << 4))
-#define S5300_DL_SEC_VERIFY(tag)	(0xa301 | ((tag) << 4))	/* CRC-verify */
-#define S5300_DL_FINISH			0xa400
+#define S5XXX_DL_SEC_START(tag)		(0xa100 | ((tag) << 4))
+#define S5XXX_DL_SEC_END(tag)		(0xa10d | ((tag) << 4))
+#define S5XXX_DL_SEC_VERIFY(tag)	(0xa301 | ((tag) << 4))	/* CRC-verify */
+#define S5XXX_DL_FINISH			0xa400
 
 /* Per-open state for the in-kernel RFS server (indexed by the CP's fid). */
-struct s5300_rfs_file {
+struct s5xxx_rfs_file {
 	bool			used;
 	const struct firmware	*fw;	/* cached read source, or NULL */
 	size_t			size;	/* file size reported at OPEN */
@@ -433,9 +472,10 @@ struct s5300_rfs_file {
 	u16			token;	/* active IO token, echoed in chunks */
 };
 
-struct s5300_modem;
+struct s5xxx_modem;
 
-struct s5300_modem {
+struct s5xxx_modem {
+	const struct s5xxx_variant *var;
 	struct device		*dev;
 	struct device		*rc_dev;
 	struct pci_dev		*pdev;
@@ -500,7 +540,7 @@ struct s5300_modem {
 	/*
 	 * OEM/GEMS channel (ch 0x82) on the FMT ring, a WWAN_PORT_OEM char port.
 	 * Both post-ONLINE FMT writers (SIT + oem) share tx_lock and fmt_frame_seq
-	 * via s5300_fmt_ring_tx(); fmt_tx_wq wakes a blocked oem writer when the CP
+	 * via s5xxx_fmt_ring_tx(); fmt_tx_wq wakes a blocked oem writer when the CP
 	 * drains the txq and frees ring space.
 	 */
 	struct wwan_port	*oem_port;
@@ -520,7 +560,7 @@ struct s5300_modem {
 	struct wwan_port	*gnss_port;
 	u8			gnss_ch_seq;	/* GNSS per-channel sequence */
 	/*
-	 * The in-kernel codeload (s5300_gnss_codeload) runs before gnss_port
+	 * The in-kernel codeload (s5xxx_gnss_codeload) runs before gnss_port
 	 * exists and collects the CP's ch-0xf0 replies here; once the port is up
 	 * the channel belongs to user space.
 	 */
@@ -529,7 +569,7 @@ struct s5300_modem {
 	u8			gnss_rsp_len;
 
 	/* In-kernel RFS server: carrierconfig/NV files the CP pulls post-attach. */
-	struct s5300_rfs_file	rfs_files[S5300_RFS_MAXFID];
+	struct s5xxx_rfs_file	rfs_files[S5XXX_RFS_MAXFID];
 	struct work_struct	rfs_work;
 	struct list_head	rfs_rxq;	/* queued CP requests (rfs_lock) */
 	spinlock_t		rfs_lock;
@@ -544,13 +584,28 @@ struct s5300_modem {
 	 * producer index, touched only under tx_lock.
 	 */
 	struct net_device	*ndev;
-	u32			dl_fore[S5300_PKTPROC_DL_NUM_QUEUE];
-	u32			dl_done[S5300_PKTPROC_DL_NUM_QUEUE];
+	u32			dl_fore[S5XXX_PKTPROC_DL_NUM_QUEUE];
+	u32			dl_done[S5XXX_PKTPROC_DL_NUM_QUEUE];
 	u32			ul_done;
 	u16			ul_cp_quota;
 	u8			ul_end_bit_owner;
 	bool			ul_active;
 };
+
+/*
+ * Firmware lives under google/<variant>/, so paths are built per instance
+ * rather than being compile-time constants.  Callers pass the name relative to
+ * that directory (the S5XXX_*_FW defines above) and a scratch buffer, which
+ * keeps the request_firmware() call sites readable.
+ */
+#define S5XXX_FW_PATH_MAX	96
+
+static const char *s5xxx_fw_path(struct s5xxx_modem *sm, char *buf,
+				 size_t len, const char *rel)
+{
+	scnprintf(buf, len, "google/%s/%s", sm->var->fw_dir, rel);
+	return buf;
+}
 
 /*
  * Program the doorbell BAR and read it back, like downstream does (it
@@ -559,7 +614,7 @@ struct s5300_modem {
  * so the hardware aligns the programmed address down; any base that still
  * decodes the doorbell bus address is fine.
  */
-static int s5300_program_doorbell_bar(struct s5300_modem *sm)
+static int s5xxx_program_doorbell_bar(struct s5xxx_modem *sm)
 {
 	u32 val = 0, base;
 	int try;
@@ -597,7 +652,7 @@ static int s5300_program_doorbell_bar(struct s5300_modem *sm)
  * range instead.  The root port is the RC's own DBI, not the flaky ROM, so
  * a single verified write suffices.
  */
-static int s5300_open_bridge_window(struct s5300_modem *sm)
+static int s5xxx_open_bridge_window(struct s5xxx_modem *sm)
 {
 	struct pci_dev *bridge = pci_upstream_bridge(sm->pdev);
 	u32 base = sm->db_bus_addr & ~(SZ_1M - 1);
@@ -659,7 +714,7 @@ static int s5300_open_bridge_window(struct s5300_modem *sm)
  * and hammering it can wedge the CP, so bail and let the caller escalate to a
  * relink.
  */
-static bool s5300_send_doorbell(struct s5300_modem *sm, u32 val)
+static bool s5xxx_send_doorbell(struct s5xxx_modem *sm, u32 val)
 {
 	int try;
 	u16 cmd;
@@ -680,8 +735,8 @@ static bool s5300_send_doorbell(struct s5300_modem *sm, u32 val)
 			pci_write_config_word(sm->pdev, PCI_COMMAND, cmd |
 					      PCI_COMMAND_MEMORY |
 					      PCI_COMMAND_MASTER);
-		s5300_program_doorbell_bar(sm);
-		s5300_open_bridge_window(sm);
+		s5xxx_program_doorbell_bar(sm);
+		s5xxx_open_bridge_window(sm);
 		udelay(100);
 	}
 
@@ -694,7 +749,7 @@ static bool s5300_send_doorbell(struct s5300_modem *sm, u32 val)
  * registers; downstream re-drives them whenever they read back zero
  * (print_msi_register(): "MSI Message Reg == 0x0 - set MSI again!!!").
  */
-static void s5300_verify_msi_target(struct s5300_modem *sm)
+static void s5xxx_verify_msi_target(struct s5xxx_modem *sm)
 {
 	u32 lo = 0;
 	int try;
@@ -717,25 +772,25 @@ static void s5300_verify_msi_target(struct s5300_modem *sm)
  * doorbell -- but only while the link is up.  The word lives in AP DRAM the CP
  * DMAs, so it is always safe to stage; when the CP has parked the link (link_up
  * false, post-ONLINE runtime PM) defer the doorbell and nudge AP2CP_WAKEUP.  The
- * CP answers on CP2AP_WAKEUP, s5300_pm_work() relinks and flushes the reserved
+ * CP answers on CP2AP_WAKEUP, s5xxx_pm_work() relinks and flushes the reserved
  * doorbell.  During boot link_up stays true, so the INIT/PHONE handshake rings
  * immediately as before.
  */
-static void s5300_send_ipc_irq(struct s5300_modem *sm, u32 val)
+static void s5xxx_send_ipc_irq(struct s5xxx_modem *sm, u32 val)
 {
 	bool wake = false;
 	unsigned long flags;
 
 	spin_lock_irqsave(&sm->lock, flags);
-	writel(val, sm->ipc + S5300_IPC_AP2CP_MSG);
-	if (sm->link_up && s5300_send_doorbell(sm, S5300_DB_MSG)) {
+	writel(val, sm->ipc + S5XXX_IPC_AP2CP_MSG);
+	if (sm->link_up && s5xxx_send_doorbell(sm, S5XXX_DB_MSG)) {
 		sm->db_reserved = false;
 	} else {
 		/*
 		 * The CP has parked (link_up already false) or the link is
 		 * physically down despite link_up (doorbell read back all-ones,
 		 * e.g. the CP dropped the link mid-transfer without the GPIO park
-		 * handshake).  Either way clear link_up so s5300_pm_work() relinks,
+		 * handshake).  Either way clear link_up so s5xxx_pm_work() relinks,
 		 * keep the doorbell reserved, and nudge AP2CP_WAKEUP so the CP
 		 * answers on CP2AP_WAKEUP; the relink then flushes it.
 		 */
@@ -756,7 +811,7 @@ static void s5300_send_ipc_irq(struct s5300_modem *sm, u32 val)
 		 * NOT relink here -- the parked CP has to bring its own PHY back up
 		 * first, which it signals by raising CP2AP_WAKEUP.  Retraining before
 		 * that ack parks the LTSSM in Polling (0x3).  The CP2AP_WAKEUP rising
-		 * edge drives s5300_pm_work(), which relinks and flushes the reserved
+		 * edge drives s5xxx_pm_work(), which relinks and flushes the reserved
 		 * doorbell -- exactly the CP-initiated wake path.
 		 */
 		zumapro_pcie_modem_wake(sm->rc_dev);
@@ -766,23 +821,23 @@ static void s5300_send_ipc_irq(struct s5300_modem *sm, u32 val)
 /*
  * Restore the endpoint config the boot bounce established (D0, forced doorbell
  * BAR0, open root-port memory window, MSI target) after a runtime relink -- the
- * same restore s5300_boot_work() runs after the boot-phase bounce, since
+ * same restore s5xxx_boot_work() runs after the boot-phase bounce, since
  * modem_link_up()'s host_init re-runs dw_pcie_setup_rc and resets the RC MSI
  * address.  MAIN rebuilds its own inbound doorbell decode on its link-up ISR;
  * this repairs the AP-side outbound routing the PERST cycle reset.
  */
-static void s5300_relink_restore(struct s5300_modem *sm)
+static void s5xxx_relink_restore(struct s5xxx_modem *sm)
 {
 	pci_set_power_state(sm->pdev, PCI_D0);
 	pci_restore_state(sm->pdev);
 	pci_set_master(sm->pdev);
 	zumapro_pcie_set_msi_target(sm->rc_dev, sm->msi_phys);
-	s5300_program_doorbell_bar(sm);
-	s5300_open_bridge_window(sm);
-	s5300_verify_msi_target(sm);
+	s5xxx_program_doorbell_bar(sm);
+	s5xxx_open_bridge_window(sm);
+	s5xxx_verify_msi_target(sm);
 }
 
-#define S5300_PARK_SETTLE_MS	30
+#define S5XXX_PARK_SETTLE_MS	30
 
 /*
  * The CP idle-parks its PCIe link aggressively (CP2AP_WAKEUP low ~1 s after it
@@ -793,10 +848,10 @@ static void s5300_relink_restore(struct s5300_modem *sm)
  * traffic (a request delivered to userspace, or a frame we send) so the whole
  * transfer drains at L0; normal idle park resumes once it goes quiet.
  */
-#define S5300_FMT_BUSY_MS	500
-static inline void s5300_fmt_mark_busy(struct s5300_modem *sm)
+#define S5XXX_FMT_BUSY_MS	500
+static inline void s5xxx_fmt_mark_busy(struct s5xxx_modem *sm)
 {
-	WRITE_ONCE(sm->fmt_busy_until, jiffies + msecs_to_jiffies(S5300_FMT_BUSY_MS));
+	WRITE_ONCE(sm->fmt_busy_until, jiffies + msecs_to_jiffies(S5XXX_FMT_BUSY_MS));
 }
 
 /*
@@ -805,7 +860,7 @@ static inline void s5300_fmt_mark_busy(struct s5300_modem *sm)
  * that arms MAIN's runtime IPC, so it is only valid because we publish valid
  * DL/UL pktproc info regions; bit 1 is CH_EXTENSION.
  */
-#define S5300_AP_CAP			0x3
+#define S5XXX_AP_CAP			0x3
 
 /*
  * True while the CP still owes us: any legacy txq (FMT or RAW) with head != tail
@@ -813,12 +868,12 @@ static inline void s5300_fmt_mark_busy(struct s5300_modem *sm)
  * check_mem_link_tx_pending() / check_legacy_tx_pending().  readl() only, so it
  * is safe to call under sm->lock.
  */
-static bool s5300_tx_pending(struct s5300_modem *sm)
+static bool s5xxx_tx_pending(struct s5xxx_modem *sm)
 {
-	return readl(sm->ipc + S5300_FMT_TXQ_HEAD) !=
-			readl(sm->ipc + S5300_FMT_TXQ_TAIL) ||
-	       readl(sm->ipc + S5300_RAW_TXQ_HEAD) !=
-			readl(sm->ipc + S5300_RAW_TXQ_TAIL);
+	return readl(sm->ipc + S5XXX_FMT_TXQ_HEAD) !=
+			readl(sm->ipc + S5XXX_FMT_TXQ_TAIL) ||
+	       readl(sm->ipc + S5XXX_RAW_TXQ_HEAD) !=
+			readl(sm->ipc + S5XXX_RAW_TXQ_TAIL);
 }
 
 /*
@@ -830,9 +885,9 @@ static bool s5300_tx_pending(struct s5300_modem *sm)
  * the link may drop to save power.  Uses our existing (boot-bounce) link_up/down
  * with the same D3hot save/restore the boot re-link uses.
  */
-static void s5300_pm_work(struct work_struct *work)
+static void s5xxx_pm_work(struct work_struct *work)
 {
-	struct s5300_modem *sm = container_of(work, struct s5300_modem, pm_work);
+	struct s5xxx_modem *sm = container_of(work, struct s5xxx_modem, pm_work);
 	bool want_up = READ_ONCE(sm->cp_wants_up);
 	unsigned long flags;
 
@@ -851,7 +906,7 @@ static void s5300_pm_work(struct work_struct *work)
 	if (want_up && !sm->link_up &&
 	    gpiod_get_value_cansleep(sm->cp2ap_wakeup)) {
 		if (zumapro_pcie_modem_link_up(sm->rc_dev) == 0) {
-			s5300_relink_restore(sm);
+			s5xxx_relink_restore(sm);
 			spin_lock_irqsave(&sm->lock, flags);
 			sm->link_up = true;
 			/*
@@ -884,7 +939,7 @@ static void s5300_pm_work(struct work_struct *work)
 		 * so a concurrent send either rings while the link is genuinely up
 		 * or reserves once we've decided to tear down.
 		 */
-		msleep(S5300_PARK_SETTLE_MS);
+		msleep(S5XXX_PARK_SETTLE_MS);
 
 		if (gpiod_get_value_cansleep(sm->cp2ap_wakeup)) {
 			dev_info(sm->dev, "CP sleep: park deferred (CP re-asserted)\n");
@@ -894,7 +949,7 @@ static void s5300_pm_work(struct work_struct *work)
 			 * Until MAIN has taken its first link-up ISR (main_armed),
 			 * it is NOT servicing the runtime rings -- so any AP->CP
 			 * frames (e.g. ModemManager's port probes) will never drain
-			 * and s5300_tx_pending() is permanently true.  Honouring the
+			 * and s5xxx_tx_pending() is permanently true.  Honouring the
 			 * vendor tx-pending defer here would keep the link up forever
 			 * and MAIN would never get the park->wake cycle that arms it.
 			 * So before MAIN is armed, honour the CP's self-park request
@@ -902,7 +957,7 @@ static void s5300_pm_work(struct work_struct *work)
 			 * (keep the link up for genuinely in-flight tx).
 			 */
 			park = !sm->main_armed ||
-			       (!s5300_tx_pending(sm) && !sm->db_reserved &&
+			       (!s5xxx_tx_pending(sm) && !sm->db_reserved &&
 				time_after_eq(jiffies,
 					      READ_ONCE(sm->fmt_busy_until)));
 			if (park)
@@ -920,7 +975,7 @@ static void s5300_pm_work(struct work_struct *work)
 
 	spin_lock_irqsave(&sm->lock, flags);
 	if (sm->db_reserved && sm->link_up &&
-	    s5300_send_doorbell(sm, S5300_DB_MSG)) {
+	    s5xxx_send_doorbell(sm, S5XXX_DB_MSG)) {
 		/* Link is up -- delivered the doorbell a tx had reserved. */
 		sm->db_reserved = false;
 		spin_unlock_irqrestore(&sm->lock, flags);
@@ -940,9 +995,9 @@ static void s5300_pm_work(struct work_struct *work)
 	}
 }
 
-static irqreturn_t s5300_cp2ap_wakeup_irq(int irq, void *data)
+static irqreturn_t s5xxx_cp2ap_wakeup_irq(int irq, void *data)
 {
-	struct s5300_modem *sm = data;
+	struct s5xxx_modem *sm = data;
 
 	/*
 	 * Latch the level at edge time: the CP pulses CP2AP_WAKEUP faster than the
@@ -963,9 +1018,9 @@ static irqreturn_t s5300_cp2ap_wakeup_irq(int irq, void *data)
  * Diagnosis only for now -- distinguishes "CP parked and deaf to the
  * AP2CP_WAKEUP nudge" (active still 1) from "CP died after ONLINE" (active 0).
  */
-static irqreturn_t s5300_cp_active_irq(int irq, void *data)
+static irqreturn_t s5xxx_cp_active_irq(int irq, void *data)
 {
-	struct s5300_modem *sm = data;
+	struct s5xxx_modem *sm = data;
 	/* gpa5 alive-block GPIO: memory-mapped, never sleeps (see wakeup irq). */
 	int up = gpiod_get_value(sm->cp_active);
 
@@ -987,11 +1042,11 @@ static irqreturn_t s5300_cp_active_irq(int irq, void *data)
 		 */
 		dev_err(sm->dev,
 			"CP2AP_PHONE_ACTIVE irq: level 0 -- CP CRASHED (err %#x boot_stage %#x sub %#x cafe %#x cp2ap %#x irq #%u)\n",
-			readl(sm->msi + S5300_MSI_ERR_REPORT),
-			readl(sm->msi + S5300_MSI_BOOT_STAGE),
-			readl(sm->msi + S5300_MSI_SUB_BOOT_STAGE),
-			readl(sm->msi + S5300_MSI_FLAG_CAFE),
-			readl(sm->ipc + S5300_IPC_CP2AP_MSG),
+			readl(sm->msi + S5XXX_MSI_ERR_REPORT),
+			readl(sm->msi + S5XXX_MSI_BOOT_STAGE),
+			readl(sm->msi + S5XXX_MSI_SUB_BOOT_STAGE),
+			readl(sm->msi + S5XXX_MSI_FLAG_CAFE),
+			readl(sm->ipc + S5XXX_IPC_CP2AP_MSG),
 			sm->irq_count);
 	}
 	return IRQ_HANDLED;
@@ -1002,7 +1057,7 @@ static irqreturn_t s5300_cp_active_irq(int irq, void *data)
  * offsets and zero the status/capability words before the CP boots.  The
  * AP capability words stay zero (tegu DT: ap_capability_0/1 = 0).
  */
-static void s5300_pktproc_fill_desc(struct s5300_modem *sm);
+static void s5xxx_pktproc_fill_desc(struct s5xxx_modem *sm);
 
 /*
  * Resolved hardware configuration, staged as firmware.  The bootloader's CDT
@@ -1012,10 +1067,10 @@ static void s5300_pktproc_fill_desc(struct s5300_modem *sm);
  * from /chosen/config and the CP signature from the cpsha firmware, both read at
  * runtime.
  */
-#define S5300_HWCFG_MAGIC		0x57483553	/* "S5HW" */
-#define S5300_HWCFG_VERSION		1
+#define S5XXX_HWCFG_MAGIC		0x57483553	/* "S5HW" */
+#define S5XXX_HWCFG_VERSION		1
 
-struct s5300_hwcfg {
+struct s5xxx_hwcfg {
 	__le32	magic;
 	__le32	version;
 	__le32	platform;
@@ -1031,17 +1086,20 @@ struct s5300_hwcfg {
 	__le32	variant;
 };
 
-static int s5300_load_hwcfg(struct s5300_modem *sm, struct s5300_hwcfg *cfg)
+static int s5xxx_load_hwcfg(struct s5xxx_modem *sm, struct s5xxx_hwcfg *cfg)
 {
 	const struct firmware *fw;
 	int ret;
 
-	ret = request_firmware_direct(&fw, S5300_HWCFG_FW, sm->dev);
+	char path[S5XXX_FW_PATH_MAX];
+
+	s5xxx_fw_path(sm, path, sizeof(path), S5XXX_HWCFG_FW);
+	ret = request_firmware_direct(&fw, path, sm->dev);
 	if (ret)
 		return ret;
 
 	if (fw->size != sizeof(*cfg)) {
-		dev_warn(sm->dev, "%s is %zu bytes, want %zu\n", S5300_HWCFG_FW,
+		dev_warn(sm->dev, "%s is %zu bytes, want %zu\n", path,
 			 fw->size, sizeof(*cfg));
 		release_firmware(fw);
 		return -EINVAL;
@@ -1049,27 +1107,28 @@ static int s5300_load_hwcfg(struct s5300_modem *sm, struct s5300_hwcfg *cfg)
 	memcpy(cfg, fw->data, sizeof(*cfg));
 	release_firmware(fw);
 
-	if (le32_to_cpu(cfg->magic) != S5300_HWCFG_MAGIC ||
-	    le32_to_cpu(cfg->version) != S5300_HWCFG_VERSION) {
-		dev_warn(sm->dev, "%s: bad magic/version\n", S5300_HWCFG_FW);
+	if (le32_to_cpu(cfg->magic) != S5XXX_HWCFG_MAGIC ||
+	    le32_to_cpu(cfg->version) != S5XXX_HWCFG_VERSION) {
+		dev_warn(sm->dev, "%s: bad magic/version\n", path);
 		return -EINVAL;
 	}
 	return 0;
 }
 
-static int s5300_build_handover(struct s5300_modem *sm, u8 *buf)
+static int s5xxx_build_handover(struct s5xxx_modem *sm, u8 *buf)
 {
+	char hpath[S5XXX_FW_PATH_MAX];
 	const struct firmware *sha;
 	struct device_node *cnode;
-	struct s5300_hwcfg cfg;
+	struct s5xxx_hwcfg cfg;
 	const void *imei;
 	int ret, len;
 
-	ret = s5300_load_hwcfg(sm, &cfg);
+	ret = s5xxx_load_hwcfg(sm, &cfg);
 	if (ret)
 		return ret;
 
-	memset(buf, 0, S5300_HANDOVER_SIZE);
+	memset(buf, 0, S5XXX_HANDOVER_SIZE);
 	put_unaligned_le32(1, buf + 0);					/* version */
 	put_unaligned_le32(le32_to_cpu(cfg.platform),  buf + 4);	/* project_id */
 	put_unaligned_le32(le32_to_cpu(cfg.revision),  buf + 8);
@@ -1090,23 +1149,24 @@ static int s5300_build_handover(struct s5300_modem *sm, u8 *buf)
 		return -ENOENT;
 	imei = of_get_property(cnode, "imei1", &len);
 	if (imei && len > 0)
-		memcpy(buf + S5300_HANDOVER_IMEI_OFS, imei, min(len, 16));
+		memcpy(buf + S5XXX_HANDOVER_IMEI_OFS, imei, min(len, 16));
 	imei = of_get_property(cnode, "imei2", &len);
 	if (imei && len > 0)
-		memcpy(buf + S5300_HANDOVER_IMEI_OFS + 16, imei, min(len, 16));
+		memcpy(buf + S5XXX_HANDOVER_IMEI_OFS + 16, imei, min(len, 16));
 	of_node_put(cnode);
-	if (!buf[S5300_HANDOVER_IMEI_OFS])	/* imei1 is mandatory */
+	if (!buf[S5XXX_HANDOVER_IMEI_OFS])	/* imei1 is mandatory */
 		return -ENODATA;
 
 	/* cpsha is the 64-char hex CP signature; the trailing NUL is already set. */
-	ret = request_firmware_direct(&sha, S5300_CPSHA_FW, sm->dev);
+	s5xxx_fw_path(sm, hpath, sizeof(hpath), S5XXX_CPSHA_FW);
+	ret = request_firmware_direct(&sha, hpath, sm->dev);
 	if (ret)
 		return ret;
 	if (sha->size < 64) {
 		release_firmware(sha);
 		return -EINVAL;
 	}
-	memcpy(buf + S5300_HANDOVER_CPSIG_OFS, sha->data, 64);
+	memcpy(buf + S5XXX_HANDOVER_CPSIG_OFS, sha->data, 64);
 	release_firmware(sha);
 
 	dev_info(sm->dev,
@@ -1116,29 +1176,30 @@ static int s5300_build_handover(struct s5300_modem *sm, u8 *buf)
 	return 0;
 }
 
-static void s5300_init_control_messages(struct s5300_modem *sm)
+static void s5xxx_init_control_messages(struct s5xxx_modem *sm)
 {
 	const struct firmware *fw;
-	u8 handover[S5300_HANDOVER_SIZE];
+	char hpath[S5XXX_FW_PATH_MAX];
+	u8 handover[S5XXX_HANDOVER_SIZE];
 	int i;
 
-	writel(S5300_IPC_SRINFO_OFFSET, sm->ipc + S5300_IPC_SRINFO_OFS_PTR);
-	writel(S5300_IPC_CAP_BASE, sm->ipc + S5300_IPC_CAP_OFS_PTR);
+	writel(S5XXX_IPC_SRINFO_OFFSET, sm->ipc + S5XXX_IPC_SRINFO_OFS_PTR);
+	writel(S5XXX_IPC_CAP_BASE, sm->ipc + S5XXX_IPC_CAP_OFS_PTR);
 	/*
 	 * Message words included (downstream init_ctrl_msg() in power_on_cp):
 	 * stale VALID bits from a previous boot must not be readable once the
 	 * MSI handler is live.
 	 */
-	writel(0, sm->ipc + S5300_IPC_AP2CP_MSG);
-	writel(0, sm->ipc + S5300_IPC_CP2AP_MSG);
+	writel(0, sm->ipc + S5XXX_IPC_AP2CP_MSG);
+	writel(0, sm->ipc + S5XXX_IPC_CP2AP_MSG);
 	/*
 	 * ds_det=1 (0x4000) tells the CP to run its deep-sleep link PM: park the
-	 * link when idle and ask for it back on CP2AP_WAKEUP (s5300_pm_work).
+	 * link when idle and ask for it back on CP2AP_WAKEUP (s5xxx_pm_work).
 	 */
-	writel(S5300_IPC_DS_DET, sm->ipc + S5300_IPC_AP2CP_STATUS);
-	writel(0, sm->ipc + S5300_IPC_CP2AP_STATUS);
-	for (i = 0; i < S5300_IPC_CAP_WORDS; i++)
-		writel(0, sm->ipc + S5300_IPC_CAP_BASE + 4 * i);
+	writel(S5XXX_IPC_DS_DET, sm->ipc + S5XXX_IPC_AP2CP_STATUS);
+	writel(0, sm->ipc + S5XXX_IPC_CP2AP_STATUS);
+	for (i = 0; i < S5XXX_IPC_CAP_WORDS; i++)
+		writel(0, sm->ipc + S5XXX_IPC_CAP_BASE + 4 * i);
 
 	/*
 	 * Stage the handover block (HW/RF config + IMEIs + signature) MAIN reads
@@ -1148,26 +1209,27 @@ static void s5300_init_control_messages(struct s5300_modem *sm)
 	 * cp_handover.bin.  Absent both, warn and continue (like cbd) -- the modem
 	 * still reaches ONLINE but may not service the rings.
 	 */
-	if (s5300_build_handover(sm, handover) == 0) {
-		memcpy_toio(sm->ipc + S5300_IPC_HANDOVER_OFS, handover,
-			    S5300_HANDOVER_SIZE);
+	if (s5xxx_build_handover(sm, handover) == 0) {
+		memcpy_toio(sm->ipc + S5XXX_IPC_HANDOVER_OFS, handover,
+			    S5XXX_HANDOVER_SIZE);
 		dev_info(sm->dev, "built handover block from device sources\n");
-	} else if (request_firmware_direct(&fw, S5300_HANDOVER_FW, sm->dev) == 0) {
-		if (fw->size == S5300_HANDOVER_SIZE) {
-			memcpy_toio(sm->ipc + S5300_IPC_HANDOVER_OFS,
+	} else if (s5xxx_fw_path(sm, hpath, sizeof(hpath), S5XXX_HANDOVER_FW),
+		   request_firmware_direct(&fw, hpath, sm->dev) == 0) {
+		if (fw->size == S5XXX_HANDOVER_SIZE) {
+			memcpy_toio(sm->ipc + S5XXX_IPC_HANDOVER_OFS,
 				    fw->data, fw->size);
 			dev_info(sm->dev, "staged handover block (%zu bytes)\n",
 				 fw->size);
 		} else {
 			dev_warn(sm->dev,
 				 "%s wrong size %zu (want %d); skipping\n",
-				 S5300_HANDOVER_FW, fw->size, S5300_HANDOVER_SIZE);
+				 hpath, fw->size, S5XXX_HANDOVER_SIZE);
 		}
 		release_firmware(fw);
 	} else {
 		dev_warn(sm->dev,
 			 "no handover block (DT/cpsha or %s); MAIN may not arm\n",
-			 S5300_HANDOVER_FW);
+			 hpath);
 	}
 
 	/*
@@ -1178,7 +1240,7 @@ static void s5300_init_control_messages(struct s5300_modem *sm)
 	 * (pure-legacy Steffen-mode) boots.
 	 */
 	if (sm->pktproc)
-		s5300_pktproc_fill_desc(sm);
+		s5xxx_pktproc_fill_desc(sm);
 }
 
 /*
@@ -1190,12 +1252,12 @@ static void s5300_init_control_messages(struct s5300_modem *sm)
  * rides the legacy rings, only rmnet uses pktproc) -- the regions just have to
  * be valid so MAIN arms and the CP's DL/UL DMA lands in the reserved carveout.
  *
- * s5300_pktproc_fill_desc() does the heavy sktbuf-descriptor fill (13.8k iomem
+ * s5xxx_pktproc_fill_desc() does the heavy sktbuf-descriptor fill (13.8k iomem
  * writes) once at boot in process context; the two publish helpers write only
  * the small info-region headers + q_info, so they are safe to call from the
  * INIT_START / PHONE_START hard-IRQ handlers.
  */
-static void s5300_pktproc_fill_desc(struct s5300_modem *sm)
+static void s5xxx_pktproc_fill_desc(struct s5xxx_modem *sm)
 {
 	void __iomem *desc;
 	u32 cp_buff;
@@ -1205,22 +1267,22 @@ static void s5300_pktproc_fill_desc(struct s5300_modem *sm)
 		return;
 
 	/* zero both info regions so a later publish writes onto clean state */
-	memset_io(sm->pktproc + S5300_PKTPROC_DL_INFO_OFS, 0, SZ_4K);
-	memset_io(sm->pktproc + S5300_PKTPROC_UL_INFO_OFS, 0, SZ_4K);
+	memset_io(sm->pktproc + S5XXX_PKTPROC_DL_INFO_OFS, 0, SZ_4K);
+	memset_io(sm->pktproc + S5XXX_PKTPROC_UL_INFO_OFS, 0, SZ_4K);
 
 	/*
 	 * DL sktbuf descriptors: cp_data_paddr is the low 36 bits of the first
 	 * u64 (32-bit addr fits the low word).  Point each at its own
 	 * true_packet_size slot so any CP downlink DMA lands in-carveout.
 	 */
-	for (q = 0; q < S5300_PKTPROC_DL_NUM_QUEUE; q++) {
-		cp_buff = S5300_PKTPROC_CP_BASE + S5300_PKTPROC_DL_BUFF_OFS +
-			  q * S5300_PKTPROC_DL_Q_BUFF_SZ;
-		desc = sm->pktproc + S5300_PKTPROC_DL_DESC_OFS +
-		       q * S5300_PKTPROC_DL_Q_DESC_SZ;
-		memset_io(desc, 0, S5300_PKTPROC_DL_Q_DESC_SZ);
-		for (j = 0; j < S5300_PKTPROC_DL_NUM_DESC; j++) {
-			void __iomem *d = desc + j * S5300_PKTPROC_DESC_SKTBUF_SZ;
+	for (q = 0; q < S5XXX_PKTPROC_DL_NUM_QUEUE; q++) {
+		cp_buff = S5XXX_PKTPROC_CP_BASE + S5XXX_PKTPROC_DL_BUFF_OFS +
+			  q * S5XXX_PKTPROC_DL_Q_BUFF_SZ;
+		desc = sm->pktproc + S5XXX_PKTPROC_DL_DESC_OFS +
+		       q * S5XXX_PKTPROC_DL_Q_DESC_SZ;
+		memset_io(desc, 0, S5XXX_PKTPROC_DL_Q_DESC_SZ);
+		for (j = 0; j < S5XXX_PKTPROC_DL_NUM_DESC; j++) {
+			void __iomem *d = desc + j * S5XXX_PKTPROC_DESC_SKTBUF_SZ;
 			u32 ctrl = 0;
 
 			/*
@@ -1230,17 +1292,17 @@ static void s5300_pktproc_fill_desc(struct s5300_modem *sm)
 			 * paddr[35:32] (byte 4) and status (byte 6).
 			 */
 			if (j == 0)
-				ctrl |= S5300_PKTPROC_CTRL_HEAD;
-			if (j == S5300_PKTPROC_DL_NUM_DESC - 1)
-				ctrl |= S5300_PKTPROC_CTRL_RINGEND;
-			writel(cp_buff + j * S5300_PKTPROC_DL_TRUE_PKT, d);
+				ctrl |= S5XXX_PKTPROC_CTRL_HEAD;
+			if (j == S5XXX_PKTPROC_DL_NUM_DESC - 1)
+				ctrl |= S5XXX_PKTPROC_CTRL_RINGEND;
+			writel(cp_buff + j * S5XXX_PKTPROC_DL_TRUE_PKT, d);
 			writel(ctrl << 8, d + 4);
 		}
 	}
 }
 
 /* DL info region (struct pktproc_info_v2), published at INIT_START. */
-static void s5300_pktproc_publish_dl(struct s5300_modem *sm)
+static void s5xxx_pktproc_publish_dl(struct s5xxx_modem *sm)
 {
 	void __iomem *info, *qinfo;
 	u32 cp_desc, cp_buff, hdr;
@@ -1252,39 +1314,39 @@ static void s5300_pktproc_publish_dl(struct s5300_modem *sm)
 		return;
 	}
 
-	info = sm->pktproc + S5300_PKTPROC_DL_INFO_OFS;
-	for (q = 0; q < S5300_PKTPROC_DL_NUM_QUEUE; q++) {
-		cp_desc = S5300_PKTPROC_CP_BASE + S5300_PKTPROC_DL_DESC_OFS +
-			  q * S5300_PKTPROC_DL_Q_DESC_SZ;
-		cp_buff = S5300_PKTPROC_CP_BASE + S5300_PKTPROC_DL_BUFF_OFS +
-			  q * S5300_PKTPROC_DL_Q_BUFF_SZ;
+	info = sm->pktproc + S5XXX_PKTPROC_DL_INFO_OFS;
+	for (q = 0; q < S5XXX_PKTPROC_DL_NUM_QUEUE; q++) {
+		cp_desc = S5XXX_PKTPROC_CP_BASE + S5XXX_PKTPROC_DL_DESC_OFS +
+			  q * S5XXX_PKTPROC_DL_Q_DESC_SZ;
+		cp_buff = S5XXX_PKTPROC_CP_BASE + S5XXX_PKTPROC_DL_BUFF_OFS +
+			  q * S5XXX_PKTPROC_DL_Q_BUFF_SZ;
 		/* q_info[q] at info + 4 (after the 4-byte header), 20 bytes each */
 		qinfo = info + 4 + q * 20;
 		writel(cp_desc, qinfo + 0);
-		writel(S5300_PKTPROC_DL_NUM_DESC, qinfo + 4);
+		writel(S5XXX_PKTPROC_DL_NUM_DESC, qinfo + 4);
 		writel(cp_buff, qinfo + 8);
 		/*
 		 * fore_ptr is the AP "buffers-available" pointer.  fill_desc armed
 		 * all num_desc slots, so offer num_desc-1 (circ leaves one slot as
 		 * the empty gap); the drain re-arms from here as the CP consumes.
 		 */
-		writel(S5300_PKTPROC_DL_NUM_DESC - 1, qinfo + 12);
+		writel(S5XXX_PKTPROC_DL_NUM_DESC - 1, qinfo + 12);
 		writel(0, qinfo + 16);		/* rear_ptr (CP producer) */
-		sm->dl_fore[q] = S5300_PKTPROC_DL_NUM_DESC - 1;
+		sm->dl_fore[q] = S5XXX_PKTPROC_DL_NUM_DESC - 1;
 		sm->dl_done[q] = 0;
 	}
 	/* header last: num_queues:4 | desc_mode:2 | irq_mode:2 | max_packet_size:16 */
-	hdr = (S5300_PKTPROC_DL_NUM_QUEUE & 0xf) |
-	      ((S5300_PKTPROC_DL_DESC_MODE & 0x3) << 4) |
+	hdr = (S5XXX_PKTPROC_DL_NUM_QUEUE & 0xf) |
+	      ((S5XXX_PKTPROC_DL_DESC_MODE & 0x3) << 4) |
 	      ((0u & 0x3) << 6) |
-	      ((S5300_PKTPROC_DL_MAX_PKT & 0xffff) << 8);
+	      ((S5XXX_PKTPROC_DL_MAX_PKT & 0xffff) << 8);
 	writel(hdr, info);
 	dev_info(sm->dev, "published DL pktproc: %d queues\n",
-		 S5300_PKTPROC_DL_NUM_QUEUE);
+		 S5XXX_PKTPROC_DL_NUM_QUEUE);
 }
 
 /* UL info region (struct pktproc_info_ul), published at PHONE_START. */
-static void s5300_pktproc_publish_ul(struct s5300_modem *sm)
+static void s5xxx_pktproc_publish_ul(struct s5xxx_modem *sm)
 {
 	void __iomem *info, *qinfo;
 	u32 cp_desc, cp_buff;
@@ -1293,21 +1355,21 @@ static void s5300_pktproc_publish_ul(struct s5300_modem *sm)
 	if (!sm->pktproc)
 		return;
 
-	info = sm->pktproc + S5300_PKTPROC_UL_INFO_OFS;
-	for (q = 0; q < S5300_PKTPROC_UL_NUM_QUEUE; q++) {
+	info = sm->pktproc + S5XXX_PKTPROC_UL_INFO_OFS;
+	for (q = 0; q < S5XXX_PKTPROC_UL_NUM_QUEUE; q++) {
 		/* vendor UL queue geometry (asymmetric), 32-byte descriptors */
 		if (q == 0) {
-			ndesc = S5300_PKTPROC_UL_Q0_NUM_DESC;
-			cp_desc = S5300_PKTPROC_CP_BASE + S5300_PKTPROC_UL_DESC_OFS;
-			cp_buff = S5300_PKTPROC_CP_BASE + S5300_PKTPROC_UL_BUFF_OFS;
+			ndesc = S5XXX_PKTPROC_UL_Q0_NUM_DESC;
+			cp_desc = S5XXX_PKTPROC_CP_BASE + S5XXX_PKTPROC_UL_DESC_OFS;
+			cp_buff = S5XXX_PKTPROC_CP_BASE + S5XXX_PKTPROC_UL_BUFF_OFS;
 		} else {
-			ndesc = S5300_PKTPROC_UL_Q1_NUM_DESC;
-			cp_desc = S5300_PKTPROC_CP_BASE + S5300_PKTPROC_UL_DESC_OFS +
-				  S5300_PKTPROC_UL_Q0_NUM_DESC *
-				  S5300_PKTPROC_DESC_UL_SZ;
-			cp_buff = S5300_PKTPROC_CP_BASE + S5300_PKTPROC_UL_BUFF_OFS +
-				  S5300_PKTPROC_UL_Q0_NUM_DESC *
-				  S5300_PKTPROC_UL_Q0_MAX_PKT;
+			ndesc = S5XXX_PKTPROC_UL_Q1_NUM_DESC;
+			cp_desc = S5XXX_PKTPROC_CP_BASE + S5XXX_PKTPROC_UL_DESC_OFS +
+				  S5XXX_PKTPROC_UL_Q0_NUM_DESC *
+				  S5XXX_PKTPROC_DESC_UL_SZ;
+			cp_buff = S5XXX_PKTPROC_CP_BASE + S5XXX_PKTPROC_UL_BUFF_OFS +
+				  S5XXX_PKTPROC_UL_Q0_NUM_DESC *
+				  S5XXX_PKTPROC_UL_Q0_MAX_PKT;
 		}
 		/*
 		 * struct pktproc_info_ul: header u32 + cp_quota u32, then
@@ -1326,9 +1388,9 @@ static void s5300_pktproc_publish_ul(struct s5300_modem *sm)
 	 * once it sees the PKTPROC_UL capability and are read back at PHONE_START --
 	 * do not write them here or the CP's values get clobbered.
 	 */
-	writel(S5300_PKTPROC_UL_NUM_QUEUE & 0xf, info);
+	writel(S5XXX_PKTPROC_UL_NUM_QUEUE & 0xf, info);
 	dev_info(sm->dev, "published UL pktproc: %d queues\n",
-		 S5300_PKTPROC_UL_NUM_QUEUE);
+		 S5XXX_PKTPROC_UL_NUM_QUEUE);
 }
 
 /*
@@ -1339,19 +1401,19 @@ static void s5300_pktproc_publish_ul(struct s5300_modem *sm)
  * AP capability; with the words left at zero the CP stays silent on FMT and the
  * SIT control port never round-trips.
  */
-static void s5300_set_ap_capabilities(struct s5300_modem *sm)
+static void s5xxx_set_ap_capabilities(struct s5xxx_modem *sm)
 {
-	writel(S5300_AP_CAP, sm->ipc + S5300_IPC_CAP_AP0);
-	writel(0, sm->ipc + S5300_IPC_CAP_AP1);
-	dev_info(sm->dev, "AP capability part0 %#x, CP part0 %#x\n", S5300_AP_CAP,
-		 readl(sm->ipc + S5300_IPC_CAP_BASE + 0x4));
+	writel(S5XXX_AP_CAP, sm->ipc + S5XXX_IPC_CAP_AP0);
+	writel(0, sm->ipc + S5XXX_IPC_CAP_AP1);
+	dev_info(sm->dev, "AP capability part0 %#x, CP part0 %#x\n", S5XXX_AP_CAP,
+		 readl(sm->ipc + S5XXX_IPC_CAP_BASE + 0x4));
 }
 
 /*
  * Downstream init_legacy_link(), run from the PHONE_START handler: clear the
  * queue pointers, then advertise the magic and access-enable words.
  */
-static void s5300_init_ipc_queues(struct s5300_modem *sm)
+static void s5xxx_init_ipc_queues(struct s5xxx_modem *sm)
 {
 	u32 magic, access;
 	int i;
@@ -1361,34 +1423,34 @@ static void s5300_init_ipc_queues(struct s5300_modem *sm)
 	sm->at_ch_seq = 0;
 	sm->rfs_ch_seq = 0;
 
-	writel(0, sm->ipc + S5300_IPC_MAGIC);
-	writel(0, sm->ipc + S5300_IPC_ACCESS);
-	for (i = 0; i < S5300_IPC_Q_WORDS; i++)
-		writel(0, sm->ipc + S5300_IPC_Q_HEAD_TAIL + 4 * i);
-	writel(S5300_IPC_MAGIC_VALUE, sm->ipc + S5300_IPC_MAGIC);
-	writel(1, sm->ipc + S5300_IPC_ACCESS);
+	writel(0, sm->ipc + S5XXX_IPC_MAGIC);
+	writel(0, sm->ipc + S5XXX_IPC_ACCESS);
+	for (i = 0; i < S5XXX_IPC_Q_WORDS; i++)
+		writel(0, sm->ipc + S5XXX_IPC_Q_HEAD_TAIL + 4 * i);
+	writel(S5XXX_IPC_MAGIC_VALUE, sm->ipc + S5XXX_IPC_MAGIC);
+	writel(1, sm->ipc + S5XXX_IPC_ACCESS);
 
-	magic = readl(sm->ipc + S5300_IPC_MAGIC);
-	access = readl(sm->ipc + S5300_IPC_ACCESS);
-	if (magic != S5300_IPC_MAGIC_VALUE || access != 1)
+	magic = readl(sm->ipc + S5XXX_IPC_MAGIC);
+	access = readl(sm->ipc + S5XXX_IPC_ACCESS);
+	if (magic != S5XXX_IPC_MAGIC_VALUE || access != 1)
 		dev_err(sm->dev, "IPC init readback failed: magic %#x access %u\n",
 			magic, access);
 }
 
 /* --- runtime control channel: umts_router AT commands over the RAW ring --- */
 
-static u32 s5300_circ_space(u32 size, u32 in, u32 out)
+static u32 s5xxx_circ_space(u32 size, u32 in, u32 out)
 {
 	return (in >= out) ? size - (in - out) - 1 : out - in - 1;
 }
 
-static u32 s5300_circ_usage(u32 size, u32 in, u32 out)
+static u32 s5xxx_circ_usage(u32 size, u32 in, u32 out)
 {
 	return (in >= out) ? in - out : size - (out - in);
 }
 
 /* Copy @len bytes into the ring buffer at byte offset @off, wrapping at @size. */
-static void s5300_circ_write(void __iomem *buff, u32 size, u32 off,
+static void s5xxx_circ_write(void __iomem *buff, u32 size, u32 off,
 			     const void *src, u32 len)
 {
 	u32 first = min(len, size - off);
@@ -1399,7 +1461,7 @@ static void s5300_circ_write(void __iomem *buff, u32 size, u32 off,
 }
 
 /* Copy @len bytes out of the ring buffer at byte offset @off, wrapping at @size. */
-static void s5300_circ_read(void *dst, void __iomem *buff, u32 size, u32 off,
+static void s5xxx_circ_read(void *dst, void __iomem *buff, u32 size, u32 off,
 			    u32 len)
 {
 	u32 first = min(len, size - off);
@@ -1412,9 +1474,9 @@ static void s5300_circ_read(void *dst, void __iomem *buff, u32 size, u32 off,
 /*
  * The two SIT transport rings.  NORM_RAW carries the AT and RFS control
  * channels (and the boot download); FMT carries the SIT control plane and the
- * oem/GEMS channel.  Every single-frame writer funnels through s5300_ring_tx().
+ * oem/GEMS channel.  Every single-frame writer funnels through s5xxx_ring_tx().
  */
-struct s5300_txring {
+struct s5xxx_txring {
 	u32	buff;		/* ring data window (ipc offset) */
 	u32	size;		/* ring size / wrap modulus */
 	u32	head;		/* AP producer index register */
@@ -1422,16 +1484,16 @@ struct s5300_txring {
 	u32	int_flag;	/* ap2cp_msg SEND_* bit to raise */
 };
 
-static const struct s5300_txring s5300_raw_txring = {
-	.buff = S5300_RAW_TXQ_BUFF, .size = S5300_RAW_TXQ_SIZE,
-	.head = S5300_RAW_TXQ_HEAD, .tail = S5300_RAW_TXQ_TAIL,
-	.int_flag = S5300_INT_SEND_RAW,
+static const struct s5xxx_txring s5xxx_raw_txring = {
+	.buff = S5XXX_RAW_TXQ_BUFF, .size = S5XXX_RAW_TXQ_SIZE,
+	.head = S5XXX_RAW_TXQ_HEAD, .tail = S5XXX_RAW_TXQ_TAIL,
+	.int_flag = S5XXX_INT_SEND_RAW,
 };
 
-static const struct s5300_txring s5300_fmt_txring = {
-	.buff = S5300_FMT_TXQ_BUFF, .size = S5300_FMT_TXQ_SIZE,
-	.head = S5300_FMT_TXQ_HEAD, .tail = S5300_FMT_TXQ_TAIL,
-	.int_flag = S5300_INT_SEND_FMT,
+static const struct s5xxx_txring s5xxx_fmt_txring = {
+	.buff = S5XXX_FMT_TXQ_BUFF, .size = S5XXX_FMT_TXQ_SIZE,
+	.head = S5XXX_FMT_TXQ_HEAD, .tail = S5XXX_FMT_TXQ_TAIL,
+	.int_flag = S5XXX_INT_SEND_FMT,
 };
 
 /*
@@ -1441,14 +1503,14 @@ static const struct s5300_txring s5300_fmt_txring = {
  * serialised by tx_lock; each caller owns its @ch_seq.  Returns @full_err on a
  * full ring so the caller picks -EAGAIN (drop) or -EBUSY (wait and retry).
  */
-static int s5300_ring_tx(struct s5300_modem *sm, const struct s5300_txring *r,
+static int s5xxx_ring_tx(struct s5xxx_modem *sm, const struct s5xxx_txring *r,
 			 u16 *frame_seq, u8 ch, u8 *ch_seq, u32 max,
 			 const u8 *data, u32 len, int full_err)
 {
-	u32 flen = ALIGN(S5300_SIT_HDR + len, 8);
+	u32 flen = ALIGN(S5XXX_SIT_HDR + len, 8);
 	void __iomem *buff = sm->ipc + r->buff;
 	unsigned long flags;
-	u8 hdr[S5300_SIT_HDR];
+	u8 hdr[S5XXX_SIT_HDR];
 	u32 in, out;
 
 	if (len == 0 || len > max)
@@ -1464,22 +1526,22 @@ static int s5300_ring_tx(struct s5300_modem *sm, const struct s5300_txring *r,
 				    in, out);
 		return -EIO;
 	}
-	if (s5300_circ_space(r->size, in, out) < flen) {
+	if (s5xxx_circ_space(r->size, in, out) < flen) {
 		spin_unlock_irqrestore(&sm->tx_lock, flags);
 		return full_err;
 	}
 
-	put_unaligned_le16(S5300_SIT_SYNC, hdr + 0);
+	put_unaligned_le16(S5XXX_SIT_SYNC, hdr + 0);
 	put_unaligned_le16((*frame_seq)++, hdr + 2);
-	put_unaligned_le16(S5300_SIT_CFG_SINGLE, hdr + 4);
-	put_unaligned_le16(S5300_SIT_HDR + len, hdr + 6);
+	put_unaligned_le16(S5XXX_SIT_CFG_SINGLE, hdr + 4);
+	put_unaligned_le16(S5XXX_SIT_HDR + len, hdr + 6);
 	hdr[8] = ch;
 	hdr[9] = ++*ch_seq;
 	hdr[10] = 0;
 	hdr[11] = 0;
 
-	s5300_circ_write(buff, r->size, in, hdr, S5300_SIT_HDR);
-	s5300_circ_write(buff, r->size, (in + S5300_SIT_HDR) % r->size,
+	s5xxx_circ_write(buff, r->size, in, hdr, S5XXX_SIT_HDR);
+	s5xxx_circ_write(buff, r->size, (in + S5XXX_SIT_HDR) % r->size,
 			 data, len);
 	/* the CP polls the head; order the payload ahead of the advance */
 	dma_wmb();
@@ -1487,35 +1549,35 @@ static int s5300_ring_tx(struct s5300_modem *sm, const struct s5300_txring *r,
 
 	spin_unlock_irqrestore(&sm->tx_lock, flags);
 
-	s5300_send_ipc_irq(sm, S5300_INT_VALID | r->int_flag);
+	s5xxx_send_ipc_irq(sm, S5XXX_INT_VALID | r->int_flag);
 	return 0;
 }
 
 /* AT / control channels on the NORM_RAW ring; also the boot handshake path. */
-static int s5300_ipc_tx(struct s5300_modem *sm, u8 ch, const u8 *data, u32 len)
+static int s5xxx_ipc_tx(struct s5xxx_modem *sm, u8 ch, const u8 *data, u32 len)
 {
-	return s5300_ring_tx(sm, &s5300_raw_txring, &sm->frame_seq, ch,
-			     &sm->at_ch_seq, 2048 - S5300_SIT_HDR, data, len,
+	return s5xxx_ring_tx(sm, &s5xxx_raw_txring, &sm->frame_seq, ch,
+			     &sm->at_ch_seq, 2048 - S5XXX_SIT_HDR, data, len,
 			     -EAGAIN);
 }
 
-static int s5300_wwan_start(struct wwan_port *port)
+static int s5xxx_wwan_start(struct wwan_port *port)
 {
 	return 0;
 }
 
-static void s5300_wwan_stop(struct wwan_port *port)
+static void s5xxx_wwan_stop(struct wwan_port *port)
 {
 }
 
-static int s5300_wwan_tx(struct wwan_port *port, struct sk_buff *skb)
+static int s5xxx_wwan_tx(struct wwan_port *port, struct sk_buff *skb)
 {
-	struct s5300_modem *sm = wwan_port_get_drvdata(port);
+	struct s5xxx_modem *sm = wwan_port_get_drvdata(port);
 	int ret;
 
 	if (!sm->online)
 		return -ENODEV;
-	ret = s5300_ipc_tx(sm, S5300_CH_AT, skb->data, skb->len);
+	ret = s5xxx_ipc_tx(sm, S5XXX_CH_AT, skb->data, skb->len);
 	if (ret) {
 		dev_info(sm->dev, "AT tx failed: %d\n", ret);
 		return ret;
@@ -1524,10 +1586,10 @@ static int s5300_wwan_tx(struct wwan_port *port, struct sk_buff *skb)
 	return 0;
 }
 
-static const struct wwan_port_ops s5300_wwan_ops = {
-	.start	= s5300_wwan_start,
-	.stop	= s5300_wwan_stop,
-	.tx	= s5300_wwan_tx,
+static const struct wwan_port_ops s5xxx_wwan_ops = {
+	.start	= s5xxx_wwan_start,
+	.stop	= s5xxx_wwan_stop,
+	.tx	= s5xxx_wwan_tx,
 };
 
 /*
@@ -1541,14 +1603,14 @@ static const struct wwan_port_ops s5300_wwan_ops = {
  * derived here from the file.  Runtime aiding (SGEE) and the CHRE/CHPP data
  * session are left to user space over this port and /dev/gnssN.
  */
-#define S5300_GNSS_INIT		0x0201
-#define S5300_GNSS_POWER_ON	0x0202
-#define S5300_GNSS_ASSERT_RESET	0x0203
-#define S5300_GNSS_RELEASE_RESET 0x0204
-#define S5300_GNSS_LOAD		0x0e05
-#define S5300_GNSS_BLC		0x0e09
+#define S5XXX_GNSS_INIT		0x0201
+#define S5XXX_GNSS_POWER_ON	0x0202
+#define S5XXX_GNSS_ASSERT_RESET	0x0203
+#define S5XXX_GNSS_RELEASE_RESET 0x0204
+#define S5XXX_GNSS_LOAD		0x0e05
+#define S5XXX_GNSS_BLC		0x0e09
 
-struct s5300_gnss_load_cmd {
+struct s5xxx_gnss_load_cmd {
 	__le16	opcode;
 	__le32	addr;
 	__le32	reserved;
@@ -1556,14 +1618,14 @@ struct s5300_gnss_load_cmd {
 } __packed;
 
 /* One boot-channel command, sent and paced against the CP's reply. */
-static int s5300_gnss_cmd(struct s5300_modem *sm, const void *cmd, u32 len)
+static int s5xxx_gnss_cmd(struct s5xxx_modem *sm, const void *cmd, u32 len)
 {
 	int ret;
 
 	reinit_completion(&sm->gnss_rsp);
-	ret = s5300_ring_tx(sm, &s5300_raw_txring, &sm->frame_seq,
-			    S5300_CH_GNSS_BOOT, &sm->gnss_ch_seq,
-			    2048 - S5300_SIT_HDR, cmd, len, -EAGAIN);
+	ret = s5xxx_ring_tx(sm, &s5xxx_raw_txring, &sm->frame_seq,
+			    S5XXX_CH_GNSS_BOOT, &sm->gnss_ch_seq,
+			    2048 - S5XXX_SIT_HDR, cmd, len, -EAGAIN);
 	if (ret)
 		return ret;
 	/* Wait for the reply so commands are paced as the receiver expects;
@@ -1573,33 +1635,33 @@ static int s5300_gnss_cmd(struct s5300_modem *sm, const void *cmd, u32 len)
 	return 0;
 }
 
-static int s5300_gnss_op(struct s5300_modem *sm, u16 opcode)
+static int s5xxx_gnss_op(struct s5xxx_modem *sm, u16 opcode)
 {
 	__le16 cmd = cpu_to_le16(opcode);
 
-	return s5300_gnss_cmd(sm, &cmd, sizeof(cmd));
+	return s5xxx_gnss_cmd(sm, &cmd, sizeof(cmd));
 }
 
-static int s5300_gnss_load(struct s5300_modem *sm, u32 addr, u32 size)
+static int s5xxx_gnss_load(struct s5xxx_modem *sm, u32 addr, u32 size)
 {
-	struct s5300_gnss_load_cmd cmd = {
-		.opcode	= cpu_to_le16(S5300_GNSS_LOAD),
+	struct s5xxx_gnss_load_cmd cmd = {
+		.opcode	= cpu_to_le16(S5XXX_GNSS_LOAD),
 		.addr	= cpu_to_le32(addr),
 		.size	= cpu_to_le32(size),
 	};
 
-	return s5300_gnss_cmd(sm, &cmd, sizeof(cmd));
+	return s5xxx_gnss_cmd(sm, &cmd, sizeof(cmd));
 }
 
-static int s5300_gnss_blc(struct s5300_modem *sm, u32 field0, u32 arg)
+static int s5xxx_gnss_blc(struct s5xxx_modem *sm, u32 field0, u32 arg)
 {
 	struct { __le16 op; __le32 field0; __le32 arg; __le32 pad; } __packed cmd = {
-		.op	= cpu_to_le16(S5300_GNSS_BLC),
+		.op	= cpu_to_le16(S5XXX_GNSS_BLC),
 		.field0	= cpu_to_le32(field0),
 		.arg	= cpu_to_le32(arg),
 	};
 
-	return s5300_gnss_cmd(sm, &cmd, sizeof(cmd));
+	return s5xxx_gnss_cmd(sm, &cmd, sizeof(cmd));
 }
 
 /*
@@ -1607,30 +1669,30 @@ static int s5300_gnss_blc(struct s5300_modem *sm, u32 field0, u32 arg)
  * header block size); @fw_size is the whole file size.  Returns 0 once the
  * sequence has been sent.
  */
-static void s5300_gnss_codeload(struct s5300_modem *sm, u32 fw_size, u32 hdr4)
+static void s5xxx_gnss_codeload(struct s5xxx_modem *sm, u32 fw_size, u32 hdr4)
 {
 	int i;
 
 	for (i = 0; i < 3; i++)
-		s5300_gnss_op(sm, S5300_GNSS_INIT);
-	s5300_gnss_op(sm, S5300_GNSS_POWER_ON);
-	s5300_gnss_op(sm, S5300_GNSS_ASSERT_RESET);
-	s5300_gnss_op(sm, S5300_GNSS_RELEASE_RESET);
+		s5xxx_gnss_op(sm, S5XXX_GNSS_INIT);
+	s5xxx_gnss_op(sm, S5XXX_GNSS_POWER_ON);
+	s5xxx_gnss_op(sm, S5XXX_GNSS_ASSERT_RESET);
+	s5xxx_gnss_op(sm, S5XXX_GNSS_RELEASE_RESET);
 
 	/* seg0 = whole file at window offset 0; seg1 = its header block. */
-	s5300_gnss_load(sm, 0, fw_size);
-	s5300_gnss_load(sm, 4, hdr4);
+	s5xxx_gnss_load(sm, 0, fw_size);
+	s5xxx_gnss_load(sm, 4, hdr4);
 
 	/* Chip-config train (fixed field0/arg pairs from the stock sequence;
 	 * the 0x02 command carries a 0x20 flag in field0 and a 32-bit arg).
 	 */
-	s5300_gnss_blc(sm, 0x00020020, 0x60000001);
-	s5300_gnss_blc(sm, 0x00240000, 0);
-	s5300_gnss_blc(sm, 0x00230000, 0);
-	s5300_gnss_blc(sm, 0x00230000, 0);
-	s5300_gnss_blc(sm, 0x00240000, 0);
-	s5300_gnss_blc(sm, 0x00230000, 0);
-	s5300_gnss_blc(sm, 0x00230000, 0);
+	s5xxx_gnss_blc(sm, 0x00020020, 0x60000001);
+	s5xxx_gnss_blc(sm, 0x00240000, 0);
+	s5xxx_gnss_blc(sm, 0x00230000, 0);
+	s5xxx_gnss_blc(sm, 0x00230000, 0);
+	s5xxx_gnss_blc(sm, 0x00240000, 0);
+	s5xxx_gnss_blc(sm, 0x00230000, 0);
+	s5xxx_gnss_blc(sm, 0x00230000, 0);
 }
 
 /*
@@ -1638,37 +1700,37 @@ static void s5300_gnss_codeload(struct s5300_modem *sm, u32 fw_size, u32 hdr4)
  * the receiver, this exposes the channel raw so user space can drive the
  * runtime side (SGEE aiding); the CP's replies arrive as port reads.
  */
-static int s5300_gnss_tx(struct wwan_port *port, struct sk_buff *skb)
+static int s5xxx_gnss_tx(struct wwan_port *port, struct sk_buff *skb)
 {
-	struct s5300_modem *sm = wwan_port_get_drvdata(port);
+	struct s5xxx_modem *sm = wwan_port_get_drvdata(port);
 	int ret;
 
 	if (!sm->online)
 		return -ENODEV;
-	ret = s5300_ring_tx(sm, &s5300_raw_txring, &sm->frame_seq,
-			    S5300_CH_GNSS_BOOT, &sm->gnss_ch_seq,
-			    2048 - S5300_SIT_HDR, skb->data, skb->len, -EAGAIN);
+	ret = s5xxx_ring_tx(sm, &s5xxx_raw_txring, &sm->frame_seq,
+			    S5XXX_CH_GNSS_BOOT, &sm->gnss_ch_seq,
+			    2048 - S5XXX_SIT_HDR, skb->data, skb->len, -EAGAIN);
 	if (ret)
 		return ret;
 	consume_skb(skb);
 	return 0;
 }
 
-static const struct wwan_port_ops s5300_gnss_ops = {
-	.start	= s5300_wwan_start,
-	.stop	= s5300_wwan_stop,
-	.tx	= s5300_gnss_tx,
+static const struct wwan_port_ops s5xxx_gnss_ops = {
+	.start	= s5xxx_wwan_start,
+	.stop	= s5xxx_wwan_stop,
+	.tx	= s5xxx_gnss_tx,
 };
 
 /* Free space (bytes) in the FMT txq; 0 if the CP left the pointers corrupt. */
-static u32 s5300_fmt_txq_space(struct s5300_modem *sm)
+static u32 s5xxx_fmt_txq_space(struct s5xxx_modem *sm)
 {
-	u32 in = readl(sm->ipc + S5300_FMT_TXQ_HEAD);
-	u32 out = readl(sm->ipc + S5300_FMT_TXQ_TAIL);
+	u32 in = readl(sm->ipc + S5XXX_FMT_TXQ_HEAD);
+	u32 out = readl(sm->ipc + S5XXX_FMT_TXQ_TAIL);
 
-	if (in >= S5300_FMT_TXQ_SIZE || out >= S5300_FMT_TXQ_SIZE)
+	if (in >= S5XXX_FMT_TXQ_SIZE || out >= S5XXX_FMT_TXQ_SIZE)
 		return 0;
-	return s5300_circ_space(S5300_FMT_TXQ_SIZE, in, out);
+	return s5xxx_circ_space(S5XXX_FMT_TXQ_SIZE, in, out);
 }
 
 /*
@@ -1679,26 +1741,26 @@ static u32 s5300_fmt_txq_space(struct s5300_modem *sm)
  * each caller owns its @ch_seq.  Returns -EBUSY on a full ring so the oem writer
  * can wait for space and retry; the SIT port just propagates it.
  */
-static int s5300_fmt_ring_tx(struct s5300_modem *sm, u8 ch, u8 *ch_seq,
+static int s5xxx_fmt_ring_tx(struct s5xxx_modem *sm, u8 ch, u8 *ch_seq,
 			     u32 max, const u8 *data, u32 len)
 {
 	int ret;
 
 	if (!READ_ONCE(sm->online))
 		return -ENODEV;
-	ret = s5300_ring_tx(sm, &s5300_fmt_txring, &sm->fmt_frame_seq, ch,
+	ret = s5xxx_ring_tx(sm, &s5xxx_fmt_txring, &sm->fmt_frame_seq, ch,
 			    ch_seq, max, data, len, -EBUSY);
 	if (!ret)
-		s5300_fmt_mark_busy(sm);	/* keep the link up during the transfer */
+		s5xxx_fmt_mark_busy(sm);	/* keep the link up during the transfer */
 	return ret;
 }
 
-static int s5300_ctrl_tx(struct wwan_port *port, struct sk_buff *skb)
+static int s5xxx_ctrl_tx(struct wwan_port *port, struct sk_buff *skb)
 {
-	struct s5300_modem *sm = wwan_port_get_drvdata(port);
+	struct s5xxx_modem *sm = wwan_port_get_drvdata(port);
 	int ret;
 
-	ret = s5300_fmt_ring_tx(sm, S5300_CH_FMT, &sm->fmt_ch_seq, S5300_FMT_MAX,
+	ret = s5xxx_fmt_ring_tx(sm, S5XXX_CH_FMT, &sm->fmt_ch_seq, S5XXX_FMT_MAX,
 				skb->data, skb->len);
 	if (ret)
 		return ret;
@@ -1706,10 +1768,10 @@ static int s5300_ctrl_tx(struct wwan_port *port, struct sk_buff *skb)
 	return 0;
 }
 
-static const struct wwan_port_ops s5300_ctrl_ops = {
-	.start	= s5300_wwan_start,
-	.stop	= s5300_wwan_stop,
-	.tx	= s5300_ctrl_tx,
+static const struct wwan_port_ops s5xxx_ctrl_ops = {
+	.start	= s5xxx_wwan_start,
+	.stop	= s5xxx_wwan_stop,
+	.tx	= s5xxx_ctrl_tx,
 };
 
 /* --- generic channel chardev (oem_ipc1 today) ---------------------------- */
@@ -1719,19 +1781,19 @@ static const struct wwan_port_ops s5300_ctrl_ops = {
  * FMT ring slot; a full ring maps to -EAGAIN.  The WWAN core hands the whole
  * message as a single linear skb (default frag_len) and takes ownership only on
  * success, so consume the skb when the send lands and return the error (the core
- * frees it) otherwise -- the same contract as s5300_wwan_tx().
+ * frees it) otherwise -- the same contract as s5xxx_wwan_tx().
  */
-static int s5300_oem_tx(struct wwan_port *port, struct sk_buff *skb)
+static int s5xxx_oem_tx(struct wwan_port *port, struct sk_buff *skb)
 {
-	struct s5300_modem *sm = wwan_port_get_drvdata(port);
+	struct s5xxx_modem *sm = wwan_port_get_drvdata(port);
 	int ret;
 
 	if (!sm->online)
 		return -ENODEV;
-	if (skb->len > S5300_FMT_MAX)
+	if (skb->len > S5XXX_FMT_MAX)
 		return -EMSGSIZE;
 
-	ret = s5300_fmt_ring_tx(sm, S5300_CH_OEM, &sm->oem_ch_seq, S5300_FMT_MAX,
+	ret = s5xxx_fmt_ring_tx(sm, S5XXX_CH_OEM, &sm->oem_ch_seq, S5XXX_FMT_MAX,
 				skb->data, skb->len);
 	if (ret == -EBUSY)
 		return -EAGAIN;
@@ -1746,24 +1808,24 @@ static int s5300_oem_tx(struct wwan_port *port, struct sk_buff *skb)
  * from the IRQ handler) rather than dropping the frame.  The retry overwrites
  * @ret with the next send's status, so a positive wait return never leaks out.
  */
-static int s5300_oem_tx_blocking(struct wwan_port *port, struct sk_buff *skb)
+static int s5xxx_oem_tx_blocking(struct wwan_port *port, struct sk_buff *skb)
 {
-	struct s5300_modem *sm = wwan_port_get_drvdata(port);
-	u32 needed = round_up(S5300_SIT_HDR + skb->len, 8);
+	struct s5xxx_modem *sm = wwan_port_get_drvdata(port);
+	u32 needed = round_up(S5XXX_SIT_HDR + skb->len, 8);
 	int ret;
 
 	if (!sm->online)
 		return -ENODEV;
-	if (skb->len > S5300_FMT_MAX)
+	if (skb->len > S5XXX_FMT_MAX)
 		return -EMSGSIZE;
 
 	for (;;) {
-		ret = s5300_fmt_ring_tx(sm, S5300_CH_OEM, &sm->oem_ch_seq,
-					S5300_FMT_MAX, skb->data, skb->len);
+		ret = s5xxx_fmt_ring_tx(sm, S5XXX_CH_OEM, &sm->oem_ch_seq,
+					S5XXX_FMT_MAX, skb->data, skb->len);
 		if (ret != -EBUSY)
 			break;
 		ret = wait_event_interruptible_timeout(sm->fmt_tx_wq,
-				s5300_fmt_txq_space(sm) >= needed, HZ);
+				s5xxx_fmt_txq_space(sm) >= needed, HZ);
 		if (ret == 0)
 			ret = -ETIMEDOUT;
 		if (ret < 0)
@@ -1777,54 +1839,54 @@ static int s5300_oem_tx_blocking(struct wwan_port *port, struct sk_buff *skb)
 	return 0;
 }
 
-static const struct wwan_port_ops s5300_oem_ops = {
-	.start		= s5300_wwan_start,
-	.stop		= s5300_wwan_stop,
-	.tx		= s5300_oem_tx,
-	.tx_blocking	= s5300_oem_tx_blocking,
+static const struct wwan_port_ops s5xxx_oem_ops = {
+	.start		= s5xxx_wwan_start,
+	.stop		= s5xxx_wwan_stop,
+	.tx		= s5xxx_oem_tx,
+	.tx_blocking	= s5xxx_oem_tx_blocking,
 };
 
 /* RFS file channel (ch 0x29) on the NORM_RAW ring, its own per-channel seq. */
-static int s5300_rfs_tx(struct s5300_modem *sm, const u8 *data, u32 len)
+static int s5xxx_rfs_tx(struct s5xxx_modem *sm, const u8 *data, u32 len)
 {
-	return s5300_ring_tx(sm, &s5300_raw_txring, &sm->frame_seq, S5300_CH_RFS,
-			     &sm->rfs_ch_seq, S5300_RFS_MAX, data, len, -EAGAIN);
+	return s5xxx_ring_tx(sm, &s5xxx_raw_txring, &sm->frame_seq, S5XXX_CH_RFS,
+			     &sm->rfs_ch_seq, S5XXX_RFS_MAX, data, len, -EAGAIN);
 }
 
-static int s5300_rfs_port_tx(struct wwan_port *port, struct sk_buff *skb)
+static int s5xxx_rfs_port_tx(struct wwan_port *port, struct sk_buff *skb)
 {
-	struct s5300_modem *sm = wwan_port_get_drvdata(port);
+	struct s5xxx_modem *sm = wwan_port_get_drvdata(port);
 	int ret;
 
 	if (!sm->online)
 		return -ENODEV;
-	ret = s5300_rfs_tx(sm, skb->data, skb->len);
+	ret = s5xxx_rfs_tx(sm, skb->data, skb->len);
 	if (ret)
 		return ret;
 	consume_skb(skb);
 	return 0;
 }
 
-static const struct wwan_port_ops s5300_rfs_ops = {
-	.start	= s5300_wwan_start,
-	.stop	= s5300_wwan_stop,
-	.tx	= s5300_rfs_port_tx,
+static const struct wwan_port_ops s5xxx_rfs_ops = {
+	.start	= s5xxx_wwan_start,
+	.stop	= s5xxx_wwan_stop,
+	.tx	= s5xxx_rfs_port_tx,
 };
 
-/* One queued CP request, handed from the hard-IRQ demux to s5300_rfs_work. */
-struct s5300_rfs_frame {
+/* One queued CP request, handed from the hard-IRQ demux to s5xxx_rfs_work. */
+struct s5xxx_rfs_frame {
 	struct list_head	node;
 	u32			len;
 	u8			data[];
 };
 
 /* Send an RFS app frame, retrying while the RAW tx ring is momentarily full. */
-static void s5300_rfs_send(struct s5300_modem *sm, const u8 *frame, u32 len)
+static void s5xxx_rfs_send(struct s5xxx_modem *sm, const u8 *frame, u32 len)
 {
 	int i;
 
 	for (i = 0; i < 200; i++) {
-		if (s5300_rfs_tx(sm, frame, len) != -EAGAIN)
+		if (s5xxx_rfs_tx(sm, frame, len) != -EAGAIN)
 			return;
 		usleep_range(1000, 2000);
 	}
@@ -1832,21 +1894,21 @@ static void s5300_rfs_send(struct s5300_modem *sm, const u8 *frame, u32 len)
 }
 
 /* OP_STATUS(3): status=success, fid, and (on OPEN) the file size. */
-static void s5300_rfs_op_status(struct s5300_modem *sm, u16 token, u32 fid,
+static void s5xxx_rfs_op_status(struct s5xxx_modem *sm, u16 token, u32 fid,
 				u32 extra)
 {
 	u8 r[20];
 
-	put_unaligned_le16(S5300_RFS_C_STATUS, r + 0);
+	put_unaligned_le16(S5XXX_RFS_C_STATUS, r + 0);
 	put_unaligned_le16(token, r + 2);
 	put_unaligned_le32(12, r + 4);
 	put_unaligned_le32(0, r + 8);		/* status 0 = success */
 	put_unaligned_le32(fid, r + 0xc);
 	put_unaligned_le32(extra, r + 0x10);
-	s5300_rfs_send(sm, r, sizeof(r));
+	s5xxx_rfs_send(sm, r, sizeof(r));
 }
 
-static void s5300_rfs_close_file(struct s5300_rfs_file *e)
+static void s5xxx_rfs_close_file(struct s5xxx_rfs_file *e)
 {
 	if (e->fw)
 		release_firmware(e->fw);
@@ -1854,46 +1916,46 @@ static void s5300_rfs_close_file(struct s5300_rfs_file *e)
 }
 
 /* Serve the next READ chunk for fid, or OP_STATUS when the read is done. */
-static void s5300_rfs_read_step(struct s5300_modem *sm, u32 fid)
+static void s5xxx_rfs_read_step(struct s5xxx_modem *sm, u32 fid)
 {
-	struct s5300_rfs_file *e = &sm->rfs_files[fid];
-	u32 clen = min_t(size_t, e->rremain, S5300_RFS_CHUNK);
+	struct s5xxx_rfs_file *e = &sm->rfs_files[fid];
+	u32 clen = min_t(size_t, e->rremain, S5XXX_RFS_CHUNK);
 	u8 *tx = sm->rfs_txbuf;
 
 	if (!clen || !e->fw || e->roff + clen > e->fw->size) {
-		s5300_rfs_op_status(sm, e->token, fid, 0);
+		s5xxx_rfs_op_status(sm, e->token, fid, 0);
 		return;
 	}
-	put_unaligned_le16(S5300_RFS_C_READ, tx + 0);
+	put_unaligned_le16(S5XXX_RFS_C_READ, tx + 0);
 	put_unaligned_le16(e->token, tx + 2);
 	put_unaligned_le32(12 + clen, tx + 4);
 	put_unaligned_le32(fid, tx + 8);
 	put_unaligned_le32(e->roff, tx + 0xc);
 	put_unaligned_le32(clen, tx + 0x10);
 	memcpy(tx + 0x14, e->fw->data + e->roff, clen);
-	s5300_rfs_send(sm, tx, 0x14 + clen);
+	s5xxx_rfs_send(sm, tx, 0x14 + clen);
 	e->roff += clen;
 	e->rremain -= clen;
 }
 
 /* Ask the CP for the next write chunk for fid (the data is sunk + discarded). */
-static void s5300_rfs_write_req(struct s5300_modem *sm, u32 fid)
+static void s5xxx_rfs_write_req(struct s5xxx_modem *sm, u32 fid)
 {
-	struct s5300_rfs_file *e = &sm->rfs_files[fid];
-	u32 clen = min_t(size_t, e->wremain, S5300_RFS_CHUNK);
+	struct s5xxx_rfs_file *e = &sm->rfs_files[fid];
+	u32 clen = min_t(size_t, e->wremain, S5XXX_RFS_CHUNK);
 	u8 r[20];
 
-	put_unaligned_le16(S5300_RFS_C_WRITE, r + 0);
+	put_unaligned_le16(S5XXX_RFS_C_WRITE, r + 0);
 	put_unaligned_le16(e->token, r + 2);
 	put_unaligned_le32(12, r + 4);
 	put_unaligned_le32(fid, r + 8);
 	put_unaligned_le32(e->woff, r + 0xc);
 	put_unaligned_le32(clen, r + 0x10);
-	s5300_rfs_send(sm, r, sizeof(r));
+	s5xxx_rfs_send(sm, r, sizeof(r));
 }
 
 /* Map + open a whitelisted OPEN(path) request read-only from firmware. */
-static int s5300_rfs_open_path(struct s5300_modem *sm, struct s5300_rfs_file *e,
+static int s5xxx_rfs_open_path(struct s5xxx_modem *sm, struct s5xxx_rfs_file *e,
 			       const u8 *path, u32 plen)
 {
 	char name[256], fw[288];
@@ -1913,131 +1975,136 @@ static int s5300_rfs_open_path(struct s5300_modem *sm, struct s5300_rfs_file *e,
 	if (!rel)
 		return -EINVAL;
 	rel += strlen("carrierconfig/");
-	scnprintf(fw, sizeof(fw), "%s/%s", S5300_CC_DIR, rel);
+	scnprintf(fw, sizeof(fw), "google/%s/%s/%s", sm->var->fw_dir,
+		  S5XXX_CC_DIR, rel);
 	ret = request_firmware_direct(&e->fw, fw, sm->dev);
 	dev_dbg(sm->dev, "RFS serve %s: %d\n", fw, ret);
 	return ret;
 }
 
 /* NV files served read-only from the staged efs partition. */
-static const char *s5300_rfs_nv_name(u32 fid)
+static const char *s5xxx_rfs_nv_name(u32 fid)
 {
 	switch (fid) {
-	case 1:	return "google/s5400/efs/nv_normal.bin";
-	case 2:	return "google/s5400/efs/nv_protected.bin";
-	case 3:	return "google/s5400/efs/nv_user.bin";
+	case 1:	return "efs/nv_normal.bin";
+	case 2:	return "efs/nv_protected.bin";
+	case 3:	return "efs/nv_user.bin";
 	default: return NULL;
 	}
 }
 
-static void s5300_rfs_open_nv(struct s5300_modem *sm, struct s5300_rfs_file *e,
+static void s5xxx_rfs_open_nv(struct s5xxx_modem *sm, struct s5xxx_rfs_file *e,
 			      u32 fid)
 {
-	const char *name = s5300_rfs_nv_name(fid);
+	const char *name = s5xxx_rfs_nv_name(fid);
+	char path[S5XXX_FW_PATH_MAX];
 
 	e->used = true;
-	if (name && !request_firmware_direct(&e->fw, name, sm->dev))
+	if (!name)
+		return;
+	s5xxx_fw_path(sm, path, sizeof(path), name);
+	if (!request_firmware_direct(&e->fw, path, sm->dev))
 		e->size = e->fw->size;
 }
 
 /* Handle one CP RFS request (process context, single-threaded via rfs_work). */
-static void s5300_rfs_handle(struct s5300_modem *sm, const u8 *f, u32 n)
+static void s5xxx_rfs_handle(struct s5xxx_modem *sm, const u8 *f, u32 n)
 {
 	u16 cmd = get_unaligned_le16(f), token = get_unaligned_le16(f + 2);
 	u32 fid, off, iolen, iotype, clen, plen;
-	struct s5300_rfs_file *e;
+	struct s5xxx_rfs_file *e;
 
 	switch (cmd) {
-	case S5300_RFS_C_OPEN:			/* 4: open a path */
+	case S5XXX_RFS_C_OPEN:			/* 4: open a path */
 		if (n < 0x10)
 			return;
 		fid = get_unaligned_le32(f + 8);
 		plen = get_unaligned_le32(f + 0xc);
-		if (fid >= S5300_RFS_MAXFID)
+		if (fid >= S5XXX_RFS_MAXFID)
 			return;
 		if (0x10 + plen > n)
 			plen = n - 0x10;
 		e = &sm->rfs_files[fid];
-		s5300_rfs_close_file(e);
+		s5xxx_rfs_close_file(e);
 		e->used = true;
-		if (!s5300_rfs_open_path(sm, e, f + 0x10, plen) && e->fw)
+		if (!s5xxx_rfs_open_path(sm, e, f + 0x10, plen) && e->fw)
 			e->size = e->fw->size;
-		s5300_rfs_op_status(sm, token, fid, e->size);
+		s5xxx_rfs_op_status(sm, token, fid, e->size);
 		return;
-	case S5300_RFS_C_OPEN_FID:		/* 7: open an NV file by id */
+	case S5XXX_RFS_C_OPEN_FID:		/* 7: open an NV file by id */
 		fid = get_unaligned_le32(f + 8);
-		if (fid >= S5300_RFS_MAXFID)
+		if (fid >= S5XXX_RFS_MAXFID)
 			return;
 		e = &sm->rfs_files[fid];
-		s5300_rfs_close_file(e);
-		s5300_rfs_open_nv(sm, e, fid);
-		s5300_rfs_op_status(sm, token, fid, e->size);
+		s5xxx_rfs_close_file(e);
+		s5xxx_rfs_open_nv(sm, e, fid);
+		s5xxx_rfs_op_status(sm, token, fid, e->size);
 		return;
-	case S5300_RFS_C_IO:			/* 6: start a read or write */
+	case S5XXX_RFS_C_IO:			/* 6: start a read or write */
 		if (n < 0x18)
 			return;
 		fid = get_unaligned_le32(f + 8);
 		off = get_unaligned_le32(f + 0xc);
 		iolen = get_unaligned_le32(f + 0x10);
 		iotype = get_unaligned_le32(f + 0x14);
-		if (fid >= S5300_RFS_MAXFID)
+		if (fid >= S5XXX_RFS_MAXFID)
 			return;
 		e = &sm->rfs_files[fid];
 		/* NV files may be IO_REQUEST'd without a preceding OPEN_FID. */
-		if (!e->used && s5300_rfs_nv_name(fid))
-			s5300_rfs_open_nv(sm, e, fid);
+		if (!e->used && s5xxx_rfs_nv_name(fid))
+			s5xxx_rfs_open_nv(sm, e, fid);
 		if (!e->used) {			/* never leave a request unanswered */
-			s5300_rfs_op_status(sm, token, fid, 0);
+			s5xxx_rfs_op_status(sm, token, fid, 0);
 			return;
 		}
 		e->token = token;
-		if (iotype == S5300_RFS_IO_READ) {
+		if (iotype == S5XXX_RFS_IO_READ) {
 			e->roff = off;
 			e->rremain = iolen;
-			s5300_rfs_read_step(sm, fid);
-		} else if (iotype == S5300_RFS_IO_WRITE) {
+			s5xxx_rfs_read_step(sm, fid);
+		} else if (iotype == S5XXX_RFS_IO_WRITE) {
 			e->woff = off;
 			e->wremain = iolen;
-			s5300_rfs_write_req(sm, fid);
+			s5xxx_rfs_write_req(sm, fid);
 		} else {
-			s5300_rfs_op_status(sm, token, fid, 0);
+			s5xxx_rfs_op_status(sm, token, fid, 0);
 		}
 		return;
-	case S5300_RFS_C_READ:			/* 1: CP ack -> next chunk */
+	case S5XXX_RFS_C_READ:			/* 1: CP ack -> next chunk */
 		if (n < 0x10)
 			return;
 		fid = get_unaligned_le32(f + 0xc);
-		if (fid >= S5300_RFS_MAXFID || !sm->rfs_files[fid].used)
+		if (fid >= S5XXX_RFS_MAXFID || !sm->rfs_files[fid].used)
 			return;
 		e = &sm->rfs_files[fid];
 		if (e->rremain)
-			s5300_rfs_read_step(sm, fid);
+			s5xxx_rfs_read_step(sm, fid);
 		else
-			s5300_rfs_op_status(sm, e->token, fid, 0);
+			s5xxx_rfs_op_status(sm, e->token, fid, 0);
 		return;
-	case S5300_RFS_C_WRITE:			/* 2: CP data -> discard */
+	case S5XXX_RFS_C_WRITE:			/* 2: CP data -> discard */
 		if (n < 0x14)
 			return;
 		fid = get_unaligned_le32(f + 0xc);
-		if (fid >= S5300_RFS_MAXFID || !sm->rfs_files[fid].used)
+		if (fid >= S5XXX_RFS_MAXFID || !sm->rfs_files[fid].used)
 			return;
 		clen = get_unaligned_le32(f + 0x10);
 		e = &sm->rfs_files[fid];
 		e->woff += clen;
 		e->wremain = e->wremain > clen ? e->wremain - clen : 0;
 		if (e->wremain)
-			s5300_rfs_write_req(sm, fid);
+			s5xxx_rfs_write_req(sm, fid);
 		else
-			s5300_rfs_op_status(sm, e->token, fid, 0);
+			s5xxx_rfs_op_status(sm, e->token, fid, 0);
 		return;
-	case S5300_RFS_C_CLOSE:			/* 5: close + ack */
+	case S5XXX_RFS_C_CLOSE:			/* 5: close + ack */
 		fid = get_unaligned_le32(f + 8);
-		if (fid >= S5300_RFS_MAXFID)
+		if (fid >= S5XXX_RFS_MAXFID)
 			return;
-		s5300_rfs_close_file(&sm->rfs_files[fid]);
-		s5300_rfs_op_status(sm, token, fid, 0);
+		s5xxx_rfs_close_file(&sm->rfs_files[fid]);
+		s5xxx_rfs_op_status(sm, token, fid, 0);
 		return;
-	case S5300_RFS_C_STATUS:		/* 3: CP ack -- consume */
+	case S5XXX_RFS_C_STATUS:		/* 3: CP ack -- consume */
 		return;
 	default:
 		dev_dbg(sm->dev, "RFS unknown cmd %#x\n", cmd);
@@ -2045,31 +2112,31 @@ static void s5300_rfs_handle(struct s5300_modem *sm, const u8 *f, u32 n)
 	}
 }
 
-static void s5300_rfs_work(struct work_struct *work)
+static void s5xxx_rfs_work(struct work_struct *work)
 {
-	struct s5300_modem *sm = container_of(work, struct s5300_modem, rfs_work);
-	struct s5300_rfs_frame *fr;
+	struct s5xxx_modem *sm = container_of(work, struct s5xxx_modem, rfs_work);
+	struct s5xxx_rfs_frame *fr;
 	unsigned long flags;
 
 	for (;;) {
 		spin_lock_irqsave(&sm->rfs_lock, flags);
 		fr = list_first_entry_or_null(&sm->rfs_rxq,
-					      struct s5300_rfs_frame, node);
+					      struct s5xxx_rfs_frame, node);
 		if (fr)
 			list_del(&fr->node);
 		spin_unlock_irqrestore(&sm->rfs_lock, flags);
 		if (!fr)
 			break;
-		s5300_rfs_handle(sm, fr->data, fr->len);
+		s5xxx_rfs_handle(sm, fr->data, fr->len);
 		kfree(fr);
 	}
 }
 
 /* Copy a CP RFS request off the ring (hard IRQ) and queue it for rfs_work. */
-static void s5300_rfs_enqueue(struct s5300_modem *sm, void __iomem *buff,
+static void s5xxx_rfs_enqueue(struct s5xxx_modem *sm, void __iomem *buff,
 			      u32 off, u32 plen)
 {
-	struct s5300_rfs_frame *fr;
+	struct s5xxx_rfs_frame *fr;
 	unsigned long flags;
 
 	if (plen < 8)
@@ -2078,7 +2145,7 @@ static void s5300_rfs_enqueue(struct s5300_modem *sm, void __iomem *buff,
 	if (!fr)
 		return;
 	fr->len = plen;
-	s5300_circ_read(fr->data, buff, S5300_RAW_RXQ_SIZE, off, plen);
+	s5xxx_circ_read(fr->data, buff, S5XXX_RAW_RXQ_SIZE, off, plen);
 	spin_lock_irqsave(&sm->rfs_lock, flags);
 	list_add_tail(&fr->node, &sm->rfs_rxq);
 	spin_unlock_irqrestore(&sm->rfs_lock, flags);
@@ -2086,17 +2153,17 @@ static void s5300_rfs_enqueue(struct s5300_modem *sm, void __iomem *buff,
 }
 
 /* Drop any queued RFS requests and release cached files (teardown). */
-static void s5300_rfs_cleanup(struct s5300_modem *sm)
+static void s5xxx_rfs_cleanup(struct s5xxx_modem *sm)
 {
-	struct s5300_rfs_frame *fr, *tmp;
+	struct s5xxx_rfs_frame *fr, *tmp;
 	int i;
 
 	list_for_each_entry_safe(fr, tmp, &sm->rfs_rxq, node) {
 		list_del(&fr->node);
 		kfree(fr);
 	}
-	for (i = 0; i < S5300_RFS_MAXFID; i++)
-		s5300_rfs_close_file(&sm->rfs_files[i]);
+	for (i = 0; i < S5XXX_RFS_MAXFID; i++)
+		s5xxx_rfs_close_file(&sm->rfs_files[i]);
 }
 
 /*
@@ -2109,31 +2176,31 @@ static void s5300_rfs_cleanup(struct s5300_modem *sm)
  * (@intval is the cp2ap_msg sampled there; skbs GFP_ATOMIC), and bounds the
  * alloc against a corrupt CP length.
  */
-static void s5300_drain_raw_rxq(struct s5300_modem *sm, u32 intval)
+static void s5xxx_drain_raw_rxq(struct s5xxx_modem *sm, u32 intval)
 {
-	void __iomem *buff = sm->ipc + S5300_RAW_RXQ_BUFF;
+	void __iomem *buff = sm->ipc + S5XXX_RAW_RXQ_BUFF;
 	bool had_raw = false;
 	u32 in, out;
 
-	in = readl(sm->ipc + S5300_RAW_RXQ_HEAD);
-	out = readl(sm->ipc + S5300_RAW_RXQ_TAIL);
-	if (in >= S5300_RAW_RXQ_SIZE || out >= S5300_RAW_RXQ_SIZE) {
+	in = readl(sm->ipc + S5XXX_RAW_RXQ_HEAD);
+	out = readl(sm->ipc + S5XXX_RAW_RXQ_TAIL);
+	if (in >= S5XXX_RAW_RXQ_SIZE || out >= S5XXX_RAW_RXQ_SIZE) {
 		dev_err_ratelimited(sm->dev, "raw rxq ptr oob (in %#x out %#x)\n",
 				    in, out);
 		return;
 	}
 
 	while (in != out) {
-		u32 usage = s5300_circ_usage(S5300_RAW_RXQ_SIZE, in, out);
-		u8 hdr[S5300_SIT_HDR];
+		u32 usage = s5xxx_circ_usage(S5XXX_RAW_RXQ_SIZE, in, out);
+		u8 hdr[S5XXX_SIT_HDR];
 		struct wwan_port *port;
 		u32 flen, total, plen, max;
 		u8 ch;
 
-		if (usage < S5300_SIT_HDR)
+		if (usage < S5XXX_SIT_HDR)
 			break;
-		s5300_circ_read(hdr, buff, S5300_RAW_RXQ_SIZE, out, S5300_SIT_HDR);
-		if (get_unaligned_le16(hdr) != S5300_SIT_SYNC) {
+		s5xxx_circ_read(hdr, buff, S5XXX_RAW_RXQ_SIZE, out, S5XXX_SIT_HDR);
+		if (get_unaligned_le16(hdr) != S5XXX_SIT_SYNC) {
 			dev_err_ratelimited(sm->dev, "raw rx bad sync %#x; flushing\n",
 					    get_unaligned_le16(hdr));
 			out = in;
@@ -2141,30 +2208,30 @@ static void s5300_drain_raw_rxq(struct s5300_modem *sm, u32 intval)
 		}
 		flen = get_unaligned_le16(hdr + 6);	/* header + payload */
 		total = ALIGN(flen, 8);
-		if (flen < S5300_SIT_HDR || total > usage)
+		if (flen < S5XXX_SIT_HDR || total > usage)
 			break;			/* partial frame; wait for more */
 		ch = hdr[8];
-		plen = flen - S5300_SIT_HDR;
+		plen = flen - S5XXX_SIT_HDR;
 
-		if (ch == S5300_CH_RFS) {
+		if (ch == S5XXX_CH_RFS) {
 			had_raw = true;
-			if (plen <= S5300_RFS_MAX) {
+			if (plen <= S5XXX_RFS_MAX) {
 				/* Serve the request in-kernel, not via the port. */
-				s5300_rfs_enqueue(sm, buff,
-						  (out + S5300_SIT_HDR) %
-							  S5300_RAW_RXQ_SIZE,
+				s5xxx_rfs_enqueue(sm, buff,
+						  (out + S5XXX_SIT_HDR) %
+							  S5XXX_RAW_RXQ_SIZE,
 						  plen);
 				port = NULL;
 				max = 0;
 			} else {
 				port = sm->rfs_port;
-				max = S5300_RFS_MAX;
+				max = S5XXX_RFS_MAX;
 			}
-		} else if (ch == S5300_CH_AT) {
+		} else if (ch == S5XXX_CH_AT) {
 			port = sm->at_port;
 			max = SZ_2K;
 			had_raw = true;
-		} else if (ch == S5300_CH_GNSS_BOOT) {
+		} else if (ch == S5XXX_CH_GNSS_BOOT) {
 			had_raw = true;
 			if (sm->gnss_port) {
 				/* Runtime: the channel belongs to user space. */
@@ -2176,10 +2243,10 @@ static void s5300_drain_raw_rxq(struct s5300_modem *sm, u32 intval)
 					      sizeof(sm->gnss_rsp_buf));
 
 				if (n) {
-					s5300_circ_read(sm->gnss_rsp_buf, buff,
-							S5300_RAW_RXQ_SIZE,
-							(out + S5300_SIT_HDR) %
-								S5300_RAW_RXQ_SIZE,
+					s5xxx_circ_read(sm->gnss_rsp_buf, buff,
+							S5XXX_RAW_RXQ_SIZE,
+							(out + S5XXX_SIT_HDR) %
+								S5XXX_RAW_RXQ_SIZE,
 							n);
 					sm->gnss_rsp_len = n;
 					complete(&sm->gnss_rsp);
@@ -2196,10 +2263,10 @@ static void s5300_drain_raw_rxq(struct s5300_modem *sm, u32 intval)
 			struct sk_buff *skb = alloc_skb(plen, GFP_ATOMIC);
 
 			if (skb) {
-				s5300_circ_read(skb_put(skb, plen), buff,
-						S5300_RAW_RXQ_SIZE,
-						(out + S5300_SIT_HDR) %
-							S5300_RAW_RXQ_SIZE, plen);
+				s5xxx_circ_read(skb_put(skb, plen), buff,
+						S5XXX_RAW_RXQ_SIZE,
+						(out + S5XXX_SIT_HDR) %
+							S5XXX_RAW_RXQ_SIZE, plen);
 				wwan_port_rx(port, skb);
 			} else {
 				dev_warn_ratelimited(sm->dev,
@@ -2207,15 +2274,15 @@ static void s5300_drain_raw_rxq(struct s5300_modem *sm, u32 intval)
 						     ch, plen);
 			}
 		}
-		out = (out + total) % S5300_RAW_RXQ_SIZE;
+		out = (out + total) % S5XXX_RAW_RXQ_SIZE;
 	}
 
 	/* order the payload reads ahead of the tail advance the CP watches */
 	dma_wmb();
-	writel(out, sm->ipc + S5300_RAW_RXQ_TAIL);
+	writel(out, sm->ipc + S5XXX_RAW_RXQ_TAIL);
 
-	if (had_raw && (intval & S5300_INT_REQ_ACK_RAW))
-		s5300_send_ipc_irq(sm, S5300_INT_VALID | S5300_INT_RES_ACK_RAW);
+	if (had_raw && (intval & S5XXX_INT_REQ_ACK_RAW))
+		s5xxx_send_ipc_irq(sm, S5XXX_INT_VALID | S5XXX_INT_RES_ACK_RAW);
 }
 
 /*
@@ -2230,15 +2297,15 @@ static void s5300_drain_raw_rxq(struct s5300_modem *sm, u32 intval)
  * an skb and hand it to @port.  Runs in the MSI hard-IRQ, so GFP_ATOMIC; a drop
  * on OOM is harmless (the CP re-requests).  The WWAN core owns rxq backpressure.
  */
-static void s5300_fmt_deliver(struct wwan_port *port, void __iomem *buff,
+static void s5xxx_fmt_deliver(struct wwan_port *port, void __iomem *buff,
 			      u32 out, u32 payload)
 {
 	struct sk_buff *skb = alloc_skb(payload, GFP_ATOMIC);
 
 	if (!skb)
 		return;
-	s5300_circ_read(skb_put(skb, payload), buff, S5300_FMT_RXQ_SIZE,
-			(out + S5300_SIT_HDR) % S5300_FMT_RXQ_SIZE, payload);
+	s5xxx_circ_read(skb_put(skb, payload), buff, S5XXX_FMT_RXQ_SIZE,
+			(out + S5XXX_SIT_HDR) % S5XXX_FMT_RXQ_SIZE, payload);
 	wwan_port_rx(port, skb);
 }
 
@@ -2252,15 +2319,15 @@ static void s5300_fmt_deliver(struct wwan_port *port, void __iomem *buff,
  * the tail; the CP gates its secondary channels on that round-trip.  skbs are
  * GFP_ATOMIC.
  */
-static void s5300_drain_fmt_rxq(struct s5300_modem *sm, u32 intval)
+static void s5xxx_drain_fmt_rxq(struct s5xxx_modem *sm, u32 intval)
 {
-	void __iomem *buff = sm->ipc + S5300_FMT_RXQ_BUFF;
+	void __iomem *buff = sm->ipc + S5XXX_FMT_RXQ_BUFF;
 	bool had_data;
 	u32 in, out;
 
-	in = readl(sm->ipc + S5300_FMT_RXQ_HEAD);
-	out = readl(sm->ipc + S5300_FMT_RXQ_TAIL);
-	if (in >= S5300_FMT_RXQ_SIZE || out >= S5300_FMT_RXQ_SIZE) {
+	in = readl(sm->ipc + S5XXX_FMT_RXQ_HEAD);
+	out = readl(sm->ipc + S5XXX_FMT_RXQ_TAIL);
+	if (in >= S5XXX_FMT_RXQ_SIZE || out >= S5XXX_FMT_RXQ_SIZE) {
 		dev_err_ratelimited(sm->dev, "fmt rxq ptr oob (in %#x out %#x)\n",
 				    in, out);
 		return;
@@ -2268,14 +2335,14 @@ static void s5300_drain_fmt_rxq(struct s5300_modem *sm, u32 intval)
 	had_data = (in != out);
 
 	while (in != out) {
-		u32 usage = s5300_circ_usage(S5300_FMT_RXQ_SIZE, in, out);
-		u8 hdr[S5300_SIT_HDR];
+		u32 usage = s5xxx_circ_usage(S5XXX_FMT_RXQ_SIZE, in, out);
+		u8 hdr[S5XXX_SIT_HDR];
 		u32 flen, total, plen;
 
-		if (usage < S5300_SIT_HDR)
+		if (usage < S5XXX_SIT_HDR)
 			break;
-		s5300_circ_read(hdr, buff, S5300_FMT_RXQ_SIZE, out, S5300_SIT_HDR);
-		if (get_unaligned_le16(hdr) != S5300_SIT_SYNC) {
+		s5xxx_circ_read(hdr, buff, S5XXX_FMT_RXQ_SIZE, out, S5XXX_SIT_HDR);
+		if (get_unaligned_le16(hdr) != S5XXX_SIT_SYNC) {
 			dev_err_ratelimited(sm->dev, "fmt rx bad sync %#x; flushing\n",
 					    get_unaligned_le16(hdr));
 			out = in;
@@ -2283,33 +2350,33 @@ static void s5300_drain_fmt_rxq(struct s5300_modem *sm, u32 intval)
 		}
 		flen = get_unaligned_le16(hdr + 6);
 		total = ALIGN(flen, 8);
-		if (flen < S5300_SIT_HDR || total > usage)
+		if (flen < S5XXX_SIT_HDR || total > usage)
 			break;			/* partial frame; wait for more */
-		plen = flen - S5300_SIT_HDR;
+		plen = flen - S5XXX_SIT_HDR;
 
-		if (hdr[8] == S5300_CH_OEM) {
+		if (hdr[8] == S5XXX_CH_OEM) {
 			if (sm->oem_port && plen)
-				s5300_fmt_deliver(sm->oem_port, buff, out, plen);
+				s5xxx_fmt_deliver(sm->oem_port, buff, out, plen);
 			/*
 			 * The CP opened an oem transaction and expects a
 			 * (multi-frame) reply; keep the link up so it drains at L0.
 			 */
-			s5300_fmt_mark_busy(sm);
-		} else if (hdr[8] != S5300_CH_FMT) {
+			s5xxx_fmt_mark_busy(sm);
+		} else if (hdr[8] != S5XXX_CH_FMT) {
 			dev_info_ratelimited(sm->dev,
 					     "fmt rxq drop unhandled ch %#x payload %u\n",
 					     hdr[8], plen);
 		} else if (sm->ctrl_port && plen) {
-			s5300_fmt_deliver(sm->ctrl_port, buff, out, plen);
+			s5xxx_fmt_deliver(sm->ctrl_port, buff, out, plen);
 		}
-		out = (out + total) % S5300_FMT_RXQ_SIZE;
+		out = (out + total) % S5XXX_FMT_RXQ_SIZE;
 	}
 
 	dma_wmb();
-	writel(out, sm->ipc + S5300_FMT_RXQ_TAIL);
+	writel(out, sm->ipc + S5XXX_FMT_RXQ_TAIL);
 
-	if (had_data && (intval & S5300_INT_REQ_ACK_FMT))
-		s5300_send_ipc_irq(sm, S5300_INT_VALID | S5300_INT_RES_ACK_FMT);
+	if (had_data && (intval & S5XXX_INT_REQ_ACK_FMT))
+		s5xxx_send_ipc_irq(sm, S5XXX_INT_VALID | S5XXX_INT_RES_ACK_FMT);
 }
 
 /*
@@ -2327,23 +2394,23 @@ static void s5300_drain_fmt_rxq(struct s5300_modem *sm, u32 intval)
  * version nibble and hand it to the raw-IP netdev.  Bounded by num_desc so a
  * garbled rear pointer cannot spin.  Runs in the MSI hard-IRQ once ONLINE.
  */
-static void s5300_pktproc_dl_drain(struct s5300_modem *sm)
+static void s5xxx_pktproc_dl_drain(struct s5xxx_modem *sm)
 {
-	void __iomem *info = sm->pktproc + S5300_PKTPROC_DL_INFO_OFS;
-	u32 n = S5300_PKTPROC_DL_NUM_DESC;
+	void __iomem *info = sm->pktproc + S5XXX_PKTPROC_DL_INFO_OFS;
+	u32 n = S5XXX_PKTPROC_DL_NUM_DESC;
 	int q;
 
 	if (!sm->pktproc || !sm->ndev)
 		return;
 
-	for (q = 0; q < S5300_PKTPROC_DL_NUM_QUEUE; q++) {
+	for (q = 0; q < S5XXX_PKTPROC_DL_NUM_QUEUE; q++) {
 		void __iomem *qinfo = info + 4 + q * 20;
-		void __iomem *descs = sm->pktproc + S5300_PKTPROC_DL_DESC_OFS +
-				      q * S5300_PKTPROC_DL_Q_DESC_SZ;
-		void __iomem *buff = sm->pktproc + S5300_PKTPROC_DL_BUFF_OFS +
-				     q * S5300_PKTPROC_DL_Q_BUFF_SZ;
-		u32 cp_buff = S5300_PKTPROC_CP_BASE + S5300_PKTPROC_DL_BUFF_OFS +
-			      q * S5300_PKTPROC_DL_Q_BUFF_SZ;
+		void __iomem *descs = sm->pktproc + S5XXX_PKTPROC_DL_DESC_OFS +
+				      q * S5XXX_PKTPROC_DL_Q_DESC_SZ;
+		void __iomem *buff = sm->pktproc + S5XXX_PKTPROC_DL_BUFF_OFS +
+				     q * S5XXX_PKTPROC_DL_Q_BUFF_SZ;
+		u32 cp_buff = S5XXX_PKTPROC_CP_BASE + S5XXX_PKTPROC_DL_BUFF_OFS +
+			      q * S5XXX_PKTPROC_DL_Q_BUFF_SZ;
 		u32 rear = readl(qinfo + 16) % n;
 		u32 done = sm->dl_done[q];
 		u32 fore = sm->dl_fore[q];
@@ -2356,11 +2423,11 @@ static void s5300_pktproc_dl_drain(struct s5300_modem *sm)
 
 		for (guard = 0; done != rear && guard < n; guard++) {
 			void __iomem *d = descs +
-					  done * S5300_PKTPROC_DESC_SKTBUF_SZ;
+					  done * S5XXX_PKTPROC_DESC_SKTBUF_SZ;
 			u32 len = readl(d + 8) & 0xffff;	/* length @ byte 8 */
 			struct sk_buff *skb;
 
-			if (len == 0 || len > S5300_PKTPROC_DL_MAX_PKT) {
+			if (len == 0 || len > S5XXX_PKTPROC_DL_MAX_PKT) {
 				sm->ndev->stats.rx_length_errors++;
 				goto next;
 			}
@@ -2370,7 +2437,7 @@ static void s5300_pktproc_dl_drain(struct s5300_modem *sm)
 				goto next;
 			}
 			memcpy_fromio(skb_put(skb, len),
-				      buff + done * S5300_PKTPROC_DL_TRUE_PKT,
+				      buff + done * S5XXX_PKTPROC_DL_TRUE_PKT,
 				      len);
 			skb->protocol = htons((skb->data[0] >> 4) == 6 ?
 					      ETH_P_IPV6 : ETH_P_IP);
@@ -2386,17 +2453,17 @@ next:
 		sm->dl_done[q] = done;
 
 		/* Re-arm the freed slots: circ_space(n, fore, done). */
-		space = s5300_circ_space(n, fore, done);
+		space = s5xxx_circ_space(n, fore, done);
 		for (i = 0; i < space; i++) {
 			void __iomem *d = descs +
-					  fore * S5300_PKTPROC_DESC_SKTBUF_SZ;
+					  fore * S5XXX_PKTPROC_DESC_SKTBUF_SZ;
 			u32 ctrl = 0;
 
 			if (fore == 0)
-				ctrl |= S5300_PKTPROC_CTRL_HEAD;
+				ctrl |= S5XXX_PKTPROC_CTRL_HEAD;
 			if (fore == n - 1)
-				ctrl |= S5300_PKTPROC_CTRL_RINGEND;
-			writel(cp_buff + fore * S5300_PKTPROC_DL_TRUE_PKT, d);
+				ctrl |= S5XXX_PKTPROC_CTRL_RINGEND;
+			writel(cp_buff + fore * S5XXX_PKTPROC_DL_TRUE_PKT, d);
 			writel(ctrl << 8, d + 4);
 			fore = (fore + 1 == n) ? 0 : fore + 1;
 		}
@@ -2415,10 +2482,10 @@ next:
  * PKTPROC_UL is advertised (ap_cap bit0); otherwise the CP does not consume the
  * ring and an up'd rmnet0 would ring spurious doorbells.
  */
-static void s5300_pktproc_ul_activate(struct s5300_modem *sm)
+static void s5xxx_pktproc_ul_activate(struct s5xxx_modem *sm)
 {
-	void __iomem *info = sm->pktproc + S5300_PKTPROC_UL_INFO_OFS;
-	void __iomem *qinfo = info + 8 + S5300_PKTPROC_UL_TXQ * 20;
+	void __iomem *info = sm->pktproc + S5XXX_PKTPROC_UL_INFO_OFS;
+	void __iomem *qinfo = info + 8 + S5XXX_PKTPROC_UL_TXQ * 20;
 
 	if (!sm->pktproc)
 		return;
@@ -2442,38 +2509,38 @@ static void s5300_pktproc_ul_activate(struct s5300_modem *sm)
  * ul_done needs no extra protection.  Returns false when the ring is full or the
  * frame is oversized -- the caller drops.
  */
-static bool s5300_pktproc_ul_xmit(struct s5300_modem *sm, struct sk_buff *skb)
+static bool s5xxx_pktproc_ul_xmit(struct s5xxx_modem *sm, struct sk_buff *skb)
 {
-	void __iomem *info = sm->pktproc + S5300_PKTPROC_UL_INFO_OFS;
-	void __iomem *qinfo = info + 8 + S5300_PKTPROC_UL_TXQ * 20;
-	u32 n = S5300_PKTPROC_UL_Q1_NUM_DESC;
-	u32 dsize = skb->len + S5300_PKTPROC_UL_CP_PADDING;
-	u32 desc_base = S5300_PKTPROC_UL_DESC_OFS +
-			S5300_PKTPROC_UL_Q0_NUM_DESC * S5300_PKTPROC_DESC_UL_SZ;
-	u32 buff_base = S5300_PKTPROC_UL_BUFF_OFS +
-			S5300_PKTPROC_UL_Q0_NUM_DESC * S5300_PKTPROC_UL_Q0_MAX_PKT;
+	void __iomem *info = sm->pktproc + S5XXX_PKTPROC_UL_INFO_OFS;
+	void __iomem *qinfo = info + 8 + S5XXX_PKTPROC_UL_TXQ * 20;
+	u32 n = S5XXX_PKTPROC_UL_Q1_NUM_DESC;
+	u32 dsize = skb->len + S5XXX_PKTPROC_UL_CP_PADDING;
+	u32 desc_base = S5XXX_PKTPROC_UL_DESC_OFS +
+			S5XXX_PKTPROC_UL_Q0_NUM_DESC * S5XXX_PKTPROC_DESC_UL_SZ;
+	u32 buff_base = S5XXX_PKTPROC_UL_BUFF_OFS +
+			S5XXX_PKTPROC_UL_Q0_NUM_DESC * S5XXX_PKTPROC_UL_Q0_MAX_PKT;
 	void __iomem *desc, *buf;
 	u32 cp_buf, rear, slot;
 	unsigned long flags;
 	u8 last;
 
-	if (dsize > S5300_PKTPROC_UL_MAX_PKT)
+	if (dsize > S5XXX_PKTPROC_UL_MAX_PKT)
 		return false;
 
 	spin_lock_irqsave(&sm->tx_lock, flags);
 	slot = sm->ul_done;
 	rear = readl(qinfo + 16) % n;	/* rear_ptr (CP consumer) */
 	/* circ_space(n, fore=slot, rear): need at least one free descriptor. */
-	if (s5300_circ_space(n, slot, rear) < 1) {
+	if (s5xxx_circ_space(n, slot, rear) < 1) {
 		spin_unlock_irqrestore(&sm->tx_lock, flags);
 		return false;
 	}
 
-	desc = sm->pktproc + desc_base + slot * S5300_PKTPROC_DESC_UL_SZ;
-	buf = sm->pktproc + buff_base + slot * S5300_PKTPROC_UL_MAX_PKT;
-	cp_buf = S5300_PKTPROC_CP_BASE + buff_base +
-		 slot * S5300_PKTPROC_UL_MAX_PKT;
-	last = sm->ul_end_bit_owner == S5300_PKTPROC_END_BIT_AP ? 1 : 0;
+	desc = sm->pktproc + desc_base + slot * S5XXX_PKTPROC_DESC_UL_SZ;
+	buf = sm->pktproc + buff_base + slot * S5XXX_PKTPROC_UL_MAX_PKT;
+	cp_buf = S5XXX_PKTPROC_CP_BASE + buff_base +
+		 slot * S5XXX_PKTPROC_UL_MAX_PKT;
+	last = sm->ul_end_bit_owner == S5XXX_PKTPROC_END_BIT_AP ? 1 : 0;
 
 	memcpy_toio(buf, skb->data, skb->len);
 	writel(dsize, desc + 0x0);		/* data_size (+CP_PADDING) */
@@ -2481,7 +2548,7 @@ static bool s5300_pktproc_ul_xmit(struct s5300_modem *sm, struct sk_buff *skb)
 	writel(cp_buf, desc + 0x8);		/* sktbuf_point[31:0] */
 	writel(0, desc + 0xc);			/* sktbuf_point[35:32] + pbp */
 	writel(last, desc + 0x10);		/* last_desc (bit0) */
-	writel(S5300_CH_PDP_FIRST << 8, desc + 0x14);	/* lcid @ byte 21 */
+	writel(S5XXX_CH_PDP_FIRST << 8, desc + 0x14);	/* lcid @ byte 21 */
 	writel(0, desc + 0x18);
 	writel(0, desc + 0x1c);
 
@@ -2491,26 +2558,26 @@ static bool s5300_pktproc_ul_xmit(struct s5300_modem *sm, struct sk_buff *skb)
 	writel(slot, qinfo + 12);	/* fore_ptr (AP producer) */
 	spin_unlock_irqrestore(&sm->tx_lock, flags);
 
-	s5300_send_ipc_irq(sm, S5300_INT_VALID | S5300_INT_SEND_RAW);
+	s5xxx_send_ipc_irq(sm, S5XXX_INT_VALID | S5XXX_INT_SEND_RAW);
 	return true;
 }
 
-static int s5300_ndo_open(struct net_device *ndev)
+static int s5xxx_ndo_open(struct net_device *ndev)
 {
 	netif_start_queue(ndev);
 	return 0;
 }
 
-static int s5300_ndo_stop(struct net_device *ndev)
+static int s5xxx_ndo_stop(struct net_device *ndev)
 {
 	netif_stop_queue(ndev);
 	return 0;
 }
 
-static netdev_tx_t s5300_ndo_start_xmit(struct sk_buff *skb,
+static netdev_tx_t s5xxx_ndo_start_xmit(struct sk_buff *skb,
 					struct net_device *ndev)
 {
-	struct s5300_modem *sm = *(struct s5300_modem **)netdev_priv(ndev);
+	struct s5xxx_modem *sm = *(struct s5xxx_modem **)netdev_priv(ndev);
 	unsigned int len;
 
 	/*
@@ -2524,7 +2591,7 @@ static netdev_tx_t s5300_ndo_start_xmit(struct sk_buff *skb,
 	}
 	len = skb->len;
 
-	if (sm->ul_active && s5300_pktproc_ul_xmit(sm, skb)) {
+	if (sm->ul_active && s5xxx_pktproc_ul_xmit(sm, skb)) {
 		ndev->stats.tx_packets++;
 		ndev->stats.tx_bytes += len;
 	} else {
@@ -2534,15 +2601,15 @@ static netdev_tx_t s5300_ndo_start_xmit(struct sk_buff *skb,
 	return NETDEV_TX_OK;
 }
 
-static const struct net_device_ops s5300_netdev_ops = {
-	.ndo_open	= s5300_ndo_open,
-	.ndo_stop	= s5300_ndo_stop,
-	.ndo_start_xmit	= s5300_ndo_start_xmit,
+static const struct net_device_ops s5xxx_netdev_ops = {
+	.ndo_open	= s5xxx_ndo_open,
+	.ndo_stop	= s5xxx_ndo_stop,
+	.ndo_start_xmit	= s5xxx_ndo_start_xmit,
 };
 
-static void s5300_netdev_setup(struct net_device *ndev)
+static void s5xxx_netdev_setup(struct net_device *ndev)
 {
-	ndev->netdev_ops = &s5300_netdev_ops;
+	ndev->netdev_ops = &s5xxx_netdev_ops;
 	ndev->type = ARPHRD_RAWIP;
 	ndev->flags = IFF_POINTOPOINT | IFF_NOARP;
 	ndev->hard_header_len = 0;
@@ -2555,12 +2622,12 @@ static void s5300_netdev_setup(struct net_device *ndev)
 }
 
 /*
- * Register the raw-IP data netdev (rmnet0).  Called from s5300_online: RX is
+ * Register the raw-IP data netdev (rmnet0).  Called from s5xxx_online: RX is
  * guarded by sm->ndev in the drain and TX by sm->ul_active, so the interface
  * appears exactly when the modem is ONLINE.  pktproc-off (legacy IPC) builds
  * skip it -- there is no UL/DL ring to back it.
  */
-static void s5300_register_netdev(struct s5300_modem *sm)
+static void s5xxx_register_netdev(struct s5xxx_modem *sm)
 {
 	struct net_device *ndev;
 	int ret;
@@ -2568,13 +2635,13 @@ static void s5300_register_netdev(struct s5300_modem *sm)
 	if (!sm->pktproc || sm->ndev)
 		return;
 
-	ndev = alloc_netdev(sizeof(struct s5300_modem *), "rmnet%d",
-			    NET_NAME_ENUM, s5300_netdev_setup);
+	ndev = alloc_netdev(sizeof(struct s5xxx_modem *), "rmnet%d",
+			    NET_NAME_ENUM, s5xxx_netdev_setup);
 	if (!ndev) {
 		dev_err(sm->dev, "failed to allocate rmnet netdev\n");
 		return;
 	}
-	*(struct s5300_modem **)netdev_priv(ndev) = sm;
+	*(struct s5xxx_modem **)netdev_priv(ndev) = sm;
 	SET_NETDEV_DEV(ndev, sm->dev);
 
 	ret = register_netdev(ndev);
@@ -2585,11 +2652,11 @@ static void s5300_register_netdev(struct s5300_modem *sm)
 	}
 	sm->ndev = ndev;
 	dev_info(sm->dev, "raw-IP data netdev %s up (ch %#x)\n",
-		 ndev->name, S5300_CH_PDP_FIRST);
+		 ndev->name, S5XXX_CH_PDP_FIRST);
 }
 
 /* Expose the runtime control channel once the CP is ONLINE (process context). */
-static void s5300_online(struct s5300_modem *sm)
+static void s5xxx_online(struct s5xxx_modem *sm)
 {
 	if (sm->at_port)
 		return;
@@ -2600,9 +2667,9 @@ static void s5300_online(struct s5300_modem *sm)
 	 * a PERST-driven retrain would never complete (the CP only re-trains
 	 * once it has itself parked the link to L2 and raised CP2AP_WAKEUP).
 	 * Instead hand the link to CP-driven runtime PM: with ds_det=1 published
-	 * (s5300_init_control_messages) the CP runs its deep-sleep handshake --
+	 * (s5xxx_init_control_messages) the CP runs its deep-sleep handshake --
 	 * parking the link when idle and cycling CP2AP_WAKEUP -- and each wake
-	 * relink (s5300_pm_work) re-arms MAIN's runtime IPC.  Just arm the wakeup
+	 * relink (s5xxx_pm_work) re-arms MAIN's runtime IPC.  Just arm the wakeup
 	 * IRQ; the link stays up until the CP first parks it.
 	 */
 	mutex_lock(&sm->pcie_onoff_lock);
@@ -2621,9 +2688,9 @@ static void s5300_online(struct s5300_modem *sm)
 	 * watchdog); if it is already 0 here, MAIN zeroes it benignly at init.
 	 */
 	dev_info(sm->dev, "at ONLINE: boot_stage %#x sub %#x cafe %#x irq #%u\n",
-		 readl(sm->msi + S5300_MSI_BOOT_STAGE),
-		 readl(sm->msi + S5300_MSI_SUB_BOOT_STAGE),
-		 readl(sm->msi + S5300_MSI_FLAG_CAFE), sm->irq_count);
+		 readl(sm->msi + S5XXX_MSI_BOOT_STAGE),
+		 readl(sm->msi + S5XXX_MSI_SUB_BOOT_STAGE),
+		 readl(sm->msi + S5XXX_MSI_FLAG_CAFE), sm->irq_count);
 	/*
 	 * Runtime shared-mem control words vs the stock capture
 	 * (~/Documents/claude-cpif-capture.rst): stock healthy = ap2cp_msg 0x82,
@@ -2633,16 +2700,16 @@ static void s5300_online(struct s5300_modem *sm)
 	 */
 	dev_info(sm->dev,
 		 "at ONLINE shmem: ap2cp_msg %#x cp2ap_msg %#x ap2cp_united %#x cp2ap_united %#x | cap ap0 %#x cp0 %#x magic %#x access %#x\n",
-		 readl(sm->ipc + S5300_IPC_AP2CP_MSG),
-		 readl(sm->ipc + S5300_IPC_CP2AP_MSG),
-		 readl(sm->ipc + S5300_IPC_AP2CP_STATUS),
+		 readl(sm->ipc + S5XXX_IPC_AP2CP_MSG),
+		 readl(sm->ipc + S5XXX_IPC_CP2AP_MSG),
+		 readl(sm->ipc + S5XXX_IPC_AP2CP_STATUS),
 		 readl(sm->ipc + 0x80c),
-		 readl(sm->ipc + S5300_IPC_CAP_AP0),
-		 readl(sm->ipc + S5300_IPC_CAP_BASE + 0x4),
-		 readl(sm->ipc + S5300_IPC_MAGIC),
-		 readl(sm->ipc + S5300_IPC_ACCESS));
+		 readl(sm->ipc + S5XXX_IPC_CAP_AP0),
+		 readl(sm->ipc + S5XXX_IPC_CAP_BASE + 0x4),
+		 readl(sm->ipc + S5XXX_IPC_MAGIC),
+		 readl(sm->ipc + S5XXX_IPC_ACCESS));
 
-	sm->at_port = wwan_create_port(sm->dev, WWAN_PORT_AT, &s5300_wwan_ops,
+	sm->at_port = wwan_create_port(sm->dev, WWAN_PORT_AT, &s5xxx_wwan_ops,
 				       NULL, sm);
 	if (IS_ERR(sm->at_port)) {
 		dev_err(sm->dev, "failed to create AT port: %ld\n",
@@ -2651,7 +2718,7 @@ static void s5300_online(struct s5300_modem *sm)
 		return;
 	}
 	dev_info(sm->dev, "AT control port up (umts_router, ch %u)\n",
-		 S5300_CH_AT);
+		 S5XXX_CH_AT);
 
 	/*
 	 * The SIT control plane (umts_ipc0, FMT ring, ch 0xF5).  The CP services
@@ -2659,7 +2726,7 @@ static void s5300_online(struct s5300_modem *sm)
 	 * driven and its REQ_ACK round-trips answered, so expose it as its own
 	 * port for a userspace RIL to run the modem init handshake.
 	 */
-	sm->ctrl_port = wwan_create_port(sm->dev, WWAN_PORT_SIT, &s5300_ctrl_ops,
+	sm->ctrl_port = wwan_create_port(sm->dev, WWAN_PORT_SIT, &s5xxx_ctrl_ops,
 					 NULL, sm);
 	if (IS_ERR(sm->ctrl_port)) {
 		dev_err(sm->dev, "failed to create SIT port: %ld\n",
@@ -2667,7 +2734,7 @@ static void s5300_online(struct s5300_modem *sm)
 		sm->ctrl_port = NULL;
 	} else {
 		dev_info(sm->dev, "SIT control port up (umts_ipc0, ch %u)\n",
-			 S5300_CH_FMT);
+			 S5XXX_CH_FMT);
 	}
 
 	/*
@@ -2676,7 +2743,7 @@ static void s5300_online(struct s5300_modem *sm)
 	 * SETUP_DATA_CALL until an AP-side RFS server answers.  Expose it so a
 	 * userspace server can serve those file requests.
 	 */
-	sm->rfs_port = wwan_create_port(sm->dev, WWAN_PORT_RFS, &s5300_rfs_ops,
+	sm->rfs_port = wwan_create_port(sm->dev, WWAN_PORT_RFS, &s5xxx_rfs_ops,
 					NULL, sm);
 	if (IS_ERR(sm->rfs_port)) {
 		dev_err(sm->dev, "failed to create RFS port: %ld\n",
@@ -2684,7 +2751,7 @@ static void s5300_online(struct s5300_modem *sm)
 		sm->rfs_port = NULL;
 	} else {
 		dev_info(sm->dev, "RFS file port up (umts_rfs0, ch %#x)\n",
-			 S5300_CH_RFS);
+			 S5XXX_CH_RFS);
 	}
 
 	/*
@@ -2692,7 +2759,7 @@ static void s5300_online(struct s5300_modem *sm)
 	 * UE-capability-config file requests here and asserts if they go unanswered.
 	 * A userspace daemon answers them over this port; the kernel is transport only.
 	 */
-	sm->oem_port = wwan_create_port(sm->dev, WWAN_PORT_OEM, &s5300_oem_ops,
+	sm->oem_port = wwan_create_port(sm->dev, WWAN_PORT_OEM, &s5xxx_oem_ops,
 					NULL, sm);
 	if (IS_ERR(sm->oem_port)) {
 		dev_err(sm->dev, "failed to create OEM port: %ld\n",
@@ -2700,13 +2767,13 @@ static void s5300_online(struct s5300_modem *sm)
 		sm->oem_port = NULL;
 	} else {
 		dev_info(sm->dev, "OEM/GEMS port up (oem_ipc1, ch %#x)\n",
-			 S5300_CH_OEM);
+			 S5XXX_CH_OEM);
 	}
 
 	/*
 	 * The GNSS boot channel (ch 0xf0), exposed raw for codeload development.
 	 */
-	sm->gnss_port = wwan_create_port(sm->dev, WWAN_PORT_GNSS, &s5300_gnss_ops,
+	sm->gnss_port = wwan_create_port(sm->dev, WWAN_PORT_GNSS, &s5xxx_gnss_ops,
 					 NULL, sm);
 	if (IS_ERR(sm->gnss_port)) {
 		dev_err(sm->dev, "failed to create GNSS port: %ld\n",
@@ -2714,7 +2781,7 @@ static void s5300_online(struct s5300_modem *sm)
 		sm->gnss_port = NULL;
 	} else {
 		dev_info(sm->dev, "GNSS boot port up (gnss_boot, ch %#x)\n",
-			 S5300_CH_GNSS_BOOT);
+			 S5XXX_CH_GNSS_BOOT);
 	}
 
 	/*
@@ -2723,16 +2790,16 @@ static void s5300_online(struct s5300_modem *sm)
 	 * the NORM UL ring; carrying real traffic still needs an active data call
 	 * (SETUP_DATA_CALL over the SIT control plane) to assign an IP.
 	 */
-	s5300_register_netdev(sm);
+	s5xxx_register_netdev(sm);
 }
 
-static irqreturn_t s5300_irq_handler(int irq, void *data)
+static irqreturn_t s5xxx_irq_handler(int irq, void *data)
 {
-	struct s5300_modem *sm = data;
+	struct s5xxx_modem *sm = data;
 	u32 val, cmd;
 
 	sm->irq_count++;
-	val = readl(sm->ipc + S5300_IPC_CP2AP_MSG);
+	val = readl(sm->ipc + S5XXX_IPC_CP2AP_MSG);
 	/* Surface interrupt-value changes so post-bounce MSI liveness is visible. */
 	if (val != sm->last_cp2ap) {
 		dev_info(sm->dev, "IPC irq #%u: cp2ap %#x\n", sm->irq_count, val);
@@ -2745,12 +2812,12 @@ static irqreturn_t s5300_irq_handler(int irq, void *data)
 	 * otherwise a DL-only interrupt returns here having done nothing.
 	 */
 	if (sm->online)
-		s5300_pktproc_dl_drain(sm);
+		s5xxx_pktproc_dl_drain(sm);
 
-	if (!(val & S5300_INT_VALID))
+	if (!(val & S5XXX_INT_VALID))
 		return IRQ_HANDLED;
 
-	if (!(val & S5300_CMD_VALID)) {
+	if (!(val & S5XXX_CMD_VALID)) {
 		/* Data notification (SEND_FMT/SEND_RAW), no command. */
 		if (sm->online) {
 			/*
@@ -2759,23 +2826,23 @@ static irqreturn_t s5300_irq_handler(int irq, void *data)
 			 * IRQ: the NORM_RAW ring (RFS files + umts_router AT) and
 			 * the FMT ring (SIT control).
 			 */
-			s5300_drain_raw_rxq(sm, val);
-			s5300_drain_fmt_rxq(sm, val);
+			s5xxx_drain_raw_rxq(sm, val);
+			s5xxx_drain_fmt_rxq(sm, val);
 			/* CP advancing the FMT txq tail frees space for oem writers. */
 			wake_up_interruptible(&sm->fmt_tx_wq);
 		} else
 			/* Boot: std_dl acks; consume so the CP keeps draining. */
-			writel(readl(sm->ipc + S5300_RAW_RXQ_HEAD),
-			       sm->ipc + S5300_RAW_RXQ_TAIL);
+			writel(readl(sm->ipc + S5XXX_RAW_RXQ_HEAD),
+			       sm->ipc + S5XXX_RAW_RXQ_TAIL);
 		return IRQ_HANDLED;
 	}
 
-	cmd = val & S5300_CMD_MASK;
+	cmd = val & S5XXX_CMD_MASK;
 	switch (cmd) {
-	case S5300_CMD_INIT_START:
+	case S5XXX_CMD_INIT_START:
 		dev_info(sm->dev, "CP INIT_START\n");
 		if (sm->pktproc) {
-			s5300_pktproc_publish_dl(sm);
+			s5xxx_pktproc_publish_dl(sm);
 			/*
 			 * Provision the UL geometry here too, before the AP
 			 * advertises PKTPROC_UL below: the CP consumes the UL rings
@@ -2784,33 +2851,33 @@ static irqreturn_t s5300_irq_handler(int irq, void *data)
 			 * doorbell, and it writes end_bit_owner/cp_quota afterwards
 			 * (read back at PHONE_START by ul_activate).
 			 */
-			s5300_pktproc_publish_ul(sm);
+			s5xxx_pktproc_publish_ul(sm);
 		}
-		s5300_set_ap_capabilities(sm);
-		s5300_send_ipc_irq(sm, S5300_CMD(S5300_CMD_PIF_INIT_DONE));
+		s5xxx_set_ap_capabilities(sm);
+		s5xxx_send_ipc_irq(sm, S5XXX_CMD(S5XXX_CMD_PIF_INIT_DONE));
 		break;
-	case S5300_CMD_PHONE_START:
+	case S5XXX_CMD_PHONE_START:
 		dev_info(sm->dev, "CP PHONE_START (AP cap %#x, CP cap %#x)\n",
-			 readl(sm->ipc + S5300_IPC_CAP_AP0),
-			 readl(sm->ipc + S5300_IPC_CAP_BASE + 0x4));
+			 readl(sm->ipc + S5XXX_IPC_CAP_AP0),
+			 readl(sm->ipc + S5XXX_IPC_CAP_BASE + 0x4));
 		if (!sm->online) {
 			/*
 			 * UL geometry was published at INIT_START; here just read
 			 * back the CP-written end_bit_owner/cp_quota and enable TX.
 			 */
 			if (sm->pktproc)
-				s5300_pktproc_ul_activate(sm);
-			s5300_init_ipc_queues(sm);
+				s5xxx_pktproc_ul_activate(sm);
+			s5xxx_init_ipc_queues(sm);
 			sm->online = true;
 		}
 		/* Re-entrant PHONE_START just gets the INIT_END again. */
-		s5300_send_ipc_irq(sm, S5300_CMD(S5300_CMD_INIT_END));
+		s5xxx_send_ipc_irq(sm, S5XXX_CMD(S5XXX_CMD_INIT_END));
 		complete_all(&sm->init_done);
 		break;
-	case S5300_CMD_CRASH_RESET:
-	case S5300_CMD_CRASH_EXIT:
+	case S5XXX_CMD_CRASH_RESET:
+	case S5XXX_CMD_CRASH_EXIT:
 		dev_err(sm->dev, "CP crash notification %#x (err_report %#x)\n",
-			cmd, readl(sm->msi + S5300_MSI_ERR_REPORT));
+			cmd, readl(sm->msi + S5XXX_MSI_ERR_REPORT));
 		break;
 	default:
 		dev_warn(sm->dev, "unknown CP command %#x\n", cmd);
@@ -2830,7 +2897,7 @@ static irqreturn_t s5300_irq_handler(int irq, void *data)
  * back (the core saw unassignable ROM BARs anyway); the modem never runs
  * with core-managed BARs downstream either.
  */
-static int s5300_setup_doorbell(struct s5300_modem *sm)
+static int s5xxx_setup_doorbell(struct s5xxx_modem *sm)
 {
 	struct pci_bus_region region;
 	/*
@@ -2855,11 +2922,11 @@ static int s5300_setup_doorbell(struct s5300_modem *sm)
 		sm->pdev->resource[i].end = 0;
 		sm->pdev->resource[i].flags = 0;
 	}
-	ret = s5300_program_doorbell_bar(sm);
+	ret = s5xxx_program_doorbell_bar(sm);
 	if (ret)
 		return ret;
 
-	ret = s5300_open_bridge_window(sm);
+	ret = s5xxx_open_bridge_window(sm);
 	if (ret)
 		return ret;
 
@@ -2881,18 +2948,18 @@ static int s5300_setup_doorbell(struct s5300_modem *sm)
 	return 0;
 }
 
-static int s5300_poll_boot_stage(struct s5300_modem *sm, u32 target)
+static int s5xxx_poll_boot_stage(struct s5xxx_modem *sm, u32 target)
 {
 	u32 val;
 	int ret;
 
-	ret = readl_poll_timeout(sm->msi + S5300_MSI_BOOT_STAGE, val,
-				 val == target, S5300_POLL_INTERVAL_US,
-				 S5300_POLL_TIMEOUT_US);
+	ret = readl_poll_timeout(sm->msi + S5XXX_MSI_BOOT_STAGE, val,
+				 val == target, S5XXX_POLL_INTERVAL_US,
+				 S5XXX_POLL_TIMEOUT_US);
 	if (ret)
 		dev_err(sm->dev,
 			"boot_stage stuck at %#x (want %#x, err_report %#x)\n",
-			val, target, readl(sm->msi + S5300_MSI_ERR_REPORT));
+			val, target, readl(sm->msi + S5XXX_MSI_ERR_REPORT));
 	return ret;
 }
 
@@ -2901,28 +2968,28 @@ static int s5300_poll_boot_stage(struct s5300_modem *sm, u32 target)
  * through the MSI block and ring the message doorbell.  The vendor
  * set_cp_rom_boot_img() does exactly this for each of the two boot stages.
  */
-static void s5300_send_boot_image(struct s5300_modem *sm, size_t off,
+static void s5xxx_send_boot_image(struct s5xxx_modem *sm, size_t off,
 				  size_t size)
 {
-	memcpy_toio(sm->ipc + S5300_BOOT_IMG_OFFSET,
+	memcpy_toio(sm->ipc + S5XXX_BOOT_IMG_OFFSET,
 		    sm->pbl->data + off, size);
-	writel(lower_32_bits(sm->ipc_phys + S5300_BOOT_IMG_OFFSET),
-	       sm->msi + S5300_MSI_IMG_ADDR_LO);
-	writel(upper_32_bits(sm->ipc_phys + S5300_BOOT_IMG_OFFSET),
-	       sm->msi + S5300_MSI_IMG_ADDR_HI);
-	writel(size, sm->msi + S5300_MSI_IMG_SIZE);
+	writel(lower_32_bits(sm->ipc_phys + S5XXX_BOOT_IMG_OFFSET),
+	       sm->msi + S5XXX_MSI_IMG_ADDR_LO);
+	writel(upper_32_bits(sm->ipc_phys + S5XXX_BOOT_IMG_OFFSET),
+	       sm->msi + S5XXX_MSI_IMG_ADDR_HI);
+	writel(size, sm->msi + S5XXX_MSI_IMG_SIZE);
 
 	/* The ROM reads the MSI target and image descriptor on the doorbell. */
-	s5300_verify_msi_target(sm);
-	s5300_send_doorbell(sm, S5300_DB_MSG);
+	s5xxx_verify_msi_target(sm);
+	s5xxx_send_doorbell(sm, S5XXX_DB_MSG);
 }
 
-static int s5300_poll_cp_wakeup(struct s5300_modem *sm)
+static int s5xxx_poll_cp_wakeup(struct s5xxx_modem *sm)
 {
 	int val, ret;
 
 	ret = read_poll_timeout(gpiod_get_value_cansleep, val, val,
-				S5300_POLL_INTERVAL_US, S5300_POLL_TIMEOUT_US,
+				S5XXX_POLL_INTERVAL_US, S5XXX_POLL_TIMEOUT_US,
 				false, sm->cp2ap_wakeup);
 	if (ret)
 		dev_err(sm->dev, "CP2AP_WAKEUP never asserted after the re-link\n");
@@ -2937,7 +3004,7 @@ static int s5300_poll_cp_wakeup(struct s5300_modem *sm)
  * vendor modem.bin. A file that is not a TOC (e.g. an already-extracted BOOT
  * blob) is staged whole.
  */
-struct s5300_toc_entry {
+struct s5xxx_toc_entry {
 	char	name[12];
 	__le32	offset;
 	__le32	load_addr;
@@ -2946,10 +3013,10 @@ struct s5300_toc_entry {
 	__le32	misc;
 };
 
-static void s5300_find_boot(struct s5300_modem *sm)
+static void s5xxx_find_boot(struct s5xxx_modem *sm)
 {
 	const struct firmware *fw = sm->pbl;
-	const struct s5300_toc_entry *toc = (const void *)fw->data;
+	const struct s5xxx_toc_entry *toc = (const void *)fw->data;
 	size_t i, n;
 
 	/* Default: the file is already the raw BOOT image. */
@@ -2980,12 +3047,41 @@ static void s5300_find_boot(struct s5300_modem *sm)
 	dev_warn(sm->dev, "no BOOT entry in TOC; staging the whole image\n");
 }
 
+/*
+ * The download server keys each std_dl stage off the TOC's `misc` field, so the
+ * stage a section must be sent on is a property of the image, not of the
+ * driver.  Report it when the image lists the section; a caller that gets
+ * nothing back falls back to its position in the table (which is what the
+ * s5400 factory image happens to want, its sections being in misc order).
+ */
+static bool s5xxx_find_stage(struct s5xxx_modem *sm, const char *name, u8 *stage)
+{
+	const struct firmware *fw = sm->pbl;
+	const struct s5xxx_toc_entry *toc = (const void *)fw->data;
+	size_t i, n;
+	u32 misc;
+
+	if (!name || fw->size < sizeof(*toc) || strncmp(toc[0].name, "TOC", 4))
+		return false;
+	n = min_t(size_t, le32_to_cpu(toc[0].size) / sizeof(*toc), 64);
+	for (i = 0; i < n; i++) {
+		if (strncmp(toc[i].name, name, sizeof(toc[i].name)))
+			continue;
+		misc = le32_to_cpu(toc[i].misc);
+		if (!misc || misc > 0xff)
+			return false;
+		*stage = misc;
+		return true;
+	}
+	return false;
+}
+
 /* Locate a TOC section by name; report its file offset, size and (opt) CRC. */
-static bool s5300_find_section(struct s5300_modem *sm, const char *name,
+static bool s5xxx_find_section(struct s5xxx_modem *sm, const char *name,
 			       size_t *off, size_t *size, u32 *crc)
 {
 	const struct firmware *fw = sm->pbl;
-	const struct s5300_toc_entry *toc = (const void *)fw->data;
+	const struct s5xxx_toc_entry *toc = (const void *)fw->data;
 	size_t i, n, o, s;
 
 	if (fw->size < sizeof(*toc) || strncmp(toc[0].name, "TOC", 4))
@@ -3017,19 +3113,19 @@ static bool s5300_find_section(struct s5300_modem *sm, const char *name,
  * (and again in the IRQ handler / boot wait), which the old "wait on txq.tail
  * but drain the rxq only afterwards" pacing deadlocked against.
  */
-static int s5300_ring_push(struct s5300_modem *sm, const void *buf, u32 len)
+static int s5xxx_ring_push(struct s5xxx_modem *sm, const void *buf, u32 len)
 {
 	u32 in, out, space, first, rxq0;
 	int spins;
 
 	for (spins = 100000; ; ) {
 		/* Consume the CP's acks so it keeps draining the TX ring. */
-		writel(readl(sm->ipc + S5300_RAW_RXQ_HEAD),
-		       sm->ipc + S5300_RAW_RXQ_TAIL);
+		writel(readl(sm->ipc + S5XXX_RAW_RXQ_HEAD),
+		       sm->ipc + S5XXX_RAW_RXQ_TAIL);
 
-		in = readl(sm->ipc + S5300_RAW_TXQ_HEAD);
-		out = readl(sm->ipc + S5300_RAW_TXQ_TAIL);
-		space = (in >= out) ? S5300_RAW_TXQ_SIZE - (in - out) - 1
+		in = readl(sm->ipc + S5XXX_RAW_TXQ_HEAD);
+		out = readl(sm->ipc + S5XXX_RAW_TXQ_TAIL);
+		space = (in >= out) ? S5XXX_RAW_TXQ_SIZE - (in - out) - 1
 				    : out - in - 1;
 		if (space >= len)
 			break;
@@ -3045,17 +3141,17 @@ static int s5300_ring_push(struct s5300_modem *sm, const void *buf, u32 len)
 		usleep_range(100, 200);
 	}
 
-	rxq0 = readl(sm->ipc + S5300_RAW_RXQ_HEAD);
+	rxq0 = readl(sm->ipc + S5XXX_RAW_RXQ_HEAD);
 
-	first = min_t(u32, len, S5300_RAW_TXQ_SIZE - in);
-	memcpy_toio(sm->ipc + S5300_RAW_TXQ_BUFF + in, buf, first);
+	first = min_t(u32, len, S5XXX_RAW_TXQ_SIZE - in);
+	memcpy_toio(sm->ipc + S5XXX_RAW_TXQ_BUFF + in, buf, first);
 	if (first < len)
-		memcpy_toio(sm->ipc + S5300_RAW_TXQ_BUFF, buf + first,
+		memcpy_toio(sm->ipc + S5XXX_RAW_TXQ_BUFF, buf + first,
 			    len - first);
 	/* order the payload ahead of the head update the CP polls */
 	dma_wmb();
-	in = (in + len) % S5300_RAW_TXQ_SIZE;
-	writel(in, sm->ipc + S5300_RAW_TXQ_HEAD);
+	in = (in + len) % S5XXX_RAW_TXQ_SIZE;
+	writel(in, sm->ipc + S5XXX_RAW_TXQ_HEAD);
 
 	/*
 	 * Pace STRICTLY on the CP's per-frame ack, exactly like cbd (write one
@@ -3066,10 +3162,10 @@ static int s5300_ring_push(struct s5300_modem *sm, const void *buf, u32 len)
 	 * consume it.
 	 */
 	for (spins = 100000; spins--; ) {
-		u32 rxq = readl(sm->ipc + S5300_RAW_RXQ_HEAD);
+		u32 rxq = readl(sm->ipc + S5XXX_RAW_RXQ_HEAD);
 
 		if (rxq != rxq0) {
-			writel(rxq, sm->ipc + S5300_RAW_RXQ_TAIL);
+			writel(rxq, sm->ipc + S5XXX_RAW_RXQ_TAIL);
 			return 0;
 		}
 		if (completion_done(&sm->init_done))
@@ -3080,45 +3176,45 @@ static int s5300_ring_push(struct s5300_modem *sm, const void *buf, u32 len)
 }
 
 /* Fill the 12-byte SIT link header at the head of a frame. */
-static void s5300_sit_header(struct s5300_modem *sm, u8 *f, u32 frame_len)
+static void s5xxx_sit_header(struct s5xxx_modem *sm, u8 *f, u32 frame_len)
 {
-	put_unaligned_le16(S5300_SIT_SYNC, f + 0);
+	put_unaligned_le16(S5XXX_SIT_SYNC, f + 0);
 	put_unaligned_le16(sm->frame_seq++, f + 2);
-	put_unaligned_le16(S5300_SIT_CFG_SINGLE, f + 4);
+	put_unaligned_le16(S5XXX_SIT_CFG_SINGLE, f + 4);
 	put_unaligned_le16(frame_len, f + 6);
-	f[8] = S5300_SIT_CH_BOOT;
+	f[8] = S5XXX_SIT_CH_BOOT;
 	f[9] = sm->ch_seq++;
 	f[10] = 0;
 	f[11] = 0;
 }
 
 /* SIT-framed 4-byte std_dl control word (start/end of a section). */
-static int s5300_send_ctrl(struct s5300_modem *sm, u8 *scratch, u32 word)
+static int s5xxx_send_ctrl(struct s5xxx_modem *sm, u8 *scratch, u32 word)
 {
-	u32 flen = S5300_SIT_HDR + 4;
+	u32 flen = S5XXX_SIT_HDR + 4;
 
-	s5300_sit_header(sm, scratch, flen);
-	put_unaligned_le32(word, scratch + S5300_SIT_HDR);
+	s5xxx_sit_header(sm, scratch, flen);
+	put_unaligned_le32(word, scratch + S5XXX_SIT_HDR);
 	memset(scratch + flen, 0, ALIGN(flen, 8) - flen);
-	return s5300_ring_push(sm, scratch, ALIGN(flen, 8));
+	return s5xxx_ring_push(sm, scratch, ALIGN(flen, 8));
 }
 
 /* One std_dl data frame: SIT header + std_dl header + payload chunk, padded. */
-static int s5300_send_chunk(struct s5300_modem *sm, u8 *scratch, u8 tag,
+static int s5xxx_send_chunk(struct s5xxx_modem *sm, u8 *scratch, u8 tag,
 			    u32 total, u32 off, const u8 *payload, u32 plen)
 {
-	u32 flen = S5300_SIT_HDR + S5300_DL_HDR + plen;
-	u8 *dl = scratch + S5300_SIT_HDR;
+	u32 flen = S5XXX_SIT_HDR + S5XXX_DL_HDR + plen;
+	u8 *dl = scratch + S5XXX_SIT_HDR;
 
-	s5300_sit_header(sm, scratch, flen);
+	s5xxx_sit_header(sm, scratch, flen);
 	dl[0] = 0x0b | (tag << 4);
 	dl[1] = 0xa1;
 	put_unaligned_le16(plen + 8, dl + 2);
 	put_unaligned_le32(total, dl + 4);
 	put_unaligned_le32(off, dl + 8);
-	memcpy(dl + S5300_DL_HDR, payload, plen);
+	memcpy(dl + S5XXX_DL_HDR, payload, plen);
 	memset(scratch + flen, 0, ALIGN(flen, 8) - flen);
-	return s5300_ring_push(sm, scratch, ALIGN(flen, 8));
+	return s5xxx_ring_push(sm, scratch, ALIGN(flen, 8));
 }
 
 /*
@@ -3126,18 +3222,18 @@ static int s5300_send_chunk(struct s5300_modem *sm, u8 *scratch, u8 tag,
  * this after MAIN's data and before its END word; without it the PBL never
  * validates MAIN and refuses to launch it (the CP stays stuck in BOOTING).
  */
-static int s5300_send_verify(struct s5300_modem *sm, u8 *scratch, u8 tag,
+static int s5xxx_send_verify(struct s5xxx_modem *sm, u8 *scratch, u8 tag,
 			     u32 crc)
 {
-	u32 flen = S5300_SIT_HDR + 8;
-	u8 *dl = scratch + S5300_SIT_HDR;
+	u32 flen = S5XXX_SIT_HDR + 8;
+	u8 *dl = scratch + S5XXX_SIT_HDR;
 
-	s5300_sit_header(sm, scratch, flen);
-	put_unaligned_le16(S5300_DL_SEC_VERIFY(tag), dl + 0);
+	s5xxx_sit_header(sm, scratch, flen);
+	put_unaligned_le16(S5XXX_DL_SEC_VERIFY(tag), dl + 0);
 	put_unaligned_le16(0, dl + 2);
 	put_unaligned_le32(crc, dl + 4);
 	memset(scratch + flen, 0, ALIGN(flen, 8) - flen);
-	return s5300_ring_push(sm, scratch, ALIGN(flen, 8));
+	return s5xxx_ring_push(sm, scratch, ALIGN(flen, 8));
 }
 
 /*
@@ -3147,20 +3243,20 @@ static int s5300_send_verify(struct s5300_modem *sm, u8 *scratch, u8 tag,
  * sequential 1..N stream position, which the CP maps back to the section's TOC
  * entry (and thus its CP-DRAM load address).
  */
-static int s5300_dl_section(struct s5300_modem *sm, u8 *scratch, u8 tag,
+static int s5xxx_dl_section(struct s5xxx_modem *sm, u8 *scratch, u8 tag,
 			    const u8 *data, u32 total, u32 verify_crc)
 {
 	u32 off = 0;
 	int ret;
 
-	ret = s5300_send_ctrl(sm, scratch, S5300_DL_SEC_START(tag));
+	ret = s5xxx_send_ctrl(sm, scratch, S5XXX_DL_SEC_START(tag));
 	if (ret)
 		return ret;
 
 	while (off < total) {
-		u32 plen = min_t(u32, total - off, S5300_DL_CHUNK);
+		u32 plen = min_t(u32, total - off, S5XXX_DL_CHUNK);
 
-		ret = s5300_send_chunk(sm, scratch, tag, total, off,
+		ret = s5xxx_send_chunk(sm, scratch, tag, total, off,
 				       data + off, plen);
 		if (ret)
 			return ret;
@@ -3168,63 +3264,115 @@ static int s5300_dl_section(struct s5300_modem *sm, u8 *scratch, u8 tag,
 	}
 
 	if (verify_crc) {
-		ret = s5300_send_verify(sm, scratch, tag, verify_crc);
+		ret = s5xxx_send_verify(sm, scratch, tag, verify_crc);
 		if (ret)
 			return ret;
 	}
 
-	return s5300_send_ctrl(sm, scratch, S5300_DL_SEC_END(tag));
+	return s5xxx_send_ctrl(sm, scratch, S5XXX_DL_SEC_END(tag));
 }
 
-static void s5300_dl_report(struct s5300_modem *sm, const char *what, int ret)
+static void s5xxx_dl_report(struct s5xxx_modem *sm, const char *what, int ret)
 {
 	dev_err(sm->dev,
 		"%s stall %d: ring head %#x tail %#x rxq_head %#x | CP boot_stage %#x sub %#x err %#x cafe %#x\n",
 		what, ret,
-		readl(sm->ipc + S5300_RAW_TXQ_HEAD),
-		readl(sm->ipc + S5300_RAW_TXQ_TAIL),
-		readl(sm->ipc + S5300_RAW_RXQ_HEAD),
-		readl(sm->msi + S5300_MSI_BOOT_STAGE),
-		readl(sm->msi + S5300_MSI_SUB_BOOT_STAGE),
-		readl(sm->msi + S5300_MSI_ERR_REPORT),
-		readl(sm->msi + S5300_MSI_FLAG_CAFE));
+		readl(sm->ipc + S5XXX_RAW_TXQ_HEAD),
+		readl(sm->ipc + S5XXX_RAW_TXQ_TAIL),
+		readl(sm->ipc + S5XXX_RAW_RXQ_HEAD),
+		readl(sm->msi + S5XXX_MSI_BOOT_STAGE),
+		readl(sm->msi + S5XXX_MSI_SUB_BOOT_STAGE),
+		readl(sm->msi + S5XXX_MSI_ERR_REPORT),
+		readl(sm->msi + S5XXX_MSI_FLAG_CAFE));
 }
 
 /*
  * A cold CP's download server wants every std_dl stage its TOC lists, and the
- * stage number is the TOC `misc` field -- NOT a sequential 1..N.  On this image
- * the sections happen to be in misc order, so streaming them in this order with
- * a sequential tag lands each on its correct stage (hw-confirmed by cbd.trace):
+ * stage number is the TOC `misc` field -- NOT a sequential 1..N.  Sending MAIN
+ * on the wrong stage makes the CP load it to another section's DRAM address
+ * (e.g. PSP's small window) and fault mid-stream (err_report 0x20), so the
+ * stage is taken from the image whenever the image states it, and only falls
+ * back to this table's order otherwise.  On the s5400 factory image the two
+ * agree (hw-confirmed by cbd.trace):
  *   1 TOC   2 PSP   3 MAIN(+CRC)   4 APM   5 VSS   6 DBGCORE
  *   7 RF_CFG   8 NV_NORM   9 NV_PROT   10 REPLAY
- * Sending MAIN on any stage but 3 makes the CP load it to the wrong section's
- * DRAM address (e.g. PSP's small window) and fault mid-stream (err_report 0x20).
+ * which is why a driver that hardcoded the order worked on that part; an image
+ * that orders its TOC differently now stages correctly on its own terms.
  * Only MAIN carries a CRC-verify frame (the PBL validates it before launch).
+ *
+ * fw_name entries are relative to the variant's firmware directory.
  */
-static const struct s5300_dl_sec {
-	const char	*toc_name;	/* NULL = the raw TOC table */
-	const char	*fw_name;	/* non-NULL = request_firmware file */
-	bool		verify;		/* send the CRC-verify frame (MAIN) */
-} s5300_dl_secs[] = {
-	{ NULL,      NULL,                                false },
-	{ "PSP",     NULL,                                false },
-	{ "MAIN",    NULL,                                true  },
-	{ "APM",     NULL,                                false },
-	{ "VSS",     NULL,                                false },
-	{ "DBGCORE", NULL,                                false },
-	{ "RF_CFG",  S5300_RF_CFG_FW,                     false },
-	{ "NV_NORM", "google/s5400/efs/nv_normal.bin",    false },
-	{ "NV_PROT", "google/s5400/efs/nv_protected.bin", false },
-	{ "REPLAY",  S5300_REPLAY_FW,                     false },
+static const struct s5xxx_dl_sec s5xxx_dl_secs_s5400[] = {
+	{ .toc_name = NULL },					/* the TOC itself */
+	{ .toc_name = "PSP" },
+	{ .toc_name = "MAIN",    .verify = true },
+	{ .toc_name = "APM" },
+	{ .toc_name = "VSS" },
+	{ .toc_name = "DBGCORE" },
+	{ .toc_name = "RF_CFG",  .fw_name = S5XXX_RF_CFG_FW },
+	{ .toc_name = "NV_NORM", .fw_name = "efs/nv_normal.bin" },
+	{ .toc_name = "NV_PROT", .fw_name = "efs/nv_protected.bin" },
+	{ .toc_name = "REPLAY",  .fw_name = S5XXX_REPLAY_FW,
+	  .optional = true, .pad_to_toc = true },
 };
 
-static int s5300_download_main(struct s5300_modem *sm)
+/*
+ * The s5300 wants a different, shorter set: no PSP, no DBGCORE and no RF_CFG,
+ * and it takes VSS before APM.  Captured from a running device (the open
+ * cbd-lite re-implementation of the vendor boot daemon, which streams
+ * TOC(1) MAIN(2)+CRC VSS(3) APM(4) NV_NORM(5) NV_PROT(6) REPLAY(7) and then the
+ * 0xa400 finish).  Feeding it the s5400 list would abort the download on the
+ * first section its TOC does not carry.
+ */
+static const struct s5xxx_dl_sec s5xxx_dl_secs_s5300[] = {
+	{ .toc_name = NULL },					/* the TOC itself */
+	{ .toc_name = "MAIN",    .verify = true },
+	{ .toc_name = "VSS" },
+	{ .toc_name = "APM" },
+	{ .toc_name = "NV_NORM", .fw_name = "efs/nv_normal.bin" },
+	{ .toc_name = "NV_PROT", .fw_name = "efs/nv_protected.bin" },
+	{ .toc_name = "REPLAY",  .fw_name = S5XXX_REPLAY_FW,
+	  .optional = true, .pad_to_toc = true },
+};
+
+static const struct s5xxx_variant s5xxx_variant_s5300 = {
+	.fw_dir		= "s5300",
+	.two_stage_boot	= false,
+	.boot_done	= S5XXX_BOOT_STAGE_BL1_DONE,
+	.dl_secs	= s5xxx_dl_secs_s5300,
+	.n_dl_secs	= ARRAY_SIZE(s5xxx_dl_secs_s5300),
+};
+
+static const struct s5xxx_variant s5xxx_variant_s5400 = {
+	.fw_dir		= "s5400",
+	.two_stage_boot	= true,
+	.bl1_done	= S5XXX_BOOT_STAGE_BL1_DONE,
+	.boot_done	= S5XXX_BOOT_STAGE_DONE,
+	.bl1_size	= S5XXX_BL1_IMG_SIZE,
+	.dl_secs	= s5xxx_dl_secs_s5400,
+	.n_dl_secs	= ARRAY_SIZE(s5xxx_dl_secs_s5400),
+};
+
+static int s5xxx_download_main(struct s5xxx_modem *sm)
 {
-	const struct s5300_toc_entry *toc = (const void *)sm->pbl->data;
+	const struct s5xxx_toc_entry *toc = (const void *)sm->pbl->data;
 	u8 *scratch;
 	int i, ret = 0;
 
-	scratch = kmalloc(S5300_SIT_HDR + S5300_DL_HDR + S5300_DL_CHUNK + 8,
+	/*
+	 * Every stage below is cut from the factory image's table of contents, so
+	 * a firmware-name pointing at a bare first-stage blob (a PBL-only
+	 * cp_pbl.bin, which is enough to reach the mask-ROM doorbell but carries
+	 * no sections) cannot serve a cold CP.  Say so rather than pushing the
+	 * blob's first bytes as if they were a TOC.
+	 */
+	if (sm->pbl->size < sizeof(*toc) || strncmp(toc[0].name, "TOC", 4)) {
+		dev_err(sm->dev,
+			"cold CP needs the factory TOC image; firmware-name has no TOC\n");
+		return -EINVAL;
+	}
+
+	scratch = kmalloc(S5XXX_SIT_HDR + S5XXX_DL_HDR + S5XXX_DL_CHUNK + 8,
 			  GFP_KERNEL);
 	if (!scratch)
 		return -ENOMEM;
@@ -3233,14 +3381,21 @@ static int s5300_download_main(struct s5300_modem *sm)
 	sm->frame_seq = 0;
 	sm->ch_seq = 0;
 
-	for (i = 0; i < ARRAY_SIZE(s5300_dl_secs); i++) {
-		const struct s5300_dl_sec *d = &s5300_dl_secs[i];
+	for (i = 0; i < (int)sm->var->n_dl_secs; i++) {
+		const struct s5xxx_dl_sec *d = &sm->var->dl_secs[i];
 		const struct firmware *fw = NULL;
 		const char *name = d->toc_name ? d->toc_name : "TOC";
+		char path[S5XXX_FW_PATH_MAX];
+		void *padded = NULL;
 		const u8 *data;
-		size_t off = 0, size;
+		size_t off = 0, size, toc_size = 0;
+		bool in_toc = false;
 		u32 crc = 0;
-		u8 tag = i + 1;		/* cbd's sequential stage nibble 1..7 */
+		u8 tag;
+
+		/* Stage from the image; table order only as a fallback. */
+		if (!s5xxx_find_stage(sm, d->toc_name, &tag))
+			tag = i + 1;
 
 		if (!d->toc_name) {
 			/* Stage 1: the raw TOC table (first record spans it). */
@@ -3248,15 +3403,60 @@ static int s5300_download_main(struct s5300_modem *sm)
 			size = le32_to_cpu(toc[0].size);
 		} else if (d->fw_name) {
 			/* RF_CFG / NV / REPLAY: a staged image. */
-			ret = request_firmware(&fw, d->fw_name, sm->dev);
+			in_toc = s5xxx_find_section(sm, d->toc_name, &off,
+						   &toc_size, NULL);
+			s5xxx_fw_path(sm, path, sizeof(path), d->fw_name);
+			ret = request_firmware(&fw, path, sm->dev);
 			if (ret) {
-				dev_err(sm->dev, "cold boot needs %s (tag %u): %d\n",
-					d->fw_name, tag, ret);
-				goto done;
+				if (!d->optional) {
+					dev_err(sm->dev,
+						"cold boot needs %s (tag %u): %d\n",
+						path, tag, ret);
+					goto done;
+				}
+				fw = NULL;
+				ret = 0;
+				/*
+				 * Optional and absent.  If the TOC says how long the
+				 * section is, send that many zero bytes -- the CP
+				 * counts stages, so dropping one would leave it
+				 * waiting forever.  Without a declared length there
+				 * is nothing sensible to send, so skip it.
+				 */
+				if (!(d->pad_to_toc && in_toc)) {
+					dev_warn(sm->dev,
+						 "%s absent; skipping stage %u\n",
+						 path, tag);
+					continue;
+				}
+				dev_info(sm->dev,
+					 "%s absent; sending an empty %#zx-byte %s\n",
+					 path, toc_size, name);
 			}
-			data = fw->data;
-			size = fw->size;
-		} else if (s5300_find_section(sm, d->toc_name, &off, &size, &crc)) {
+
+			if (d->pad_to_toc && in_toc) {
+				/*
+				 * The CP wants exactly the TOC-declared length here
+				 * (REPLAY: it carries no TOC CRC, and the vendor
+				 * daemon streams the declared size whatever the
+				 * on-disk archive happens to be).
+				 */
+				padded = kvzalloc(toc_size, GFP_KERNEL);
+				if (!padded) {
+					ret = -ENOMEM;
+					release_firmware(fw);
+					goto done;
+				}
+				if (fw)
+					memcpy(padded, fw->data,
+					       min(fw->size, toc_size));
+				data = padded;
+				size = toc_size;
+			} else {
+				data = fw->data;
+				size = fw->size;
+			}
+		} else if (s5xxx_find_section(sm, d->toc_name, &off, &size, &crc)) {
 			/* MAIN/VSS/APM carried in modem.bin. */
 			data = sm->pbl->data + off;
 		} else {
@@ -3267,23 +3467,24 @@ static int s5300_download_main(struct s5300_modem *sm)
 
 		dev_info(sm->dev, "streaming %s (tag %u, %#zx bytes%s)\n",
 			 name, tag, size, d->verify ? ", CRC-verified" : "");
-		ret = s5300_dl_section(sm, scratch, tag, data, size,
+		ret = s5xxx_dl_section(sm, scratch, tag, data, size,
 				       d->verify ? crc : 0);
+		kvfree(padded);
 		if (fw)
 			release_firmware(fw);
 		if (ret == -EALREADY)
 			goto online;
 		if (ret) {
-			s5300_dl_report(sm, name, ret);
+			s5xxx_dl_report(sm, name, ret);
 			goto done;
 		}
 		/* Drain probe: after the first section, has the CP consumed it? */
 		if (i == 0)
 			dev_info(sm->dev,
 				 "TOC pushed: ring head %#x tail %#x rxq_head %#x\n",
-				 readl(sm->ipc + S5300_RAW_TXQ_HEAD),
-				 readl(sm->ipc + S5300_RAW_TXQ_TAIL),
-				 readl(sm->ipc + S5300_RAW_RXQ_HEAD));
+				 readl(sm->ipc + S5XXX_RAW_TXQ_HEAD),
+				 readl(sm->ipc + S5XXX_RAW_TXQ_TAIL),
+				 readl(sm->ipc + S5XXX_RAW_RXQ_HEAD));
 	}
 
 	/*
@@ -3298,24 +3499,24 @@ static int s5300_download_main(struct s5300_modem *sm)
 		goto online;
 	dev_info(sm->dev, "download complete; sending boot command\n");
 	{
-		u32 in, flen = ALIGN(S5300_SIT_HDR + 4, 8);
+		u32 in, flen = ALIGN(S5XXX_SIT_HDR + 4, 8);
 
-		s5300_sit_header(sm, scratch, S5300_SIT_HDR + 4);
-		put_unaligned_le32(S5300_DL_FINISH, scratch + S5300_SIT_HDR);
-		memset(scratch + S5300_SIT_HDR + 4, 0, flen - (S5300_SIT_HDR + 4));
+		s5xxx_sit_header(sm, scratch, S5XXX_SIT_HDR + 4);
+		put_unaligned_le32(S5XXX_DL_FINISH, scratch + S5XXX_SIT_HDR);
+		memset(scratch + S5XXX_SIT_HDR + 4, 0, flen - (S5XXX_SIT_HDR + 4));
 
-		in = readl(sm->ipc + S5300_RAW_TXQ_HEAD);
-		memcpy_toio(sm->ipc + S5300_RAW_TXQ_BUFF + in, scratch, flen);
+		in = readl(sm->ipc + S5XXX_RAW_TXQ_HEAD);
+		memcpy_toio(sm->ipc + S5XXX_RAW_TXQ_BUFF + in, scratch, flen);
 		dma_wmb();
-		writel((in + flen) % S5300_RAW_TXQ_SIZE,
-		       sm->ipc + S5300_RAW_TXQ_HEAD);
+		writel((in + flen) % S5XXX_RAW_TXQ_SIZE,
+		       sm->ipc + S5XXX_RAW_TXQ_HEAD);
 
 		/* Nudge the CP to process the completion / boot MAIN. */
-		s5300_send_doorbell(sm, S5300_DB_MSG);
+		s5xxx_send_doorbell(sm, S5XXX_DB_MSG);
 
 		for (i = 0; i < 500; i++) {
-			if (readl(sm->ipc + S5300_RAW_TXQ_TAIL) ==
-			    readl(sm->ipc + S5300_RAW_TXQ_HEAD))
+			if (readl(sm->ipc + S5XXX_RAW_TXQ_TAIL) ==
+			    readl(sm->ipc + S5XXX_RAW_TXQ_HEAD))
 				break;
 			if (completion_done(&sm->init_done))
 				goto online;
@@ -3323,11 +3524,11 @@ static int s5300_download_main(struct s5300_modem *sm)
 		}
 		dev_info(sm->dev,
 			 "boot cmd: txq %#x/%#x rxq %#x/%#x cp2ap %#x (drained %s)\n",
-			 readl(sm->ipc + S5300_RAW_TXQ_HEAD),
-			 readl(sm->ipc + S5300_RAW_TXQ_TAIL),
-			 readl(sm->ipc + S5300_RAW_RXQ_HEAD),
-			 readl(sm->ipc + S5300_RAW_RXQ_TAIL),
-			 readl(sm->ipc + S5300_IPC_CP2AP_MSG),
+			 readl(sm->ipc + S5XXX_RAW_TXQ_HEAD),
+			 readl(sm->ipc + S5XXX_RAW_TXQ_TAIL),
+			 readl(sm->ipc + S5XXX_RAW_RXQ_HEAD),
+			 readl(sm->ipc + S5XXX_RAW_RXQ_TAIL),
+			 readl(sm->ipc + S5XXX_IPC_CP2AP_MSG),
 			 i < 500 ? "yes" : "no");
 	}
 	ret = 0;
@@ -3349,7 +3550,7 @@ done:
  * reset, seen with a bare online).  The descriptor is requested output-high at
  * probe; re-assert here so a warm reload also lands it high.
  */
-static void s5300_drive_partial_rst(struct s5300_modem *sm)
+static void s5xxx_drive_partial_rst(struct s5xxx_modem *sm)
 {
 	if (!sm->cp_partial_rst)
 		return;
@@ -3361,28 +3562,30 @@ static void s5300_drive_partial_rst(struct s5300_modem *sm)
  * without it the receiver simply never starts, which does not affect the modem,
  * so a missing image is a note rather than an error.
  */
-static void s5300_load_gnss_fw(struct s5300_modem *sm)
+static void s5xxx_load_gnss_fw(struct s5xxx_modem *sm)
 {
 	const struct firmware *fw;
+	char path[S5XXX_FW_PATH_MAX];
 
-	if (sm->ipc_size < S5300_GNSS_FW_OFFSET + S5300_GNSS_FW_SIZE)
+	if (sm->ipc_size < S5XXX_GNSS_FW_OFFSET + S5XXX_GNSS_FW_SIZE)
 		return;
 
-	if (request_firmware_direct(&fw, S5300_GNSS_FW, sm->dev)) {
+	s5xxx_fw_path(sm, path, sizeof(path), S5XXX_GNSS_FW);
+	if (request_firmware_direct(&fw, path, sm->dev)) {
 		dev_info(sm->dev, "no %s; GNSS receiver will not start\n",
-			 S5300_GNSS_FW);
+			 path);
 		return;
 	}
 
-	if (fw->size > S5300_GNSS_FW_SIZE || fw->size < 8) {
+	if (fw->size > S5XXX_GNSS_FW_SIZE || fw->size < 8) {
 		dev_warn(sm->dev, "%s bad size %zu; skipping\n",
-			 S5300_GNSS_FW, fw->size);
+			 path, fw->size);
 	} else {
 		/* seg1 size lives in the image header at offset 4. */
 		u32 hdr4 = get_unaligned_le32(fw->data + 4);
 
-		memcpy_toio(sm->ipc + S5300_GNSS_FW_OFFSET, fw->data, fw->size);
-		s5300_gnss_codeload(sm, fw->size, hdr4);
+		memcpy_toio(sm->ipc + S5XXX_GNSS_FW_OFFSET, fw->data, fw->size);
+		s5xxx_gnss_codeload(sm, fw->size, hdr4);
 		dev_info(sm->dev,
 			 "staged GNSS firmware (%zu bytes) and ran the codeload\n",
 			 fw->size);
@@ -3391,15 +3594,15 @@ static void s5300_load_gnss_fw(struct s5300_modem *sm)
 	release_firmware(fw);
 }
 
-static void s5300_boot_work(struct work_struct *work)
+static void s5xxx_boot_work(struct work_struct *work)
 {
-	struct s5300_modem *sm = container_of(work, struct s5300_modem,
+	struct s5xxx_modem *sm = container_of(work, struct s5xxx_modem,
 					      boot_work);
 	struct pci_dev *pdev = sm->pdev;
 	size_t bl1_size, btl_off, btl_size;
 	int ret, i, attempt;
 
-	s5300_drive_partial_rst(sm);
+	s5xxx_drive_partial_rst(sm);
 
 	for (attempt = 0; ; attempt++) {
 		/*
@@ -3410,14 +3613,14 @@ static void s5300_boot_work(struct work_struct *work)
 		 * at INIT_START (it never advances to PHONE_START).  Only a true
 		 * power-off cleared it before; clearing them here does the same.
 		 */
-		writel(0, sm->msi + S5300_MSI_BOOT_STAGE);
-		writel(0, sm->msi + S5300_MSI_SUB_BOOT_STAGE);
-		writel(0, sm->msi + S5300_MSI_FLAG_CAFE);
-		writel(0, sm->msi + S5300_MSI_OTP_VERSION);
-		writel(0, sm->msi + S5300_MSI_DB_LOOP_CNT);
-		writel(0, sm->msi + S5300_MSI_DB_RECEIVED);
-		writel(0, sm->msi + S5300_MSI_BOOT_SIZE);
-		s5300_init_control_messages(sm);
+		writel(0, sm->msi + S5XXX_MSI_BOOT_STAGE);
+		writel(0, sm->msi + S5XXX_MSI_SUB_BOOT_STAGE);
+		writel(0, sm->msi + S5XXX_MSI_FLAG_CAFE);
+		writel(0, sm->msi + S5XXX_MSI_OTP_VERSION);
+		writel(0, sm->msi + S5XXX_MSI_DB_LOOP_CNT);
+		writel(0, sm->msi + S5XXX_MSI_DB_RECEIVED);
+		writel(0, sm->msi + S5XXX_MSI_BOOT_SIZE);
+		s5xxx_init_control_messages(sm);
 
 		/*
 		 * Arm the shared-memory IPC region up front (vendor
@@ -3427,8 +3630,8 @@ static void s5300_boot_work(struct work_struct *work)
 		 * the bootloader hands over to MAIN and starts the post-bounce
 		 * INIT_START handshake.
 		 */
-		writel(S5300_SHM_BOOT_MAGIC, sm->ipc + S5300_IPC_MAGIC);
-		writel(1, sm->ipc + S5300_IPC_MEM_ACCESS);
+		writel(S5XXX_SHM_BOOT_MAGIC, sm->ipc + S5XXX_IPC_MAGIC);
+		writel(1, sm->ipc + S5XXX_IPC_MEM_ACCESS);
 		/*
 		 * Zero every FMT+RAW queue head/tail word (vendor
 		 * init_legacy_link clears them all before boot).  We had only
@@ -3436,34 +3639,43 @@ static void s5300_boot_work(struct work_struct *work)
 		 * at their power-on 0xffffffff; the CP's IPC validation rejects
 		 * that and never leaves the bootloader.
 		 */
-		for (i = 0; i < S5300_IPC_Q_WORDS; i++)
-			writel(0, sm->ipc + S5300_IPC_Q_HEAD_TAIL + 4 * i);
+		for (i = 0; i < S5XXX_IPC_Q_WORDS; i++)
+			writel(0, sm->ipc + S5XXX_IPC_Q_HEAD_TAIL + 4 * i);
 
 		/* Config (forced BAR0, MSI cap) must survive the re-link. */
 		pci_save_state(pdev);
 
 		/*
-		 * Two-stage boot (vendor start_normal_boot_bl1() then
-		 * start_normal_boot_bootloader()): the BOOT section is split,
-		 * each half fed through the same boot slot with its own message
-		 * doorbell.  Stage 1 (BL1, first S5300_BL1_IMG_SIZE bytes)
-		 * drives boot_stage to BL1_DONE; stage 2 (the remainder, the
-		 * "bootloader") drives it to DONE.
+		 * The s5400 mask ROM boots in two stages (vendor
+		 * start_normal_boot_bl1() then start_normal_boot_bootloader()):
+		 * the BOOT section is split, each half fed through the same boot
+		 * slot with its own message doorbell.  Stage 1 (BL1, first
+		 * var->bl1_size bytes) drives boot_stage to bl1_done; stage 2 (the
+		 * remainder, the "bootloader") drives it to boot_done.  The s5300
+		 * ROM takes the whole section in a single doorbell instead.
 		 */
-		bl1_size = min_t(size_t, S5300_BL1_IMG_SIZE, sm->boot_size);
-		btl_off  = sm->boot_off + bl1_size;
-		btl_size = sm->boot_size - bl1_size;
+		if (sm->var->two_stage_boot) {
+			bl1_size = min_t(size_t, sm->var->bl1_size, sm->boot_size);
+			btl_off  = sm->boot_off + bl1_size;
+			btl_size = sm->boot_size - bl1_size;
 
-		dev_info(sm->dev, "BL1 download (%#zx bytes at %pap+%#x)\n",
-			 bl1_size, &sm->ipc_phys, S5300_BOOT_IMG_OFFSET);
-		s5300_send_boot_image(sm, sm->boot_off, bl1_size);
-		ret = s5300_poll_boot_stage(sm, S5300_BOOT_STAGE_BL1_DONE);
-		if (!ret) {
-			dev_info(sm->dev,
-				 "BL1 up; bootloader download (%#zx bytes)\n",
-				 btl_size);
-			s5300_send_boot_image(sm, btl_off, btl_size);
-			ret = s5300_poll_boot_stage(sm, S5300_BOOT_STAGE_DONE);
+			dev_info(sm->dev, "BL1 download (%#zx bytes at %pap+%#x)\n",
+				 bl1_size, &sm->ipc_phys, S5XXX_BOOT_IMG_OFFSET);
+			s5xxx_send_boot_image(sm, sm->boot_off, bl1_size);
+			ret = s5xxx_poll_boot_stage(sm, sm->var->bl1_done);
+			if (!ret) {
+				dev_info(sm->dev,
+					 "BL1 up; bootloader download (%#zx bytes)\n",
+					 btl_size);
+				s5xxx_send_boot_image(sm, btl_off, btl_size);
+				ret = s5xxx_poll_boot_stage(sm, sm->var->boot_done);
+			}
+		} else {
+			dev_info(sm->dev, "boot download (%#zx bytes at %pap+%#x)\n",
+				 sm->boot_size, &sm->ipc_phys,
+				 S5XXX_BOOT_IMG_OFFSET);
+			s5xxx_send_boot_image(sm, sm->boot_off, sm->boot_size);
+			ret = s5xxx_poll_boot_stage(sm, sm->var->boot_done);
 		}
 		if (!ret)
 			break;
@@ -3487,13 +3699,13 @@ static void s5300_boot_work(struct work_struct *work)
 		}
 		pci_restore_state(pdev);
 		pci_set_master(pdev);
-		s5300_open_bridge_window(sm);
+		s5xxx_open_bridge_window(sm);
 		zumapro_pcie_set_msi_target(sm->rc_dev, sm->msi_phys);
-		s5300_verify_msi_target(sm);
+		s5xxx_verify_msi_target(sm);
 	}
 
 	/* Clear boot_stage before the re-link (vendor clears it here too). */
-	writel(0, sm->msi + S5300_MSI_BOOT_STAGE);
+	writel(0, sm->msi + S5XXX_MSI_BOOT_STAGE);
 	dev_info(sm->dev,
 		 "bootloader up (boot_stage done); re-establishing the link\n");
 
@@ -3511,7 +3723,7 @@ static void s5300_boot_work(struct work_struct *work)
 	ret = zumapro_pcie_modem_link_down(sm->rc_dev);
 	if (ret)
 		goto out_fw;
-	ret = s5300_poll_cp_wakeup(sm);
+	ret = s5xxx_poll_cp_wakeup(sm);
 	if (ret)
 		goto out_fw;
 	ret = zumapro_pcie_modem_link_up(sm->rc_dev);
@@ -3533,8 +3745,8 @@ static void s5300_boot_work(struct work_struct *work)
 	 * re-open the bridge window and re-arm the endpoint-side MSI target.
 	 */
 	zumapro_pcie_set_msi_target(sm->rc_dev, sm->msi_phys);
-	s5300_open_bridge_window(sm);
-	s5300_verify_msi_target(sm);
+	s5xxx_open_bridge_window(sm);
+	s5xxx_verify_msi_target(sm);
 
 	/*
 	 * Ring the PCIe link-ack doorbell the CP bootloader waits for (vendor
@@ -3542,7 +3754,7 @@ static void s5300_boot_work(struct work_struct *work)
 	 * -- a DIFFERENT doorbell from the boot-image msg doorbell) so it leaves
 	 * the bootloader to read the MAIN ring and raise INIT_START.
 	 */
-	s5300_send_doorbell(sm, S5300_DB_LINK_ACK);
+	s5xxx_send_doorbell(sm, S5XXX_DB_LINK_ACK);
 
 	/*
 	 * The CP's DDR is self-powered, so a stale MAIN survives even the rail
@@ -3561,7 +3773,7 @@ static void s5300_boot_work(struct work_struct *work)
 	 * ring (cbd's post-bounce std_dl download).  Then wait again.
 	 */
 	dev_info(sm->dev, "no resident MAIN; streaming firmware to the CP\n");
-	ret = s5300_download_main(sm);
+	ret = s5xxx_download_main(sm);
 	release_firmware(sm->pbl);
 	sm->pbl = NULL;
 	if (ret) {
@@ -3584,7 +3796,7 @@ static void s5300_boot_work(struct work_struct *work)
 		u32 fmt_dumped = 0;
 
 		for (s = 0; s < 150; s++) {
-			u32 fh = readl(sm->ipc + S5300_FMT_RXQ_HEAD);
+			u32 fh = readl(sm->ipc + S5XXX_FMT_RXQ_HEAD);
 
 			/*
 			 * MSI-loss fallback: a deep (S5910 DCXO) cold cycle
@@ -3594,17 +3806,17 @@ static void s5300_boot_work(struct work_struct *work)
 			 * handshake still completes; harmless when the MSI does
 			 * fire (the handler no-ops on an already-processed cmd).
 			 */
-			s5300_irq_handler(0, sm);
+			s5xxx_irq_handler(0, sm);
 
-			writel(readl(sm->ipc + S5300_RAW_RXQ_HEAD),
-			       sm->ipc + S5300_RAW_RXQ_TAIL);
+			writel(readl(sm->ipc + S5XXX_RAW_RXQ_HEAD),
+			       sm->ipc + S5XXX_RAW_RXQ_TAIL);
 			/* If the CP posted an FMT control message, dump it once. */
 			if (fh && fh != fmt_dumped) {
 				u32 n = min_t(u32, fh, 64);
 
 				print_hex_dump(KERN_INFO, "s5xxx fmt: ",
 					       DUMP_PREFIX_OFFSET, 16, 1,
-					       sm->ipc + S5300_FMT_RXQ_BUFF, n, false);
+					       sm->ipc + S5XXX_FMT_RXQ_BUFF, n, false);
 				fmt_dumped = fh;
 			}
 			if (completion_done(&sm->init_done))
@@ -3613,13 +3825,13 @@ static void s5300_boot_work(struct work_struct *work)
 				dev_info(sm->dev,
 					 "wait %ds: irq %u cp2ap %#x sub %#x txq %#x/%#x rxq %#x/%#x fmt %#x/%#x\n",
 					 s / 10, sm->irq_count,
-					 readl(sm->ipc + S5300_IPC_CP2AP_MSG),
-					 readl(sm->msi + S5300_MSI_SUB_BOOT_STAGE),
-					 readl(sm->ipc + S5300_RAW_TXQ_HEAD),
-					 readl(sm->ipc + S5300_RAW_TXQ_TAIL),
-					 readl(sm->ipc + S5300_RAW_RXQ_HEAD),
-					 readl(sm->ipc + S5300_RAW_RXQ_TAIL),
-					 fh, readl(sm->ipc + S5300_FMT_RXQ_TAIL));
+					 readl(sm->ipc + S5XXX_IPC_CP2AP_MSG),
+					 readl(sm->msi + S5XXX_MSI_SUB_BOOT_STAGE),
+					 readl(sm->ipc + S5XXX_RAW_TXQ_HEAD),
+					 readl(sm->ipc + S5XXX_RAW_TXQ_TAIL),
+					 readl(sm->ipc + S5XXX_RAW_RXQ_HEAD),
+					 readl(sm->ipc + S5XXX_RAW_RXQ_TAIL),
+					 fh, readl(sm->ipc + S5XXX_FMT_RXQ_TAIL));
 			msleep(100);
 		}
 	}
@@ -3627,17 +3839,17 @@ static void s5300_boot_work(struct work_struct *work)
 	if (!completion_done(&sm->init_done)) {
 		dev_err(sm->dev,
 			"CP handshake timed out (cp2ap %#x boot_stage %#x sub %#x err %#x cafe %#x)\n",
-			readl(sm->ipc + S5300_IPC_CP2AP_MSG),
-			readl(sm->msi + S5300_MSI_BOOT_STAGE),
-			readl(sm->msi + S5300_MSI_SUB_BOOT_STAGE),
-			readl(sm->msi + S5300_MSI_ERR_REPORT),
-			readl(sm->msi + S5300_MSI_FLAG_CAFE));
+			readl(sm->ipc + S5XXX_IPC_CP2AP_MSG),
+			readl(sm->msi + S5XXX_MSI_BOOT_STAGE),
+			readl(sm->msi + S5XXX_MSI_SUB_BOOT_STAGE),
+			readl(sm->msi + S5XXX_MSI_ERR_REPORT),
+			readl(sm->msi + S5XXX_MSI_FLAG_CAFE));
 		return;
 	}
 
 	dev_info(sm->dev, "CP is ONLINE\n");
-	s5300_load_gnss_fw(sm);
-	s5300_online(sm);
+	s5xxx_load_gnss_fw(sm);
+	s5xxx_online(sm);
 	return;
 
 out_fw:
@@ -3645,7 +3857,7 @@ out_fw:
 	sm->pbl = NULL;
 }
 
-static int s5300_map_region(struct s5300_modem *sm, const char *name,
+static int s5xxx_map_region(struct s5xxx_modem *sm, const char *name,
 			    phys_addr_t *phys, resource_size_t *size,
 			    void __iomem **map)
 {
@@ -3679,12 +3891,12 @@ static int s5300_map_region(struct s5300_modem *sm, const char *name,
 	return 0;
 }
 
-static int s5300_probe(struct platform_device *pdev)
+static int s5xxx_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct platform_device *rc_pdev;
 	struct device_node *rc_node;
-	struct s5300_modem *sm;
+	struct s5xxx_modem *sm;
 	const char *fw_name;
 	u16 cmd;
 	int ret;
@@ -3693,15 +3905,18 @@ static int s5300_probe(struct platform_device *pdev)
 	if (!sm)
 		return -ENOMEM;
 
+	sm->var = of_device_get_match_data(dev);
+	if (!sm->var)
+		return -EINVAL;
 	sm->dev = dev;
 	spin_lock_init(&sm->lock);
 	spin_lock_init(&sm->tx_lock);
 	mutex_init(&sm->pcie_onoff_lock);
 	init_completion(&sm->init_done);
 	init_completion(&sm->gnss_rsp);
-	INIT_WORK(&sm->boot_work, s5300_boot_work);
-	INIT_WORK(&sm->pm_work, s5300_pm_work);
-	INIT_WORK(&sm->rfs_work, s5300_rfs_work);
+	INIT_WORK(&sm->boot_work, s5xxx_boot_work);
+	INIT_WORK(&sm->pm_work, s5xxx_pm_work);
+	INIT_WORK(&sm->rfs_work, s5xxx_rfs_work);
 	INIT_LIST_HEAD(&sm->rfs_rxq);
 	spin_lock_init(&sm->rfs_lock);
 	init_waitqueue_head(&sm->fmt_tx_wq);
@@ -3756,13 +3971,13 @@ static int s5300_probe(struct platform_device *pdev)
 		goto err_rc;
 	}
 
-	ret = s5300_map_region(sm, "ipc", &sm->ipc_phys, &sm->ipc_size,
+	ret = s5xxx_map_region(sm, "ipc", &sm->ipc_phys, &sm->ipc_size,
 			       &sm->ipc);
 	if (ret) {
 		dev_err_probe(dev, ret, "failed to map IPC carveout\n");
 		goto err_rc;
 	}
-	ret = s5300_map_region(sm, "msi", &sm->msi_phys, NULL, &sm->msi);
+	ret = s5xxx_map_region(sm, "msi", &sm->msi_phys, NULL, &sm->msi);
 	if (ret) {
 		dev_err_probe(dev, ret, "failed to map MSI carveout\n");
 		goto err_rc;
@@ -3772,7 +3987,7 @@ static int s5300_probe(struct platform_device *pdev)
 	 * only publish a minimal DL info region here so MAIN arms its runtime IPC;
 	 * a DT without it still boots (older overlays), MAIN just won't arm.
 	 */
-	if (s5300_map_region(sm, "pktproc", &sm->pktproc_phys, &sm->pktproc_size,
+	if (s5xxx_map_region(sm, "pktproc", &sm->pktproc_phys, &sm->pktproc_size,
 			     &sm->pktproc))
 		dev_warn(dev, "no pktproc carveout mapped\n");
 
@@ -3783,8 +3998,8 @@ static int s5300_probe(struct platform_device *pdev)
 		dev_err_probe(dev, ret, "failed to load %s\n", fw_name);
 		goto err_rc;
 	}
-	s5300_find_boot(sm);
-	if (sm->boot_size > sm->ipc_size - S5300_BOOT_IMG_OFFSET) {
+	s5xxx_find_boot(sm);
+	if (sm->boot_size > sm->ipc_size - S5XXX_BOOT_IMG_OFFSET) {
 		ret = dev_err_probe(dev, -EFBIG, "PBL too large\n");
 		goto err_fw;
 	}
@@ -3795,8 +4010,8 @@ static int s5300_probe(struct platform_device *pdev)
 	 * returns the root port.  Match the endpoint by port type.
 	 */
 	sm->pdev = NULL;
-	while ((sm->pdev = pci_get_device(S5300_PCI_VENDOR_ID,
-					  S5300_PCI_DEVICE_ID, sm->pdev))) {
+	while ((sm->pdev = pci_get_device(S5XXX_PCI_VENDOR_ID,
+					  S5XXX_PCI_DEVICE_ID, sm->pdev))) {
 		if (pci_pcie_type(sm->pdev) == PCI_EXP_TYPE_ENDPOINT)
 			break;
 	}
@@ -3837,7 +4052,7 @@ static int s5300_probe(struct platform_device *pdev)
 	if (ret)
 		goto err_pci;
 
-	ret = s5300_setup_doorbell(sm);
+	ret = s5xxx_setup_doorbell(sm);
 	if (ret)
 		goto err_pci;
 
@@ -3873,25 +4088,25 @@ static int s5300_probe(struct platform_device *pdev)
 		u32 hdr;
 
 		pci_read_config_word(sm->pdev, 0x40, &w40);
-		pci_read_config_word(sm->pdev, S5300_ROM_MSI_CAP, &w50);
-		pci_read_config_word(sm->pdev, S5300_ROM_MSI_CAP + 2, &w52);
-		pci_read_config_dword(sm->pdev, S5300_ROM_MSI_CAP, &hdr);
+		pci_read_config_word(sm->pdev, S5XXX_ROM_MSI_CAP, &w50);
+		pci_read_config_word(sm->pdev, S5XXX_ROM_MSI_CAP + 2, &w52);
+		pci_read_config_dword(sm->pdev, S5XXX_ROM_MSI_CAP, &hdr);
 		dev_warn(dev,
 			 "MSI cap probe: w@0x40 %#06x w@0x50 %#06x w@0x52 %#06x dw@0x50 %#010x\n",
 			 w40, w50, w52, hdr);
 		if ((hdr & PCI_CAP_ID_MASK) == PCI_CAP_ID_MSI)
-			sm->pdev->msi_cap = S5300_ROM_MSI_CAP;
+			sm->pdev->msi_cap = S5XXX_ROM_MSI_CAP;
 	}
 
 	/*
 	 * Reserve the RC's own MSI vectors 0-3 so the modem's four vectors land
 	 * at data base 4 (MME=2): MAIN raises INIT_START (and every MAIN-phase
 	 * interrupt) on MSI message 4, which then lands on the endpoint's vector
-	 * 0 where s5300_irq_handler() sees it.  Without this the CP drains the
+	 * 0 where s5xxx_irq_handler() sees it.  Without this the CP drains the
 	 * whole download but its INIT_START MSI is unrepresentable and the
 	 * handshake never completes.
 	 */
-	ret = zumapro_pcie_reserve_msi_base(sm->rc_dev, S5300_MSI_VECTORS);
+	ret = zumapro_pcie_reserve_msi_base(sm->rc_dev, S5XXX_MSI_VECTORS);
 	if (ret) {
 		dev_err(dev, "reserving MSI base failed: %d\n", ret);
 		goto err_disable;
@@ -3905,7 +4120,7 @@ static int s5300_probe(struct platform_device *pdev)
 	 * That is all bring-up needs; the TX/pktproc vectors come with the data
 	 * path.  request_irq() below is on the first (only) allocated vector.
 	 */
-	ret = pci_alloc_irq_vectors(sm->pdev, 1, S5300_MSI_VECTORS,
+	ret = pci_alloc_irq_vectors(sm->pdev, 1, S5XXX_MSI_VECTORS,
 				    PCI_IRQ_MSI);
 	if (ret < 0) {
 		dev_err(dev, "MSI alloc: %d (power state %d, msi_cap %#x)\n",
@@ -3925,12 +4140,12 @@ static int s5300_probe(struct platform_device *pdev)
 	 * magic (0xBDBD), and MAIN self-resets ~123 ms after ONLINE seeing
 	 * boot-magic at runtime.  Clearing cp2ap_msg here is the fix.
 	 */
-	writel(0, sm->ipc + S5300_IPC_AP2CP_MSG);
-	writel(0, sm->ipc + S5300_IPC_CP2AP_MSG);
+	writel(0, sm->ipc + S5XXX_IPC_AP2CP_MSG);
+	writel(0, sm->ipc + S5XXX_IPC_CP2AP_MSG);
 	sm->online = false;
 
-	ret = request_irq(pci_irq_vector(sm->pdev, 0), s5300_irq_handler, 0,
-			  "s5300-ipc", sm);
+	ret = request_irq(pci_irq_vector(sm->pdev, 0), s5xxx_irq_handler, 0,
+			  "s5xxx-ipc", sm);
 	if (ret)
 		goto err_vectors;
 
@@ -3941,18 +4156,18 @@ static int s5300_probe(struct platform_device *pdev)
 	 * enabled once the CP reaches ONLINE (PHONE_START).  Ordered wq: relinks
 	 * must not race.
 	 */
-	sm->pm_wq = alloc_ordered_workqueue("s5300-pm", 0);
+	sm->pm_wq = alloc_ordered_workqueue("s5xxx-pm", 0);
 	if (!sm->pm_wq) {
 		ret = -ENOMEM;
 		goto err_irq;
 	}
 	/* Ordered wq for the in-kernel RFS server; stateful ack ping-pong. */
-	sm->rfs_wq = alloc_ordered_workqueue("s5300-rfs", 0);
+	sm->rfs_wq = alloc_ordered_workqueue("s5xxx-rfs", 0);
 	if (!sm->rfs_wq) {
 		ret = -ENOMEM;
 		goto err_wq;
 	}
-	sm->rfs_txbuf = devm_kmalloc(dev, 0x14 + S5300_RFS_CHUNK, GFP_KERNEL);
+	sm->rfs_txbuf = devm_kmalloc(dev, 0x14 + S5XXX_RFS_CHUNK, GFP_KERNEL);
 	if (!sm->rfs_txbuf) {
 		ret = -ENOMEM;
 		goto err_rfs;
@@ -3962,9 +4177,9 @@ static int s5300_probe(struct platform_device *pdev)
 		ret = dev_err_probe(dev, sm->cp2ap_irq, "CP2AP_WAKEUP to irq\n");
 		goto err_rfs;
 	}
-	ret = request_irq(sm->cp2ap_irq, s5300_cp2ap_wakeup_irq,
+	ret = request_irq(sm->cp2ap_irq, s5xxx_cp2ap_wakeup_irq,
 			  IRQF_TRIGGER_RISING | IRQF_TRIGGER_FALLING |
-			  IRQF_NO_AUTOEN, "s5300-cp2ap-wakeup", sm);
+			  IRQF_NO_AUTOEN, "s5xxx-cp2ap-wakeup", sm);
 	if (ret) {
 		dev_err(dev, "CP2AP_WAKEUP request_irq: %d\n", ret);
 		goto err_rfs;
@@ -3978,10 +4193,10 @@ static int s5300_probe(struct platform_device *pdev)
 	if (sm->cp_active) {
 		int irq = gpiod_to_irq(sm->cp_active);
 
-		if (irq >= 0 && !request_irq(irq, s5300_cp_active_irq,
+		if (irq >= 0 && !request_irq(irq, s5xxx_cp_active_irq,
 					     IRQF_TRIGGER_RISING |
 					     IRQF_TRIGGER_FALLING,
-					     "s5300-cp-active", sm))
+					     "s5xxx-cp-active", sm))
 			sm->cp_active_irq = irq;
 		else
 			dev_warn(dev, "CP2AP_PHONE_ACTIVE irq unavailable\n");
@@ -4011,9 +4226,9 @@ err_rc:
 	return ret;
 }
 
-static void s5300_remove(struct platform_device *pdev)
+static void s5xxx_remove(struct platform_device *pdev)
 {
-	struct s5300_modem *sm = platform_get_drvdata(pdev);
+	struct s5xxx_modem *sm = platform_get_drvdata(pdev);
 
 	/*
 	 * Quiesce runtime PM first: free_irq() stops new wakeup IRQs and waits for
@@ -4033,7 +4248,7 @@ static void s5300_remove(struct platform_device *pdev)
 		unregister_netdev(sm->ndev);	/* needs_free_netdev frees it */
 	cancel_work_sync(&sm->rfs_work);
 	destroy_workqueue(sm->rfs_wq);
-	s5300_rfs_cleanup(sm);
+	s5xxx_rfs_cleanup(sm);
 	if (sm->gnss_port)
 		wwan_remove_port(sm->gnss_port);
 	if (sm->oem_port)
@@ -4051,11 +4266,12 @@ static void s5300_remove(struct platform_device *pdev)
 	put_device(sm->rc_dev);
 }
 
-static const struct of_device_id s5300_of_match[] = {
-	{ .compatible = "samsung,s5300-modem" },
+static const struct of_device_id s5xxx_of_match[] = {
+	{ .compatible = "samsung,s5300-modem", .data = &s5xxx_variant_s5300 },
+	{ .compatible = "samsung,s5400-modem", .data = &s5xxx_variant_s5400 },
 	{ },
 };
-MODULE_DEVICE_TABLE(of, s5300_of_match);
+MODULE_DEVICE_TABLE(of, s5xxx_of_match);
 
 /*
  * Quiesce on system shutdown/reboot: stop every worker and IRQ path that
@@ -4063,9 +4279,9 @@ MODULE_DEVICE_TABLE(of, s5300_of_match);
  * in the shutdown path (an access to a dead CP link throws an SError on this
  * SoC), so with autoload enabled this hook is load-bearing.
  */
-static void s5300_shutdown(struct platform_device *pdev)
+static void s5xxx_shutdown(struct platform_device *pdev)
 {
-	struct s5300_modem *sm = platform_get_drvdata(pdev);
+	struct s5xxx_modem *sm = platform_get_drvdata(pdev);
 
 	if (!sm)
 		return;
@@ -4085,25 +4301,33 @@ static void s5300_shutdown(struct platform_device *pdev)
 	dev_info(sm->dev, "quiesced for shutdown\n");
 }
 
-static struct platform_driver s5300_driver = {
-	.probe	= s5300_probe,
-	.remove	= s5300_remove,
-	.shutdown = s5300_shutdown,
+static struct platform_driver s5xxx_driver = {
+	.probe	= s5xxx_probe,
+	.remove	= s5xxx_remove,
+	.shutdown = s5xxx_shutdown,
 	.driver	= {
-		.name		= "s5300-modem",
-		.of_match_table	= s5300_of_match,
+		.name		= "s5xxx-modem",
+		.of_match_table	= s5xxx_of_match,
 	},
 };
-module_platform_driver(s5300_driver);
+module_platform_driver(s5xxx_driver);
 
 /* Firmware the driver loads; all of it is staged under a fixed name. */
-MODULE_FIRMWARE(S5300_HANDOVER_FW);
-MODULE_FIRMWARE(S5300_CPSHA_FW);
-MODULE_FIRMWARE(S5300_HWCFG_FW);
-MODULE_FIRMWARE(S5300_RF_CFG_FW);
-MODULE_FIRMWARE(S5300_REPLAY_FW);
-MODULE_FIRMWARE("google/s5400/efs/nv_normal.bin");
-MODULE_FIRMWARE("google/s5400/efs/nv_protected.bin");
+/*
+ * MODULE_FIRMWARE is a build-time list, so the per-variant directory cannot be
+ * folded in the way the runtime paths are; name both families explicitly.
+ */
+#define S5XXX_MODULE_FIRMWARE(dir)					\
+	MODULE_FIRMWARE("google/" dir "/" S5XXX_HANDOVER_FW);		\
+	MODULE_FIRMWARE("google/" dir "/" S5XXX_CPSHA_FW);		\
+	MODULE_FIRMWARE("google/" dir "/" S5XXX_HWCFG_FW);		\
+	MODULE_FIRMWARE("google/" dir "/" S5XXX_RF_CFG_FW);		\
+	MODULE_FIRMWARE("google/" dir "/" S5XXX_REPLAY_FW);		\
+	MODULE_FIRMWARE("google/" dir "/efs/nv_normal.bin");		\
+	MODULE_FIRMWARE("google/" dir "/efs/nv_protected.bin")
 
-MODULE_DESCRIPTION("Samsung Exynos Modem 5300 PCIe boot driver");
+S5XXX_MODULE_FIRMWARE("s5300");
+S5XXX_MODULE_FIRMWARE("s5400");
+
+MODULE_DESCRIPTION("Samsung Exynos s5300/s5400 modem PCIe boot driver");
 MODULE_LICENSE("GPL");

@@ -94,7 +94,7 @@
 };
 
 /*
- * Tensor modem (Exynos Modem 5300) on PCIe CH0 / HSI1. The AP2CP rail and
+ * Tensor modem (Exynos Modem 5400) on PCIe CH0 / HSI1. The AP2CP rail and
  * CP2AP wakeup lines match the vendor wiring in ../fdt.dts (gpio_ap2cp_*:
  * cp_pwr_on gpp12-2, cp_nreset_n gpp12-3, pm_wrst_n gpp8-3, cp_wrst_n
  * gpp16-3, wake_up gpp16-0, pda_active gpp16-2; cp2ap wake_up gpa5-1).
@@ -245,7 +245,7 @@
 	};
 
 	modem {
-		compatible = "samsung,s5300-modem";
+		compatible = "samsung,s5400-modem";
 		memory-region = <&cp_rmem_reserved>, <&cp_msi_rmem_reserved>,
 				<&cp_pktproc_rmem_reserved>;
 		memory-region-names = "ipc", "msi", "pktproc";
