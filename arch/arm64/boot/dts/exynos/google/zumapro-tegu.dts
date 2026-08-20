@@ -14,6 +14,12 @@
 	compatible = "google,tegu", "google,zumapro-tegu", "google,zumapro";
 };
 
+/* Board identity the AOC firmware reads at boot. */
+&aoc {
+	aoc-board-id = <0x60b02>;
+	aoc-board-rev = <0x10000>;
+};
+
 &decon_autorefresh_bit {
 	status = "okay";
 };
