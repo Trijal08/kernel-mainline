@@ -8,7 +8,7 @@
 /dts-v1/;
 
 #include "zumapro-pixel-common.dtsi"
-#include "zumapro-caimito-wireless.dtsi"
+#include "zumapro-caimito-bcm4390.dtsi"
 #include "zumapro-caimito-cs35l41.dtsi"
 
 / {
