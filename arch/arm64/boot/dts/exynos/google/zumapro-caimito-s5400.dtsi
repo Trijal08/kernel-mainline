@@ -1,0 +1,189 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * Device tree for the boards that carry the Samsung Exynos S5400 Modem/GNSS combo chip:
+ * caiman, komodo, tokay and comet (tegu uses a different part).
+ *
+ * Copyright 2025 Trijal Saha - <trijalsaha2012@gmail.com>
+ */
+
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/spmi/spmi.h>
+
+/ {
+	/*
+	 * CP PMIC bit-banged SPMI bus (SCLK gpa3-2, SDATA gpa3-3): the CP PMIC
+	 * at SID 0 and the S5910 DCXO clock buffer at SID 5.
+	 */
+	spmi {
+		compatible = "google,bitbang-spmi-controller";
+		#address-cells = <2>;
+		#size-cells = <0>;
+		sclk-gpios = <&gpa3 2 GPIO_ACTIVE_HIGH>;
+		sdata-gpios = <&gpa3 3 GPIO_ACTIVE_HIGH>;
+		delay-us = <10>;
+
+		cp_pmic: pmic@0 {
+			compatible = "google,cp-pmic-spmi";
+			reg = <0 SPMI_USID>;
+		};
+
+		cp_s5910: s5910@5 {
+			compatible = "google,s5910-spmi";
+			reg = <5 SPMI_USID>;
+		};
+	};
+
+	/*
+	 * Exynos modem (CP) power/reset sequencer: owns the AP2CP rail GPIOs
+	 * (../fdt.dts gpio_ap2cp_*) and drives the CP PMIC + S5910 over SPMI.
+	 * The PCIe RC (&pcie_0) references it and delegates CP power/reset.
+	 * warm_reset_seq (0x675=0xa1, 0x67d=0xbe) and the S5910 on_seq are in
+	 * the driver.
+	 */
+	cp_power: cp-power {
+		compatible = "google,exynos-cp-power";
+		cp-pwr-gpios = <&gpp12 2 GPIO_ACTIVE_HIGH>;
+		cp-nreset-gpios = <&gpp12 3 GPIO_ACTIVE_HIGH>;
+		cp-pm-wrst-gpios = <&gpp8 3 GPIO_ACTIVE_HIGH>;
+		cp-wrst-gpios = <&gpp16 3 GPIO_ACTIVE_HIGH>;
+		cp-pda-active-gpios = <&gpp16 2 GPIO_ACTIVE_HIGH>;
+		cp-dump-noti-gpios = <&gpp16 1 GPIO_ACTIVE_HIGH>;
+		cp2ap-cp-wrst-gpios = <&gpa7 3 GPIO_ACTIVE_HIGH>;
+		google,cp-pmic = <&cp_pmic>;
+		google,cp-dcxo = <&cp_s5910>;
+	};
+};
+
+/*
+ * Tensor modem (Exynos Modem 5400) on PCIe CH0 / HSI1. The AP2CP rail and
+ * CP2AP wakeup lines match the vendor wiring in ../fdt.dts (gpio_ap2cp_*:
+ * cp_pwr_on gpp12-2, cp_nreset_n gpp12-3, pm_wrst_n gpp8-3, cp_wrst_n
+ * gpp16-3, wake_up gpp16-0, pda_active gpp16-2; cp2ap wake_up gpa5-1).
+ */
+&pcie_0_phy {
+	status = "okay";
+};
+
+&pcie_0 {
+	status = "okay";
+	pinctrl-0 = <&pcie0_clkreq &pcie0_perst>;
+	pinctrl-names = "default";
+	reset-gpios = <&gph0 0 GPIO_ACTIVE_HIGH>;	/* PERST (gph0-0) */
+	/* AP2CP_WAKEUP: runtime PCIe link-request signal, owned by the RC. */
+	google,cp-wakeup-gpios = <&gpp16 0 GPIO_ACTIVE_HIGH>;
+	/* CP rails + CP PMIC/S5910 (SPMI) sequencing live in the cp-power node. */
+	google,cp-power = <&cp_power>;
+};
+
+/ {
+	reserved-memory {
+		/* CP IPC + boot-image staging (../fdt.dts cp_rmem) */
+		cp_rmem_reserved: cp-rmem@ea400000 {
+			reg = <0x0 0xea400000 0xc00000>;
+			no-map;
+		};
+
+		/* CP MSI status page (../fdt.dts cp_msi_rmem) */
+		cp_msi_rmem_reserved: cp-msi-rmem@f6200000 {
+			reg = <0x0 0xf6200000 0x1000>;
+			no-map;
+		};
+
+		/*
+		 * CP PKTPROC carveout (../fdt.dts cp_rmem_1).  The CP DMAs its
+		 * downlink packet-processor descriptor/buffer rings here; the AP
+		 * publishes the DL info region so MAIN can complete its runtime-IPC
+		 * bring-up (without a valid DL info region the pktproc-class CP never
+		 * arms its legacy FMT/RAW control rings).  CP-side aperture base is
+		 * pktproc_cp_base 0x20000000.
+		 */
+		cp_pktproc_rmem_reserved: cp-pktproc-rmem@e8000000 {
+			reg = <0x0 0xe8000000 0x2000000>;
+			no-map;
+		};
+	};
+
+	modem {
+		compatible = "samsung,s5400-modem";
+		memory-region = <&cp_rmem_reserved>, <&cp_msi_rmem_reserved>,
+				<&cp_pktproc_rmem_reserved>;
+		memory-region-names = "ipc", "msi", "pktproc";
+		/*
+		 * The unmodified vendor CP image (ntn_modem/modem.bin); the
+		 * driver parses its TOC and stages the BOOT section. Keyed on
+		 * the modem part (s5400), not the board - komodo and caiman
+		 * ship byte-identical images.  Mirror the on-device modem
+		 * partition layout under /lib/firmware/google/s5400/.
+		 */
+		firmware-name = "google/s5400/modem/images/default/modem.bin";
+		google,pcie = <&pcie_0>;
+		samsung,doorbell-addr = <0x14e60000>;
+		cp2ap-wakeup-gpios = <&gpa5 1 GPIO_ACTIVE_HIGH>;
+		/* CP2AP_PHONE_ACTIVE (../fdt.dts gpio_cp2ap_phone_active): high
+		 * while the CP runs; falling edge after ONLINE = CP crash. */
+		cp2ap-active-gpios = <&gpa5 2 GPIO_ACTIVE_HIGH>;
+		/*
+		 * AP2CP_PARTIAL_RST_N (../fdt.dts gpio_ap2cp_pmu_reset, gpp21-6):
+		 * active-low partial-reset request MAIN samples; the driver holds
+		 * it high (deasserted) or MAIN self-resets ~200 ms after ONLINE.
+		 */
+		cp-partial-rst-gpios = <&gpp21 6 GPIO_ACTIVE_HIGH>;
+	};
+};
+
+/*
+ * KEPLER GNSS receiver on spi_21 (USI3_HSI0), per ../fdt.dts (gnssif + the
+ * spi@111E0000 gnss@0 child). The receiver is a companion of the CP: its
+ * firmware is staged into CP shared memory and booted by the modem, and this
+ * SPI bus is only the runtime host link.
+ *
+ * The bus pins are dedicated HSI0 signals - there is no HSI0 pin controller,
+ * so only the two handshake lines need muxing. The vendor tags both GPIOs
+ * GPIO_ACTIVE_LOW but drives and samples them with the legacy raw GPIO API,
+ * which ignores polarity; the lines are asserted high in hardware, so they are
+ * described active-high here.
+ */
+&spi_21 {
+	num-cs = <1>;
+
+	gnss@0 {
+		compatible = "samsung,kepler";
+		reg = <0>;
+		spi-max-frequency = <3125000>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&gnss_spi_irq &gnss_spi_int>;
+		/* GNSS2AP_SPI_INT on gpa5-4, the data-ready/ready interrupt */
+		gnss2ap-gpios = <&gpa5 4 GPIO_ACTIVE_HIGH>;
+		/* AP2GNSS_SPI_INT on gpp2-3, the host-ready line */
+		ap2gnss-gpios = <&gpp2 3 GPIO_ACTIVE_HIGH>;
+
+		controller-data {
+			samsung,spi-feedback-delay = <0>;
+			/*
+			 * Native manual chip select. The controller's automatic
+			 * mode never clears CS_SIG_INACT, so the chip select is
+			 * held inactive and the receiver never sees the bus: it
+			 * answers the handshake on its GPIOs but is deaf on SPI.
+			 */
+			samsung,spi-chip-select-mode = <0>;
+		};
+	};
+};
+
+&pinctrl_far_alive {
+	gnss_spi_irq: gnss-spi-irq-pins {
+		samsung,pins = "gpa5-4";
+		samsung,pin-function = <GS101_PIN_FUNC_EINT>;
+		samsung,pin-pud = <GS101_PIN_PULL_DOWN>;
+		samsung,pin-drv = <GS101_PIN_DRV_2_5_MA>;
+	};
+};
+
+&pinctrl_peric0 {
+	gnss_spi_int: gnss-spi-int-pins {
+		samsung,pins = "gpp2-3";
+		samsung,pin-function = <GS101_PIN_FUNC_OUTPUT>;
+		samsung,pin-pud = <GS101_PIN_PULL_NONE>;
+		samsung,pin-drv = <GS101_PIN_DRV_2_5_MA>;
+	};
+};
