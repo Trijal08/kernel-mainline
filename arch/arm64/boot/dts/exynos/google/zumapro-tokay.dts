@@ -9,6 +9,7 @@
 
 #include "zumapro-pixel-common.dtsi"
 #include "zumapro-caimito-bcm4390.dtsi"
+#include "zumapro-caimito-s5400.dtsi"
 #include "zumapro-caimito-cs35l41.dtsi"
 
 / {
