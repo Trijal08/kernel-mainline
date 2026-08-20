@@ -1,0 +1,129 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * Audio for the boards that carry the AOC-routed CS35L41 audio amplifiers:
+ * caiman, komodo, tokay and comet (tegu uses a different part).
+ *
+ * Copyright 2025 Trijal Saha - <trijalsaha2012@gmail.com>
+ */
+
+#include <dt-bindings/gpio/gpio.h>
+
+/ {
+	/*
+	 * AOC-routed audio.  The AOC does the DSP and drives the speaker amps;
+	 * this card streams PCM to it over the audio IPC rings.  Regless: it is
+	 * a software card, not a device.
+	 */
+	aoc_sound: aoc-sound {
+		compatible = "google,aoc-sound";
+		aoc = <&aoc>;
+
+		/* Both amplifiers listening to the AOC's TDM: left on slot 0,
+		 * right on slot 1.
+		 */
+		speakers {
+			sound-dai = <&cs35l41_l 0>, <&cs35l41_r 0>;
+		};
+	};
+
+	/* VP is the battery, which is always there and has nothing to model. */
+	cs35l41_vp: regulator-cs35l41-vp {
+		compatible = "regulator-fixed";
+		regulator-name = "cs35l41-vp";
+		regulator-min-microvolt = <3700000>;
+		regulator-max-microvolt = <3700000>;
+		regulator-always-on;
+	};
+};
+
+/*
+ * Stereo speaker amplifiers: two CS35L41 on spi_19 (HSI0 USI1).  The AOC
+ * drives them over TDM; this bus is only their SPI control link.  The left
+ * amp uses the controller's native chip select; the right amp's is a GPIO
+ * (gpn1-0) driven in the manual chip-select mode the Samsung SPI needs.
+ */
+&spi_19 {
+	status = "okay";
+	num-cs = <2>;
+	cs-gpios = <0>, <&gpn1 0 GPIO_ACTIVE_LOW>;
+
+	/*
+	 * The left amp is on the controller's native chip select, the right
+	 * on a GPIO (gpn1-0) driven in the manual chip-select mode the Samsung
+	 * SPI needs.
+	 */
+	cs35l41_l: cs35l41@0 {
+		compatible = "cirrus,cs35l41";
+		reg = <0>;
+		#sound-dai-cells = <1>;
+		spi-max-frequency = <25000000>;
+
+		/*
+		 * The reset line, gpp6-3, is the SPI3 chip-select pad and comes
+		 * up in its peripheral function; mux it to GPIO output (the
+		 * spi3_cs config does exactly that) or the reset never drives and
+		 * the amp hangs in reset (OTP boot never completes).
+		 */
+		pinctrl-names = "default";
+		pinctrl-0 = <&spi3_cs>;
+
+		interrupt-parent = <&gpa5>;
+		interrupts = <5 IRQ_TYPE_LEVEL_LOW>;
+		reset-gpios = <&gpp6 3 GPIO_ACTIVE_HIGH>;
+
+		VA-supply = <&s_bucka_reg>;
+		VP-supply = <&cs35l41_vp>;
+
+		cirrus,boost-peak-milliamp = <3500>;
+		cirrus,boost-ind-nanohenry = <1000>;
+		cirrus,boost-cap-microfarad = <4>;
+		cirrus,asp-sdout-hiz = <3>;
+
+		/*
+		 * GPIO2 is the interrupt line, and idles high impedance until
+		 * it is told what it is for.  Leave it a GPIO input: the pad's
+		 * interrupt function drives it, and making it an output would
+		 * have it hold the line low itself.
+		 */
+		cirrus,gpio2-src-select = <2>;	/* open drain INTB */
+
+		controller-data {
+			samsung,spi-feedback-delay = <1>;
+			samsung,spi-chip-select-mode = <0>;
+		};
+	};
+
+	cs35l41_r: cs35l41@1 {
+		compatible = "cirrus,cs35l41";
+		reg = <1>;
+		#sound-dai-cells = <1>;
+		sound-name-prefix = "R";
+		spi-max-frequency = <25000000>;
+
+		interrupt-parent = <&gpa7>;
+		interrupts = <2 IRQ_TYPE_LEVEL_LOW>;
+		reset-gpios = <&gph2 1 GPIO_ACTIVE_HIGH>;
+
+		VA-supply = <&s_bucka_reg>;
+		VP-supply = <&cs35l41_vp>;
+
+		cirrus,boost-peak-milliamp = <3500>;
+		cirrus,boost-ind-nanohenry = <1000>;
+		cirrus,boost-cap-microfarad = <4>;
+		cirrus,asp-sdout-hiz = <3>;
+
+		/*
+		 * GPIO2 is the interrupt line, and idles high impedance until
+		 * it is told what it is for.  Leave it a GPIO input: the pad's
+		 * interrupt function drives it, and making it an output would
+		 * have it hold the line low itself.
+		 */
+		cirrus,gpio2-src-select = <2>;	/* open drain INTB */
+		cirrus,right-channel-amp;
+
+		controller-data {
+			samsung,spi-feedback-delay = <1>;
+			samsung,spi-chip-select-mode = <2>;
+		};
+	};
+};
