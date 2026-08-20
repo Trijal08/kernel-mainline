@@ -9,10 +9,17 @@
 
 #include "zumapro-pixel-common.dtsi"
 #include "zumapro-caimito-wireless.dtsi"
+#include "zumapro-caimito-cs35l41.dtsi"
 
 / {
 	model = "Pixel 9 Pro Fold";
 	compatible = "google,comet", "google,zumapro-comet", "google,zumapro";
+};
+
+/* Board identity the AOC firmware reads at boot. */
+&aoc {
+	aoc-board-id = <0x40602>;
+	aoc-board-rev = <0x10000>;
 };
 
 &decon_autorefresh_bit {
