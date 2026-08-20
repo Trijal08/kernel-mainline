@@ -15,22 +15,26 @@
 	compatible = "google,comet", "google,zumapro-comet", "google,zumapro";
 };
 
-// &cont_splash_mem {
-// 	// reg = <0x0 0xfac00000 (1440 * 3120 * 4)>;
-// 	reg = <0x0 0xfac00000 (2076 * 2152 * 4)>;
-// 	status = "okay";
-// };
+&decon_autorefresh_bit {
+	status = "okay";
+};
 
-// &framebuffer0 {
-// 	// width = <1440>;
-// 	// height = <3120>;
-// 	// stride = <(1440 * 4)>;
-// 	width = <2076>;
-// 	height = <2152>;
-// 	stride = <(2076 * 4)>;
-// 	format = "a8r8g8b8";
-// 	status = "okay";
-// };
+&cont_splash_mem {
+	// reg = <0x0 0xfac00000 (1440 * 3120 * 4)>;
+	reg = <0x0 0xfac00000 (2076 * 2152 * 4)>;
+	status = "okay";
+};
+
+&framebuffer0 {
+	// width = <1440>;
+	// height = <3120>;
+	// stride = <(1440 * 4)>;
+	width = <2076>;
+	height = <2152>;
+	stride = <(2076 * 4)>;
+	format = "a8r8g8b8";
+	status = "okay";
+};
 
 &spitouch {
 	st,dchip_id = /bits/ 8 <0x36 0x48>;

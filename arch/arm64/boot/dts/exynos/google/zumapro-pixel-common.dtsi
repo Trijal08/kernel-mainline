@@ -25,13 +25,13 @@
 		bootargs = "earlycon=exynos4210,0x10870000";
 		stdout-path = &serial_0;
 
-		// /* Use display framebuffer as setup by bootloader */
-		// framebuffer0: framebuffer-0 {
-		// 	compatible = "simple-framebuffer";
-		// 	memory-region = <&cont_splash_mem>;
-		// 	/* format properties to be added by actual board */
-		// 	status = "disabled";
-		// };
+		/* Use display framebuffer as setup by bootloader */
+		framebuffer0: framebuffer-0 {
+			compatible = "simple-framebuffer";
+			memory-region = <&cont_splash_mem>;
+			/* format properties to be added by actual board */
+			status = "disabled";
+		};
 	};
 
 	memory@b80000000 {
@@ -69,11 +69,13 @@
 		reg = <0x08 0x80000000 0x80000000>;
 	};
 
-	// decon_autorefresh_bit: mmio-init@19470030 {
-	// 	compatible = "linux,mmio-init-helper";
-	// 	reg = <0 0x19470030 0x4>;
-	// 	value = <0x3061>;
-	// };
+	decon_autorefresh_bit: mmio-init@19470030 {
+		compatible = "linux,mmio-init-helper";
+		reg = <0 0x19470030 0x4>;
+		value = <0x3061>;
+
+		status = "disabled";
+	};
 
 	gpio-keys {
 		compatible = "gpio-keys";
@@ -133,12 +135,12 @@
 	};
 
 	reserved-memory {
-		// cont_splash_mem: splash@fac00000 {
-		// 	/* size to be updated by actual board */
-		// 	reg = <0x0 0xfac00000 0x0>;
-		// 	no-map;
-		// 	status = "disabled";
-		// };
+		cont_splash_mem: splash@fac00000 {
+			/* size to be updated by actual board */
+			reg = <0x0 0xfac00000 0x0>;
+			no-map;
+			status = "disabled";
+		};
 	};
 };
 
