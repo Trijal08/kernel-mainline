@@ -8,6 +8,7 @@
  */
 
 #include <linux/component.h>
+#include <linux/err.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
 
@@ -39,19 +40,27 @@ static int exynos_dsi_host_attach(struct samsung_dsim *dsim,
 	struct exynos_dsi *dsi = dsim->priv;
 	struct drm_encoder *encoder = &dsi->encoder;
 	struct drm_device *drm = encoder->dev;
+	struct exynos_drm_crtc *crtc;
+	int ret;
 
-	drm_bridge_attach(encoder, &dsim->bridge,
-			  list_first_entry_or_null(&encoder->bridge_chain,
-						   struct drm_bridge,
-						   chain_node), 0);
+	crtc = exynos_drm_crtc_get_by_type(drm, EXYNOS_DISPLAY_TYPE_LCD);
+	if (IS_ERR(crtc))
+		return PTR_ERR(crtc);
+
+	ret = drm_bridge_attach(encoder, &dsim->bridge,
+				list_first_entry_or_null(&encoder->bridge_chain,
+							 struct drm_bridge,
+							 chain_node), 0);
+	if (ret)
+		return ret;
 
 	mutex_lock(&drm->mode_config.mutex);
 
 	dsim->lanes = device->lanes;
 	dsim->format = device->format;
 	dsim->mode_flags = device->mode_flags;
-	exynos_drm_crtc_get_by_type(drm, EXYNOS_DISPLAY_TYPE_LCD)->i80_mode =
-			!(dsim->mode_flags & MIPI_DSI_MODE_VIDEO);
+	dsim->dsc = device->dsc;
+	crtc->i80_mode = !(dsim->mode_flags & MIPI_DSI_MODE_VIDEO);
 
 	mutex_unlock(&drm->mode_config.mutex);
 
@@ -159,6 +168,11 @@ static const struct samsung_dsim_plat_data exynos7870_dsi_pdata = {
 	.host_ops = &exynos_dsi_exynos_host_ops,
 };
 
+static const struct samsung_dsim_plat_data zumapro_dsi_pdata = {
+	.hw_type = DSIM_TYPE_ZUMAPRO,
+	.host_ops = &exynos_dsi_exynos_host_ops,
+};
+
 static const struct of_device_id exynos_dsi_of_match[] = {
 	{
 		.compatible = "samsung,exynos3250-mipi-dsi",
@@ -183,6 +197,10 @@ static const struct of_device_id exynos_dsi_of_match[] = {
 	{
 		.compatible = "samsung,exynos7870-mipi-dsi",
 		.data = &exynos7870_dsi_pdata,
+	},
+	{
+		.compatible = "google,zumapro-mipi-dsi",
+		.data = &zumapro_dsi_pdata,
 	},
 	{ /* sentinel. */ }
 };

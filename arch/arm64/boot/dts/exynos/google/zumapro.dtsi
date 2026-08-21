@@ -4075,27 +4075,54 @@
 		 * region: DECON_MAIN, DECON_WIN, DECON_SUB (DSIM/DP interface
 		 * select) and DECON0_WINCON.
 		 */
-		decon0: decon@19470000 {
-			compatible = "google,zuma-decon";
-			reg = <0x19470000 0x6000>,	/* main   */
-			      <0x19480000 0xe000>,	/* win    */
-			      <0x19490000 0x10000>,	/* sub    */
-			      <0x194a0000 0xe000>;	/* wincon */
-			reg-names = "main", "win", "sub", "wincon";
-			/* index 0 is the frame-done interrupt used by the driver */
-			interrupts = <GIC_SPI 242 IRQ_TYPE_LEVEL_HIGH 0>, /* frame_done */
-				     <GIC_SPI 243 IRQ_TYPE_LEVEL_HIGH 0>, /* frame_start */
-				     <GIC_SPI 241 IRQ_TYPE_LEVEL_HIGH 0>; /* extra */
-			interrupt-names = "frame_done", "frame_start", "extra";
-			clocks = <&cmu_dpu CLK_GOUT_DPU_DECON0_ACLK>;
-			clock-names = "aclk";
-			power-domains = <&pd_dpuf0>;
-			/*
-			 * The DECON is the CRTC/blender/output block; it issues no
-			 * framebuffer DMA of its own. Memory reads are done by the
-			 * IDMA (see dpu_dma), which is the SysMMU master, so no
-			 * iommus phandle is needed here.
-			 */
+		dpp0: dpp@19900000 {
+			compatible = "google,zumapro-dpp";
+			reg = <0x19900000 0x1000>,
+			      <0x19930000 0x1000>,
+			      <0x19940000 0x4000>,
+			      <0x19950000 0x1000>,
+			      <0x19960000 0x1000>,
+			      <0x19980000 0x1000>;
+			reg-names = "dma", "dpp", "scl_coef", "sramc",
+				    "hdr_comm", "hdr";
+			interrupts = <GIC_SPI 256 IRQ_TYPE_LEVEL_HIGH 0>,
+				     <GIC_SPI 265 IRQ_TYPE_LEVEL_HIGH 0>;
+			interrupt-names = "dma", "dpp";
+			google,dpp-attributes = <0x6d0867>; /* downstream attr */
+			google,axi-port = <0>; /* downstream port */
+			google,scale-down = <4>; /* downstream scale_down */
+			google,scale-up = <8>; /* downstream scale_up */
+			google,dpp-id = <0>; /* downstream dpp,id */
+			status = "disabled";
+		};
+
+		decon0: display-controller@19470000 {
+			compatible = "google,zumapro-decon";
+			reg = <0x19470000 0x6000>,
+			      <0x19480000 0xe000>,
+			      <0x19490000 0x10000>,
+			      <0x194a0000 0xe000>,
+			      <0x194d0000 0xf000>,
+			      <0x194f0000 0x10000>,
+			      <0x1990e000 0x1000>;
+			reg-names = "main", "win", "sub", "wincon", "dqe",
+				    "dqe-cgc", "cgc-dma";
+			interrupts = <GIC_SPI 243 IRQ_TYPE_LEVEL_HIGH 0>,
+				     <GIC_SPI 242 IRQ_TYPE_LEVEL_HIGH 0>,
+				     <GIC_SPI 241 IRQ_TYPE_LEVEL_HIGH 0>,
+				     <GIC_SPI 240 IRQ_TYPE_LEVEL_HIGH 0>,
+				     <GIC_SPI 239 IRQ_TYPE_LEVEL_HIGH 0>,
+				     <GIC_SPI 255 IRQ_TYPE_LEVEL_HIGH 0>;
+			interrupt-names = "frame_start", "frame_done", "extra",
+					  "dimming_start", "dimming_end",
+					  "cgc-dma";
+			google,decon-id = <0>; /* downstream decon,id */
+			google,cgc-dma-id = <18>; /* downstream cgc-dma,id */
+			iommus = <&sysmmu_dpuf0>, <&sysmmu_dpuf1>;
+			samsung,tzmp;
+			power-domains = <&pd_dpuf0>, <&pd_dpuf1>;
+			google,max-windows = <14>; /* downstream max_win */
+			dpps = <&dpp0>;
 			status = "disabled";
 
 			ports {
@@ -4104,100 +4131,91 @@
 
 				port@0 {
 					reg = <0>;
+
 					decon0_out: endpoint {
-						remote-endpoint = <&dsim0_in>;
+						remote-endpoint = <&dsi0_in>;
 					};
 				};
 			};
 		};
 
 		/*
-		 * DPU IDMA channel array (channels at 0x1000 stride from the
-		 * base). The exynosautov9 DPU-DMA driver drives the GF0 channel
-		 * (channel_map[0] = 5 -> base + 0x5000 = 0x19905000).
+		 * Source: downstream disp_ss@19421000 in research/dumped.dts:476.
+		 * The D-PHY driver uses offset 0x8 to hand DPHY reset ownership to
+		 * software and release M_RESETN_M0.  TRACE NEEDED: validate those
+		 * sysreg writes during the first DSIM enable/disable experiment.
 		 */
-		dpu_dma: dma-controller@19900000 {
-			compatible = "samsung,exynosauto-dpu-dma";
-			reg = <0x19900000 0x9000>;
-			interrupts = <GIC_SPI 261 IRQ_TYPE_LEVEL_HIGH 0>; /* IDMA GF0 (ch5) */
-			clocks = <&cmu_dpu CLK_GOUT_DPU_DECON0_ACLK>;
-			clock-names = "aclk";
-			power-domains = <&pd_dpuf0>;
-			/*
-			 * The IDMA is the DPU's memory master. Route it through the
-			 * v9 DPU SysMMUs (mainline exynos-iommu gained v9 support),
-			 * so exynos DRM maps framebuffers into the IOMMU instead of
-			 * requiring physically contiguous CMA. Both DPUF SysMMUs are
-			 * listed because the IDMA channels span the two DPU fetch
-			 * blocks; #iommu-cells is 0 so no stream id is encoded here.
-			 */
-			iommus = <&sysmmu_dpuf0>, <&sysmmu_dpuf1>;
+		sysreg_dpub: syscon@19421000 {
+			compatible = "google,zumapro-disp-sysreg", "syscon";
+			reg = <0x19421000 0x10>;
+			clocks = <&cmu_dpu CLK_GOUT_DPU_SYSREG_DPU_PCLK>;
+			power-domains = <&pd_dpub>;
 			status = "disabled";
 		};
 
 		/*
-		 * DPP processing block for the GF0 channel. The driver accesses
-		 * regs + 0x1000, so the region base is one channel stride below
-		 * the GF0 DPP block (0x19935000) to land on it.
+		 * Source: downstream dphy_m4s4_dsim0@19460000 plus the DSIM-owned
+		 * "dphy-extra" and "dphy" ranges in research/dumped.dts:483-494.
+		 * Mainline keeps the DSIM register window separate and gives these
+		 * PHY windows to the PHY provider to avoid overlapping resources.
 		 */
-		dpp0: dpp@19934000 {
-			compatible = "samsung,exynosauto-dpp";
-			reg = <0x19934000 0x2000>;
-			clocks = <&cmu_dpu CLK_GOUT_DPU_DECON0_ACLK>;
-			clock-names = "aclk";
-			power-domains = <&pd_dpuf0>;
+		mipi_phy_dsim0: phy@19460000 {
+			compatible = "google,zumapro-mipi-dphy";
+			reg = <0x19460000 0x100>,
+			      <0x19460100 0x700>;
+			reg-names = "bias", "dphy";
+			#phy-cells = <1>;
+			clocks = <&ext_24_5m>;
+			clock-names = "ref";
+			samsung,sysreg = <&sysreg_dpub>;
+			samsung,id = <0>;
+			power-domains = <&pd_dpub>;
 			status = "disabled";
 		};
 
 		/*
-		 * MIPI-DSI host (DSIM0), driven by the minimal boot-handoff
-		 * encoder in drivers/gpu/drm/exynos/exynos9_dsim.c. The
-		 * bootloader initialises the DCPHY/link/panel; this node only
-		 * needs the DSIM block kept clocked+powered so that running link
-		 * survives, plus the OF-graph to the DECON and the panel.
+		 * Source: downstream drmdsim@19440000 in research/dumped.dts:491.
+		 * The downstream binding uses phy-names = "dsim_dphy"; the mainline
+		 * binding uses the common "dsim" name while the driver keeps a
+		 * downstream-compatible fallback.
 		 */
-		dsim0: dsi@19440000 {
-			compatible = "google,zuma-dsim";
-			reg = <0x19440000 0x300>,	/* dsi         */
-			      <0x19460100 0x700>,	/* dphy        */
-			      <0x19460000 0x100>;	/* dphy-extra  */
-			reg-names = "dsi", "dphy", "dphy-extra";
+		dsi0: dsi@19440000 {
+			compatible = "google,zumapro-mipi-dsi";
+			reg = <0x19440000 0x300>;
 			interrupts = <GIC_SPI 252 IRQ_TYPE_LEVEL_HIGH 0>;
-			clocks = <&cmu_dpu CLK_GOUT_DPU_PCLK>;
-			clock-names = "bus_clk";
-			power-domains = <&pd_dpuf0>;
-			/* DPU SYSREG: DCPHY reset control for cold link bring-up */
-			samsung,disp-sysreg = <&sysreg_dpu>;
+			clocks = <&cmu_dpu CLK_GOUT_DPU_DSIM0_ALVCLK>,
+				 <&cmu_dpu CLK_GOUT_DPU_DSIM0_OSCCLK>;
+			clock-names = "bus", "osc";
+			power-domains = <&pd_dpub>;
+			phys = <&mipi_phy_dsim0 0>;
+			phy-names = "dsim";
+			samsung,pll-clock-frequency = <24576000>;
+			samsung,burst-clock-frequency = <1368000000>;
+			samsung,esc-clock-frequency = <20000000>;
+			vddcore-supply = <&reg_placeholder>;
+			vddio-supply = <&reg_placeholder>;
 			#address-cells = <1>;
 			#size-cells = <0>;
 			status = "disabled";
 
-			/*
-			 * Panel tearing-effect (TE): the pad gpp0-3 muxed to
-			 * EINT routes the panel's TE into the DECON's DDI0
-			 * hardware trigger (te_from = 0), which is what clocks
-			 * out each frame in command mode. Applied as the default
-			 * state so the mux is established at probe.
-			 */
-			pinctrl-names = "default";
-			pinctrl-0 = <&disp_te_pri_on>;
-			te-gpio = <&gpp0 3 0>;
-
-			/*
-			 * port@0 is the DECON input. The panel output (port@1)
-			 * and the panel child node are board-specific and are
-			 * added by the board DTS (see zumapro-komodo.dts).
-			 */
 			ports {
 				#address-cells = <1>;
 				#size-cells = <0>;
 
 				port@0 {
 					reg = <0>;
-					dsim0_in: endpoint {
+
+					dsi0_in: endpoint {
 						remote-endpoint = <&decon0_out>;
 					};
 				};
+
+				/*
+				 * port@1 is the panel output.  It lives in the
+				 * board DTS together with the panel node, since
+				 * only boards that describe a panel can supply
+				 * the endpoint it links to.
+				 */
 			};
 		};
 

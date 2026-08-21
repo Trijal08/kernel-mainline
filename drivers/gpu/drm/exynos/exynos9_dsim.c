@@ -18,6 +18,7 @@
 
 #include <linux/clk.h>
 #include <linux/component.h>
+#include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/iopoll.h>
 #include <linux/math64.h>
@@ -656,17 +657,42 @@ static int zuma_dsim_cold_init(struct zuma_dsim *dsim)
 }
 
 
+/*
+ * Vendor dsim_reg_wait_hs_clk_ready(): the DCPHY raises TX_READY_HSCLK once the
+ * PLL has locked and the clock lane is actually running in high speed.
+ */
+static int zuma_dsim_wait_hs_clk_ready(struct zuma_dsim *dsim)
+{
+	u32 val;
+
+	return readl_poll_timeout(dsim->regs + DSIM_DPHY_STATUS, val,
+				  val & DSIM_DPHY_STATUS_TX_READY_HSCLK,
+				  10, 2000);
+}
+
 static void zuma_dsim_configure(struct zuma_dsim *dsim)
 {
 	u32 stable_vfp, te_protect, te_tout;
 	u32 vrefresh = dsim->vrefresh ? dsim->vrefresh : DSIM_DEFAULT_VREFRESH;
 	u32 hs_mbps = dsim->hs_clk_mbps;
+	int ret;
 
-	if (!dsim->regs || !hs_mbps || !dsim->hactive)
+	if (!dsim->regs || !hs_mbps || !dsim->hactive) {
+		/*
+		 * Nothing below can run without the mode, and skipping it leaves
+		 * the link on whatever the bootloader set up.  Say so rather
+		 * than failing silently.
+		 */
+		dev_warn(dsim->dev,
+			 "link init skipped: hs_clk=%u hactive=%u\n",
+			 hs_mbps, dsim->hactive);
 		return;
+	}
 
 	/* Own the link: always bring the DCPHY/PLL/lanes up from scratch. */
-	zuma_dsim_cold_init(dsim);
+	ret = zuma_dsim_cold_init(dsim);
+	if (ret)
+		dev_err(dsim->dev, "cold link init failed: %d\n", ret);
 
 	/*
 	 * Command-mode transfer TE timing (vendor dsim_reg_set_config subset).
@@ -695,6 +721,26 @@ static void zuma_dsim_configure(struct zuma_dsim *dsim)
 	 */
 	dsim_rmw(dsim, DSIM_CLK_CTRL, DSIM_CLK_CTRL_TX_REQUEST_HSCLK,
 		 DSIM_CLK_CTRL_TX_REQUEST_HSCLK);
+
+	/*
+	 * The link is only usable once the DCPHY reports the HS clock running
+	 * (vendor dsim_reg_wait_hs_clk_ready()).  Taking the bootloader's live
+	 * DCPHY through a reset does not always relock first time; when it does
+	 * not, the DECON happily keeps pushing frames into a master that never
+	 * entered HS, so each frame only partly lands in the panel's GRAM and
+	 * whatever was there before - the boot splash - shows through the parts
+	 * that were never written.  Re-running the cold init is what recovers
+	 * it, which is exactly why a later modeset cures the ghosting for good.
+	 */
+	if (zuma_dsim_wait_hs_clk_ready(dsim)) {
+		dev_warn(dsim->dev, "DSI master not in HS state, re-initialising\n");
+		zuma_dsim_cold_init(dsim);
+		dsim_rmw(dsim, DSIM_CLK_CTRL, DSIM_CLK_CTRL_TX_REQUEST_HSCLK,
+			 DSIM_CLK_CTRL_TX_REQUEST_HSCLK);
+		if (zuma_dsim_wait_hs_clk_ready(dsim))
+			dev_err(dsim->dev, "DSI master stuck out of HS state\n");
+	}
+
 	dsim_rmw(dsim, DSIM_INTMSK, 0,
 		 DSIM_INTMSK_SW_RST_RELEASE | DSIM_INTMSK_SFR_PL_FIFO_EMPTY |
 			 DSIM_INTMSK_SFR_PH_FIFO_EMPTY | DSIM_INTMSK_FRAME_DONE |
@@ -888,6 +934,33 @@ static const struct component_ops zuma_dsim_component_ops = {
 	.unbind = zuma_dsim_unbind,
 };
 
+/*
+ * The link's error sources are unmasked in zuma_dsim_configure() but nothing
+ * has ever serviced them, so a failing transfer has been silent.  UNDER_RUN in
+ * particular means the DSIM ran out of pixel data mid-frame: the transfer to
+ * the panel is cut short, only part of its GRAM is rewritten, and whatever was
+ * there before stays on screen in the rest.
+ */
+static irqreturn_t zuma_dsim_irq_handler(int irq, void *dev_id)
+{
+	struct zuma_dsim *dsim = dev_id;
+	u32 src;
+
+	src = readl(dsim->regs + DSIM_INTSRC);
+	if (!src)
+		return IRQ_NONE;
+	writel(src, dsim->regs + DSIM_INTSRC);
+
+	if (src & DSIM_INTMSK_UNDER_RUN)
+		dev_err_ratelimited(dsim->dev, "DSI under-run\n");
+	if (src & DSIM_INTMSK_INVALID_SFR_VALUE)
+		dev_err_ratelimited(dsim->dev, "DSI invalid SFR value\n");
+	if (src & DSIM_INTMSK_ERR_RX_ECC)
+		dev_err_ratelimited(dsim->dev, "DSI RX ECC error\n");
+
+	return IRQ_HANDLED;
+}
+
 static int zuma_dsim_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -925,6 +998,15 @@ static int zuma_dsim_probe(struct platform_device *pdev)
 	if (IS_ERR(dsim->sysreg))
 		return dev_err_probe(dev, PTR_ERR(dsim->sysreg),
 				     "failed to get disp-sysreg\n");
+
+	ret = platform_get_irq(pdev, 0);
+	if (ret > 0) {
+		ret = devm_request_irq(dev, ret, zuma_dsim_irq_handler,
+				       IRQF_SHARED, dev_name(dev), dsim);
+		if (ret)
+			return dev_err_probe(dev, ret,
+					     "failed to request DSIM irq\n");
+	}
 
 	/* keep the DSIM block clocked+powered; the bootloader link stays up */
 	dsim->bus_clk = devm_clk_get_optional_enabled(dev, "bus_clk");

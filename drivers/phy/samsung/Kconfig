@@ -21,6 +21,16 @@ config PHY_EXYNOS_MIPI_VIDEO
 	  Support for MIPI CSI-2 and MIPI DSI DPHY found on Samsung S5P
 	  and Exynos SoCs.
 
+config PHY_ZUMAPRO_MIPI_DPHY
+	tristate "Google Tensor G4 Zumapro MIPI D-PHY driver"
+	depends on OF && HAS_IOMEM
+	depends on ARCH_EXYNOS || COMPILE_TEST
+	select GENERIC_PHY
+	select MFD_SYSCON
+	help
+	  Support for the M4M4 MIPI D-PHY block used by the DSIM display
+	  controller on Google Tensor G4 / Samsung Zumapro SoCs.
+
 config PHY_EXYNOS_PCIE
 	bool "Exynos PCIe PHY driver"
 	depends on OF && (ARCH_EXYNOS || COMPILE_TEST)

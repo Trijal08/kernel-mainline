@@ -265,4 +265,6 @@ extern struct platform_driver rotator_driver;
 extern struct platform_driver scaler_driver;
 extern struct platform_driver gsc_driver;
 extern struct platform_driver mic_driver;
+extern struct platform_driver zumapro_decon_driver;
+extern struct platform_driver zumapro_dpp_driver;
 #endif

@@ -510,7 +510,20 @@ static int komodo_panel_probe(struct mipi_dsi_device *dsi)
 	 * transfer window and compute the PLL for a cold link bring-up.
 	 */
 	dsi->hs_rate = 1368000000;
-	/* publish the DSC config so the DSIM/DECON can program compression */
+	/*
+	 * Publish the DSC config so the DSI host can program compression.  The
+	 * upstream samsung_dsim host latches this at attach (exynos_dsi_host_attach
+	 * copies it into dsim->dsc), and the link rate itself comes from the DT
+	 * samsung,burst-clock-frequency rather than hs_rate above.
+	 *
+	 * Both WQHD modes use komodo_wqhd_dsc, which is the preferred mode and so
+	 * the one the host is configured for.  The FHD modes in komodo_modes[] need
+	 * komodo_fhd_dsc; the panel programs its own decoder per mode in enable(),
+	 * but the host keeps this config, so selecting an FHD mode compresses with
+	 * WQHD parameters.  Fixing that needs the host to re-read the config on a
+	 * mode change -- it cannot be done from here, because the host's
+	 * pre_enable() runs before the panel's prepare().
+	 */
 	dsi->dsc = (struct drm_dsc_config *)&komodo_wqhd_dsc;
 	/*
 	 * The komodo panel runs in MIPI command mode (LTPO OLED); the DECON is
