@@ -50,17 +50,10 @@ static int exynos_drm_alloc_buf(struct exynos_drm_gem *exynos_gem, bool kvmap)
 			!(exynos_gem->flags & EXYNOS_BO_CACHABLE))
 		attr |= DMA_ATTR_WRITE_COMBINE;
 
-	/*
-	 * Always take a kernel mapping, even where the caller does not need one.
-	 * dma_direct_alloc_no_mapping() allocates with __GFP_ZERO explicitly
-	 * stripped and has no mapping to zero the pages through, so a
-	 * DMA_ATTR_NO_KERNEL_MAPPING buffer comes back holding whatever was last
-	 * in that physical memory.  These buffers are handed to userspace by
-	 * drm_gem_dumb_create() and scanned out by the DECON, so that is both a
-	 * leak of stale memory and, when a buffer happens to land on the
-	 * bootloader's splash framebuffer, the boot logo showing through
-	 * everything the compositor does not repaint.
-	 */
+	/* FBDev emulation requires kernel mapping */
+	if (!kvmap)
+		attr |= DMA_ATTR_NO_KERNEL_MAPPING;
+
 	exynos_gem->dma_attrs = attr;
 	exynos_gem->cookie = dma_alloc_attrs(drm_dev_dma_dev(dev), exynos_gem->base.size,
 					     &exynos_gem->dma_addr, GFP_KERNEL,

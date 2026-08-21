@@ -8,7 +8,6 @@
 #define __SAMSUNG_DSIM__
 
 #include <linux/gpio/consumer.h>
-#include <linux/mutex.h>
 #include <linux/regulator/consumer.h>
 
 #include <drm/drm_atomic_helper.h>
@@ -23,7 +22,6 @@ struct samsung_dsim;
 #define DSIM_STATE_INITIALIZED		BIT(1)
 #define DSIM_STATE_CMD_LPM		BIT(2)
 #define DSIM_STATE_VIDOUT_AVAILABLE	BIT(3)
-#define DSIM_STATE_PRE_ENABLE_FAILED	BIT(4)
 
 enum samsung_dsim_type {
 	DSIM_TYPE_EXYNOS3250,
@@ -32,7 +30,6 @@ enum samsung_dsim_type {
 	DSIM_TYPE_EXYNOS5422,
 	DSIM_TYPE_EXYNOS5433,
 	DSIM_TYPE_EXYNOS7870,
-	DSIM_TYPE_ZUMAPRO,
 	DSIM_TYPE_IMX8MM,
 	DSIM_TYPE_IMX8MP,
 	DSIM_TYPE_COUNT,
@@ -62,8 +59,6 @@ struct samsung_dsim_driver_data {
 	unsigned int has_clklane_stop:1;
 	unsigned int has_broken_fifoctrl_emptyhdr:1;
 	unsigned int has_sfrctrl:1;
-	unsigned int has_zumapro_regs:1;
-	unsigned int uses_external_dphy_pll:1;
 	struct clk_bulk_data *clk_data;
 	unsigned int num_clks;
 	unsigned int min_freq;
@@ -119,11 +114,9 @@ struct samsung_dsim {
 	u32 burst_clk_rate;
 	u32 hs_clock;
 	u32 esc_clk_rate;
-	u32 esc_clock;
 	u32 lanes;
 	u32 mode_flags;
 	u32 format;
-	struct drm_dsc_config *dsc;
 
 	bool swap_dn_dp_clk;
 	bool swap_dn_dp_data;
@@ -131,14 +124,6 @@ struct samsung_dsim {
 	struct drm_property *brightness;
 	struct completion completed;
 
-	/*
-	 * Serializes the command-transfer state machine.  Held across all of
-	 * samsung_dsim_transfer_start() and samsung_dsim_transfer_finish(),
-	 * i.e. across the window in which either of them owns the head of
-	 * transfer_list without holding transfer_lock.  transfer_lock only
-	 * protects the list itself and is always taken inside cmd_lock.
-	 */
-	struct mutex cmd_lock;
 	spinlock_t transfer_lock; /* protects transfer_list */
 	struct list_head transfer_list;
 

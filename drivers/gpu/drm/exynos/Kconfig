@@ -75,18 +75,9 @@ config DRM_EXYNOS_DPI
 	help
 	  This enables support for Exynos parallel output.
 
-config DRM_EXYNOS_ZUMAPRO_DPU
-	bool "DPU on Google Tensor G4 Zumapro"
-	depends on ARM64 || COMPILE_TEST
-	select DRM_DISPLAY_HELPER
-	select DRM_DISPLAY_DSC_HELPER
-	help
-	  Choose this option if you want to build the Google Tensor G4
-	  Zumapro DECON/DPP display pipeline support.
-
 config DRM_EXYNOS_DSI
 	bool "MIPI-DSI host"
-	depends on DRM_EXYNOS_FIMD || DRM_EXYNOS5433_DECON || DRM_EXYNOS7_DECON || DRM_EXYNOS_ZUMAPRO_DPU
+	depends on DRM_EXYNOS_FIMD || DRM_EXYNOS5433_DECON || DRM_EXYNOS7_DECON
 	select DRM_MIPI_DSI
 	select DRM_PANEL
 	select DRM_SAMSUNG_DSIM
