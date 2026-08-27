@@ -12,6 +12,7 @@
 #include <dt-bindings/input/input.h>
 #include <dt-bindings/regulator/samsung,s2mpg10-regulator.h>
 #include <dt-bindings/usb/pd.h>
+#include <dt-bindings/leds/common.h>
 #include "zumapro-pinctrl.h"
 #include "zumapro.dtsi"
 
@@ -376,6 +377,25 @@
 	};
 };
 
+&hsi2c_4 {
+	status = "okay";
+
+	flash_led: led-controller@63 {
+		compatible = "ti,lm3644";
+		reg = <0x63>;
+		enable-gpios = <&gpp24 1 GPIO_ACTIVE_HIGH>;
+
+		led {
+			function = LED_FUNCTION_FLASH;
+			color = <LED_COLOR_ID_WHITE>;
+			led-sources = <0>, <1>;
+			led-max-microamp = <90000>;
+			flash-max-microamp = <750000>;
+			flash-max-timeout-us = <100000>;
+		};
+	};
+};
+
 &hsi2c_6 {
 	status = "okay";
 	/* TODO: add the devices once drivers exist */
@@ -697,6 +717,11 @@
 &usi_uart {
 	samsung,clkreq-on; /* needed for UART mode */
 
+	status = "okay";
+};
+
+&usi4 {
+	samsung,mode = <USI_MODE_I2C>;
 	status = "okay";
 };
 
