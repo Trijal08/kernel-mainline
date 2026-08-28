@@ -139,21 +139,26 @@ static int lm3644_torch_brightness_set(struct led_classdev *led_cdev,
 		goto out;
 	}
 
-	ret = regmap_update_bits(chip->regmap, LM3644_REG_ENABLE,
-				 LM3644_ENABLE_MODE | LM3644_ENABLE_LEDS,
-				 LM3644_MODE_STANDBY);
-	if (ret || !brightness)
-		goto out;
+	if (!brightness) {
+		ret = regmap_update_bits(chip->regmap, LM3644_REG_ENABLE,
+					 LM3644_ENABLE_MODE | LM3644_ENABLE_LEDS,
+					 LM3644_MODE_STANDBY);
+	} else if ((val & LM3644_ENABLE_MODE) == LM3644_MODE_TORCH) {
+		ret = lm3644_set_current(chip, LM3644_REG_TORCH_LED1,
+					 LM3644_REG_TORCH_LED2,
+					 brightness - 1);
+	} else {
+		ret = lm3644_set_current(chip, LM3644_REG_TORCH_LED1,
+					 LM3644_REG_TORCH_LED2,
+					 brightness - 1);
+		if (ret)
+			goto out;
 
-	ret = lm3644_set_current(chip, LM3644_REG_TORCH_LED1,
-				 LM3644_REG_TORCH_LED2, brightness - 1);
-	if (ret)
-		goto out;
-
-	enable = LM3644_MODE_TORCH | lm3644_source_enable_mask(chip);
-	ret = regmap_update_bits(chip->regmap, LM3644_REG_ENABLE,
-				 LM3644_ENABLE_MODE | LM3644_ENABLE_LEDS,
-				 enable);
+		enable = LM3644_MODE_TORCH | lm3644_source_enable_mask(chip);
+		ret = regmap_update_bits(chip->regmap, LM3644_REG_ENABLE,
+					 LM3644_ENABLE_MODE | LM3644_ENABLE_LEDS,
+					 enable);
+	}
 
 out:
 	mutex_unlock(&chip->lock);
