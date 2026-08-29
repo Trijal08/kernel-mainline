@@ -15,6 +15,16 @@
 / {
 	model = "Pixel 9";
 	compatible = "google,tokay", "google,zumapro-tokay", "google,zumapro";
+
+	memory_4: memory@a00000000 {
+		device_type = "memory";
+		reg = <0x0a 0x00 0x80000000>;
+	};
+
+	memory_5: memory@a80000000 {
+		device_type = "memory";
+		reg = <0x0a 0x80000000 0x80000000>;
+	};
 };
 
 /* Board identity the AOC firmware reads at boot. */
