@@ -36,39 +36,19 @@
 		};
 	};
 
-	memory@b80000000 {
+	memory_1: memory@880000000 {
 		device_type = "memory";
-		reg = <0x0b 0x80000000 0x60f83000>;
+		reg = <0x08 0x80000000 0x80000000>;
 	};
 
-	memory@b00000000 {
-		device_type = "memory";
-		reg = <0x0b 0x00 0x80000000>;
-	};
-
-	memory@a80000000 {
-		device_type = "memory";
-		reg = <0x0a 0x80000000 0x80000000>;
-	};
-
-	memory@a00000000 {
-		device_type = "memory";
-		reg = <0x0a 0x00 0x80000000>;
-	};
-
-	memory@980000000 {
-		device_type = "memory";
-		reg = <0x09 0x80000000 0x80000000>;
-	};
-
-	memory@900000000 {
+	memory_2: memory@900000000 {
 		device_type = "memory";
 		reg = <0x09 0x00 0x80000000>;
 	};
 
-	memory@880000000 {
+	memory_3: memory@980000000 {
 		device_type = "memory";
-		reg = <0x08 0x80000000 0x80000000>;
+		reg = <0x09 0x80000000 0x80000000>;
 	};
 
 	decon_autorefresh_bit: mmio-init@19470030 {
