@@ -10,6 +10,7 @@
 #include <linux/bits.h>
 #include <linux/firmware/samsung/exynos-acpm-protocol.h>
 #include <linux/ktime.h>
+#include <linux/printk.h>
 #include <linux/string.h>
 #include <linux/types.h>
 #include <linux/units.h>
@@ -109,6 +110,22 @@ int acpm_tmu_read_temp(struct acpm_handle *handle, unsigned int acpm_chan_id,
 	ret = acpm_tmu_to_linux_err(msg.rx.ret);
 	if (ret)
 		return ret;
+
+	/*
+	 * The firmware occasionally hands back a reply belonging to an
+	 * earlier request -- another zone's, or another request type's.
+	 * Taking msg.rx.temp from one of those reports a temperature that
+	 * was never asked for, and the thermal core acts on it: a stale
+	 * reading is what makes a cool zone appear to cross a trip.  The
+	 * reply carries the type and zone it answers, so check them and let
+	 * the caller retry rather than believing the wrong number.
+	 */
+	if (msg.rx.type != ACPM_TMU_READ_TEMP || msg.rx.tzid != tz) {
+		pr_warn_ratelimited("acpm-tmu: discarding reply for tz %u type 0x%02x, wanted tz %u type 0x%02x\n",
+				    msg.rx.tzid, msg.rx.type, tz,
+				    ACPM_TMU_READ_TEMP);
+		return -EAGAIN;
+	}
 
 	*temp = msg.rx.temp;
 
