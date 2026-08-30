@@ -68,25 +68,6 @@ properties:
       compatible:
         const: samsung,s2mpg11-pmic
 
-  thermal-sensor:
-    description:
-      Child node describing the Thermal Management Unit owned by the ACPM
-      firmware. Per-zone temperatures are read over ACPM IPC; the node is a
-      thermal sensor provider whose cell is the firmware thermal-zone id.
-    type: object
-    additionalProperties: false
-
-    properties:
-      compatible:
-        const: google,zumapro-acpm-tmu
-
-      "#thermal-sensor-cells":
-        const: 1
-
-    required:
-      - compatible
-      - "#thermal-sensor-cells"
-
   shmem:
     description:
       List of phandle pointing to the shared memory (SHM) area. The memory
@@ -161,10 +142,5 @@ examples:
                     samsung,ext-control = <S2MPG11_EXTCTRL_UFS_EN>;
                 };
             };
-        };
-
-        thermal-sensor {
-            compatible = "google,zumapro-acpm-tmu";
-            #thermal-sensor-cells = <1>;
         };
     };
