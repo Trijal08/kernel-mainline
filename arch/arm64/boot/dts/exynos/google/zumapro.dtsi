@@ -4464,31 +4464,119 @@
 			 */
 			operating-points-v2 = <&gpu_opp_table>;
 
+			/*
+			 * The downstream 14-row DVFS table, whose top row is
+			 * this part's declared 940 MHz shader maximum.
+			 * Each row carries both rates, G3D first and G3DL2
+			 * second, because ACPM moves only the domain it is asked
+			 * for: requesting 302 MHz on G3D leaves PLL_G3D_L2 at its
+			 * 160 MHz idle setting, so the pairing has to come from
+			 * here.
+			 *
+			 * opp-microwatt is what the Energy Model is built from,
+			 * and these are MEASURED: mean ODPM S2S_VDD_G3D over a
+			 * 10 s glmark2 terrain run pinned at each rung, rounded
+			 * to 10 mW, about the noise floor of the reading.  Three
+			 * points came back 2-4% below the rung beneath them --
+			 * inside that noise -- and were raised one step to keep
+			 * the table increasing.
+			 *
+			 * Two known biases, both understating, which is the safe
+			 * direction for a thermal budget: ODPM does not meter the
+			 * L2 rail (S8S_VDD_G3D_L2 is not one of the 12 muxed
+			 * channels), and the figures include whatever the
+			 * compositor was doing at the time.
+			 *
+			 * This replaces a dynamic-power-coefficient plus invented
+			 * per-OPP voltages, which underestimated the bottom rung
+			 * by 4.7x -- 28 mW modelled against 135 mW measured.
+			 */
 			gpu_opp_table: opp-table {
 				compatible = "operating-points-v2";
 
-				/*
-				 * Frequency-only G3D shader-core points from the zuma
-				 * vendor DVFS table v2 (gpu1 column).  Voltage is
-				 * ASV/ECT-calibrated and owned by ACPM, so no opp-microvolt.
-				 * zumapro overrides gpu_dvfs_max_freq to 940 MHz (zuma itself
-				 * caps at 890), so all 14 rows apply here.  The paired G3DL2
-				 * rate is noted per OPP.
-				 */
-				opp-150000000 { opp-hz = /bits/ 64 <150000000>; }; /* L2 160 MHz */
-				opp-302000000 { opp-hz = /bits/ 64 <302000000>; }; /* L2 386 MHz */
-				opp-337000000 { opp-hz = /bits/ 64 <337000000>; }; /* L2 430 MHz */
-				opp-376000000 { opp-hz = /bits/ 64 <376000000>; }; /* L2 531 MHz */
-				opp-419000000 { opp-hz = /bits/ 64 <419000000>; }; /* L2 531 MHz */
-				opp-467000000 { opp-hz = /bits/ 64 <467000000>; }; /* L2 659 MHz */
-				opp-521000000 { opp-hz = /bits/ 64 <521000000>; }; /* L2 659 MHz */
-				opp-580000000 { opp-hz = /bits/ 64 <580000000>; }; /* L2 749 MHz */
-				opp-649000000 { opp-hz = /bits/ 64 <649000000>; }; /* L2 749 MHz */
-				opp-723000000 { opp-hz = /bits/ 64 <723000000>; }; /* L2 900 MHz */
-				opp-807000000 { opp-hz = /bits/ 64 <807000000>; }; /* L2 900 MHz */
-				opp-850000000 { opp-hz = /bits/ 64 <850000000>; }; /* L2 900 MHz */
-				opp-890000000 { opp-hz = /bits/ 64 <890000000>; }; /* L2 900 MHz */
-				opp-940000000 { opp-hz = /bits/ 64 <940000000>; }; /* L2 950 MHz, Fmax */
+				opp-150000000 {
+					opp-hz = /bits/ 64 <150000000>,
+						 /bits/ 64 <160000000>;
+					opp-microwatt = <140000>;
+				};
+
+				opp-302000000 {
+					opp-hz = /bits/ 64 <302000000>,
+						 /bits/ 64 <386000000>;
+					opp-microwatt = <210000>;
+				};
+
+				opp-337000000 {
+					opp-hz = /bits/ 64 <337000000>,
+						 /bits/ 64 <430000000>;
+					opp-microwatt = <240000>;
+				};
+
+				opp-376000000 {
+					opp-hz = /bits/ 64 <376000000>,
+						 /bits/ 64 <531000000>;
+					opp-microwatt = <250000>;
+				};
+
+				opp-419000000 {
+					opp-hz = /bits/ 64 <419000000>,
+						 /bits/ 64 <531000000>;
+					opp-microwatt = <270000>;
+				};
+
+				opp-467000000 {
+					opp-hz = /bits/ 64 <467000000>,
+						 /bits/ 64 <659000000>;
+					opp-microwatt = <320000>;
+				};
+
+				opp-521000000 {
+					opp-hz = /bits/ 64 <521000000>,
+						 /bits/ 64 <659000000>;
+					opp-microwatt = <350000>;
+				};
+
+				opp-580000000 {
+					opp-hz = /bits/ 64 <580000000>,
+						 /bits/ 64 <749000000>;
+					opp-microwatt = <420000>;
+				};
+
+				opp-649000000 {
+					opp-hz = /bits/ 64 <649000000>,
+						 /bits/ 64 <749000000>;
+					opp-microwatt = <430000>;
+				};
+
+				opp-723000000 {
+					opp-hz = /bits/ 64 <723000000>,
+						 /bits/ 64 <900000000>;
+					opp-microwatt = <500000>;
+				};
+
+				opp-807000000 {
+					opp-hz = /bits/ 64 <807000000>,
+						 /bits/ 64 <900000000>;
+					opp-microwatt = <550000>;
+				};
+
+				opp-850000000 {
+					opp-hz = /bits/ 64 <850000000>,
+						 /bits/ 64 <900000000>;
+					opp-microwatt = <600000>;
+				};
+
+				opp-890000000 {
+					opp-hz = /bits/ 64 <890000000>,
+						 /bits/ 64 <900000000>;
+					opp-microwatt = <610000>;
+				};
+
+				opp-940000000 {
+					opp-hz = /bits/ 64 <940000000>,
+						 /bits/ 64 <950000000>;
+					opp-microwatt = <740000>;
+				};
 			};
 		};
 	};
