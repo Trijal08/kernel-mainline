@@ -15,3 +15,4 @@ obj-y += ms_sensors/
 obj-y += scmi_sensors/
 obj-y += ssp_sensors/
 obj-y += st_sensors/
+obj-y += aoc_usf/
