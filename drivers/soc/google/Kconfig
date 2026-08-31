@@ -14,3 +14,14 @@ config GOOGLE_AOC
 	  out of reset, so the driver needs both.
 
 	  This can be built as a module, which will be called aoc.
+
+config GOOGLE_AOC_CHANNEL
+	tristate "AoC channelized comms (AOCC) in-kernel client"
+	depends on GOOGLE_AOC
+	help
+	  AOCC multiplexes many logical channels over one AOC service.  This
+	  provides the in-kernel client used by the sensor hub (USF) and the
+	  touch bus negotiator; there is no userspace char device, because
+	  those stacks run entirely in the kernel.
+
+	  This can be built as a module, which will be called aoc-channel.
