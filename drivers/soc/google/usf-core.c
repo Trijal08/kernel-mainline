@@ -18,6 +18,7 @@
 #include <linux/device.h>
 #include <linux/err.h>
 #include <linux/export.h>
+#include <linux/minmax.h>
 #include <linux/mutex.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
@@ -47,7 +48,7 @@ struct usf_session {
 
 	/* Control request/response, serialised by @ctl_lock. */
 	struct mutex ctl_lock;
-	struct usf_fbb fbb;		/* request builder scratch */
+	struct usf_fbb *fbb;		/* request builder scratch */
 	u32 txn;			/* monotonic transaction id */
 
 	/* Response slot, filled by the rx callback, protected by @resp_lock. */
@@ -59,6 +60,7 @@ struct usf_session {
 	u8 resp[USF_RESP_MAX];
 
 	/* Server handles, resolved at runtime -- never hardcoded. */
+	u32 registry;
 	u32 sensor_mgr;
 	u32 sample_chan;
 };
@@ -98,6 +100,58 @@ static void usf_session_rx(void *ctx, const void *payload, size_t len)
 }
 
 /*
+ * Write one envelope, fragmenting it if it will not fit in a single AOCC
+ * message.  A registry load script is a whole .reg file and routinely exceeds
+ * the MTU; the AoC reassembles the type-3 fragments back into the envelope and
+ * then parses it normally, so this is transport framing and nothing above here
+ * needs to know it happened.
+ */
+static int usf_write_env(struct usf_session *s, const u8 *env, size_t len)
+{
+	struct usf_fbb *fb;
+	size_t off;
+	u8 *copy;
+	int ret = 0;
+
+	if (len <= AOCC_MAX_MSG_SIZE)
+		return aocc_kernel_write(s->wake, env, len);
+
+	/*
+	 * @env points into the caller's builder, which the fragment builder
+	 * would overwrite, so take a copy first.
+	 */
+	copy = kmemdup(env, len, GFP_KERNEL);
+	if (!copy)
+		return -ENOMEM;
+
+	fb = usf_fbb_alloc(USF_FRAG_CHUNK + 256);
+	if (!fb) {
+		kfree(copy);
+		return -ENOMEM;
+	}
+
+	for (off = 0; off < len; off += USF_FRAG_CHUNK) {
+		size_t n = min_t(size_t, USF_FRAG_CHUNK, len - off);
+		const u8 *msg;
+		size_t mlen;
+
+		ret = usf_build_fragment(fb, (u32)len, (u32)off, copy + off, n,
+					 &msg, &mlen);
+		if (ret)
+			break;
+
+		ret = aocc_kernel_write(s->wake, msg, mlen);
+		if (ret < 0)
+			break;
+	}
+
+	usf_fbb_free(fb);
+	kfree(copy);
+
+	return ret < 0 ? ret : (int)len;
+}
+
+/*
  * Send one request on the wake channel and wait for its response. Caller holds
  * ctl_lock (which also owns @fbb, so @req must stay valid across the write).
  * On success @resp/@resp_len point at s->resp (valid until the next call).
@@ -115,7 +169,7 @@ static int usf_ctl(struct usf_session *s, u32 txn, const u8 *req, size_t reqlen,
 	s->resp_ready = U32_MAX;	/* discard any stale payload */
 	spin_unlock_irqrestore(&s->resp_lock, flags);
 
-	ret = aocc_kernel_write(s->wake, req, reqlen);
+	ret = usf_write_env(s, req, reqlen);
 	if (ret < 0)
 		goto clear;
 
@@ -158,7 +212,7 @@ static u32 usf_get_server(struct usf_session *s, const u8 uuid[16],
 
 	mutex_lock(&s->ctl_lock);
 	txn = s->txn++;
-	ret = usf_build_get_server(&s->fbb, txn, uuid, &req, &reqlen);
+	ret = usf_build_get_server(s->fbb, txn, uuid, &req, &reqlen);
 	if (!ret)
 		ret = usf_ctl(s, txn, req, reqlen, &resp, &rlen);
 	if (!ret) {
@@ -195,6 +249,10 @@ struct usf_session *usf_session_alloc(struct device *dev,
 	s->txn = 1;
 	s->resp_txn = U32_MAX;
 	s->resp_ready = U32_MAX;
+	s->fbb = usf_fbb_alloc(USF_FBB_CAP);
+	if (!s->fbb)
+		return ERR_PTR(-ENOMEM);
+
 	mutex_init(&s->ctl_lock);
 	spin_lock_init(&s->resp_lock);
 	init_completion(&s->resp_done);
@@ -244,6 +302,7 @@ void usf_session_close(struct usf_session *s)
 	}
 	s->sensor_mgr = 0;
 	s->sample_chan = 0;
+	s->registry = 0;
 }
 EXPORT_SYMBOL_GPL(usf_session_close);
 
@@ -271,6 +330,85 @@ int usf_session_bootstrap(struct usf_session *s)
 }
 EXPORT_SYMBOL_GPL(usf_session_bootstrap);
 
+
+struct device *usf_session_dev(struct usf_session *s)
+{
+	return s->dev;
+}
+EXPORT_SYMBOL_GPL(usf_session_dev);
+
+int usf_session_registry_open(struct usf_session *s)
+{
+	if (!s->wake)
+		return -ENODEV;
+	if (!s->registry)
+		s->registry = usf_get_server(s, usf_uuid_registry, "Registry");
+
+	return s->registry ? 0 : -ENODEV;
+}
+EXPORT_SYMBOL_GPL(usf_session_registry_open);
+
+int usf_session_load_script(struct usf_session *s, const u8 *script,
+			    size_t len, u32 cdt)
+{
+	const u8 *req, *resp;
+	struct usf_fbb *fb;
+	size_t reqlen;
+	u32 rlen, txn;
+	int ret;
+
+	if (!s->registry)
+		return -ENODEV;
+
+	/* Room for the script plus the body and the two nesting levels. */
+	fb = usf_fbb_alloc(len + 512);
+	if (!fb)
+		return -ENOMEM;
+
+	mutex_lock(&s->ctl_lock);
+	txn = s->txn++;
+	ret = usf_build_load_script(fb, txn, s->registry, script, len, cdt,
+				    &req, &reqlen);
+	if (!ret)
+		ret = usf_ctl(s, txn, req, reqlen, &resp, &rlen);
+	mutex_unlock(&s->ctl_lock);
+
+	usf_fbb_free(fb);
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(usf_session_load_script);
+
+int usf_session_set_loaded(struct usf_session *s)
+{
+	static const u8 path[] = "/";
+	static const u8 name[] = "loaded";
+	static const u8 value[] = "1";
+	const struct usf_prop prop = {
+		/* sizeof() counts the NUL, which the wire format expects. */
+		.name = name, .name_len = sizeof(name),
+		.value = value, .value_len = sizeof(value),
+	};
+	const u8 *req, *resp;
+	size_t reqlen;
+	u32 rlen, txn;
+	int ret;
+
+	if (!s->registry)
+		return -ENODEV;
+
+	mutex_lock(&s->ctl_lock);
+	txn = s->txn++;
+	ret = usf_build_registry_set(s->fbb, txn, s->registry, path,
+				     sizeof(path), &prop, 1, &req, &reqlen);
+	if (!ret)
+		ret = usf_ctl(s, txn, req, reqlen, &resp, &rlen);
+	mutex_unlock(&s->ctl_lock);
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(usf_session_set_loaded);
+
 int usf_session_sensor_list(struct usf_session *s, u32 *handles, int max)
 {
 	const u8 *req, *resp, *body, *vec;
@@ -282,7 +420,7 @@ int usf_session_sensor_list(struct usf_session *s, u32 *handles, int max)
 		count = 0;
 		mutex_lock(&s->ctl_lock);
 		txn = s->txn++;
-		ret = usf_build_no_body(&s->fbb, USF_MSG_GET_SENSOR_LIST, txn,
+		ret = usf_build_no_body(s->fbb, USF_MSG_GET_SENSOR_LIST, txn,
 					s->sensor_mgr, &req, &reqlen);
 		if (!ret)
 			ret = usf_ctl(s, txn, req, reqlen, &resp, &rlen);
@@ -320,7 +458,7 @@ int usf_session_sensor_info(struct usf_session *s, u32 handle, char *name,
 		*res_bits = 0;
 	mutex_lock(&s->ctl_lock);
 	txn = s->txn++;
-	ret = usf_build_no_body(&s->fbb, USF_MSG_GET_SENSOR_INFO, txn, handle,
+	ret = usf_build_no_body(s->fbb, USF_MSG_GET_SENSOR_INFO, txn, handle,
 				&req, &reqlen);
 	if (!ret)
 		ret = usf_ctl(s, txn, req, reqlen, &resp, &rlen);
@@ -349,7 +487,7 @@ int usf_session_start_sampling(struct usf_session *s, u32 handle,
 
 	mutex_lock(&s->ctl_lock);
 	txn = s->txn++;
-	ret = usf_build_create_sampling(&s->fbb, txn, handle, mode, period_ns,
+	ret = usf_build_create_sampling(s->fbb, txn, handle, mode, period_ns,
 					client_id, &req, &reqlen);
 	if (!ret)
 		ret = usf_ctl(s, txn, req, reqlen, &resp, &rlen);
@@ -392,7 +530,7 @@ int usf_session_reconfig(struct usf_session *s, u32 handle, u32 sampling_id,
 
 	mutex_lock(&s->ctl_lock);
 	txn = s->txn++;
-	ret = usf_build_reconfig(&s->fbb, txn, handle, sampling_id, period_ns,
+	ret = usf_build_reconfig(s->fbb, txn, handle, sampling_id, period_ns,
 				 max_latency_ns, enable, &req, &reqlen);
 	if (!ret)
 		ret = aocc_kernel_write(s->wake, req, reqlen);
@@ -415,7 +553,7 @@ int usf_session_stop_sampling(struct usf_session *s, u32 handle,
 
 	mutex_lock(&s->ctl_lock);
 	txn = s->txn++;
-	ret = usf_build_stop_sampling(&s->fbb, txn, handle, sampling_id,
+	ret = usf_build_stop_sampling(s->fbb, txn, handle, sampling_id,
 				      &req, &reqlen);
 	if (!ret)
 		ret = usf_ctl(s, txn, req, reqlen, &resp, &rlen);
