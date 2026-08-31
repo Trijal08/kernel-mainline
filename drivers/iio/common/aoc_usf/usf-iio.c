@@ -676,9 +676,9 @@ static void usf_iio_enumerate_work(struct work_struct *work)
 
 	/*
 	 * The servers stay dormant until the registry is up, so load it before
-	 * bootstrapping rather than waiting for something else to do it.
-	 * Re-uploading an already-loaded registry is what the retry path would
-	 * do anyway, and the AoC tolerates it.
+	 * bootstrapping rather than waiting for something else to do it.  The
+	 * loader is a no-op once the registry is in, so a retry here, or the
+	 * wake-gesture driver having got there first, costs nothing.
 	 */
 	ret = usf_registry_load(usf->usf, usf->dev->of_node);
 	if (ret) {
