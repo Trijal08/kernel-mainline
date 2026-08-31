@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: GPL-2.0-only
+config AOC_USF_IIO
+	tristate "AoC USF sensor framework to IIO bridge"
+	depends on IIO
+	depends on GOOGLE_AOC_USF
+	select IIO_BUFFER
+	select IIO_KFIFO_BUF
+	help
+	  Bridge the sensors hosted by the AoC USF (Unified Sensor Framework)
+	  firmware on Google Tensor devices to Linux IIO.  The driver loads the
+	  sensor registry itself, out of the firmware search path, then
+	  enumerates the sensors over the com.google.usf AOCC channel and
+	  exposes them as IIO devices (accelerometer, gyroscope, magnetometer,
+	  light, proximity, pressure).
+
+	  To compile this driver as a module, choose M here: the module will
+	  be called aoc-usf-iio.
+
+	  If unsure, say N.

@@ -37,7 +37,11 @@
 
 #include <linux/soc/google/aoc.h>
 #include <linux/soc/samsung/exynos-gsa.h>
+#include <linux/math64.h>
+#include <linux/timekeeping.h>
 #include <linux/trusty/trusty_ipc.h>
+#include <asm/arch_timer.h>
+#include <clocksource/arm_arch_timer.h>
 
 /*
  * The AOC's secure setup (its SysMMU's secure context and the reset release)
@@ -451,6 +455,7 @@ static int aoc_load_image(struct aoc_data *aoc, const struct firmware *fw)
 #define AOC_CB_FW_VERSION_NAME	0x24
 #define AOC_CB_HW_VERSION_NAME	0x54
 #define AOC_VERSION_LEN		48
+#define AOC_CB_SYSTEM_CLOCK_OFFSET 0x84
 /* struct aoc_ipc_service_header: name[32], then flags and two ring regions. */
 #define AOC_SERVICE_NAME_LEN	32
 
@@ -1020,6 +1025,60 @@ static int aoc_ring_write(struct aoc_data *aoc, void *svc,
  * hold an opaque struct aoc_service *; here we unwrap it to the header pointer
  * and the owning device, and dispatch on the service type.
  */
+
+/*
+ * The AOC stamps its events in its own clock domain: nanoseconds off the
+ * architected counter, biased by the offset its firmware publishes in the
+ * control block.  CLOCK_BOOTTIME advances with that same counter, so
+ * expressing "now" in the AOC's domain and differencing the two converts
+ * exactly, with no drift to correct for.
+ */
+#define AOC_TS_SANITY_NS	(10ULL * NSEC_PER_SEC)
+
+u64 aoc_ts_to_boottime_ns(struct device *dev, u64 aoc_ts)
+{
+	struct aoc_data *aoc = platform_get_drvdata(to_platform_device(dev));
+	u64 now_cnt, now_boot, aoc_now_ns, delta_ns, offset;
+	u32 rate;
+
+	if (!aoc || !aoc->ipc)
+		return 0;
+
+	/*
+	 * CNTFRQ_EL0 rather than arch_timer_get_rate(): the latter is not
+	 * exported to modules, and the two agree here because nothing
+	 * overrides the rate -- the device tree's timer node carries no
+	 * clock-frequency, so the arch timer takes CNTFRQ_EL0 as authoritative
+	 * too.
+	 */
+	rate = arch_timer_get_cntfrq();
+	if (!rate)
+		return 0;
+
+	offset = (u64)cb_rd(aoc->ipc, AOC_CB_SYSTEM_CLOCK_OFFSET) |
+		 ((u64)cb_rd(aoc->ipc, AOC_CB_SYSTEM_CLOCK_OFFSET + 4) << 32);
+
+	now_cnt = arch_timer_read_counter();
+	now_boot = ktime_get_boottime_ns();
+	aoc_now_ns = mul_u64_u64_div_u64(now_cnt - offset, NSEC_PER_SEC, rate);
+
+	if (aoc_ts <= aoc_now_ns) {
+		delta_ns = aoc_now_ns - aoc_ts;
+		/* Too far back to believe, or before boot: let the caller stamp. */
+		if (delta_ns > AOC_TS_SANITY_NS || delta_ns > now_boot)
+			return 0;
+		return now_boot - delta_ns;
+	}
+
+	/* Stamped just ahead of our read; the two clock reads race. */
+	delta_ns = aoc_ts - aoc_now_ns;
+	if (delta_ns > AOC_TS_SANITY_NS)
+		return 0;
+
+	return now_boot + delta_ns;
+}
+EXPORT_SYMBOL_GPL(aoc_ts_to_boottime_ns);
+
 struct aoc_service *aoc_service_find(struct device *dev, const char *name)
 {
 	struct aoc_data *aoc = platform_get_drvdata(to_platform_device(dev));
