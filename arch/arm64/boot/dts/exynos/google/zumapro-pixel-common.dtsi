@@ -281,6 +281,21 @@
 				regulator-name = "vdd_gnss_aux";
 				regulator-always-on;
 			};
+
+			/*
+			 * The rails the AoC's physical sensors sit on.  No
+			 * voltage constraints: the bootloader leaves both
+			 * selectors where the AoC expects them and the driver
+			 * describes these enable-only, so a constraint here
+			 * would fail registration rather than set a voltage.
+			 */
+			s_ldo5_reg: ldo5s {
+				regulator-name = "L5S_PROX";
+			};
+
+			s_ldo7_reg: ldo7s {
+				regulator-name = "L7S_SENSORS";
+			};
 		};
 
 		s2mpg15_gpio: gpio {
@@ -846,6 +861,15 @@
 		/* vdd = L25M_TSP_DVDD (1.8V), avdd = L4M_TS_AVDD (3.3V) */
 		vdd-supply = <&m_ldo25_reg>;
 		avdd-supply = <&m_ldo4_reg>;
+
+		/*
+		 * Opt in to the Touch Bus Negotiator: with the display off the
+		 * driver puts the IC into low-power gesture mode and hands the
+		 * SPI bus to the AoC, so a tap can wake the AP without the AP
+		 * being awake to see it.  Without this the driver takes the
+		 * plain deep-sleep path and keeps the bus.
+		 */
+		goog,tbn-enabled;
 
 		/* Native manual CS (mode 0) with a 2us setup delay, per vendor */
 		controller-data {
