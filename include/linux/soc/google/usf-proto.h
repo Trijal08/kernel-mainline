@@ -29,6 +29,8 @@ enum usf_msg_id {
 	USF_MSG_STOP_SAMPLING   = 9,
 	USF_MSG_RECONFIG        = 10,
 	USF_MSG_REGISTRY_GET    = 21,
+	USF_MSG_REGISTRY_SET    = 22,
+	USF_MSG_REGISTRY_LOAD_SCRIPT = 24,
 };
 
 /* Outer envelope type (UsfMsgOuter.type). */
@@ -41,6 +43,19 @@ enum usf_env_type {
 };
 
 #define USF_SERVER_MGR_HANDLE 1	/* fixed dst_handle for GetServer */
+
+/* Fragmentation of an oversized envelope; both observed on the wire. */
+#define USF_FRAG_MSG_ID	1	/* Fragment.frag_msg_id, constant 1 */
+#define USF_FRAG_CHUNK	940	/* bytes of envelope per fragment */
+#define USF_MAX_PROPS	8	/* properties in one RegistrySet */
+
+/** struct usf_prop - one property in a RegistrySet */
+struct usf_prop {
+	const u8 *name;		/* NUL counted, e.g. "loaded\0" */
+	size_t name_len;
+	const u8 *value;	/* NUL counted, e.g. "1\0" */
+	size_t value_len;
+};
 
 /*
  * CreateSampling fid0. The firmware validates this: 0 and 4 are rejected (the
@@ -63,16 +78,32 @@ enum usf_sampling_mode {
  */
 #define USF_FBB_CAP 512
 
+/*
+ * Registry load scripts are whole .reg files and run to several kilobytes, far
+ * past what the control messages need, so the three regions are allocated to a
+ * caller-chosen @cap rather than sized in the struct.
+ */
 struct usf_fbb {
-	u8 buf[USF_FBB_CAP];
-	u8 scratch_body[USF_FBB_CAP];
-	u8 scratch_inner[USF_FBB_CAP];
+	u8 *buf;
+	u8 *scratch_body;
+	u8 *scratch_inner;
+	size_t cap;
 	size_t used;
 	u16 field_loc[16];
 	int max_field;
 	u32 table_start_used;
 	bool overflow;
 };
+
+/**
+ * usf_fbb_alloc() - allocate a builder with @cap bytes per region
+ * @cap: capacity of each of the three regions; USF_FBB_CAP suits control
+ *       messages, a load script needs room for the whole file.
+ *
+ * Return: builder, or NULL.  Free with usf_fbb_free().
+ */
+struct usf_fbb *usf_fbb_alloc(size_t cap);
+void usf_fbb_free(struct usf_fbb *b);
 
 /*
  * Request builders. Each encodes a complete outer FlatBuffer into @b and
@@ -91,6 +122,16 @@ int usf_build_reconfig(struct usf_fbb *b, u32 txn, u32 sensor_handle,
 		       bool enable, const u8 **out, size_t *out_len);
 int usf_build_stop_sampling(struct usf_fbb *b, u32 txn, u32 sensor_handle,
 			    u32 sampling_id, const u8 **out, size_t *out_len);
+int usf_build_load_script(struct usf_fbb *b, u32 txn, u32 reg_handle,
+			  const u8 *script, size_t script_len, u32 cdt,
+			  const u8 **out, size_t *out_len);
+int usf_build_registry_set(struct usf_fbb *b, u32 txn, u32 reg_handle,
+			   const u8 *path, size_t path_len,
+			   const struct usf_prop *props, unsigned int nprops,
+			   const u8 **out, size_t *out_len);
+int usf_build_fragment(struct usf_fbb *b, u32 total_len, u32 offset,
+		       const u8 *chunk, size_t chunk_len,
+		       const u8 **out, size_t *out_len);
 
 /* Envelope/response readers (schemaless, field-id based). */
 
