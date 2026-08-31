@@ -41,6 +41,58 @@
 &aoc {
 	aoc-board-id = <0x40802>;
 	aoc-board-rev = <0x10000>;
+
+	/*
+	 * The rails the AoC's physical sensors hang off.  The AoC does not
+	 * switch these itself, and without them its sensor stack enumerates
+	 * only the fused and software sensors -- the LSM6DSV, magnetometer,
+	 * barometer and proximity chips never answer.  Mapping matches the
+	 * downstream komodo aoc@17000000: sensor_1v8 = L7S_SENSORS (LDO7S),
+	 * sensor_3v3 = L5S_PROX (LDO5S).
+	 */
+	sensor_1v8-supply = <&s_ldo7_reg>;
+	sensor_3v3-supply = <&s_ldo5_reg>;
+};
+
+/ {
+	/*
+	 * Touch Bus Negotiator.  tbn,mode = 2 is the AoC-channel handshake: the
+	 * AP <-> AoC arbitration runs as messages over the com.google.tbn_service AoC
+	 * service rather than over GPIOs, which is what the downstream tbn node
+	 * describes.  One consumer, the touch controller.
+	 */
+	tbn: tbn {
+		compatible = "touch_bus_negotiator";
+		google,aoc = <&aoc>;
+		tbn,mode = <2>;
+		tbn,max_devices = <1>;
+	};
+
+	/*
+	 * The AoC sensor hub, bridged to IIO.  No hardware is described here: the
+	 * sensors live in AoC firmware behind the com.google.usf service.  The driver
+	 * uploads the sensor registry itself before enumerating -- the scripts are the
+	 * vendor .reg files, staged into the firmware path and listed, in upload
+	 * order, by google/usf/komodo/registry.manifest.  Point
+	 * google,usf-registry-manifest elsewhere, or list the files directly in
+	 * google,usf-registry, to override.
+	 */
+	aoc_usf: aoc-usf {
+		compatible = "google,aoc-usf";
+		google,aoc = <&aoc>;
+		google,usf-registry-manifest = "google/usf/komodo/registry.manifest";
+	};
+
+	/*
+	 * Wake gestures the AoC watches while the AP sleeps: a tap on the dark panel,
+	 * and lift-to-wake, reported as KEY_WAKEUP.  Armed only while the panel it
+	 * names is off.
+	 */
+	aoc-gesture-wake {
+		compatible = "google,aoc-gesture-wake";
+		google,aoc = <&aoc>;
+		panel = <&panel0>;
+	};
 };
 
 // &cont_splash_mem {

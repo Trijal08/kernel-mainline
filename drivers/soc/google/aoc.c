@@ -39,6 +39,7 @@
 #include <linux/soc/samsung/exynos-gsa.h>
 #include <linux/math64.h>
 #include <linux/timekeeping.h>
+#include <linux/regulator/consumer.h>
 #include <linux/trusty/trusty_ipc.h>
 #include <asm/arch_timer.h>
 #include <clocksource/arm_arch_timer.h>
@@ -1394,6 +1395,41 @@ static int aoc_services_show(struct seq_file *s, void *unused)
 }
 DEFINE_SHOW_ATTRIBUTE(aoc_services);
 
+/*
+ * The physical sensors the AoC drives sit on their own rails, and the AoC does
+ * not switch them itself: unless the AP turns them on, the sensor stack comes
+ * up and enumerates only the fused and software sensors, while the real chips
+ * never answer.  The rails are optional, so a board that does not describe them
+ * still probes.
+ */
+static const char * const aoc_sensor_supplies[] = {
+	"sensor_1v8",
+	"sensor_3v3",
+};
+
+static int aoc_enable_sensor_rails(struct device *dev)
+{
+	unsigned int i, n = 0;
+	const char *names[ARRAY_SIZE(aoc_sensor_supplies)];
+
+	for (i = 0; i < ARRAY_SIZE(aoc_sensor_supplies); i++) {
+		char prop[32];
+
+		scnprintf(prop, sizeof(prop), "%s-supply",
+			  aoc_sensor_supplies[i]);
+		if (of_property_present(dev->of_node, prop))
+			names[n++] = aoc_sensor_supplies[i];
+	}
+
+	if (!n) {
+		dev_dbg(dev, "no sensor rails described\n");
+		return 0;
+	}
+
+	/* Left enabled for the life of the device; the AoC owns them after. */
+	return devm_regulator_bulk_get_enable(dev, n, names);
+}
+
 static int aoc_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -1413,6 +1449,10 @@ static int aoc_probe(struct platform_device *pdev)
 	mutex_init(&aoc->tz_rsp_lock);
 	init_completion(&aoc->tz_reply);
 	platform_set_drvdata(pdev, aoc);
+
+	ret = aoc_enable_sensor_rails(dev);
+	if (ret)
+		return dev_err_probe(dev, ret, "failed to enable sensor rails\n");
 
 	/* The GSA that will authenticate our image. */
 	np = of_parse_phandle(dev->of_node, "gsa-device", 0);

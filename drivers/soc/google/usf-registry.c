@@ -115,6 +115,64 @@ static u32 usf_registry_cdt(struct device *dev, struct device_node *np)
 }
 
 /*
+ * Which scripts to upload, and in what order.  Either the device tree names
+ * them directly, or -- when the set is not known until the vendor files are
+ * staged -- a manifest in the firmware path lists them one per line, blank
+ * lines and #-comments ignored.  Order is significant either way: it is the
+ * order the vendor HAL uploads in, and the AoC applies them in sequence.
+ */
+#define USF_MANIFEST_DEFAULT	"google/usf/registry.manifest"
+
+static int usf_load_from_manifest(struct usf_session *s, struct device *dev,
+				  struct device_node *np, u32 cdt)
+{
+	const struct firmware *fw;
+	const char *manifest;
+	char *text, *line, *cur;
+	int n = 0, ret;
+
+	if (of_property_read_string(np, "google,usf-registry-manifest",
+				    &manifest))
+		manifest = USF_MANIFEST_DEFAULT;
+
+	ret = request_firmware(&fw, manifest, dev);
+	if (ret) {
+		dev_err(dev, "no registry list: neither google,usf-registry nor %s (%d)\n",
+			manifest, ret);
+		return ret;
+	}
+
+	text = kmemdup_nul(fw->data, fw->size, GFP_KERNEL);
+	release_firmware(fw);
+	if (!text)
+		return -ENOMEM;
+
+	cur = text;
+	while ((line = strsep(&cur, "\n"))) {
+		line = strim(line);
+		if (!*line || *line == '#')
+			continue;
+
+		ret = usf_upload_script(s, dev, line, cdt);
+		if (ret)
+			goto out;
+		n++;
+	}
+
+	if (!n) {
+		dev_err(dev, "%s lists no scripts\n", manifest);
+		ret = -EINVAL;
+		goto out;
+	}
+
+	ret = n;
+out:
+	kfree(text);
+
+	return ret;
+}
+
+/*
  * The registry is AoC-global state, not per-session: the IIO bridge and the
  * wake-gesture driver each hold their own session but talk to one AoC, and
  * /.loaded fires a one-shot startup.  Whichever probes first loads it; the
@@ -131,12 +189,6 @@ static int usf_registry_load_locked(struct usf_session *s,
 	int count, i, ret;
 	u32 cdt;
 
-	count = of_property_count_strings(np, "google,usf-registry");
-	if (count <= 0) {
-		dev_err(dev, "no google,usf-registry scripts listed\n");
-		return count ? count : -EINVAL;
-	}
-
 	ret = usf_session_registry_open(s);
 	if (ret) {
 		dev_err(dev, "Registry server not reachable: %d\n", ret);
@@ -144,6 +196,14 @@ static int usf_registry_load_locked(struct usf_session *s,
 	}
 
 	cdt = usf_registry_cdt(dev, np);
+
+	count = of_property_count_strings(np, "google,usf-registry");
+	if (count <= 0) {
+		count = usf_load_from_manifest(s, dev, np, cdt);
+		if (count < 0)
+			return count;
+		goto loaded;
+	}
 
 	for (i = 0; i < count; i++) {
 		const char *name;
@@ -157,6 +217,8 @@ static int usf_registry_load_locked(struct usf_session *s,
 		if (ret)
 			return ret;
 	}
+
+loaded:
 
 	/*
 	 * Only now: the AoC starts USF on the falling edge of this write, and
