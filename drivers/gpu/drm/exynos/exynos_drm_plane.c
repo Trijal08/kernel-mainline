@@ -4,6 +4,7 @@
  * Authors: Joonyoung Shim <jy0922.shim@samsung.com>
  */
 
+#include <linux/err.h>
 
 #include <drm/drm_atomic.h>
 #include <drm/drm_atomic_helper.h>
