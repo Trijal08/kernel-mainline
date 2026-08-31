@@ -56,4 +56,18 @@ void aoc_service_set_handler(struct aoc_service *svc,
 			     void (*handler)(struct aoc_service *svc, void *priv),
 			     void *priv);
 
+/**
+ * aoc_ts_to_boottime_ns() - map an AOC-domain timestamp to CLOCK_BOOTTIME
+ * @aoc_dev: the AOC platform device
+ * @aoc_ts: nanoseconds in the AOC's clock domain, as it stamps its samples
+ *
+ * The AOC counts from the architected counter that CLOCK_BOOTTIME is derived
+ * from, so the conversion is exact.  Safe from atomic context.
+ *
+ * Returns CLOCK_BOOTTIME nanoseconds, or 0 if the AOC is not up or the stamp
+ * is too far from now to trust, in which case the caller should substitute
+ * the current boottime.
+ */
+u64 aoc_ts_to_boottime_ns(struct device *aoc_dev, u64 aoc_ts);
+
 #endif /* __LINUX_SOC_GOOGLE_AOC_H */
