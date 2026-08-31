@@ -32,6 +32,7 @@
 
 #include <linux/device.h>
 #include <linux/firmware.h>
+#include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/slab.h>
 #include <linux/string.h>
@@ -113,7 +114,18 @@ static u32 usf_registry_cdt(struct device *dev, struct device_node *np)
 	return cdt;
 }
 
-int usf_registry_load(struct usf_session *s, struct device_node *np)
+/*
+ * The registry is AoC-global state, not per-session: the IIO bridge and the
+ * wake-gesture driver each hold their own session but talk to one AoC, and
+ * /.loaded fires a one-shot startup.  Whichever probes first loads it; the
+ * other finds it done.  A firmware restart would need this cleared, which
+ * there is currently no notification for.
+ */
+static DEFINE_MUTEX(usf_registry_lock);
+static bool usf_registry_done;
+
+static int usf_registry_load_locked(struct usf_session *s,
+				    struct device_node *np)
 {
 	struct device *dev = usf_session_dev(s);
 	int count, i, ret;
@@ -160,5 +172,23 @@ int usf_registry_load(struct usf_session *s, struct device_node *np)
 		 count, cdt);
 
 	return 0;
+}
+
+int usf_registry_load(struct usf_session *s, struct device_node *np)
+{
+	int ret;
+
+	mutex_lock(&usf_registry_lock);
+	if (usf_registry_done) {
+		mutex_unlock(&usf_registry_lock);
+		return 0;
+	}
+
+	ret = usf_registry_load_locked(s, np);
+	if (!ret)
+		usf_registry_done = true;
+	mutex_unlock(&usf_registry_lock);
+
+	return ret;
 }
 EXPORT_SYMBOL_GPL(usf_registry_load);
