@@ -7,9 +7,10 @@
  * start/stop sampling. Consumers add the policy -- what a sensor means and
  * where its samples go (IIO buffers, input events).
  *
- * The AoC sensor registry is loaded out of band by a userspace daemon. Until it
- * is, the USF servers are dormant and usf_session_bootstrap() returns -EAGAIN,
- * so a consumer is expected to retry rather than fail probe.
+ * The USF servers stay dormant until the sensor registry has been uploaded, and
+ * usf_session_bootstrap() returns -EAGAIN while they are, so a consumer should
+ * retry rather than fail probe. The registry is loaded in-kernel out of the
+ * firmware search path; see usf_registry_load().
  */
 #ifndef _SOC_GOOGLE_USF_H_
 #define _SOC_GOOGLE_USF_H_
@@ -18,6 +19,7 @@
 #include <linux/soc/google/usf-proto.h>
 
 struct device;
+struct device_node;
 struct usf_session;
 
 #define USF_NAME_MAX	64	/* longest sensor name we keep */
@@ -47,6 +49,49 @@ int usf_session_open(struct usf_session *s);
 
 /** usf_session_close() - close both channels (idempotent) */
 void usf_session_close(struct usf_session *s);
+
+/** usf_session_dev() - the device the session was allocated against */
+struct device *usf_session_dev(struct usf_session *s);
+
+/**
+ * usf_session_registry_open() - resolve the Registry server handle
+ *
+ * The Registry server answers before the registry itself is loaded, which is
+ * what makes loading it from here possible at all.
+ *
+ * Return: 0, or -ENODEV.
+ */
+int usf_session_registry_open(struct usf_session *s);
+
+/**
+ * usf_session_load_script() - upload one registry script
+ * @script: `.reg` text; NUL-terminated on the wire, so @len counts the NUL
+ * @len: length of @script including its terminator
+ * @cdt: device CDT the AoC evaluates the script's ?+/?- directives against
+ *
+ * Fragmented automatically when it exceeds the AOCC MTU.  Return: 0 or errno.
+ */
+int usf_session_load_script(struct usf_session *s, const u8 *script,
+			    size_t len, u32 cdt);
+
+/**
+ * usf_session_set_loaded() - set /.loaded = 1
+ *
+ * Fires the AoC's one-shot USF startup, after which the sensors probe and
+ * usf_session_bootstrap() can resolve the remaining servers.  Call once, after
+ * every script has been uploaded.  Return: 0 or errno.
+ */
+int usf_session_set_loaded(struct usf_session *s);
+
+/**
+ * usf_registry_load() - load and upload the whole sensor registry
+ * @s: an open session
+ * @np: device node naming the registry scripts and the CDT
+ *
+ * Reads each script through request_firmware(), uploads it, and finishes with
+ * usf_session_set_loaded().  Return: 0, or a negative errno.
+ */
+int usf_registry_load(struct usf_session *s, struct device_node *np);
 
 /**
  * usf_session_bootstrap() - resolve the USF server handles
