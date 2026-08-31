@@ -4624,12 +4624,12 @@ exynos_drm_dp_encoder_helper_funcs = {
 };
 
 static const struct drm_connector_funcs exynos_drm_dp_connector_funcs = {
+	.atomic_create_state = drm_atomic_helper_connector_create_state,
 	.atomic_duplicate_state = drm_atomic_helper_connector_duplicate_state,
 	.atomic_destroy_state = drm_atomic_helper_connector_destroy_state,
 	.detect = exynos_drm_dp_connector_detect,
 	.destroy = exynos_drm_dp_destroy_connector,
 	.dpms = drm_helper_connector_dpms,
-	.reset = drm_atomic_helper_connector_reset,
 	.fill_modes = drm_helper_probe_single_connector_modes,
 };
 
