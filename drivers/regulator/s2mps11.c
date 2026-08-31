@@ -1892,6 +1892,36 @@ static const struct regulator_desc s2mpg14_regulators[] = {
 	regulator_desc_s2mpg14_ldo(25, "vinl25m", s2mpg14_ldo_vranges5, BIT(7)),
 };
 
+/*
+ * The two sensor rails the AoC powers: LDO7S (L7S_SENSORS, 1.8 V) and LDO5S
+ * (L5S_PROX, 3.3 V).  Enable-only on purpose.  The bootloader leaves both
+ * voltage selectors at the values the AoC expects and the downstream kernel
+ * only ever flips the enable bit, so wiring voltage ops here would buy nothing
+ * and a device-tree constraint that disagreed with the hardware encoding would
+ * fail registration rather than program the rail.  Give them voltage ranges
+ * only once a consumer genuinely has to change one, with a datasheet-verified
+ * encoding -- LDO5S in particular sits above every LDO range described here.
+ */
+static const struct regulator_ops s2mpg15_reg_enable_only_ops = {
+	.is_enabled		= regulator_is_enabled_regmap,
+	.enable			= regulator_enable_regmap,
+	.disable		= regulator_disable_regmap,
+};
+
+/* LxS_CTRL bit 7 is the plain on/off enable; bits 5:0 are the selector. */
+#define regulator_desc_s2mpg15_ldo_en(_num) {				\
+	.name		= "ldo"#_num"s",				\
+	.of_match	= of_match_ptr("ldo"#_num"s"),			\
+	.regulators_node = of_match_ptr("regulators"),			\
+	.id		= S2MPG15_LDO##_num,				\
+	.ops		= &s2mpg15_reg_enable_only_ops,			\
+	.type		= REGULATOR_VOLTAGE,				\
+	.owner		= THIS_MODULE,					\
+	.enable_reg	= S2MPG15_PMIC_L##_num##S_CTRL,			\
+	.enable_mask	= BIT(7),					\
+	.enable_time	= 130,						\
+}
+
 static const struct regulator_desc s2mpg15_regulators[] = {
 	regulator_desc_s2mpg15_buck(2, "vinb2s", s2mpg15_buck_vranges1),
 	regulator_desc_s2mpg15_buck(8, "vinb8s", s2mpg15_buck_vranges1),
@@ -1923,6 +1953,9 @@ static const struct regulator_desc s2mpg15_regulators[] = {
 	regulator_desc_s2mpg15_ldo(9, "vinl9s", s2mpg15_ldo_vranges9),
 	regulator_desc_s2mpg15_ldo(10, "vinl10s", s2mpg15_ldo_vranges10),
 	regulator_desc_s2mpg15_ldo(11, "vinl11s", s2mpg15_ldo_vranges10),
+	/* AoC sensor rails; see s2mpg15_reg_enable_only_ops above */
+	regulator_desc_s2mpg15_ldo_en(5),
+	regulator_desc_s2mpg15_ldo_en(7),
 };
 
 static int s2mps14_pmic_enable_ext_control(struct s2mps11_info *s2mps11,
