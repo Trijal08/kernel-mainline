@@ -1023,4 +1023,20 @@ config INPUT_STPMIC1_ONKEY
 	  To compile this driver as a module, choose M here: the
 	  module will be called stpmic1_onkey.
 
+config INPUT_AOC_GESTURE_WAKE
+	tristate "Google AoC wake gestures"
+	depends on GOOGLE_AOC_USF
+	depends on OF
+	help
+	  Report the wake gestures watched by the AoC coprocessor on Google
+	  Tensor devices -- single tap on the powered-down touch panel, and
+	  lift-to-wake -- as KEY_WAKEUP, so the display comes back the way a
+	  power-key press brings it back.  The gestures are armed only while
+	  the panel is off, and can be enabled individually through sysfs.
+
+	  To compile this driver as a module, choose M here: the module will
+	  be called aoc-gesture-wake.
+
+	  If unsure, say N.
+
 endif
