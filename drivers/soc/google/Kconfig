@@ -25,3 +25,14 @@ config GOOGLE_AOC_CHANNEL
 	  those stacks run entirely in the kernel.
 
 	  This can be built as a module, which will be called aoc-channel.
+
+config GOOGLE_AOC_USF
+	tristate "Google AoC USF (Unified Sensor Framework) client"
+	depends on GOOGLE_AOC_CHANNEL
+	help
+	  Client session for the sensor-hub firmware running on the AOC: the
+	  AOCC transport, the request/response transactions, server-handle
+	  resolution, sensor enumeration and sampling control.  Consumers add
+	  the policy -- the IIO bridge and the wake-gesture input driver.
+
+	  This can be built as a module, which will be called aoc-usf.
