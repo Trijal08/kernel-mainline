@@ -38,8 +38,18 @@
 
 #include <linux/soc/google/usf.h>
 
-#define USF_RETRY_MS		1000	/* bootstrap retry cadence */
-#define USF_MAX_RETRIES		15	/* ~15 s before giving up */
+/*
+ * Bootstrap retry cadence.  The fast phase covers the ordinary case, where the
+ * AoC is still coming up.  Past that the usual reason is that the registry
+ * scripts are not reachable yet -- they live in the firmware search path, which
+ * on a built-in driver means waiting for the real root to be mounted -- so back
+ * off and keep trying for long enough to outlast a switch_root rather than
+ * giving up while the files are about to appear.
+ */
+#define USF_RETRY_MS		1000	/* fast phase cadence */
+#define USF_RETRY_SLOW_MS	10000	/* once the fast phase is spent */
+#define USF_FAST_RETRIES	15	/* ~15 s before backing off */
+#define USF_MAX_RETRIES		75	/* ~10 min in total */
 
 #define USF_LIST_MAX		64	/* enumerated sensor handles */
 #define USF_MAX_DEV		12	/* max IIO devices registered */
@@ -647,15 +657,27 @@ static void usf_enumerate(struct usf_iio *usf)
 /* Reschedule the bootstrap if we have retries left; otherwise give up. */
 static bool usf_retry(struct usf_iio *usf, const char *why)
 {
-	if (usf->retries++ < USF_MAX_RETRIES) {
+	unsigned int delay_ms;
+
+	if (usf->retries++ >= USF_MAX_RETRIES) {
+		dev_warn(usf->dev, "giving up after %u retries: %s\n",
+			 usf->retries, why);
+		return false;
+	}
+
+	delay_ms = usf->retries < USF_FAST_RETRIES ? USF_RETRY_MS
+						   : USF_RETRY_SLOW_MS;
+	if (usf->retries == USF_FAST_RETRIES)
+		dev_info(usf->dev,
+			 "%s; still waiting, slowing to %u s between tries\n",
+			 why, USF_RETRY_SLOW_MS / 1000);
+	else
 		dev_dbg(usf->dev, "%s; retry %u/%u\n", why, usf->retries,
 			USF_MAX_RETRIES);
-		schedule_delayed_work(&usf->enum_work,
-				      msecs_to_jiffies(USF_RETRY_MS));
-		return true;
-	}
-	dev_warn(usf->dev, "giving up after %u retries: %s\n", usf->retries, why);
-	return false;
+
+	schedule_delayed_work(&usf->enum_work, msecs_to_jiffies(delay_ms));
+
+	return true;
 }
 
 static void usf_iio_enumerate_work(struct work_struct *work)

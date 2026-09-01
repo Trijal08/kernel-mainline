@@ -47,8 +47,13 @@
 
 #include <linux/soc/google/usf.h>
 
-#define AGW_RETRY_MS		1000	/* bootstrap retry cadence */
-#define AGW_MAX_RETRIES		15	/* ~15 s before giving up */
+/* See usf-iio.c: the fast phase waits for the AoC, the slow one for the
+ * registry scripts to become reachable in the firmware search path.
+ */
+#define AGW_RETRY_MS		1000	/* fast phase cadence */
+#define AGW_RETRY_SLOW_MS	10000	/* once the fast phase is spent */
+#define AGW_FAST_RETRIES	15	/* ~15 s before backing off */
+#define AGW_MAX_RETRIES		75	/* ~10 min in total */
 #define AGW_LIST_MAX		64	/* enumerated sensor handles */
 #define AGW_WAKE_HOLD_MS	1000	/* keep the AP up long enough to react */
 
@@ -394,11 +399,21 @@ static int agw_resolve_handles(struct agw *agw)
 
 static void agw_retry(struct agw *agw, const char *why)
 {
+	unsigned int delay_ms;
+
 	if (agw->retries++ < AGW_MAX_RETRIES) {
-		dev_dbg(agw->dev, "%s; retry %u/%u\n", why, agw->retries,
-			AGW_MAX_RETRIES);
+		delay_ms = agw->retries < AGW_FAST_RETRIES ? AGW_RETRY_MS
+							   : AGW_RETRY_SLOW_MS;
+		if (agw->retries == AGW_FAST_RETRIES)
+			dev_info(agw->dev,
+				 "%s; still waiting, slowing to %u s between tries\n",
+				 why, AGW_RETRY_SLOW_MS / 1000);
+		else
+			dev_dbg(agw->dev, "%s; retry %u/%u\n", why,
+				agw->retries, AGW_MAX_RETRIES);
+
 		schedule_delayed_work(&agw->bootstrap_work,
-				      msecs_to_jiffies(AGW_RETRY_MS));
+				      msecs_to_jiffies(delay_ms));
 		return;
 	}
 	dev_warn(agw->dev,
