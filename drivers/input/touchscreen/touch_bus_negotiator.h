@@ -15,6 +15,7 @@
 #include <linux/completion.h>
 #include <linux/errno.h>
 #include <linux/mutex.h>
+#include <linux/kconfig.h>
 #include <linux/types.h>
 #include <linux/workqueue.h>
 
@@ -107,7 +108,40 @@ struct tbn_context {
  * register_tbn() yields mask 0 and tbn_ready() is false, so the consumer keeps
  * its plain AP-owns-the-bus suspend path.
  */
-#if IS_REACHABLE(CONFIG_TOUCHSCREEN_TBN)
+/**
+ * struct tbn_ops - what the negotiator publishes when it probes
+ *
+ * The negotiator depends on the AoC and so loads late; a touch driver is up
+ * from the initramfs.  Calls therefore go through tbn_ops.c, which is always
+ * built in, rather than directly into the negotiator module -- otherwise the
+ * touch driver would carry a module dependency on the negotiator, and through
+ * it on the AoC.
+ */
+struct tbn_ops {
+	bool (*ready)(void);
+	int (*register_tbn)(u32 *output);
+	void (*unregister_tbn)(u32 *output);
+	void (*register_lptw_callback)(void (*callback)(struct TbnLptwEvent *lptw,
+							void *user_data),
+				       void *cbdata);
+	int (*request_bus)(u32 dev_mask, bool *lptw_triggered);
+	int (*release_bus)(u32 dev_mask);
+};
+
+int tbn_register_ops(const struct tbn_ops *ops);
+void tbn_unregister_ops(void);
+
+/*
+ * Consumer API.  Safe to call before, or without, a negotiator: tbn_ready() is
+ * then false, register_tbn() yields mask 0, and the bus calls return -ENODEV,
+ * so the caller keeps the bus and takes its plain suspend path.
+ *
+ * TOUCHSCREEN_TBN_OPS is a bool selected by the negotiator, so these live in
+ * the kernel image whenever a negotiator exists at all -- built in or modular.
+ * With no negotiator configured they compile away to the stubs below, and a
+ * consumer needs no #ifdef of its own either way.
+ */
+#if IS_ENABLED(CONFIG_TOUCHSCREEN_TBN_OPS)
 bool tbn_ready(void);
 int register_tbn(u32 *output);
 void unregister_tbn(u32 *output);
@@ -149,6 +183,6 @@ static inline int tbn_release_bus(u32 dev_mask)
 {
 	return -ENODEV;
 }
-#endif /* IS_REACHABLE(CONFIG_TOUCHSCREEN_TBN) */
+#endif /* IS_ENABLED(CONFIG_TOUCHSCREEN_TBN_OPS) */
 
 #endif /* _TOUCH_BUS_NEGOTIATOR_H */
