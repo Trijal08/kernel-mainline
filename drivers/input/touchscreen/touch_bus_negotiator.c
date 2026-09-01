@@ -268,7 +268,7 @@ static int tbn_handshaking(struct tbn_context *tbn, enum TbnOperation operation)
 	return ret;
 }
 
-int tbn_request_bus_with_result(u32 dev_mask, bool *lptw_triggered)
+static int tbn_impl_request_bus(u32 dev_mask, bool *lptw_triggered)
 {
 	int ret = 0;
 
@@ -298,15 +298,9 @@ int tbn_request_bus_with_result(u32 dev_mask, bool *lptw_triggered)
 
 	return ret;
 }
-EXPORT_SYMBOL_GPL(tbn_request_bus_with_result);
 
-int tbn_request_bus(u32 dev_mask)
-{
-	return tbn_request_bus_with_result(dev_mask, NULL);
-}
-EXPORT_SYMBOL_GPL(tbn_request_bus);
 
-int tbn_release_bus(u32 dev_mask)
+static int tbn_impl_release_bus(u32 dev_mask)
 {
 	int ret = 0;
 
@@ -342,7 +336,6 @@ int tbn_release_bus(u32 dev_mask)
 
 	return ret;
 }
-EXPORT_SYMBOL_GPL(tbn_release_bus);
 
 /*
  * True only when a consumer can safely hand the bus to AoC: the negotiator
@@ -350,13 +343,12 @@ EXPORT_SYMBOL_GPL(tbn_release_bus);
  * suspend-time release on this so a missing/crashed AoC falls back to the
  * AP-owns-the-bus path instead of stalling on 500 ms handshake timeouts.
  */
-bool tbn_ready(void)
+static bool tbn_impl_ready(void)
 {
 	return tbn_context != NULL && aoc_tbn_service_ready();
 }
-EXPORT_SYMBOL_GPL(tbn_ready);
 
-int register_tbn(u32 *output)
+static int tbn_impl_register(u32 *output)
 {
 	u32 i;
 
@@ -381,11 +373,10 @@ int register_tbn(u32 *output)
 
 	return 0;
 }
-EXPORT_SYMBOL_GPL(register_tbn);
 
-void register_tbn_lptw_callback(void (*callback)(struct TbnLptwEvent *lptw,
-						 void *user_data),
-				void *cbdata)
+static void tbn_impl_register_lptw_callback(void (*callback)(struct TbnLptwEvent *lptw,
+							     void *user_data),
+					    void *cbdata)
 {
 	if (!tbn_context)
 		return;
@@ -393,7 +384,6 @@ void register_tbn_lptw_callback(void (*callback)(struct TbnLptwEvent *lptw,
 	tbn_context->lptw_event_cb = callback;
 	tbn_context->lptw_event_cbdata = cbdata;
 }
-EXPORT_SYMBOL_GPL(register_tbn_lptw_callback);
 
 static void tbn_aoc_reset_work(struct work_struct *work)
 {
@@ -407,7 +397,7 @@ static void tbn_aoc_reset_work(struct work_struct *work)
 		tbn_handshaking(tbn, TBN_OPERATION_AP_REQUEST_BUS);
 }
 
-void unregister_tbn(u32 *output)
+static void tbn_impl_unregister(u32 *output)
 {
 	if (!tbn_context)
 		return;
@@ -417,7 +407,6 @@ void unregister_tbn(u32 *output)
 	*output = 0;
 	mutex_unlock(&tbn_context->dev_mask_mutex);
 }
-EXPORT_SYMBOL_GPL(unregister_tbn);
 
 /*
  * Resolve the AoC TBN service.  Deferring keeps the negotiator out of the way
@@ -453,6 +442,15 @@ static int tbn_attach_aoc(struct device *dev)
 
 	return 0;
 }
+
+static const struct tbn_ops tbn_impl_ops = {
+	.ready			= tbn_impl_ready,
+	.register_tbn		= tbn_impl_register,
+	.unregister_tbn		= tbn_impl_unregister,
+	.register_lptw_callback	= tbn_impl_register_lptw_callback,
+	.request_bus		= tbn_impl_request_bus,
+	.release_bus		= tbn_impl_release_bus,
+};
 
 static int tbn_probe(struct platform_device *pdev)
 {
@@ -513,6 +511,15 @@ static int tbn_probe(struct platform_device *pdev)
 	sched_set_fifo(tbn->aoc_channel_task);
 
 	tbn_context = tbn;
+
+	err = tbn_register_ops(&tbn_impl_ops);
+	if (err) {
+		tbn_context = NULL;
+		kthread_stop(tbn->aoc_channel_task);
+		destroy_workqueue(tbn->event_wq);
+		return err;
+	}
+
 	dev_info(dev, "bus negotiator initialized, mode: %u\n", tbn->mode);
 
 	return 0;
@@ -524,6 +531,9 @@ static void tbn_remove(struct platform_device *pdev)
 
 	if (!tbn)
 		return;
+
+	/* No new callers past this point. */
+	tbn_unregister_ops();
 
 	tbn_context = NULL;
 	if (tbn_service) {
