@@ -1428,9 +1428,19 @@ config TOUCHSCREEN_HIMAX_HX83112B
 	  To compile this driver as a module, choose M here: the
 	  module will be called himax_hx83112b.
 
+config TOUCHSCREEN_TBN_OPS
+	bool
+	help
+	  The always-built-in half of the negotiator: it holds the operations
+	  the negotiator publishes when it probes, and answers touch drivers
+	  from whatever is registered at the time.  Calls go through here so a
+	  touch driver never links against the negotiator module, and so
+	  cannot drag the AoC stack in behind it when it loads early.
+
 config TOUCHSCREEN_TBN
 	tristate "Touch Bus Negotiator (AoC channel)"
 	depends on GOOGLE_AOC
+	select TOUCHSCREEN_TBN_OPS
 	help
 	  Say Y here to enable the Touch Bus Negotiator (TBN), which hands
 	  ownership of the touch SPI bus to the Always-on Compute (AoC)
