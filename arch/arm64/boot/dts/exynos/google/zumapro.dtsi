@@ -608,8 +608,23 @@
 
 			trips {
 				/*
+				 * 70 C stands in for a skin measurement this port does
+				 * not have.  The vendor stack does not throttle on die
+				 * temperature at all -- its BIG/MID/LITTLE/G3D zones
+				 * carry no trips whatsoever -- and regulates a modelled
+				 * skin temperature instead, which on this board held
+				 * the big cluster's die to about 74 C at its hottest.
+				 * Holding 70 C keeps the case at least as cool without
+				 * a thermistor to aim at.
+				 *
+				 * The cost is that a die reading cannot tell a brief
+				 * spike on a cold case from sustained load on a hot
+				 * one, so bursts throttle earlier than they need to.
+				 * Distinguishing them is precisely what skin
+				 * temperature is for.
+				 *
 				 * Single passive trip = always-on IPA: the band is
-				 * the control temperature itself (90 C), which makes
+				 * the control temperature itself, which makes
 				 * estimate_pid_constants() derive gentle gains
 				 * (k_po~17).  A second "switch-on" passive trip would
 				 * narrow the band into steep gains AND reset the PID
@@ -619,7 +634,7 @@
 				 * point when that fallback governor is selected.
 				 */
 				big_alert: throttle {
-					temperature = <90000>;
+					temperature = <70000>;
 					hysteresis = <5000>;
 					type = "passive";
 				};
@@ -653,7 +668,7 @@
 			trips {
 				/* Always-on IPA, single passive trip; see big-thermal. */
 				mid_alert: throttle {
-					temperature = <95000>;
+					temperature = <70000>;
 					hysteresis = <5000>;
 					type = "passive";
 				};
@@ -688,7 +703,7 @@
 			trips {
 				/* Always-on IPA, single passive trip; see big-thermal. */
 				little_alert: throttle {
-					temperature = <95000>;
+					temperature = <70000>;
 					hysteresis = <5000>;
 					type = "passive";
 				};
@@ -733,12 +748,12 @@
 			polling-delay = <1000>;
 			polling-delay-passive = <25>;
 			thermal-sensors = <&tmu_sub 0>;
-			sustainable-power = <740>;
+			sustainable-power = <473>;
 
 			trips {
 				/* Always-on IPA, single passive trip; see big-thermal. */
 				g3d_alert: throttle {
-					temperature = <90000>;
+					temperature = <70000>;
 					hysteresis = <5000>;
 					type = "passive";
 				};
