@@ -57,11 +57,31 @@
 	 * The sensor registry, described here rather than on a consumer,
 	 * because it is one piece of AoC-global state: the IIO bridge and the
 	 * wake-gesture driver both ask for it, and whichever arrives first
-	 * loads it.  The scripts are the vendor .reg files, staged into the
-	 * firmware path and listed in upload order by the manifest; name them
-	 * directly in google,usf-registry to override.
+	 * loads it.
+	 *
+	 * These are the vendor .reg scripts, copied unmodified into the
+	 * firmware path -- the tree under /vendor/etc/sensors/registry, layout
+	 * and all.  They are named here rather than discovered, because the
+	 * kernel cannot enumerate a directory to load firmware from, and
+	 * because which scripts a board carries is board description.
+	 *
+	 * All of them are uploaded whatever the stage.  Each carries its own
+	 * ?+CDT/?-CDT filter and the AoC evaluates those against the CDT
+	 * composed from /chosen/plat, so the scripts for other stages exclude
+	 * themselves; on a stage-6 part (CDT 0x00086100) that leaves
+	 * komodo_common, komodo_dvt and the two append scripts.  Order
+	 * matters: the common script defines the buses and the devices, the
+	 * stage script refines them, and the append scripts come last.
 	 */
-	google,usf-registry-manifest = "google/usf/komodo/registry.manifest";
+	google,usf-registry = "google/usf/komodo/komodo_common.reg",
+			      "google/usf/komodo/komodo_proto.reg",
+			      "google/usf/komodo/komodo_proto_mag_doe.reg",
+			      "google/usf/komodo/komodo_evt_1_0.reg",
+			      "google/usf/komodo/komodo_evt_1_1.reg",
+			      "google/usf/komodo/komodo_evt_mag_doe.reg",
+			      "google/usf/komodo/komodo_dvt.reg",
+			      "google/usf/komodo/append/motion_state.reg",
+			      "google/usf/komodo/append/power.reg";
 };
 
 / {
