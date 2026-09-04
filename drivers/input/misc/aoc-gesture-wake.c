@@ -449,7 +449,7 @@ static void agw_bootstrap_work(struct work_struct *work)
 	 * which may not be mounted -- so retry rather than give up.  The
 	 * session stays open across the retry, per above.
 	 */
-	ret = usf_registry_load(agw->usf, agw->dev->of_node);
+	ret = usf_registry_load(agw->usf);
 	if (ret) {
 		agw_retry(agw, "sensor registry not loaded");
 		return;
