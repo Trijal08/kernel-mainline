@@ -16,8 +16,6 @@
 	 */
 	aoc_sound: aoc-sound {
 		compatible = "google,aoc-sound";
-		/* Its only DAI link is the amps below, which are disabled. */
-		status = "disabled";
 		aoc = <&aoc>;
 
 		/* Both amplifiers listening to the AOC's TDM: left on slot 0,
@@ -39,29 +37,6 @@
 };
 
 /*
- * Both amplifiers are held disabled.
- *
- * They probe and identify correctly -- "Cirrus Logic CS35L41 (35a40),
- * Revision: B2" -- but their INTB line then asserts and never clears, and the
- * driver claims none of it: cs35l41_irq() logs every condition it recognises
- * and logs nothing here, so the threaded handler runs, finds no bit it owns,
- * returns IRQ_NONE, and a level-triggered line re-fires immediately.  Nothing
- * catches it, because request_threaded_irq()'s default primary handler always
- * returns IRQ_WAKE_THREAD, so the spurious-interrupt detector never trips.
- *
- * Measured on komodo: ~450 interrupts a second across the two amps, each
- * costing eight SPI register reads, holding two cores busy and the big cluster
- * at 2.7 GHz.  Unbinding both dropped the big-cluster temperature from 87 to
- * 62 C and system time from 33% to 9% -- on a part that plays no audio,
- * because the AOC audio path is not wired up yet.
- *
- * The most likely cause is that they have no valid clock -- spi_19 is on
- * HSI0 USI1, whose CMU gate is not described -- so the PLL cannot lock, and
- * PLL_UNLOCK is one of the status bits cs35l41_irq() has no handler for.
- *
- * Re-enable both, and the card below, once the amp clock is real.
- */
-/*
  * Stereo speaker amplifiers: two CS35L41 on spi_19 (HSI0 USI1).  The AOC
  * drives them over TDM; this bus is only their SPI control link.  The left
  * amp uses the controller's native chip select; the right amp's is a GPIO
@@ -78,7 +53,6 @@
 	 * SPI needs.
 	 */
 	cs35l41_l: cs35l41@0 {
-		status = "disabled";
 		compatible = "cirrus,cs35l41";
 		reg = <0>;
 		#sound-dai-cells = <1>;
@@ -120,7 +94,6 @@
 	};
 
 	cs35l41_r: cs35l41@1 {
-		status = "disabled";
 		compatible = "cirrus,cs35l41";
 		reg = <1>;
 		#sound-dai-cells = <1>;
