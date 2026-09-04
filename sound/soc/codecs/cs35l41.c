@@ -416,8 +416,18 @@ static irqreturn_t cs35l41_irq(int irq, void *data)
 
 	/* Check to see if unmasked bits are active */
 	if (!(status[0] & ~masks[0]) && !(status[1] & ~masks[1]) &&
-	    !(status[2] & ~masks[2]) && !(status[3] & ~masks[3]))
+	    !(status[2] & ~masks[2]) && !(status[3] & ~masks[3])) {
+		/*
+		 * Nothing the part reports is asserted, so if the line is not
+		 * shared it is being held by something other than an event --
+		 * an INTB pad left open drain with no pull-up will do it, and
+		 * the resulting level-triggered storm is otherwise silent,
+		 * since no case below matches to log anything.
+		 */
+		dev_warn_once(cs35l41->dev,
+			      "interrupt with no unmasked status; check the INTB pad configuration\n");
 		goto done;
+	}
 
 	if (status[3] & CS35L41_OTP_BOOT_DONE) {
 		regmap_update_bits(cs35l41->regmap, CS35L41_IRQ1_MASK4,
