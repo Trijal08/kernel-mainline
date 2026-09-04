@@ -38,6 +38,21 @@
 };
 
 /* Board identity the AOC firmware reads at boot. */
+/*
+ * The Halo DSP speaker-protection tuning is specific to this board's drivers
+ * and to each channel, so the firmware has to be named for both.  This is what
+ * wm_adsp interpolates as the system name: the amplifiers ask for
+ * cirrus/cs35l41-dsp1-spk-prot-caiman.wmfw, and for a tuning of the same stem
+ * with "-r" appended on the right-hand amplifier, which carries the prefix.
+ */
+&cs35l41_l {
+	cirrus,subsystem-id = "caiman";
+};
+
+&cs35l41_r {
+	cirrus,subsystem-id = "caiman";
+};
+
 &aoc {
 	aoc-board-id = <0x40902>;
 	aoc-board-rev = <0x10000>;
