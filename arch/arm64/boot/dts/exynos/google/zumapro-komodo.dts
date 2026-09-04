@@ -52,6 +52,16 @@
 	 */
 	sensor_1v8-supply = <&s_ldo7_reg>;
 	sensor_3v3-supply = <&s_ldo5_reg>;
+
+	/*
+	 * The sensor registry, described here rather than on a consumer,
+	 * because it is one piece of AoC-global state: the IIO bridge and the
+	 * wake-gesture driver both ask for it, and whichever arrives first
+	 * loads it.  The scripts are the vendor .reg files, staged into the
+	 * firmware path and listed in upload order by the manifest; name them
+	 * directly in google,usf-registry to override.
+	 */
+	google,usf-registry-manifest = "google/usf/komodo/registry.manifest";
 };
 
 / {
@@ -69,18 +79,13 @@
 	};
 
 	/*
-	 * The AoC sensor hub, bridged to IIO.  No hardware is described here: the
-	 * sensors live in AoC firmware behind the com.google.usf service.  The driver
-	 * uploads the sensor registry itself before enumerating -- the scripts are the
-	 * vendor .reg files, staged into the firmware path and listed, in upload
-	 * order, by google/usf/komodo/registry.manifest.  Point
-	 * google,usf-registry-manifest elsewhere, or list the files directly in
-	 * google,usf-registry, to override.
+	 * The AoC sensor hub, bridged to IIO.  No hardware is described here:
+	 * the sensors live in AoC firmware behind the com.google.usf service.
+	 * The registry it needs is named on the AoC node above.
 	 */
 	aoc_usf: aoc-usf {
 		compatible = "google,aoc-usf";
 		google,aoc = <&aoc>;
-		google,usf-registry-manifest = "google/usf/komodo/registry.manifest";
 	};
 
 	/*
