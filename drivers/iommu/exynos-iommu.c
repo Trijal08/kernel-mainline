@@ -590,8 +590,8 @@ static void __sysmmu_get_version(struct sysmmu_drvdata *data)
 	else
 		data->version = MMU_RAW_VER(ver);
 
-	dev_dbg(data->sysmmu, "hardware version: %d.%d\n",
-		MMU_MAJ_VER(data->version), MMU_MIN_VER(data->version));
+	dev_info(data->sysmmu, "hardware version: %d.%d\n",
+		 MMU_MAJ_VER(data->version), MMU_MIN_VER(data->version));
 
 	if (MMU_MAJ_VER(data->version) < 5) {
 		data->variant = &sysmmu_v1_variant;
@@ -867,15 +867,40 @@ static int exynos_sysmmu_probe(struct platform_device *pdev)
 
 	data->sysmmu = dev;
 	spin_lock_init(&data->lock);
+	platform_set_drvdata(pdev, data);
+
+	/*
+	 * The version register lives inside the block's own power domain, so
+	 * reading it before the domain is powered returns nothing meaningful
+	 * and leaves the driver with no variant and a page-entry shift chosen
+	 * for the wrong generation.  Bring the device up around the read.
+	 * Runtime PM has to be enabled first, and the drvdata set before that,
+	 * since the PM callbacks look it up.
+	 */
+	pm_runtime_enable(dev);
+
+	ret = pm_runtime_resume_and_get(dev);
+	if (ret) {
+		dev_err_probe(dev, ret, "failed to power up for version read\n");
+		goto err_pm_disable;
+	}
 
 	__sysmmu_get_version(data);
+
+	pm_runtime_put(dev);
+
+	if (!data->variant) {
+		ret = dev_err_probe(dev, -ENODEV,
+				    "unrecognised System MMU version %d.%d\n",
+				    MMU_MAJ_VER(data->version),
+				    MMU_MIN_VER(data->version));
+		goto err_pm_disable;
+	}
 
 	ret = iommu_device_sysfs_add(&data->iommu, &pdev->dev, NULL,
 				     dev_name(data->sysmmu));
 	if (ret)
-		return ret;
-
-	platform_set_drvdata(pdev, data);
+		goto err_pm_disable;
 
 	if (PG_ENT_SHIFT < 0) {
 		if (MMU_MAJ_VER(data->version) < 5) {
@@ -904,8 +929,6 @@ static int exynos_sysmmu_probe(struct platform_device *pdev)
 	if (!dma_dev)
 		dma_dev = &pdev->dev;
 
-	pm_runtime_enable(dev);
-
 	ret = iommu_device_register(&data->iommu, &exynos_iommu_ops, dev);
 	if (ret)
 		goto err_dma_set_mask;
@@ -914,6 +937,8 @@ static int exynos_sysmmu_probe(struct platform_device *pdev)
 
 err_dma_set_mask:
 	iommu_device_sysfs_remove(&data->iommu);
+err_pm_disable:
+	pm_runtime_disable(dev);
 	return ret;
 }
 
