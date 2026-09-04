@@ -53,6 +53,9 @@ void usf_session_close(struct usf_session *s);
 /** usf_session_dev() - the device the session was allocated against */
 struct device *usf_session_dev(struct usf_session *s);
 
+/** usf_session_aoc_dev() - the AOC the session talks to */
+struct device *usf_session_aoc_dev(struct usf_session *s);
+
 /**
  * usf_session_registry_open() - resolve the Registry server handle
  *
@@ -86,12 +89,14 @@ int usf_session_set_loaded(struct usf_session *s);
 /**
  * usf_registry_load() - load and upload the whole sensor registry
  * @s: an open session
- * @np: device node naming the registry scripts and the CDT
  *
  * Reads each script through request_firmware(), uploads it, and finishes with
- * usf_session_set_loaded().  Return: 0, or a negative errno.
+ * usf_session_set_loaded().  The scripts are named on the AOC's own node, since
+ * the registry is AoC-global; it is loaded once however many consumers ask.
+ *
+ * Return: 0, or a negative errno.
  */
-int usf_registry_load(struct usf_session *s, struct device_node *np);
+int usf_registry_load(struct usf_session *s);
 
 /**
  * usf_session_bootstrap() - resolve the USF server handles
