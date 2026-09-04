@@ -702,7 +702,7 @@ static void usf_iio_enumerate_work(struct work_struct *work)
 	 * loader is a no-op once the registry is in, so a retry here, or the
 	 * wake-gesture driver having got there first, costs nothing.
 	 */
-	ret = usf_registry_load(usf->usf, usf->dev->of_node);
+	ret = usf_registry_load(usf->usf);
 	if (ret) {
 		usf_session_close(usf->usf);
 		usf_retry(usf, "sensor registry not loaded");

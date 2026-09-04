@@ -337,6 +337,12 @@ struct device *usf_session_dev(struct usf_session *s)
 }
 EXPORT_SYMBOL_GPL(usf_session_dev);
 
+struct device *usf_session_aoc_dev(struct usf_session *s)
+{
+	return s->aoc_dev;
+}
+EXPORT_SYMBOL_GPL(usf_session_aoc_dev);
+
 int usf_session_registry_open(struct usf_session *s)
 {
 	if (!s->wake)
