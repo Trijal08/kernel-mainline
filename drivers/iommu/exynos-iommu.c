@@ -510,27 +510,31 @@ static void __sysmmu_tlb_invalidate_entry(struct sysmmu_drvdata *data,
 {
 	unsigned int i;
 
+	if (MMU_MAJ_VER(data->version) >= 9) {
+		/*
+		 * v9 has no single-entry register, so a single page goes
+		 * through the range path as well.  The VPN is in 16-byte
+		 * units and writing the end with bit 0 set triggers.
+		 */
+		writel((iova & SPAGE_MASK) >> 4, SYSMMU_REG(data, flush_start));
+		writel((((iova & SPAGE_MASK) + (num_inv - 1) * SPAGE_SIZE) >> 4) | 1,
+		       SYSMMU_REG(data, flush_range));
+		return;
+	}
+
 	if (MMU_MAJ_VER(data->version) < 5 || num_inv == 1) {
 		for (i = 0; i < num_inv; i++) {
 			writel((iova & SPAGE_MASK) | 1,
 			       SYSMMU_REG(data, flush_entry));
 			iova += SPAGE_SIZE;
 		}
+		return;
 	}
-	if (MMU_MAJ_VER(data->version) >= 9) {
-		/*
-		 * v9 range invalidation encodes VPN in 16-byte units and
-		 * triggers on writing end|1.
-		 */
-		writel((iova & SPAGE_MASK) >> 4, SYSMMU_REG(data, flush_start));
-		writel((((iova & SPAGE_MASK) + (num_inv - 1) * SPAGE_SIZE) >> 4) | 1,
-		       SYSMMU_REG(data, flush_range));
-	} else {
-		writel(iova & SPAGE_MASK, SYSMMU_REG(data, flush_start));
-		writel((iova & SPAGE_MASK) + (num_inv - 1) * SPAGE_SIZE,
-		       SYSMMU_REG(data, flush_end));
-		writel(0x1, SYSMMU_REG(data, flush_range));
-	}
+
+	writel(iova & SPAGE_MASK, SYSMMU_REG(data, flush_start));
+	writel((iova & SPAGE_MASK) + (num_inv - 1) * SPAGE_SIZE,
+	       SYSMMU_REG(data, flush_end));
+	writel(0x1, SYSMMU_REG(data, flush_range));
 }
 
 static void __sysmmu_set_ptbase(struct sysmmu_drvdata *data, phys_addr_t pgd)
