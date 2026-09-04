@@ -489,6 +489,40 @@ static irqreturn_t cs35l41_irq(int irq, void *data)
 		ret = IRQ_HANDLED;
 	}
 
+	if (ret == IRQ_NONE) {
+		/*
+		 * Something is asserting that nothing above claims.  The line
+		 * is level triggered and the default primary handler that
+		 * request_threaded_irq() installs always returns
+		 * IRQ_WAKE_THREAD, so the spurious-interrupt detector never
+		 * trips and this re-enters for as long as the condition holds
+		 * -- silently, since no case matched to log anything.
+		 *
+		 * Mask the offending sources so the part stays usable, and say
+		 * once which they were: an unmasked interrupt with no handler
+		 * is a driver bug, and this is the only evidence of it.
+		 */
+		for (i = 0; i < ARRAY_SIZE(status); i++) {
+			unsigned int stray = status[i] & ~masks[i];
+
+			if (!stray)
+				continue;
+
+			dev_warn_once(cs35l41->dev,
+				      "masking unhandled IRQ1_STATUS%u source(s) %#x\n",
+				      i + 1, stray);
+
+			regmap_update_bits(cs35l41->regmap,
+					   CS35L41_IRQ1_MASK1 + (i * CS35L41_REGSTRIDE),
+					   stray, stray);
+			regmap_write(cs35l41->regmap,
+				     CS35L41_IRQ1_STATUS1 + (i * CS35L41_REGSTRIDE),
+				     stray);
+		}
+
+		ret = IRQ_HANDLED;
+	}
+
 done:
 	pm_runtime_put_autosuspend(cs35l41->dev);
 
