@@ -80,12 +80,15 @@
 		cirrus,asp-sdout-hiz = <3>;
 
 		/*
-		 * GPIO2 is the interrupt line, and idles high impedance until
-		 * it is told what it is for.  Leave it a GPIO input: the pad's
-		 * interrupt function drives it, and making it an output would
-		 * have it hold the line low itself.
+		 * GPIO2 is the interrupt line.  Push-pull rather than open
+		 * drain, and an output, matching the downstream node: open
+		 * drain only ever pulls the line low and needs a pull-up to
+		 * release it, which nothing provides here, so the pad sat low
+		 * and the level-triggered interrupt was asserted permanently
+		 * -- about 260 a second per amplifier, for no event at all.
 		 */
-		cirrus,gpio2-src-select = <2>;	/* open drain INTB */
+		cirrus,gpio2-src-select = <4>;	/* push-pull INTB, active low */
+		cirrus,gpio2-output-enable;
 
 		controller-data {
 			samsung,spi-feedback-delay = <1>;
@@ -113,12 +116,15 @@
 		cirrus,asp-sdout-hiz = <3>;
 
 		/*
-		 * GPIO2 is the interrupt line, and idles high impedance until
-		 * it is told what it is for.  Leave it a GPIO input: the pad's
-		 * interrupt function drives it, and making it an output would
-		 * have it hold the line low itself.
+		 * GPIO2 is the interrupt line.  Push-pull rather than open
+		 * drain, and an output, matching the downstream node: open
+		 * drain only ever pulls the line low and needs a pull-up to
+		 * release it, which nothing provides here, so the pad sat low
+		 * and the level-triggered interrupt was asserted permanently
+		 * -- about 260 a second per amplifier, for no event at all.
 		 */
-		cirrus,gpio2-src-select = <2>;	/* open drain INTB */
+		cirrus,gpio2-src-select = <4>;	/* push-pull INTB, active low */
+		cirrus,gpio2-output-enable;
 		cirrus,right-channel-amp;
 
 		controller-data {
