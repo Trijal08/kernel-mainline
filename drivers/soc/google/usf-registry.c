@@ -89,27 +89,53 @@ static int usf_upload_script(struct usf_session *s, struct device *dev,
 }
 
 /*
- * The CDT (0xPPPPSJIV) identifies the board and stepping.  The bootloader
- * leaves it in /chosen; a device-tree override exists for boards where it does
- * not, and for bring-up.
+ * The CDT identifies the board and its stepping, and the AoC evaluates every
+ * script's ?+CDT/?-CDT stage directives against it, so getting it right decides
+ * which sensors are described at all.
+ *
+ * It is not a property: the bootloader leaves /chosen/plat as a node of
+ * separate fields, which compose into 0xPPPPSJIV -- product in the top 16 bits,
+ * then stage, major, minor and variant a nibble each.
  */
+static u32 usf_compose_cdt(u32 product, u32 stage, u32 major, u32 minor,
+			   u32 variant)
+{
+	return ((product & 0xffff) << 16) | ((stage & 0xf) << 12) |
+	       ((major & 0xf) << 8) | ((minor & 0xf) << 4) | (variant & 0xf);
+}
+
 static u32 usf_registry_cdt(struct device *dev, struct device_node *np)
 {
-	struct device_node *chosen;
+	u32 product, stage, major, minor, variant;
+	struct device_node *plat;
 	u32 cdt = 0;
 
+	/* An override wins, for a board whose bootloader leaves no plat node. */
 	if (!of_property_read_u32(np, "google,usf-cdt", &cdt))
 		return cdt;
 
-	chosen = of_find_node_by_path("/chosen");
-	if (chosen) {
-		of_property_read_u32(chosen, "plat", &cdt);
-		of_node_put(chosen);
+	plat = of_find_node_by_path("/chosen/plat");
+	if (!plat) {
+		dev_warn(dev,
+			 "no /chosen/plat; scripts gated on ?+CDT will not apply\n");
+		return 0;
 	}
 
-	if (!cdt)
+	if (of_property_read_u32(plat, "product", &product) ||
+	    of_property_read_u32(plat, "stage", &stage) ||
+	    of_property_read_u32(plat, "major", &major) ||
+	    of_property_read_u32(plat, "minor", &minor) ||
+	    of_property_read_u32(plat, "variant", &variant)) {
 		dev_warn(dev,
-			 "no CDT in /chosen or DT; scripts gated on ?+CDT will not apply\n");
+			 "/chosen/plat is incomplete; scripts gated on ?+CDT will not apply\n");
+		of_node_put(plat);
+		return 0;
+	}
+	of_node_put(plat);
+
+	cdt = usf_compose_cdt(product, stage, major, minor, variant);
+	dev_dbg(dev, "CDT 0x%08x (product %u stage %u %u.%u variant %u)\n",
+		cdt, product, stage, major, minor, variant);
 
 	return cdt;
 }
@@ -182,12 +208,19 @@ out:
 static DEFINE_MUTEX(usf_registry_lock);
 static bool usf_registry_done;
 
-static int usf_registry_load_locked(struct usf_session *s,
-				    struct device_node *np)
+static int usf_registry_load_locked(struct usf_session *s)
 {
 	struct device *dev = usf_session_dev(s);
+	struct device_node *np;
 	int count, i, ret;
 	u32 cdt;
+
+	/*
+	 * The scripts are described on the AoC node, not on the consumer's:
+	 * the registry is one piece of AoC-global state, and both the IIO
+	 * bridge and the wake-gesture driver ask for it.
+	 */
+	np = usf_session_aoc_dev(s)->of_node;
 
 	ret = usf_session_registry_open(s);
 	if (ret) {
@@ -236,7 +269,7 @@ loaded:
 	return 0;
 }
 
-int usf_registry_load(struct usf_session *s, struct device_node *np)
+int usf_registry_load(struct usf_session *s)
 {
 	int ret;
 
@@ -246,7 +279,7 @@ int usf_registry_load(struct usf_session *s, struct device_node *np)
 		return 0;
 	}
 
-	ret = usf_registry_load_locked(s, np);
+	ret = usf_registry_load_locked(s);
 	if (!ret)
 		usf_registry_done = true;
 	mutex_unlock(&usf_registry_lock);
