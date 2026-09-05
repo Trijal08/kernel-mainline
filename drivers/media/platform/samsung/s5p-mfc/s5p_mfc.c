@@ -10,6 +10,7 @@
 #include <linux/delay.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
+#include <linux/iommu.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/sched.h>
@@ -1330,11 +1331,71 @@ static void s5p_mfc_unconfigure_common_memory(struct s5p_mfc_dev *mfc_dev)
 	vb2_dma_contig_clear_max_seg_size(dev);
 }
 
+/*
+ * Reserve the low IOVA range in DT, leaving exactly one firmware-sized slot
+ * below 256 MiB. Firmware is the first DMA allocation; all later allocations
+ * must then fall above it, including when the IOVA allocator starts its
+ * search at the previous allocation. Contexts use standalone DMA buffers.
+ * Also reserve addresses beyond the firmware-relative RISC memory window.
+ */
+static int s5p_mfc_configure_v16_memory(struct s5p_mfc_dev *mfc_dev)
+{
+	struct device *dev = &mfc_dev->plat_dev->dev;
+	struct iommu_domain *domain = iommu_get_domain_for_dev(dev);
+	struct iommu_resv_region *region;
+	u64 coherent_mask = dev->coherent_dma_mask;
+	size_t fw_size = mfc_dev->variant->buf_size->fw;
+	dma_addr_t fw_base = SZ_256M - fw_size;
+	dma_addr_t fw_limit = fw_base + MFC_V16_MEM_WINDOW_SIZE;
+	bool low_reserved = false, high_reserved = false;
+	LIST_HEAD(regions);
+	int ret;
+
+	if (!domain || !iommu_is_dma_domain(domain))
+		return dev_err_probe(dev, -EINVAL, "firmware requires a DMA IOMMU domain\n");
+
+	iommu_get_resv_regions(dev, &regions);
+	list_for_each_entry(region, &regions, list) {
+		if (region->type != IOMMU_RESV_RESERVED)
+			continue;
+		if (!region->start && region->length == fw_base)
+			low_reserved = true;
+		if (region->start == fw_limit &&
+		    region->length == BIT_ULL(32) - fw_limit)
+			high_reserved = true;
+	}
+	iommu_put_resv_regions(dev, &regions);
+	if (!low_reserved || !high_reserved)
+		return dev_err_probe(dev, -EINVAL, "missing firmware IOVA reservations\n");
+
+	mfc_dev->mem_dev[BANK_L_CTX] = mfc_dev->mem_dev[BANK_R_CTX] = dev;
+	ret = dma_set_coherent_mask(dev, DMA_BIT_MASK(28));
+	if (ret)
+		return ret;
+
+	ret = s5p_mfc_alloc_firmware(mfc_dev);
+	dma_set_coherent_mask(dev, coherent_mask);
+	if (ret)
+		return ret;
+
+	if (mfc_dev->fw_buf.dma != fw_base) {
+		s5p_mfc_release_firmware(mfc_dev);
+		return dev_err_probe(dev, -EINVAL, "unexpected firmware DMA address\n");
+	}
+
+	mfc_dev->dma_base[BANK_L_CTX] = fw_base;
+	mfc_dev->dma_base[BANK_R_CTX] = fw_base;
+	vb2_dma_contig_set_max_seg_size(dev, DMA_BIT_MASK(32));
+	return 0;
+}
+
 static int s5p_mfc_configure_dma_memory(struct s5p_mfc_dev *mfc_dev)
 {
 	struct device *dev = &mfc_dev->plat_dev->dev;
 
-	if (exynos_is_iommu_available(dev) || !IS_TWOPORT(mfc_dev))
+	if (IS_MFCV16_PLUS(mfc_dev))
+		return s5p_mfc_configure_v16_memory(mfc_dev);
+	else if (exynos_is_iommu_available(dev) || !IS_TWOPORT(mfc_dev))
 		return s5p_mfc_configure_common_memory(mfc_dev);
 	else
 		return s5p_mfc_configure_2port_memory(mfc_dev);
@@ -1345,7 +1406,9 @@ static void s5p_mfc_unconfigure_dma_memory(struct s5p_mfc_dev *mfc_dev)
 	struct device *dev = &mfc_dev->plat_dev->dev;
 
 	s5p_mfc_release_firmware(mfc_dev);
-	if (exynos_is_iommu_available(dev) || !IS_TWOPORT(mfc_dev))
+	if (IS_MFCV16_PLUS(mfc_dev))
+		vb2_dma_contig_clear_max_seg_size(dev);
+	else if (exynos_is_iommu_available(dev) || !IS_TWOPORT(mfc_dev))
 		s5p_mfc_unconfigure_common_memory(mfc_dev);
 	else
 		s5p_mfc_unconfigure_2port_memory(mfc_dev);
@@ -1375,6 +1438,12 @@ static int s5p_mfc_probe(struct platform_device *pdev)
 	if (!dev->variant) {
 		dev_err(&pdev->dev, "Failed to get device MFC hardware variant information\n");
 		return -ENOENT;
+	}
+
+	if (IS_MFCV16_PLUS(dev)) {
+		ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(32));
+		if (ret)
+			return ret;
 	}
 
 	dev->regs_base = devm_platform_ioremap_resource(pdev, 0);
@@ -1804,4 +1873,3 @@ module_platform_driver(s5p_mfc_driver);
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Kamil Debski <k.debski@samsung.com>");
 MODULE_DESCRIPTION("Samsung S5P Multi Format Codec V4L2 driver");
-
