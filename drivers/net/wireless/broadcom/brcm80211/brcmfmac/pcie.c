@@ -3666,6 +3666,54 @@ DEFINE_SIMPLE_ATTRIBUTE(brcmf_pcie_console_interval_fops,
 			brcmf_pcie_console_interval_set,
 			"%llu\n");
 
+/* The window below rambase is the dongle's mask ROM. Read it a chunk at a
+ * time with *ppos as the backplane address so the whole region streams out
+ * under dd/cat. Read-only on purpose: writing the backplane out from under
+ * running firmware would be a good way to lose the device.
+ */
+#define BRCMF_ROMDUMP_CHUNK	(64 * 1024)
+
+static ssize_t brcmf_pcie_romdump_read(struct file *f, char __user *buf,
+				       size_t count, loff_t *ppos)
+{
+	struct brcmf_pciedev_info *devinfo = f->private_data;
+	u32 romend;
+	void *tmp;
+	int err;
+
+	if (!devinfo || !devinfo->ci)
+		return -ENODEV;
+
+	romend = devinfo->ci->rambase;
+	if (!romend || *ppos < 0 || *ppos >= romend)
+		return 0;
+
+	if (count > romend - (u32)*ppos)
+		count = romend - (u32)*ppos;
+	if (count > BRCMF_ROMDUMP_CHUNK)
+		count = BRCMF_ROMDUMP_CHUNK;
+
+	tmp = vzalloc(count);
+	if (!tmp)
+		return -ENOMEM;
+
+	brcmf_pcie_copy_dev_tomem(devinfo, (u32)*ppos, tmp, count);
+	err = copy_to_user(buf, tmp, count);
+	vfree(tmp);
+	if (err)
+		return -EFAULT;
+
+	*ppos += count;
+	return count;
+}
+
+static const struct file_operations brcmf_pcie_romdump_fops = {
+	.owner		= THIS_MODULE,
+	.open		= simple_open,
+	.read		= brcmf_pcie_romdump_read,
+	.llseek		= default_llseek,
+};
+
 static void brcmf_pcie_debugfs_create(struct device *dev)
 {
 	struct brcmf_bus *bus_if = dev_get_drvdata(dev);
@@ -3681,6 +3729,9 @@ static void brcmf_pcie_debugfs_create(struct device *dev)
 
 	debugfs_create_file("console_interval", 0644, dentry, devinfo,
 			    &brcmf_pcie_console_interval_fops);
+
+	debugfs_create_file("romdump", 0400, dentry, devinfo,
+			    &brcmf_pcie_romdump_fops);
 }
 
 #else
