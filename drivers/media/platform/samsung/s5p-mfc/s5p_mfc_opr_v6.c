@@ -489,6 +489,25 @@ static int calc_plane(int width, int height)
 static void s5p_mfc_dec_calc_dpb_size_v6(struct s5p_mfc_ctx *ctx)
 {
 	struct s5p_mfc_dev *dev = ctx->dev;
+
+	if (IS_MFCV16_PLUS(dev)) {
+		/* v16 exposes linear NV12M, including the firmware's DMA padding. */
+		ctx->buf_width = ALIGN(ctx->img_width, 64);
+		ctx->buf_height = ALIGN(ctx->img_height, 16);
+		ctx->stride[0] = ctx->buf_width;
+		ctx->stride[1] = ctx->buf_width;
+		ctx->luma_size = max_t(u32,
+			ctx->buf_width * ctx->buf_height + 256,
+			mfc_read(dev, S5P_FIMV_D_MIN_LUMA_DPB_SIZE_V6));
+		ctx->chroma_size = max_t(u32,
+			ctx->buf_width * ctx->buf_height / 2 + 256,
+			mfc_read(dev, S5P_FIMV_D_MIN_CHROMA_DPB_SIZE_V6));
+		ctx->chroma_size_1 = 0;
+		ctx->mv_size = ALIGN(S5P_MFC_DEC_MV_SIZE(ctx->img_width,
+						     ctx->img_height, 1024), 32);
+		return;
+	}
+
 	ctx->buf_width = ALIGN(ctx->img_width, S5P_FIMV_NV12MT_HALIGN_V6);
 	ctx->buf_height = ALIGN(ctx->img_height, S5P_FIMV_NV12MT_VALIGN_V6);
 	ctx->chroma_size_1 = 0;
