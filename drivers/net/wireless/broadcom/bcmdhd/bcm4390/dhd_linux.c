@@ -654,6 +654,12 @@ module_param(logtrace_pkt_sendup, uint, 0660);
 uint dhd_watchdog_ms = CUSTOM_DHD_WATCHDOG_MS;
 module_param(dhd_watchdog_ms, uint, 0);
 
+/* Poll the DPC every N ms while the bus is up, for the case where the dongle
+ * stops raising its interrupt but keeps filling the completion rings.
+ * 0 disables. See bcmdhd-dpc-poll.patch. */
+uint dhd_dpc_poll_ms = 0;
+module_param(dhd_dpc_poll_ms, uint, 0644);
+
 #ifdef DHD_PCIE_RUNTIMEPM
 uint dhd_runtimepm_ms = CUSTOM_DHD_RUNTIME_MS;
 #ifdef RPM_FAST_TRIGGER
