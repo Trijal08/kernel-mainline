@@ -22,6 +22,7 @@
 #include <linux/iopoll.h>
 #include <linux/math64.h>
 #include <linux/mfd/syscon.h>
+#include <linux/module.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
@@ -40,6 +41,15 @@
 
 /* fallback refresh rate until the first mode_set (any sane value works) */
 #define DSIM_DEFAULT_VREFRESH	60
+
+static bool dsim_pkt_go;
+module_param_named(pkt_go, dsim_pkt_go, bool, 0644);
+MODULE_PARM_DESC(pkt_go, "release commands with the PKT_GO handshake");
+
+static bool dsim_te_cmd_allow;
+module_param_named(te_cmd_allow, dsim_te_cmd_allow, bool, 0644);
+MODULE_PARM_DESC(te_cmd_allow,
+		 "gate command transfers on the panel TE window (jams the FIFO)");
 
 struct zuma_dsim {
 	struct device *dev;
@@ -579,7 +589,8 @@ static void zuma_dsim_set_config(struct zuma_dsim *dsim)
 	dsim_rmw(dsim, DSIM_ESCMODE,
 		 DSIM_ESCMODE_STOP_STATE_CNT(DSIM_STOP_STATE_CNT),
 		 DSIM_ESCMODE_STOP_STATE_CNT_MASK | DSIM_ESCMODE_CMD_LPDT);
-	dsim_rmw(dsim, DSIM_OPTION_SUITE, DSIM_OPTION_SUITE_OPT_TE_ON_CMD_ALLOW,
+	dsim_rmw(dsim, DSIM_OPTION_SUITE,
+		 dsim_te_cmd_allow ? DSIM_OPTION_SUITE_OPT_TE_ON_CMD_ALLOW : 0,
 		 DSIM_OPTION_SUITE_OPT_TE_ON_CMD_ALLOW);
 
 	writel(DSIM_THRESHOLD_LEVEL(width), dsim->regs + DSIM_THRESHOLD);
@@ -611,7 +622,9 @@ static void zuma_dsim_set_config(struct zuma_dsim *dsim)
 		       DSIM_SLICE01_SIZE_OF_SLICE1(slice_cnt > 1 ? slice_w : 0),
 		       dsim->regs + DSIM_SLICE01);
 	}
-	dsim_rmw(dsim, DSIM_CMD_CONFIG, 0, DSIM_CMD_CONFIG_PKT_GO_EN);
+	dsim_rmw(dsim, DSIM_CMD_CONFIG,
+		 dsim_pkt_go ? DSIM_CMD_CONFIG_PKT_GO_EN : 0,
+		 DSIM_CMD_CONFIG_PKT_GO_EN);
 }
 
 /* Full cold link init (vendor dsim_reg_init): own the DCPHY from scratch. */
@@ -658,7 +671,7 @@ static int zuma_dsim_cold_init(struct zuma_dsim *dsim)
 
 static void zuma_dsim_configure(struct zuma_dsim *dsim)
 {
-	u32 stable_vfp, te_protect, te_tout;
+	u32 stable_vfp, te_protect, te_tout, hs_ready;
 	u32 vrefresh = dsim->vrefresh ? dsim->vrefresh : DSIM_DEFAULT_VREFRESH;
 	u32 hs_mbps = dsim->hs_clk_mbps;
 
@@ -676,7 +689,8 @@ static void zuma_dsim_configure(struct zuma_dsim *dsim)
 	 * and (re)program the stable-VFP / TE protect+timeout. SFR-only, does not
 	 * touch the D-PHY, so the live HS link survives.
 	 */
-	dsim_rmw(dsim, DSIM_OPTION_SUITE, DSIM_OPTION_SUITE_OPT_TE_ON_CMD_ALLOW,
+	dsim_rmw(dsim, DSIM_OPTION_SUITE,
+		 dsim_te_cmd_allow ? DSIM_OPTION_SUITE_OPT_TE_ON_CMD_ALLOW : 0,
 		 DSIM_OPTION_SUITE_OPT_TE_ON_CMD_ALLOW);
 	stable_vfp = dsim->hactive * DSIM_STABLE_VFP_VALUE / 100;
 	/* TE protect/timeout windows scale with the frame period (vrefresh) */
@@ -695,6 +709,12 @@ static void zuma_dsim_configure(struct zuma_dsim *dsim)
 	 */
 	dsim_rmw(dsim, DSIM_CLK_CTRL, DSIM_CLK_CTRL_TX_REQUEST_HSCLK,
 		 DSIM_CLK_CTRL_TX_REQUEST_HSCLK);
+	/* vendor dsim_reg_set_hs_clock() waits for the clock lane here */
+	if (readl_poll_timeout(dsim->regs + DSIM_DPHY_STATUS, hs_ready,
+			       hs_ready & DSIM_DPHY_STATUS_TX_READY_HSCLK,
+			       10, 2000))
+		dev_warn(dsim->dev, "HS clock not ready (DPHY_STATUS 0x%08x)\n",
+			 hs_ready);
 	dsim_rmw(dsim, DSIM_INTMSK, 0,
 		 DSIM_INTMSK_SW_RST_RELEASE | DSIM_INTMSK_SFR_PL_FIFO_EMPTY |
 			 DSIM_INTMSK_SFR_PH_FIFO_EMPTY | DSIM_INTMSK_FRAME_DONE |
@@ -836,6 +856,14 @@ static ssize_t zuma_dsim_host_transfer(struct mipi_dsi_host *host,
 		       DSIM_PKTHDR_DATA1(packet.header[2]),
 	       dsim->regs + DSIM_PKTHDR);
 
+	/*
+	 * With the DECON streaming, the header only leaves the FIFO once the
+	 * link opens a command window; the vendor releases it with PKT_GO.
+	 */
+	if (dsim_pkt_go)
+		dsim_rmw(dsim, DSIM_CMD_CONFIG, DSIM_CMD_CONFIG_PKT_GO_RDY,
+			 DSIM_CMD_CONFIG_PKT_GO_RDY);
+
 	/* wait for the header (and payload) FIFO to drain */
 	mask = DSIM_FIFOCTRL_EMPTY_PH_SFR;
 	if (packet.payload_length)
@@ -843,8 +871,15 @@ static ssize_t zuma_dsim_host_transfer(struct mipi_dsi_host *host,
 	ret = readl_poll_timeout_atomic(dsim->regs + DSIM_FIFOCTRL, val,
 					(val & mask) == mask, 10, 20000);
 	if (ret) {
-		dev_warn(dsim->dev, "cmd tx timeout (type 0x%02x, FIFOCTRL=0x%08x)\n",
-			 msg->type, val);
+		dev_warn(dsim->dev,
+			 "cmd tx timeout (type 0x%02x, FIFOCTRL=0x%08x) dphy_status 0x%08x clk_ctrl 0x%08x escmode 0x%08x cmd_config 0x%08x option_suite 0x%08x intsrc 0x%08x\n",
+			 msg->type, val,
+			 readl(dsim->regs + DSIM_DPHY_STATUS),
+			 readl(dsim->regs + DSIM_CLK_CTRL),
+			 readl(dsim->regs + DSIM_ESCMODE),
+			 readl(dsim->regs + DSIM_CMD_CONFIG),
+			 readl(dsim->regs + DSIM_OPTION_SUITE),
+			 readl(dsim->regs + DSIM_INTSRC));
 		return ret;
 	}
 
