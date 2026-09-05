@@ -15,5 +15,6 @@ const struct v4l2_ioctl_ops *get_enc_v4l2_ioctl_ops(void);
 int s5p_mfc_enc_ctrls_setup(struct s5p_mfc_ctx *ctx);
 void s5p_mfc_enc_ctrls_delete(struct s5p_mfc_ctx *ctx);
 void s5p_mfc_enc_init(struct s5p_mfc_ctx *ctx);
+void s5p_mfc_enc_stream_complete(struct s5p_mfc_ctx *ctx);
 
 #endif /* S5P_MFC_ENC_H_  */

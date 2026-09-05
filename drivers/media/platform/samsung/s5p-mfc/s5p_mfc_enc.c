@@ -1678,9 +1678,6 @@ static int vidioc_qbuf(struct file *file, void *priv, struct v4l2_buffer *buf)
 static int vidioc_dqbuf(struct file *file, void *priv, struct v4l2_buffer *buf)
 {
 	struct s5p_mfc_ctx *ctx = file_to_ctx(file);
-	const struct v4l2_event ev = {
-		.type = V4L2_EVENT_EOS
-	};
 	int ret;
 
 	if (ctx->state == MFCINST_ERROR) {
@@ -1691,9 +1688,6 @@ static int vidioc_dqbuf(struct file *file, void *priv, struct v4l2_buffer *buf)
 		ret = vb2_dqbuf(&ctx->vq_src, buf, file->f_flags & O_NONBLOCK);
 	} else if (buf->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
 		ret = vb2_dqbuf(&ctx->vq_dst, buf, file->f_flags & O_NONBLOCK);
-		if (ret == 0 && ctx->state == MFCINST_FINISHED
-					&& list_empty(&ctx->vq_dst.done_list))
-			v4l2_event_queue_fh(&ctx->fh, &ev);
 	} else {
 		ret = -EINVAL;
 	}
@@ -2613,6 +2607,33 @@ static int s5p_mfc_start_streaming(struct vb2_queue *q, unsigned int count)
 	return 0;
 }
 
+/* Caller holds irqlock, including when the last buffer arrives after drain. */
+static void enc_return_last_buffer(struct s5p_mfc_ctx *ctx)
+{
+	const struct v4l2_event ev = { .type = V4L2_EVENT_EOS };
+	struct s5p_mfc_buf *buf;
+
+	if (!ctx->enc_eos_pending || list_empty(&ctx->dst_queue))
+		return;
+
+	buf = list_first_entry(&ctx->dst_queue, struct s5p_mfc_buf, list);
+	list_del(&buf->list);
+	ctx->dst_queue_cnt--;
+	ctx->enc_eos_pending = false;
+	buf->b->flags &= ~(V4L2_BUF_FLAG_KEYFRAME | V4L2_BUF_FLAG_PFRAME |
+			   V4L2_BUF_FLAG_BFRAME);
+	buf->b->flags |= V4L2_BUF_FLAG_LAST;
+	vb2_set_plane_payload(&buf->b->vb2_buf, 0, 0);
+	vb2_buffer_done(&buf->b->vb2_buf, VB2_BUF_STATE_DONE);
+	v4l2_event_queue_fh(&ctx->fh, &ev);
+}
+
+void s5p_mfc_enc_stream_complete(struct s5p_mfc_ctx *ctx)
+{
+	ctx->enc_eos_pending = true;
+	enc_return_last_buffer(ctx);
+}
+
 static void s5p_mfc_stop_streaming(struct vb2_queue *q)
 {
 	unsigned long flags;
@@ -2629,6 +2650,7 @@ static void s5p_mfc_stop_streaming(struct vb2_queue *q)
 	ctx->state = MFCINST_FINISHED;
 	spin_lock_irqsave(&dev->irqlock, flags);
 	if (q->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
+		ctx->enc_eos_pending = false;
 		s5p_mfc_cleanup_queue(&ctx->dst_queue, &ctx->vq_dst);
 		INIT_LIST_HEAD(&ctx->dst_queue);
 		ctx->dst_queue_cnt = 0;
@@ -2662,6 +2684,7 @@ static void s5p_mfc_buf_queue(struct vb2_buffer *vb)
 		spin_lock_irqsave(&dev->irqlock, flags);
 		list_add_tail(&mfc_buf->list, &ctx->dst_queue);
 		ctx->dst_queue_cnt++;
+		enc_return_last_buffer(ctx);
 		spin_unlock_irqrestore(&dev->irqlock, flags);
 	} else if (vq->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
 		mfc_buf = &ctx->src_bufs[vb->index];
