@@ -8,6 +8,7 @@
 #include <linux/clk-provider.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
+#include <linux/pm_runtime.h>
 
 #include <dt-bindings/clock/google,zuma.h>
 
@@ -4624,15 +4625,17 @@ static const struct samsung_cmu_info peric1_cmu_info __initconst = {
 
 /* ---- platform_driver ----------------------------------------------------- */
 
+/*
+ * Every CMU here saves and restores its registers through runtime PM, while
+ * its block is still powered. The plain registration would leave them on the
+ * syscore list instead, which runs after genpd has powered blocks down --
+ * reading a gated CMU there raises a synchronous external abort. A DT
+ * "power-domains" property is not a reliable filter: cmu_dpu lives in BLK_DPU
+ * but does not declare one, and it faults once pd-dpuf0/pd-dpuf1 go down.
+ */
 static int __init zuma_cmu_probe(struct platform_device *pdev)
 {
-	const struct samsung_cmu_info *info;
-	struct device *dev = &pdev->dev;
-
-	info = of_device_get_match_data(dev);
-	exynos_arm64_register_cmu(dev, dev->of_node, info);
-
-	return 0;
+	return exynos_arm64_register_cmu_pm(pdev, true);
 }
 
 static const struct of_device_id zuma_cmu_of_match[] = {
@@ -4676,11 +4679,18 @@ static const struct of_device_id zuma_cmu_of_match[] = {
 	},
 };
 
+static const struct dev_pm_ops zuma_cmu_pm_ops = {
+	RUNTIME_PM_OPS(exynos_arm64_cmu_suspend, exynos_arm64_cmu_resume, NULL)
+	NOIRQ_SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend,
+				  pm_runtime_force_resume)
+};
+
 static struct platform_driver zuma_cmu_driver __refdata = {
 	.driver	= {
 		.name = "zuma-cmu",
 		.of_match_table = zuma_cmu_of_match,
 		.suppress_bind_attrs = true,
+		.pm = pm_ptr(&zuma_cmu_pm_ops),
 	},
 	.probe = zuma_cmu_probe,
 };
