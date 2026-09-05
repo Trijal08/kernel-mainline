@@ -652,7 +652,8 @@ static void s5p_mfc_handle_seq_done(struct s5p_mfc_ctx *ctx,
 			   (ctx->codec_mode == S5P_MFC_CODEC_VP8_DEC ||
 			    ctx->codec_mode == S5P_MFC_CODEC_VP9_DEC ||
 			    ctx->codec_mode == S5P_MFC_CODEC_MPEG4_DEC ||
-			    ctx->codec_mode == S5P_MFC_CODEC_H263_DEC)) {
+			    ctx->codec_mode == S5P_MFC_CODEC_H263_DEC ||
+			    ctx->codec_mode == S5P_MFC_CODEC_MPEG2_DEC)) {
 			/* Sequence parsing also consumes the first frame header. */
 			ctx->head_processed = 0;
 		} else {
