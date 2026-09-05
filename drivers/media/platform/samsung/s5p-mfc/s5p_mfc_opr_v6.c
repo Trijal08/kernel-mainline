@@ -865,10 +865,11 @@ static int s5p_mfc_set_enc_params(struct s5p_mfc_ctx *ctx)
 
 	mfc_debug_enter();
 
-	/* width */
-	writel(ctx->img_width, mfc_regs->e_frame_width); /* 16 align */
-	/* height */
-	writel(ctx->img_height, mfc_regs->e_frame_height); /* 16 align */
+	/* v16 uses only the cropped dimensions; the old registers are reused. */
+	if (!IS_MFCV16_PLUS(dev)) {
+		writel(ctx->img_width, mfc_regs->e_frame_width);
+		writel(ctx->img_height, mfc_regs->e_frame_height);
+	}
 
 	/* cropped width */
 	writel(ctx->img_width, mfc_regs->e_cropped_frame_width);
@@ -953,10 +954,13 @@ static int s5p_mfc_set_enc_params(struct s5p_mfc_ctx *ctx)
 		writel(0x3, mfc_regs->pixel_format);
 	}
 
-	/* memory structure recon. frame */
-	/* 0: Linear, 1: 2D tiled */
+	/* v16 uses bits 8:7 for SBWC selection, with zero for linear buffers. */
 	reg = readl(mfc_regs->e_enc_options);
-	reg |= (0x1 << 8);
+	if (IS_MFCV16_PLUS(dev))
+		reg &= ~GENMASK(8, 7);
+	else
+		/* Reference frames use the tiled layout on older generations. */
+		reg |= BIT(8);
 	writel(reg, mfc_regs->e_enc_options);
 
 	/* padding control & value */
@@ -1143,8 +1147,8 @@ static int s5p_mfc_set_enc_params_h264(struct s5p_mfc_ctx *ctx)
 
 	/* height */
 	if (p_h264->interlace) {
-		writel(ctx->img_height >> 1,
-				mfc_regs->e_frame_height); /* 32 align */
+		if (!IS_MFCV16_PLUS(dev))
+			writel(ctx->img_height >> 1, mfc_regs->e_frame_height);
 		/* cropped height */
 		writel(ctx->img_height >> 1,
 				mfc_regs->e_cropped_frame_height);
