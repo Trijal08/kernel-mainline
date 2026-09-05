@@ -1109,23 +1109,57 @@ static int s5p_mfc_start_streaming(struct vb2_queue *q, unsigned int count)
 	return 0;
 }
 
+/* Called with irqlock held, before vb2 can release any DMA mappings. */
+static void s5p_mfc_dec_stop_failed(struct s5p_mfc_dev *dev)
+{
+	if (READ_ONCE(dev->fw_failed))
+		return;
+
+	s5p_mfc_clock_on(dev);
+	s5p_mfc_abort_firmware(dev);
+	/* Drop the outstanding command's clock reference, if it timed out. */
+	if (test_and_clear_bit(0, &dev->hw_lock))
+		s5p_mfc_clock_off(dev);
+	s5p_mfc_clock_off(dev);
+}
+
 static void s5p_mfc_stop_streaming(struct vb2_queue *q)
 {
 	unsigned long flags;
 	struct s5p_mfc_ctx *ctx = vb2_get_drv_priv(q);
 	struct s5p_mfc_dev *dev = ctx->dev;
 	int aborted = 0;
+	int ret;
 
 	spin_lock_irqsave(&dev->irqlock, flags);
+	if (IS_MFCV16_PLUS(dev)) {
+		clear_work_bit(ctx);
+		/* Sequence parsing and resolution-change drains also access DMA. */
+		if (ctx->state == MFCINST_RES_CHANGE_INIT ||
+		    ctx->state == MFCINST_RES_CHANGE_FLUSH ||
+		    (dev->curr_ctx == ctx->num && dev->hw_lock &&
+		     ctx->state != MFCINST_RUNNING && ctx->state != MFCINST_FINISHING))
+			s5p_mfc_dec_stop_failed(dev);
+	}
 	if ((ctx->state == MFCINST_FINISHING ||
 		ctx->state ==  MFCINST_RUNNING) &&
 		dev->curr_ctx == ctx->num && dev->hw_lock) {
 		ctx->state = MFCINST_ABORT;
 		spin_unlock_irqrestore(&dev->irqlock, flags);
-		s5p_mfc_wait_for_done_ctx(ctx,
+		ret = s5p_mfc_wait_for_done_ctx(ctx,
 					S5P_MFC_R2H_CMD_FRAME_DONE_RET, 0);
 		aborted = 1;
 		spin_lock_irqsave(&dev->irqlock, flags);
+		if (IS_MFCV16_PLUS(dev)) {
+			/* Frame completion can itself discover a resolution change. */
+			if (ret || ctx->state == MFCINST_RES_CHANGE_INIT ||
+			    ctx->state == MFCINST_RES_CHANGE_FLUSH ||
+			    (dev->curr_ctx == ctx->num && dev->hw_lock))
+				s5p_mfc_dec_stop_failed(dev);
+			else if (ctx->state == MFCINST_ABORT)
+				ctx->state = MFCINST_RUNNING;
+			aborted = 0;
+		}
 	}
 	if (q->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
 		s5p_mfc_cleanup_queue(&ctx->dst_queue, &ctx->vq_dst);
@@ -1133,15 +1167,28 @@ static void s5p_mfc_stop_streaming(struct vb2_queue *q)
 		ctx->dst_queue_cnt = 0;
 		ctx->dpb_flush_flag = 1;
 		ctx->dec_dst_flag = 0;
-		if (IS_MFCV6_PLUS(dev) && (ctx->state == MFCINST_RUNNING)) {
+		if (IS_MFCV6_PLUS(dev) &&
+		    (ctx->state == MFCINST_RUNNING ||
+		     (IS_MFCV16_PLUS(dev) &&
+		      (ctx->state == MFCINST_FINISHING || ctx->state == MFCINST_FINISHED)))) {
+			enum s5p_mfc_inst_state prev_state = ctx->state;
+
 			ctx->state = MFCINST_FLUSH;
+			s5p_mfc_clean_ctx_int_flags(ctx);
 			set_work_bit_irqsave(ctx);
 			s5p_mfc_hw_call(dev->mfc_ops, try_run, dev);
 			spin_unlock_irqrestore(&dev->irqlock, flags);
-			if (s5p_mfc_wait_for_done_ctx(ctx,
-				S5P_MFC_R2H_CMD_DPB_FLUSH_RET, 0))
+			ret = s5p_mfc_wait_for_done_ctx(ctx,
+				S5P_MFC_R2H_CMD_DPB_FLUSH_RET, 0);
+			if (ret)
 				mfc_err("Err flushing buffers\n");
 			spin_lock_irqsave(&dev->irqlock, flags);
+			if (IS_MFCV16_PLUS(dev)) {
+				if (ret)
+					s5p_mfc_dec_stop_failed(dev);
+				else
+					ctx->state = prev_state;
+			}
 		}
 	} else if (q->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
 		s5p_mfc_cleanup_queue(&ctx->src_queue, &ctx->vq_src);
