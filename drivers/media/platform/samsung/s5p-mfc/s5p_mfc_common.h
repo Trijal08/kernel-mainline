@@ -19,7 +19,7 @@
 #include <media/v4l2-ioctl.h>
 #include <media/videobuf2-v4l2.h>
 #include "regs-mfc.h"
-#include "regs-mfc-v12.h"
+#include "regs-mfc-v16.h"
 
 #define S5P_MFC_NAME		"s5p-mfc"
 
@@ -299,6 +299,7 @@ struct s5p_mfc_priv_buf {
  * @fw_ver:		loaded firmware sub-version
  * @fw_get_done:	flag set when request_firmware() is complete and
  *			copied into fw_buf
+ * @fw_failed:		firmware fault requiring all handles to close before restart
  * @risc_on:		flag indicates RISC is on or off
  *
  */
@@ -346,6 +347,7 @@ struct s5p_mfc_dev {
 	const struct s5p_mfc_regs *mfc_regs;
 	enum s5p_mfc_fw_ver fw_ver;
 	bool fw_get_done;
+	bool fw_failed;
 	bool risc_on; /* indicates if RISC is on or off */
 };
 
@@ -775,6 +777,7 @@ static inline struct s5p_mfc_ctx *file_to_ctx(struct file *filp)
 #define ctrl_to_ctx(__ctrl) \
 	container_of((__ctrl)->handler, struct s5p_mfc_ctx, ctrl_handler)
 
+void s5p_mfc_abort_firmware(struct s5p_mfc_dev *dev);
 void clear_work_bit(struct s5p_mfc_ctx *ctx);
 void set_work_bit(struct s5p_mfc_ctx *ctx);
 void clear_work_bit_irqsave(struct s5p_mfc_ctx *ctx);
@@ -790,6 +793,7 @@ void s5p_mfc_cleanup_queue(struct list_head *lh, struct vb2_queue *vq);
 #define IS_MFCV8_PLUS(dev)	((dev)->variant->version >= 0x80)
 #define IS_MFCV10_PLUS(dev)	((dev)->variant->version >= 0xA0)
 #define IS_MFCV12(dev)		((dev)->variant->version >= 0xC0)
+#define IS_MFCV16_PLUS(dev)	((dev)->variant->version >= MFC_VERSION_V16)
 #define FW_HAS_E_MIN_SCRATCH_BUF(dev) (IS_MFCV10_PLUS(dev))
 
 #define MFC_V5_BIT	BIT(0)

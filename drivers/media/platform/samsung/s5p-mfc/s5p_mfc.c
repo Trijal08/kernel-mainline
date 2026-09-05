@@ -111,6 +111,11 @@ int s5p_mfc_get_new_ctx(struct s5p_mfc_dev *dev)
 static void wake_up_ctx(struct s5p_mfc_ctx *ctx, unsigned int reason,
 			unsigned int err)
 {
+	if (READ_ONCE(ctx->dev->fw_failed)) {
+		reason = S5P_MFC_R2H_CMD_ERR_RET;
+		err = 0;
+	}
+
 	ctx->int_cond = 1;
 	ctx->int_type = reason;
 	ctx->int_err = err;
@@ -125,6 +130,32 @@ static void wake_up_dev(struct s5p_mfc_dev *dev, unsigned int reason,
 	dev->int_type = reason;
 	dev->int_err = err;
 	wake_up(&dev->queue);
+}
+
+/* A device reset invalidates every firmware instance. */
+void s5p_mfc_abort_firmware(struct s5p_mfc_dev *dev)
+{
+	struct s5p_mfc_ctx *ctx;
+	int i;
+
+	WRITE_ONCE(dev->fw_failed, true);
+	s5p_mfc_reset(dev);
+	s5p_mfc_hw_call(dev->mfc_ops, clear_int_flags, dev);
+	for (i = 0; i < MFC_NUM_CONTEXTS; i++) {
+		ctx = dev->ctx[i];
+		if (!ctx)
+			continue;
+		ctx->state = MFCINST_ERROR;
+		clear_work_bit(ctx);
+		/* SYS_INIT precedes vb2 queue initialization on first open. */
+		if (ctx->vq_src.ops)
+			vb2_queue_error(&ctx->vq_src);
+		if (ctx->vq_dst.ops)
+			vb2_queue_error(&ctx->vq_dst);
+		wake_up_ctx(ctx, S5P_MFC_R2H_CMD_ERR_RET, 0);
+	}
+	clear_bit(0, &dev->enter_suspend);
+	wake_up_dev(dev, S5P_MFC_R2H_CMD_ERR_RET, 0);
 }
 
 void s5p_mfc_cleanup_queue(struct list_head *lh, struct vb2_queue *vq)
@@ -179,9 +210,20 @@ static void s5p_mfc_watchdog_worker(struct work_struct *work)
 	 * This is necessary as they may load and unload firmware.
 	 */
 	mutex_locked = mutex_trylock(&dev->mfc_mutex);
-	if (!mutex_locked)
+	if (!mutex_locked) {
 		mfc_err("Error: some instance may be closing/opening\n");
+		if (IS_MFCV16_PLUS(dev))
+			return;
+	}
+	if (READ_ONCE(dev->fw_failed))
+		goto unlock;
 	spin_lock_irqsave(&dev->irqlock, flags);
+
+	/* Stop DMA before returning timed-out buffers to userspace. */
+	if (IS_MFCV16_PLUS(dev) && s5p_mfc_reset(dev)) {
+		spin_unlock_irqrestore(&dev->irqlock, flags);
+		goto unlock;
+	}
 
 	s5p_mfc_clock_off(dev);
 
@@ -199,7 +241,9 @@ static void s5p_mfc_watchdog_worker(struct work_struct *work)
 	spin_unlock_irqrestore(&dev->irqlock, flags);
 
 	/* De-init MFC */
-	s5p_mfc_deinit_hw(dev);
+	ret = s5p_mfc_deinit_hw(dev);
+	if (ret)
+		goto unlock;
 
 	/*
 	 * Double check if there is at least one instance running.
@@ -655,6 +699,11 @@ static irqreturn_t s5p_mfc_irq(int irq, void *priv)
 	/* Reset the timeout watchdog */
 	atomic_set(&dev->watchdog_cnt, 0);
 	spin_lock(&dev->irqlock);
+	if (READ_ONCE(dev->fw_failed)) {
+		s5p_mfc_hw_call(dev->mfc_ops, clear_int_flags, dev);
+		spin_unlock(&dev->irqlock);
+		return IRQ_HANDLED;
+	}
 	ctx = dev->ctx[dev->curr_ctx];
 	/* Get the reason of interrupt and the error code */
 	reason = s5p_mfc_hw_call(dev->mfc_ops, get_int_reason, dev);
@@ -790,6 +839,11 @@ static int s5p_mfc_open(struct file *file)
 	mfc_debug_enter();
 	if (mutex_lock_interruptible(&dev->mfc_mutex)) {
 		ret = -ERESTARTSYS;
+		goto err_enter;
+	}
+	if (dev->num_inst && READ_ONCE(dev->fw_failed)) {
+		mutex_unlock(&dev->mfc_mutex);
+		ret = -EIO;
 		goto err_enter;
 	}
 	dev->num_inst++;	/* It is guarded by mfc_mutex in vfd */

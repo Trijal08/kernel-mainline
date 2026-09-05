@@ -708,11 +708,8 @@ static int s5p_mfc_set_dec_frame_buffer_v6(struct s5p_mfc_ctx *ctx)
 	}
 
 	writel(ctx->inst_no, mfc_regs->instance_id);
-	s5p_mfc_hw_call(dev->mfc_cmds, cmd_host2risc, dev,
+	return s5p_mfc_hw_call(dev->mfc_cmds, cmd_host2risc, dev,
 			S5P_FIMV_CH_INIT_BUFS_V6, NULL);
-
-	mfc_debug(2, "After setting buffers.\n");
-	return 0;
 }
 
 /* Set registers for encoding stream buffer */
@@ -834,12 +831,8 @@ static int s5p_mfc_set_enc_ref_buffer_v6(struct s5p_mfc_ctx *ctx)
 	}
 
 	writel(ctx->inst_no, mfc_regs->instance_id);
-	s5p_mfc_hw_call(dev->mfc_cmds, cmd_host2risc, dev,
+	return s5p_mfc_hw_call(dev->mfc_cmds, cmd_host2risc, dev,
 			S5P_FIMV_CH_INIT_BUFS_V6, NULL);
-
-	mfc_debug_leave();
-
-	return 0;
 }
 
 static int s5p_mfc_set_slice_mode(struct s5p_mfc_ctx *ctx)
@@ -1809,14 +1802,11 @@ static int s5p_mfc_init_decode_v6(struct s5p_mfc_ctx *ctx)
 	writel(ctx->sei_fp_parse & 0x1, mfc_regs->d_sei_enable);
 
 	writel(ctx->inst_no, mfc_regs->instance_id);
-	s5p_mfc_hw_call(dev->mfc_cmds, cmd_host2risc, dev,
+	return s5p_mfc_hw_call(dev->mfc_cmds, cmd_host2risc, dev,
 			S5P_FIMV_CH_SEQ_HEADER_V6, NULL);
-
-	mfc_debug_leave();
-	return 0;
 }
 
-static inline void s5p_mfc_set_flush(struct s5p_mfc_ctx *ctx, int flush)
+static inline int s5p_mfc_set_flush(struct s5p_mfc_ctx *ctx, int flush)
 {
 	struct s5p_mfc_dev *dev = ctx->dev;
 	const struct s5p_mfc_regs *mfc_regs = dev->mfc_regs;
@@ -1824,9 +1814,10 @@ static inline void s5p_mfc_set_flush(struct s5p_mfc_ctx *ctx, int flush)
 	if (flush) {
 		dev->curr_ctx = ctx->num;
 		writel(ctx->inst_no, mfc_regs->instance_id);
-		s5p_mfc_hw_call(dev->mfc_cmds, cmd_host2risc, dev,
+		return s5p_mfc_hw_call(dev->mfc_cmds, cmd_host2risc, dev,
 				S5P_FIMV_H2R_CMD_FLUSH_V6, NULL);
 	}
+	return 0;
 }
 
 /* Decode a single frame */
@@ -1844,20 +1835,16 @@ static int s5p_mfc_decode_one_frame_v6(struct s5p_mfc_ctx *ctx,
 	 * is the last frame or not. */
 	switch (last_frame) {
 	case 0:
-		s5p_mfc_hw_call(dev->mfc_cmds, cmd_host2risc, dev,
+		return s5p_mfc_hw_call(dev->mfc_cmds, cmd_host2risc, dev,
 				S5P_FIMV_CH_FRAME_START_V6, NULL);
-		break;
 	case 1:
-		s5p_mfc_hw_call(dev->mfc_cmds, cmd_host2risc, dev,
+		return s5p_mfc_hw_call(dev->mfc_cmds, cmd_host2risc, dev,
 				S5P_FIMV_CH_LAST_FRAME_V6, NULL);
-		break;
 	default:
 		mfc_err("Unsupported last frame arg.\n");
 		return -EINVAL;
 	}
 
-	mfc_debug(2, "Decoding a usual frame.\n");
-	return 0;
 }
 
 static int s5p_mfc_init_encode_v6(struct s5p_mfc_ctx *ctx)
@@ -1891,10 +1878,8 @@ static int s5p_mfc_init_encode_v6(struct s5p_mfc_ctx *ctx)
 	}
 
 	writel(ctx->inst_no, mfc_regs->instance_id);
-	s5p_mfc_hw_call(dev->mfc_cmds, cmd_host2risc, dev,
+	return s5p_mfc_hw_call(dev->mfc_cmds, cmd_host2risc, dev,
 			S5P_FIMV_CH_SEQ_HEADER_V6, NULL);
-
-	return 0;
 }
 
 static int s5p_mfc_h264_set_aso_slice_order_v6(struct s5p_mfc_ctx *ctx)
@@ -1936,20 +1921,16 @@ static int s5p_mfc_encode_one_frame_v6(struct s5p_mfc_ctx *ctx)
 		cmd = S5P_FIMV_CH_LAST_FRAME_V6;
 
 	writel(ctx->inst_no, mfc_regs->instance_id);
-	s5p_mfc_hw_call(dev->mfc_cmds, cmd_host2risc, dev, cmd, NULL);
-
-	mfc_debug(2, "--\n");
-
-	return 0;
+	return s5p_mfc_hw_call(dev->mfc_cmds, cmd_host2risc, dev, cmd, NULL);
 }
 
-static inline void s5p_mfc_run_dec_last_frames(struct s5p_mfc_ctx *ctx)
+static inline int s5p_mfc_run_dec_last_frames(struct s5p_mfc_ctx *ctx)
 {
 	struct s5p_mfc_dev *dev = ctx->dev;
 
 	s5p_mfc_set_dec_stream_buffer_v6(ctx, 0, 0, 0);
 	dev->curr_ctx = ctx->num;
-	s5p_mfc_decode_one_frame_v6(ctx, MFC_DEC_LAST_FRAME);
+	return s5p_mfc_decode_one_frame_v6(ctx, MFC_DEC_LAST_FRAME);
 }
 
 static inline int s5p_mfc_run_dec_frame(struct s5p_mfc_ctx *ctx)
@@ -1963,8 +1944,7 @@ static inline int s5p_mfc_run_dec_frame(struct s5p_mfc_ctx *ctx)
 		s5p_mfc_set_dec_stream_buffer_v6(ctx, 0, 0, 0);
 		dev->curr_ctx = ctx->num;
 		s5p_mfc_clean_ctx_int_flags(ctx);
-		s5p_mfc_decode_one_frame_v6(ctx, last_frame);
-		return 0;
+		return s5p_mfc_decode_one_frame_v6(ctx, last_frame);
 	}
 
 	/* Frames are being decoded */
@@ -1986,9 +1966,7 @@ static inline int s5p_mfc_run_dec_frame(struct s5p_mfc_ctx *ctx)
 		mfc_debug(2, "Setting ctx->state to FINISHING\n");
 		ctx->state = MFCINST_FINISHING;
 	}
-	s5p_mfc_decode_one_frame_v6(ctx, last_frame);
-
-	return 0;
+	return s5p_mfc_decode_one_frame_v6(ctx, last_frame);
 }
 
 static inline int s5p_mfc_run_enc_frame(struct s5p_mfc_ctx *ctx)
@@ -2049,12 +2027,10 @@ static inline int s5p_mfc_run_enc_frame(struct s5p_mfc_ctx *ctx)
 	s5p_mfc_set_enc_stream_buffer_v6(ctx, dst_addr, dst_size);
 
 	dev->curr_ctx = ctx->num;
-	s5p_mfc_encode_one_frame_v6(ctx);
-
-	return 0;
+	return s5p_mfc_encode_one_frame_v6(ctx);
 }
 
-static inline void s5p_mfc_run_init_dec(struct s5p_mfc_ctx *ctx)
+static inline int s5p_mfc_run_init_dec(struct s5p_mfc_ctx *ctx)
 {
 	struct s5p_mfc_dev *dev = ctx->dev;
 	struct s5p_mfc_buf *temp_vb;
@@ -2067,10 +2043,10 @@ static inline void s5p_mfc_run_init_dec(struct s5p_mfc_ctx *ctx)
 		vb2_dma_contig_plane_dma_addr(&temp_vb->b->vb2_buf, 0), 0,
 			temp_vb->b->vb2_buf.planes[0].bytesused);
 	dev->curr_ctx = ctx->num;
-	s5p_mfc_init_decode_v6(ctx);
+	return s5p_mfc_init_decode_v6(ctx);
 }
 
-static inline void s5p_mfc_run_init_enc(struct s5p_mfc_ctx *ctx)
+static inline int s5p_mfc_run_init_enc(struct s5p_mfc_ctx *ctx)
 {
 	struct s5p_mfc_dev *dev = ctx->dev;
 	struct s5p_mfc_buf *dst_mb;
@@ -2082,7 +2058,7 @@ static inline void s5p_mfc_run_init_enc(struct s5p_mfc_ctx *ctx)
 	dst_size = vb2_plane_size(&dst_mb->b->vb2_buf, 0);
 	s5p_mfc_set_enc_stream_buffer_v6(ctx, dst_addr, dst_size);
 	dev->curr_ctx = ctx->num;
-	s5p_mfc_init_encode_v6(ctx);
+	return s5p_mfc_init_encode_v6(ctx);
 }
 
 static inline int s5p_mfc_run_init_dec_buffers(struct s5p_mfc_ctx *ctx)
@@ -2135,7 +2111,10 @@ static void s5p_mfc_try_run_v6(struct s5p_mfc_dev *dev)
 {
 	struct s5p_mfc_ctx *ctx;
 	int new_ctx;
-	unsigned int ret = 0;
+	int ret = 0;
+
+	if (READ_ONCE(dev->fw_failed))
+		return;
 
 	mfc_debug(1, "Try run dev: %p\n", dev);
 
@@ -2175,7 +2154,7 @@ static void s5p_mfc_try_run_v6(struct s5p_mfc_dev *dev)
 	if (ctx->type == MFCINST_DECODER) {
 		switch (ctx->state) {
 		case MFCINST_FINISHING:
-			s5p_mfc_run_dec_last_frames(ctx);
+			ret = s5p_mfc_run_dec_last_frames(ctx);
 			break;
 		case MFCINST_RUNNING:
 			ret = s5p_mfc_run_dec_frame(ctx);
@@ -2189,25 +2168,25 @@ static void s5p_mfc_try_run_v6(struct s5p_mfc_dev *dev)
 					ctx);
 			break;
 		case MFCINST_GOT_INST:
-			s5p_mfc_run_init_dec(ctx);
+			ret = s5p_mfc_run_init_dec(ctx);
 			break;
 		case MFCINST_HEAD_PARSED:
 			ret = s5p_mfc_run_init_dec_buffers(ctx);
 			break;
 		case MFCINST_FLUSH:
-			s5p_mfc_set_flush(ctx, ctx->dpb_flush_flag);
+			ret = s5p_mfc_set_flush(ctx, ctx->dpb_flush_flag);
 			break;
 		case MFCINST_RES_CHANGE_INIT:
-			s5p_mfc_run_dec_last_frames(ctx);
+			ret = s5p_mfc_run_dec_last_frames(ctx);
 			break;
 		case MFCINST_RES_CHANGE_FLUSH:
-			s5p_mfc_run_dec_last_frames(ctx);
+			ret = s5p_mfc_run_dec_last_frames(ctx);
 			break;
 		case MFCINST_RES_CHANGE_END:
 			mfc_debug(2, "Finished remaining frames after resolution change.\n");
 			ctx->capture_state = QUEUE_FREE;
 			mfc_debug(2, "Will re-init the codec`.\n");
-			s5p_mfc_run_init_dec(ctx);
+			ret = s5p_mfc_run_init_dec(ctx);
 			break;
 		default:
 			ret = -EAGAIN;
@@ -2227,14 +2206,14 @@ static void s5p_mfc_try_run_v6(struct s5p_mfc_dev *dev)
 					ctx);
 			break;
 		case MFCINST_GOT_INST:
-			s5p_mfc_run_init_enc(ctx);
+			ret = s5p_mfc_run_init_enc(ctx);
 			break;
 		case MFCINST_HEAD_PRODUCED:
 			ret = s5p_mfc_run_init_enc_buffers(ctx);
 			break;
 		case MFCINST_NAL_ABORT:
 			mfc_write(dev, ctx->inst_no, S5P_FIMV_INSTANCE_ID_V6);
-			s5p_mfc_hw_call(dev->mfc_cmds, cmd_host2risc,
+			ret = s5p_mfc_hw_call(dev->mfc_cmds, cmd_host2risc,
 					dev, S5P_FIMV_H2R_CMD_NAL_ABORT_V6, NULL);
 			break;
 		default:
