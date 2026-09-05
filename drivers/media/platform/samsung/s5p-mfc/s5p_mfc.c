@@ -581,6 +581,17 @@ static void s5p_mfc_handle_seq_done(struct s5p_mfc_ctx *ctx,
 		if (ctx->c_ops->post_seq_start(ctx))
 			mfc_err("post_seq_start() failed\n");
 	} else {
+		if (IS_MFCV16_PLUS(dev) && ctx->codec_mode == S5P_MFC_CODEC_HEVC_DEC &&
+		    ((mfc_read(dev, S5P_FIMV_D_DECODED_PICTURE_PROFILE_V16) &
+		      S5P_FIMV_D_BIT_DEPTH_MINUS8_MASK_V16) ||
+		     (mfc_read(dev, S5P_FIMV_D_CHROMA_FORMAT_V16) &
+		      S5P_FIMV_D_CHROMA_FORMAT_MASK_V16) != S5P_FIMV_D_CHROMA_420_V16)) {
+			mfc_err("Only 8-bit 4:2:0 decoder output is supported\n");
+			ctx->state = MFCINST_ERROR;
+			vb2_queue_error(&ctx->vq_src);
+			vb2_queue_error(&ctx->vq_dst);
+			goto done;
+		}
 		ctx->img_width = s5p_mfc_hw_call(dev->mfc_ops, get_img_width,
 				dev);
 		ctx->img_height = s5p_mfc_hw_call(dev->mfc_ops, get_img_height,
@@ -601,7 +612,8 @@ static void s5p_mfc_handle_seq_done(struct s5p_mfc_ctx *ctx,
 			ctx->state = MFCINST_HEAD_PARSED;
 
 		if ((ctx->codec_mode == S5P_MFC_CODEC_H264_DEC ||
-			ctx->codec_mode == S5P_MFC_CODEC_H264_MVC_DEC) &&
+			ctx->codec_mode == S5P_MFC_CODEC_H264_MVC_DEC ||
+			(IS_MFCV16_PLUS(dev) && ctx->codec_mode == S5P_MFC_CODEC_HEVC_DEC)) &&
 				!list_empty(&ctx->src_queue)) {
 			struct s5p_mfc_buf *src_buf;
 
@@ -617,6 +629,7 @@ static void s5p_mfc_handle_seq_done(struct s5p_mfc_ctx *ctx,
 			ctx->head_processed = 1;
 		}
 	}
+done:
 	s5p_mfc_hw_call(dev->mfc_ops, clear_int_flags, dev);
 	clear_work_bit(ctx);
 	WARN_ON(test_and_clear_bit(0, &dev->hw_lock) == 0);
