@@ -18,6 +18,7 @@ properties:
   compatible:
     oneOf:
       - enum:
+          - google,zumapro-mfc            # Google Tensor G4
           - samsung,exynos5433-mfc        # Exynos5433
           - samsung,mfc-v5                # Exynos4
           - samsung,mfc-v6                # Exynos5
@@ -71,6 +72,34 @@ required:
 additionalProperties: false
 
 allOf:
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: google,zumapro-mfc
+    then:
+      properties:
+        clocks:
+          maxItems: 1
+        clock-names:
+          items:
+            - const: mfc
+        iommus:
+          maxItems: 1
+        iommu-names: false
+        memory-region:
+          maxItems: 1
+          description:
+            IOVA reservations bounding the firmware-relative memory window.
+            Firmware occupies the last 1 MiB below 256 MiB; all codec buffers
+            must be above it and end no more than 0xf0000000 bytes from its
+            base. The region has no physical backing and uses iommu-addresses
+            to exclude the lower 255 MiB and the upper 1 MiB of 32-bit IOVAs.
+      required:
+        - iommus
+        - power-domains
+        - memory-region
+
   - if:
       properties:
         compatible:
