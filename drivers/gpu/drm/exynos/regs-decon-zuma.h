@@ -205,6 +205,13 @@
 /* -------- DECON_SUB: DSC encoders (0x1000 stride, in the SUB block) -------- */
 #define ZD_DSC_OFFSET(_i)			(0x1000 * (_i))
 
+/*
+ * The bootloader leaves 0xE here on both encoders and the encoders produce no
+ * output without it; the field layout is not documented in this header.
+ */
+#define ZD_DSC_CONTROL0(_i)			(ZD_DSC_OFFSET(_i) + 0x0000)
+#define ZD_DSC_CONTROL0_BOOT_VALUE		0xE
+
 #define ZD_DSC_CONTROL1(_i)			(ZD_DSC_OFFSET(_i) + 0x0004)
 #define ZD_DSC_SW_RESET				(0x1 << 28)
 /* DSC_SWAP(bit_swap, byte_swap, word_swap) */

@@ -21,6 +21,7 @@
 #include <linux/err.h>
 #include <linux/io.h>
 #include <linux/iopoll.h>
+#include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/unaligned.h>
 
@@ -433,6 +434,27 @@ static void zuma_reg_set_data_path(u32 id, enum decon_out_type out_type,
  * (cal_common/exynos_panel.h decon_get_comp_dsc_width):
  *   DIV_ROUND_UP(DIV_ROUND_UP(slice_width * bpc, 8), 6) * 2
  */
+static int zuma_dsc_ds_en = -1;
+module_param_named(dsc_ds_en, zuma_dsc_ds_en, int, 0644);
+MODULE_PARM_DESC(dsc_ds_en, "DSC dual-slice enable (-1 = driver default)");
+
+static int zuma_dsc_sm_ch = -1;
+module_param_named(dsc_sm_ch, zuma_dsc_sm_ch, int, 0644);
+MODULE_PARM_DESC(dsc_sm_ch, "DSC slice-mode-change (-1 = driver default)");
+
+static int zuma_dsc_ctrl0 = ZD_DSC_CONTROL0_BOOT_VALUE;
+module_param_named(dsc_ctrl0, zuma_dsc_ctrl0, int, 0644);
+MODULE_PARM_DESC(dsc_ctrl0, "DSC_CONTROL0 value (bootloader uses 0xE)");
+
+static int zuma_dsc_dec_delay = -1;
+module_param_named(dsc_dec_delay, zuma_dsc_dec_delay, int, 0644);
+MODULE_PARM_DESC(dsc_dec_delay,
+		 "override initial_dec_delay in the encoder PPS (-1 = panel's)");
+
+static bool zuma_dsc_enable = true;
+module_param_named(dsc, zuma_dsc_enable, bool, 0644);
+MODULE_PARM_DESC(dsc, "compress the output when the panel advertises DSC");
+
 static u32 zuma_dsc_comp_width(const struct drm_dsc_config *cfg)
 {
 	u32 slice_px = DIV_ROUND_UP(cfg->slice_width * cfg->bits_per_component,
@@ -441,11 +463,30 @@ static u32 zuma_dsc_comp_width(const struct drm_dsc_config *cfg)
 	return DIV_ROUND_UP(slice_px, 6) * 2;
 }
 
+/*
+ * The encoders come out of the bootloader configured for its own geometry, and
+ * nothing else here resets them. Reset before programming (vendor
+ * dsc_reg_swreset); the bit is self-clearing.
+ */
+static void zuma_reg_dsc_swreset(u32 id, u32 dsc_id)
+{
+	u32 val;
+
+	writel(ZD_DSC_SW_RESET, zd_sub[id] + ZD_DSC_CONTROL1(dsc_id));
+	if (readl_poll_timeout_atomic(zd_sub[id] + ZD_DSC_CONTROL1(dsc_id), val,
+				      !(val & ZD_DSC_SW_RESET), 10, 2000))
+		pr_warn("decon%u: DSC%u reset did not clear\n", id, dsc_id);
+}
+
 static void zuma_reg_dsc_config_control(u32 id, u32 dsc_id, u32 ds_en,
 					u32 sm_ch, u32 slice_width)
 {
 	u32 remainder = (slice_width % 3) ? (slice_width % 3) : 3;
 	u32 grpcntline = (slice_width + 2) / 3;
+
+	zuma_reg_dsc_swreset(id, dsc_id);
+
+	writel(zuma_dsc_ctrl0, zd_sub[id] + ZD_DSC_CONTROL0(dsc_id));
 
 	writel(ZD_DSC_SWAP(0x0, 0x1, 0x0) | ZD_DSC_DUAL_SLICE_EN_F(ds_en) |
 		       ZD_DSC_SLICE_MODE_CH_F(sm_ch) |
@@ -456,15 +497,28 @@ static void zuma_reg_dsc_config_control(u32 id, u32 dsc_id, u32 ds_en,
 	       zd_sub[id] + ZD_DSC_CONTROL3(dsc_id));
 }
 
-/* Program one DSC encoder's PPS from the standard packed payload. */
+/*
+ * Program one DSC encoder's PPS.
+ *
+ * Each encoder compresses one slice and its PPS describes *that slice* as the
+ * picture, so pic_width is the slice width - the panel's own PPS, which the
+ * panel driver sends to the DDIC, keeps the full picture width. Taking the
+ * panel's config verbatim here left the encoders producing nothing and the
+ * DSIM underrunning; the bootloader programs 640 where the panel says 1280.
+ */
 static void zuma_reg_dsc_set_pps(u32 id, u32 dsc_id,
 				 const struct drm_dsc_config *cfg)
 {
 	struct drm_dsc_picture_parameter_set pps;
+	struct drm_dsc_config enc_cfg = *cfg;
 	const u8 *raw = (const u8 *)&pps;
 	int i;
 
-	drm_dsc_pps_payload_pack(&pps, cfg);
+	enc_cfg.pic_width = cfg->slice_width;
+	if (zuma_dsc_dec_delay >= 0)
+		enc_cfg.initial_dec_delay = zuma_dsc_dec_delay;
+
+	drm_dsc_pps_payload_pack(&pps, &enc_cfg);
 
 	/* PPS bytes 0..87, 4 bytes (big-endian) per register from +0x40 */
 	for (i = 0; i < ZD_DSC_PPS_REG_CNT; i++)
@@ -477,9 +531,12 @@ static void zuma_reg_set_dsc(u32 id, const struct drm_dsc_config *cfg)
 	/*
 	 * komodo: dsc_count == slice_count == 2, so each encoder handles one
 	 * slice (dual_slice disabled) and the slice-mode-change bit is set.
+	 * Unverified on caiman - the parameters exist to sweep it, since the
+	 * encoders wedge the DECON on the first frame when they disagree with
+	 * the stream and one rung then needs a fresh enable, not a poke.
 	 */
-	u32 ds_en = 0;
-	u32 sm_ch = 1;
+	u32 ds_en = (zuma_dsc_ds_en >= 0) ? !!zuma_dsc_ds_en : 0;
+	u32 sm_ch = (zuma_dsc_sm_ch >= 0) ? !!zuma_dsc_sm_ch : 1;
 	u32 dsc_id;
 
 	for (dsc_id = 0; dsc_id < cfg->slice_count; dsc_id++) {
@@ -717,8 +774,19 @@ zuma_decon_dsc(const struct decon_config *cfg)
 	};
 	unsigned int i;
 
-	if (!(cfg->out_type & DECON_OUT_DSI))
+	if (!(cfg->out_type & DECON_OUT_DSI) || !zuma_dsc_enable)
 		return NULL;
+
+	/*
+	 * The panel's own config, published by the DSIM. It has to describe the
+	 * mode being set: the DECON's encoders and the DDIC's decoder are
+	 * programmed from separate copies (the panel driver sends its own PPS),
+	 * and compressing to a geometry the panel is not decoding puts noise on
+	 * the screen rather than failing.
+	 */
+	if (cfg->dsc && cfg->dsc->pic_width == cfg->image_width &&
+	    cfg->dsc->pic_height == cfg->image_height)
+		return cfg->dsc;
 
 	for (i = 0; i < ARRAY_SIZE(dscs); i++)
 		if (cfg->image_width == dscs[i]->pic_width &&
