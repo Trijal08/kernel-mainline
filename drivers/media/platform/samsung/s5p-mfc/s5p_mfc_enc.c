@@ -2394,6 +2394,7 @@ static const struct v4l2_ioctl_ops s5p_mfc_enc_ioctl_ops = {
 
 static int check_vb_with_fmt(const struct s5p_mfc_fmt *fmt, struct vb2_buffer *vb)
 {
+	struct s5p_mfc_ctx *ctx = vb2_get_drv_priv(vb->vb2_queue);
 	int i;
 
 	if (!fmt)
@@ -2406,6 +2407,10 @@ static int check_vb_with_fmt(const struct s5p_mfc_fmt *fmt, struct vb2_buffer *v
 		dma_addr_t dma = vb2_dma_contig_plane_dma_addr(vb, i);
 		if (!dma) {
 			mfc_err("failed to get plane cookie\n");
+			return -EINVAL;
+		}
+		if (!s5p_mfc_dma_addr_valid(ctx->dev, dma)) {
+			mfc_err("Plane buffer is below the firmware allocation\n");
 			return -EINVAL;
 		}
 		mfc_debug(2, "index: %d, plane[%d] cookie: %pad\n",

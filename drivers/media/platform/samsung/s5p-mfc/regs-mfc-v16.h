@@ -14,4 +14,7 @@
 #define MFC_VERSION_V16				0x160
 #define MFC_VERSION_ZUMAPRO			0x16060000
 
+/* The RISC maps its registers above this firmware-relative memory window. */
+#define MFC_V16_MEM_WINDOW_SIZE			0xf0000000ULL
+
 #endif /* _REGS_MFC_V16_H */

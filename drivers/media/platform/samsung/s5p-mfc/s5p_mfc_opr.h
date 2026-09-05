@@ -14,6 +14,12 @@
 
 #include "s5p_mfc_common.h"
 
+static inline bool s5p_mfc_dma_addr_valid(struct s5p_mfc_dev *dev,
+					dma_addr_t addr)
+{
+	return !IS_MFCV16_PLUS(dev) || addr >= dev->fw_buf.dma + dev->fw_buf.size;
+}
+
 struct s5p_mfc_regs {
 
 	/* codec common registers */
