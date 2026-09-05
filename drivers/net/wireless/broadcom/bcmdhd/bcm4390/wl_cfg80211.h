@@ -530,6 +530,13 @@ do {	\
 #define WL_CONS_ONLY(args) do { printf args; } while (0)
 #endif /* defined(CUSTOMER_DBG_PREFIX_ENABLE) */
 
+/* Unterminated pr_cont fragments never flush, and without DHD_DEBUG
+ * wl_dbg_level is #defined to (0), folding away every level test. */
+extern void wl_dbg_printk(const char *prefix, const char *func,
+	const char *fmt, ...);
+#define WL_PRINTK_ERR(...)	wl_dbg_printk(CFG80211_ERROR_TEXT, __func__, __VA_ARGS__)
+#define WL_PRINTK_INFO(...)	wl_dbg_printk(CFG80211_INFO_TEXT, __func__, __VA_ARGS__)
+
 #define WL_CONS_ONLY_RLMT(args) \
 do {    \
 	static uint64 __err_ts = 0; \
@@ -649,11 +656,7 @@ do {										\
 #else /* defined(DHD_DEBUG) */
 #define	WL_ERR(args)									\
 do {										\
-	if ((wl_dbg_level & WL_DBG_ERR) && net_ratelimit()) {				\
-			WL_DBG_PRINT_SYSTEM_TIME;				\
-			pr_cont(CFG80211_ERROR_TEXT "%s : ", __func__);	\
-			pr_cont args;						\
-		}								\
+	WL_PRINTK_ERR args;						\
 } while (0)
 #define WL_ERR_KERN(args) WL_ERR(args)
 #define WL_ERR_MEM(args) WL_ERR(args)
@@ -697,8 +700,7 @@ do {	\
 do {										\
 	if (wl_dbg_level & WL_DBG_INFO) {				\
 			WL_DBG_PRINT_SYSTEM_TIME;				\
-			pr_cont(CFG80211_INFO_TEXT "%s : ", __func__);	\
-			pr_cont args;						\
+			WL_PRINTK_INFO args;					\
 		}								\
 } while (0)
 
