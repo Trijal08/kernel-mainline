@@ -151,12 +151,12 @@ extern s32 wl_cfgscan_notify_listen_complete(struct bcm_cfg80211 *cfg);
 extern s32 wl_cfgscan_cancel_listen_on_channel(struct bcm_cfg80211 *cfg, bool notify_user);
 #if defined(WL_CFG80211_P2P_DEV_IF)
 extern s32 wl_cfgscan_remain_on_channel(struct wiphy *wiphy, bcm_struct_cfgdev *cfgdev,
-	struct ieee80211_channel *channel, unsigned int duration, u64 *cookie,
+	struct ieee80211_channel *channel, unsigned int duration, u64 cookie,
 	const u8 *rx_addr);
 #else
 extern s32 wl_cfgscan_remain_on_channel(struct wiphy *wiphy, bcm_struct_cfgdev *cfgdev,
 	struct ieee80211_channel *channel, enum nl80211_channel_type channel_type,
-	unsigned int duration, u64 *cookie);
+	unsigned int duration, u64 cookie);
 #endif /* WL_CFG80211_P2P_DEV_IF */
 extern s32 wl_cfgscan_cancel_remain_on_channel(struct wiphy *wiphy,
 	bcm_struct_cfgdev *cfgdev, u64 cookie);
