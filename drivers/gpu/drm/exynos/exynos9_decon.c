@@ -1601,6 +1601,7 @@ static void decon_enable(struct exynos_drm_crtc *crtc)
 	ctx->config.image_width = ctx->v_mode.hactive;
 	ctx->config.image_height = ctx->v_mode.vactive;
 	ctx->config.fps = drm_mode_vrefresh(&crtc->base.mode);
+	ctx->config.dsc = crtc->dsc;
 
 	decon_set_mode(crtc);
 
