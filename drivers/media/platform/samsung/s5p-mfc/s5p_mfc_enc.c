@@ -1227,10 +1227,26 @@ static int enc_pre_frame_start(struct s5p_mfc_ctx *ctx)
 	return 0;
 }
 
+static void enc_copy_metadata(struct vb2_v4l2_buffer *dst,
+			      const struct vb2_v4l2_buffer *src)
+{
+	u32 mask = V4L2_BUF_FLAG_TIMECODE | V4L2_BUF_FLAG_TSTAMP_SRC_MASK;
+
+	if (!dst)
+		return;
+
+	dst->vb2_buf.timestamp = src->vb2_buf.timestamp;
+	dst->vb2_buf.copied_timestamp = 1;
+	dst->timecode = src->timecode;
+	dst->field = src->field;
+	dst->flags = (dst->flags & ~mask) | (src->flags & mask);
+}
+
 static int enc_post_frame_start(struct s5p_mfc_ctx *ctx)
 {
 	struct s5p_mfc_dev *dev = ctx->dev;
 	struct s5p_mfc_buf *mb_entry;
+	struct vb2_v4l2_buffer *dst = NULL;
 	unsigned long enc_y_addr = 0, enc_c_addr = 0, enc_c_1_addr = 0;
 	unsigned long mb_y_addr, mb_c_addr, mb_c_1_addr;
 	int slice_type;
@@ -1239,6 +1255,8 @@ static int enc_post_frame_start(struct s5p_mfc_ctx *ctx)
 
 	slice_type = s5p_mfc_hw_call(dev->mfc_ops, get_enc_slice_type, dev);
 	strm_size = s5p_mfc_hw_call(dev->mfc_ops, get_enc_strm_size, dev);
+	if (strm_size && !list_empty(&ctx->dst_queue))
+		dst = list_first_entry(&ctx->dst_queue, struct s5p_mfc_buf, list)->b;
 	mfc_debug(2, "Encoded slice type: %d\n", slice_type);
 	mfc_debug(2, "Encoded stream size: %d\n", strm_size);
 	mfc_debug(2, "Display order: %d\n",
@@ -1263,6 +1281,7 @@ static int enc_post_frame_start(struct s5p_mfc_ctx *ctx)
 					== mb_c_1_addr) {
 				list_del(&mb_entry->list);
 				ctx->src_queue_cnt--;
+				enc_copy_metadata(dst, mb_entry->b);
 				vb2_buffer_done(&mb_entry->b->vb2_buf,
 						VB2_BUF_STATE_DONE);
 				break;
@@ -1284,6 +1303,7 @@ static int enc_post_frame_start(struct s5p_mfc_ctx *ctx)
 					== mb_c_1_addr) {
 				list_del(&mb_entry->list);
 				ctx->ref_queue_cnt--;
+				enc_copy_metadata(dst, mb_entry->b);
 				vb2_buffer_done(&mb_entry->b->vb2_buf,
 						VB2_BUF_STATE_DONE);
 				break;
