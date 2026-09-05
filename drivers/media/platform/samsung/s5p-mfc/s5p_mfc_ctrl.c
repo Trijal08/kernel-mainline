@@ -226,7 +226,7 @@ int s5p_mfc_init_hw(struct s5p_mfc_dev *dev)
 	ret = s5p_mfc_reset(dev);
 	if (ret) {
 		mfc_err("Failed to reset MFC - timeout\n");
-		return ret;
+		goto err_clock;
 	}
 	mfc_debug(2, "Done MFC reset..\n");
 	/* 1. Set DRAM base Addr */
@@ -248,25 +248,21 @@ int s5p_mfc_init_hw(struct s5p_mfc_dev *dev)
 	mfc_debug(2, "Will now wait for completion of firmware transfer\n");
 	if (s5p_mfc_wait_for_done_dev(dev, S5P_MFC_R2H_CMD_FW_STATUS_RET)) {
 		mfc_err("Failed to load firmware\n");
-		s5p_mfc_reset(dev);
-		s5p_mfc_clock_off(dev);
-		return -EIO;
+		ret = -EIO;
+		goto err_reset;
 	}
 	s5p_mfc_clean_dev_int_flags(dev);
 	/* 4. Initialize firmware */
 	ret = s5p_mfc_hw_call(dev->mfc_cmds, sys_init_cmd, dev);
 	if (ret) {
 		mfc_err("Failed to send command to MFC - timeout\n");
-		s5p_mfc_reset(dev);
-		s5p_mfc_clock_off(dev);
-		return ret;
+		goto err_reset;
 	}
 	mfc_debug(2, "Ok, now will wait for completion of hardware init\n");
 	if (s5p_mfc_wait_for_done_dev(dev, S5P_MFC_R2H_CMD_SYS_INIT_RET)) {
 		mfc_err("Failed to init hardware\n");
-		s5p_mfc_reset(dev);
-		s5p_mfc_clock_off(dev);
-		return -EIO;
+		ret = -EIO;
+		goto err_reset;
 	}
 	dev->int_cond = 0;
 	if (dev->int_err != 0 || dev->int_type !=
@@ -274,9 +270,8 @@ int s5p_mfc_init_hw(struct s5p_mfc_dev *dev)
 		/* Failure. */
 		mfc_err("Failed to init firmware - error: %d int: %d\n",
 						dev->int_err, dev->int_type);
-		s5p_mfc_reset(dev);
-		s5p_mfc_clock_off(dev);
-		return -EIO;
+		ret = -EIO;
+		goto err_reset;
 	}
 	if (IS_MFCV6_PLUS(dev))
 		ver = mfc_read(dev, S5P_FIMV_FW_VERSION_V6);
@@ -288,6 +283,14 @@ int s5p_mfc_init_hw(struct s5p_mfc_dev *dev)
 	s5p_mfc_clock_off(dev);
 	mfc_debug_leave();
 	return 0;
+
+err_reset:
+	/* Retain the context if reset cannot establish DMA quiescence. */
+	if (!s5p_mfc_reset(dev) && dev->ctx_buf.virt)
+		s5p_mfc_hw_call(dev->mfc_ops, release_dev_context_buffer, dev);
+err_clock:
+	s5p_mfc_clock_off(dev);
+	return ret;
 }
 
 
