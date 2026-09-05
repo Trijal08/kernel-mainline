@@ -2599,7 +2599,7 @@ static void s5xxx_pktproc_ul_activate(struct s5xxx_modem *sm)
  * frame is oversized -- the caller drops.
  */
 static bool s5xxx_pktproc_ul_xmit(struct s5xxx_modem *sm, struct sk_buff *skb,
-				  u8 lcid)
+				  u8 lcid, bool publish)
 {
 	void __iomem *info = sm->pktproc + S5XXX_PKTPROC_UL_INFO_OFS;
 	void __iomem *qinfo = info + 8 + S5XXX_PKTPROC_UL_TXQ * 20;
@@ -2630,7 +2630,15 @@ static bool s5xxx_pktproc_ul_xmit(struct s5xxx_modem *sm, struct sk_buff *skb,
 	buf = sm->pktproc + buff_base + slot * S5XXX_PKTPROC_UL_MAX_PKT;
 	cp_buf = S5XXX_PKTPROC_CP_BASE + buff_base +
 		 slot * S5XXX_PKTPROC_UL_MAX_PKT;
-	last = sm->ul_end_bit_owner == S5XXX_PKTPROC_END_BIT_AP ? 1 : 0;
+	/*
+	 * The end bit terminates a published batch, so only its last descriptor
+	 * carries one: vendor pktproc_ul_update_fore_ptr() sets it at fore-1 and
+	 * clears it on every enqueue.  Setting it on all of them leaves a stale
+	 * end bit sitting at fore once the ring has lapped, which is what the
+	 * CP walked into on 2026-08-31 -- both wedges ended with rear parked at
+	 * exactly fore+1 and the CP servicing neither direction again.
+	 */
+	last = (publish && sm->ul_end_bit_owner == S5XXX_PKTPROC_END_BIT_AP) ? 1 : 0;
 
 	memcpy_toio(buf, skb->data, skb->len);
 	writel(dsize, desc + 0x0);		/* data_size (+CP_PADDING) */
@@ -2644,6 +2652,13 @@ static bool s5xxx_pktproc_ul_xmit(struct s5xxx_modem *sm, struct sk_buff *skb,
 
 	slot = (slot + 1 == n) ? 0 : slot + 1;
 	sm->ul_done = slot;
+	if (!publish) {
+		/* More skbs queued behind this one: leave fore_ptr alone and let
+		 * the burst's last packet publish them all with one doorbell,
+		 * the way the vendor's tx timer batches. */
+		spin_unlock_irqrestore(&sm->tx_lock, flags);
+		return true;
+	}
 	wmb();				/* descriptor + payload land before fore */
 	writel(slot, qinfo + 12);	/* fore_ptr (AP producer) */
 	spin_unlock_irqrestore(&sm->tx_lock, flags);
@@ -2693,7 +2708,8 @@ static netdev_tx_t s5xxx_ndo_start_xmit(struct sk_buff *skb,
 	len = skb->len;
 
 	if (sm->ul_active &&
-	    s5xxx_pktproc_ul_xmit(sm, skb, S5XXX_CH_PDP_FIRST + priv->q)) {
+	    s5xxx_pktproc_ul_xmit(sm, skb, S5XXX_CH_PDP_FIRST + priv->q,
+				  !netdev_xmit_more())) {
 		ndev->stats.tx_packets++;
 		ndev->stats.tx_bytes += len;
 	} else {
