@@ -24,6 +24,7 @@
 
 #include "s5p_mfc_common.h"
 #include "s5p_mfc_cmd.h"
+#include "s5p_mfc_dec.h"
 #include "s5p_mfc_intr.h"
 #include "s5p_mfc_pm.h"
 #include "s5p_mfc_debug.h"
@@ -677,6 +678,9 @@ static int s5p_mfc_set_dec_frame_buffer_v6(struct s5p_mfc_ctx *ctx)
 			frame_size, frame_size_ch, frame_size_mv);
 
 	for (i = 0; i < ctx->total_dpb_count; i++) {
+		/* Dynamic DPBs are supplied individually with each frame command. */
+		if (IS_MFCV16_PLUS(dev))
+			break;
 		/* Bank2 */
 		mfc_debug(2, "Luma %d: %zx\n", i,
 					ctx->dst_bufs[i].cookie.raw.luma);
@@ -726,6 +730,11 @@ static int s5p_mfc_set_dec_frame_buffer_v6(struct s5p_mfc_ctx *ctx)
 		return -ENOMEM;
 	}
 
+	if (IS_MFCV16_PLUS(dev)) {
+		ctx->dec_dpb_used = 0;
+		writel(S5P_FIMV_D_OPT_DYNAMIC_DPB_V16,
+		       mfc_regs->d_init_buffer_options);
+	}
 	writel(ctx->inst_no, mfc_regs->instance_id);
 	return s5p_mfc_hw_call(dev->mfc_cmds, cmd_host2risc, dev,
 			S5P_FIMV_CH_INIT_BUFS_V6, NULL);
@@ -1850,7 +1859,22 @@ static int s5p_mfc_decode_one_frame_v6(struct s5p_mfc_ctx *ctx,
 	struct s5p_mfc_dev *dev = ctx->dev;
 	const struct s5p_mfc_regs *mfc_regs = dev->mfc_regs;
 
-	writel(ctx->dec_dst_flag, mfc_regs->d_available_dpb_flag_lower);
+	if (IS_MFCV16_PLUS(dev)) {
+		int index = s5p_mfc_dec_dpb_index(ctx);
+
+		if (index < 0)
+			return index;
+		writel(ctx->dst_bufs[index].cookie.raw.luma,
+		       mfc_regs->d_first_plane_dpb + index * 4);
+		writel(ctx->dst_bufs[index].cookie.raw.chroma,
+		       mfc_regs->d_second_plane_dpb + index * 4);
+		mfc_write(dev, BIT(index), S5P_FIMV_D_DYNAMIC_DPB_FLAG_LOWER_V16);
+		mfc_write(dev, 0, S5P_FIMV_D_DYNAMIC_DPB_FLAG_UPPER_V16);
+		writel(BIT(index), mfc_regs->d_available_dpb_flag_lower);
+		mfc_write(dev, 0, S5P_FIMV_D_AVAILABLE_DPB_FLAG_UPPER_V16);
+	} else {
+		writel(ctx->dec_dst_flag, mfc_regs->d_available_dpb_flag_lower);
+	}
 	writel(ctx->slice_interface & 0x1, mfc_regs->d_slice_if_enable);
 
 	writel(ctx->inst_no, mfc_regs->instance_id);
