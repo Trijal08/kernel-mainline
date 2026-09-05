@@ -173,6 +173,7 @@ struct exynos_pcie {
 	struct exynos_cp_power		*cp_power;
 	/* modem runtime-relink state (downstream establish_link) */
 	bool				cp_phy_off;	/* PHY left powered off by link_down */
+	bool				dump_relink;	/* relink at x1 for the minidump agent (vs x2 for MAIN) */
 	bool				msi_saved;
 	u32				saved_msi_enable;
 	u32				saved_msi_mask;
@@ -718,7 +719,7 @@ static int exynos_pcie_cp_get_gpios(struct exynos_pcie *ep)
 		return dev_err_probe(dev, PTR_ERR(ep->cp_wakeup), "cp-wakeup\n");
 
 	/* Warm-reset the CP into its boot ROM before link training. */
-	return exynos_cp_power_warm_reset(ep->cp_power);
+	return exynos_cp_power_warm_reset(ep->cp_power, false);
 }
 
 static int exynos_pcie_probe(struct platform_device *pdev)
@@ -1210,11 +1211,19 @@ int zumapro_pcie_modem_link_up(struct device *rc_dev)
 	gpiod_set_value_cansleep(ep->cp_wakeup, 1);
 
 	/*
-	 * The post-PBL CP endpoint is 2-lane and gates its IPC start on a Gen3 x2
-	 * link, so re-link at x2/Gen3 -- dw_pcie_setup_rc() arms the directed speed
-	 * change, so training completes at Gen1 and upshifts.
+	 * Normal-boot post-bootloader CP endpoint negotiates Gen3 x2, so re-link
+	 * at x2/Gen3 -- dw_pcie_setup_rc() arms the directed speed change, so
+	 * training completes at Gen1 and upshifts.  The minidump agent (dump_relink)
+	 * endpoint is Gen3 x1 -- CONFIRMED on device 2026-08-29 by reading EP
+	 * config space at boot_stage DONE (LNKSTA 0x1013 -> CLS 3 NLW 1), so relink
+	 * at x1 to match it.  NB the x1/x2 choice is NOT what blocks the dump
+	 * relink: at x1 (matching the EP) it still parks in Polling (ltssm 0x3),
+	 * because the post-PBL minidump EP does not drive its PHY for retraining
+	 * after a link_down even though it raises CP2AP_WAKEUP -- a CP-firmware
+	 * state, not an RC/geometry fault (the same link_up trains the normal-boot
+	 * and dump-reset bounces).
 	 */
-	pci->num_lanes = 2;
+	pci->num_lanes = ep->dump_relink ? 1 : 2;
 	pci->max_link_speed = 3;
 
 	/*
@@ -2056,14 +2065,17 @@ int zumapro_pcie_modem_power_cycle(struct device *rc_dev)
 }
 EXPORT_SYMBOL_GPL(zumapro_pcie_modem_power_cycle);
 
-int zumapro_pcie_modem_reset(struct device *rc_dev)
+static int zumapro_pcie_modem_reset_mode(struct device *rc_dev, bool dump)
 {
 	struct exynos_pcie *ep = zumapro_pcie_from_dev(rc_dev);
 
 	if (!ep || !ep->cp_power)
 		return -ENODEV;
 
-	exynos_cp_power_warm_reset(ep->cp_power);
+	/* Dump relink stays at the CP's x1 (see modem_link_up); normal boot is x2. */
+	ep->dump_relink = dump;
+
+	exynos_cp_power_warm_reset(ep->cp_power, dump);
 
 	/*
 	 * If the previous modem instance parked the link (link_down: PHY off,
@@ -2080,7 +2092,23 @@ int zumapro_pcie_modem_reset(struct device *rc_dev)
 	}
 	return zumapro_pcie_modem_link_up(rc_dev);
 }
+
+int zumapro_pcie_modem_reset(struct device *rc_dev)
+{
+	return zumapro_pcie_modem_reset_mode(rc_dev, false);
+}
 EXPORT_SYMBOL_GPL(zumapro_pcie_modem_reset);
+
+/*
+ * Same warm reset, but with AP2CP_DUMP_NOTI latched so the ROM boots its
+ * minidump agent: the caller then re-runs the PBL download and reads the
+ * decoded crash record out of srinfo.
+ */
+int zumapro_pcie_modem_dump_reset(struct device *rc_dev)
+{
+	return zumapro_pcie_modem_reset_mode(rc_dev, true);
+}
+EXPORT_SYMBOL_GPL(zumapro_pcie_modem_dump_reset);
 
 static struct platform_driver exynos_pcie_driver = {
 	.probe		= exynos_pcie_probe,
