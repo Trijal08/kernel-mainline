@@ -205,12 +205,13 @@ static void exynos_cp_power_pmic_warm_reset_seq(struct exynos_cp_power *cp)
 	dev_info(dev, "CP PMIC warm reset sequence completed\n");
 }
 
-int exynos_cp_power_warm_reset(struct exynos_cp_power *cp)
+int exynos_cp_power_warm_reset(struct exynos_cp_power *cp, bool dump)
 {
 	struct device *dev = cp->dev;
 	int val = -1, i;
 
-	dev_info(dev, "warm-resetting the CP (modem) endpoint\n");
+	dev_info(dev, "warm-resetting the CP (modem) endpoint%s\n",
+		 dump ? " into dump mode" : "");
 
 	exynos_cp_power_setup_spmi(cp);
 
@@ -222,8 +223,14 @@ int exynos_cp_power_warm_reset(struct exynos_cp_power *cp)
 	 */
 	gpiod_direction_output(cp->cp_pwr, 1);
 	gpiod_direction_output(cp->cp_nreset, 1);
+	/*
+	 * AP2CP_DUMP_NOTI latched across the reset is what makes the ROM start
+	 * its minidump agent instead of a normal boot (downstream
+	 * power_reset_dump_cp): the agent decodes the CP's encoded crash record
+	 * into srinfo as ASCII, which is the only way to read the assert reason.
+	 */
 	if (cp->cp_dump_noti)
-		gpiod_direction_output(cp->cp_dump_noti, 0);	/* not a dump boot */
+		gpiod_direction_output(cp->cp_dump_noti, dump);
 	/* The caller (RC) drives AP2CP_WAKEUP low before this; it is a link signal. */
 
 	/*

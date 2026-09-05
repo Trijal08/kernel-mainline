@@ -3555,6 +3555,8 @@ static INLINE bool dhd_check_del_in_progress(dhd_pub_t *dhdp, uint8 ifindex)
 
 /* Watchdog timer interval */
 extern uint dhd_watchdog_ms;
+/* DPC poll interval in ms, 0 = off. See bcmdhd-dpc-poll.patch. */
+extern uint dhd_dpc_poll_ms;
 #ifdef DHD_PCIE_RUNTIMEPM
 extern uint dhd_runtimepm_ms;
 #endif /* DHD_PCIE_RUNTIMEPM */
