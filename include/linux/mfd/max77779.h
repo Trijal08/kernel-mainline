@@ -59,41 +59,62 @@
 #define MAX77779_MAXQ_REG_AP_DATAIN0            0xb1
 #define MAX77779_MAXQ_REG_UIC_SWRST             0xe0
 
+/*
+ * Charger block register map. NOTE: despite the shared register *names*, the
+ * MAX77779 addresses are NOT those of the MAX77759 -- the whole block is
+ * shifted (CHG_CNFG_00 is 0xbc, not 0xb9) and there is an extra
+ * CHG_DETAILS_04. Using the MAX77759 offsets aims every config write at the
+ * wrong register and the mode writes at read-only status registers.
+ */
 #define MAX77779_CHGR_REG_CHG_INT               0xb0
 #define MAX77779_CHGR_REG_CHG_INT2              0xb1
-#define MAX77779_CHGR_REG_CHG_INT_MASK          0xb2
-#define MAX77779_CHGR_REG_CHG_INT2_MASK         0xb3
-#define MAX77779_CHGR_REG_CHG_INT_OK            0xb4
-#define MAX77779_CHGR_REG_CHG_DETAILS_00        0xb5
-#define MAX77779_CHGR_REG_CHG_DETAILS_01        0xb6
-#define MAX77779_CHGR_REG_CHG_DETAILS_02        0xb7
-#define MAX77779_CHGR_REG_CHG_DETAILS_03        0xb8
-#define MAX77779_CHGR_REG_CHG_CNFG_00           0xb9
+#define MAX77779_CHGR_REG_CHG_INT_MASK          0xb3
+#define MAX77779_CHGR_REG_CHG_INT2_MASK         0xb4
+#define MAX77779_CHGR_REG_CHG_INT_OK            0xb6
+#define   MAX77779_CHGR_REG_CHG_INT_OK_CHG      BIT(4)
+#define   MAX77779_CHGR_REG_CHG_INT_OK_CHGIN    BIT(6)
+#define MAX77779_CHGR_REG_CHG_DETAILS_00        0xb7
+#define   MAX77779_CHGR_REG_CHG_DETAILS_00_CHGIN_DTLS  GENMASK(6, 5)
+#define MAX77779_CHGR_REG_CHG_DETAILS_01        0xb8
+#define   MAX77779_CHGR_REG_CHG_DETAILS_01_CHG_DTLS    GENMASK(3, 0)
+#define   MAX77779_CHGR_REG_CHG_DETAILS_01_BAT_DTLS    GENMASK(6, 4)
+#define MAX77779_CHGR_REG_CHG_DETAILS_02        0xb9
+#define   MAX77779_CHGR_REG_CHG_DETAILS_02_CHGIN_STS   BIT(5)
+#define MAX77779_CHGR_REG_CHG_DETAILS_03        0xba
+#define MAX77779_CHGR_REG_CHG_DETAILS_04        0xbb
+#define MAX77779_CHGR_REG_CHG_CNFG_00           0xbc
 #define   MAX77779_CHGR_REG_CHG_CNFG_00_MODE    GENMASK(3, 0)
-#define MAX77779_CHGR_REG_CHG_CNFG_01           0xba
-#define MAX77779_CHGR_REG_CHG_CNFG_02           0xbb
-#define MAX77779_CHGR_REG_CHG_CNFG_03           0xbc
-#define MAX77779_CHGR_REG_CHG_CNFG_04           0xbd
-#define MAX77779_CHGR_REG_CHG_CNFG_05           0xbe
-#define MAX77779_CHGR_REG_CHG_CNFG_06           0xbf
-#define MAX77779_CHGR_REG_CHG_CNFG_07           0xc0
-#define MAX77779_CHGR_REG_CHG_CNFG_08           0xc1
-#define MAX77779_CHGR_REG_CHG_CNFG_09           0xc2
-#define MAX77779_CHGR_REG_CHG_CNFG_10           0xc3
-#define MAX77779_CHGR_REG_CHG_CNFG_11           0xc4
-#define MAX77779_CHGR_REG_CHG_CNFG_12           0xc5
-#define MAX77779_CHGR_REG_CHG_CNFG_13           0xc6
-#define MAX77779_CHGR_REG_CHG_CNFG_14           0xc7
-#define MAX77779_CHGR_REG_CHG_CNFG_15           0xc8
-#define MAX77779_CHGR_REG_CHG_CNFG_16           0xc9
-#define MAX77779_CHGR_REG_CHG_CNFG_17           0xca
-#define MAX77779_CHGR_REG_CHG_CNFG_18           0xcb
-#define MAX77779_CHGR_REG_CHG_CNFG_19           0xcc
+#define MAX77779_CHGR_REG_CHG_CNFG_01           0xbd
+#define MAX77779_CHGR_REG_CHG_CNFG_02           0xbe
+#define   MAX77779_CHGR_REG_CHG_CNFG_02_CHGCC   GENMASK(5, 0)
+#define MAX77779_CHGR_REG_CHG_CNFG_03           0xbf
+#define MAX77779_CHGR_REG_CHG_CNFG_04           0xc0
+#define   MAX77779_CHGR_REG_CHG_CNFG_04_CHG_CV_PRM     GENMASK(5, 0)
+#define MAX77779_CHGR_REG_CHG_CNFG_05           0xc1
+#define MAX77779_CHGR_REG_CHG_CNFG_06           0xc2
+#define   MAX77779_CHGR_REG_CHG_CNFG_06_CHGPROT GENMASK(3, 2)
+#define MAX77779_CHGR_REG_CHG_CNFG_07           0xc3
+#define MAX77779_CHGR_REG_CHG_CNFG_08           0xc4
+#define MAX77779_CHGR_REG_CHG_CNFG_09           0xc5
+#define   MAX77779_CHGR_REG_CHG_CNFG_09_CHGIN_ILIM     GENMASK(6, 0)
+#define   MAX77779_CHGR_REG_CHG_CNFG_09_NO_AUTOIBUS    BIT(7)
+#define MAX77779_CHGR_REG_CHG_CNFG_10           0xc6
+#define MAX77779_CHGR_REG_CHG_CNFG_11           0xc7
+#define MAX77779_CHGR_REG_CHG_CNFG_12           0xc8
+#define   MAX77779_CHGR_REG_CHG_CNFG_12_CHGINSEL       BIT(5)
+#define   MAX77779_CHGR_REG_CHG_CNFG_12_WCINSEL        BIT(6)
+#define   MAX77779_CHGR_REG_CHG_CNFG_12_CHG_EN         BIT(7)
+#define MAX77779_CHGR_REG_CHG_CNFG_13           0xc9
+#define MAX77779_CHGR_REG_CHG_CNFG_14           0xca
+#define MAX77779_CHGR_REG_CHG_CNFG_15           0xcb
+#define MAX77779_CHGR_REG_CHG_CNFG_16           0xcc
+#define MAX77779_CHGR_REG_CHG_CNFG_17           0xcd
 
 /* Charger MODE field (CHG_CNFG_00.MODE) values */
 enum max77779_chgr_mode {
 	MAX77779_CHGR_MODE_ALL_OFF		= 0x0,
 	MAX77779_CHGR_MODE_BUCK_ON		= 0x4,
+	MAX77779_CHGR_MODE_CHGR_BUCK_ON		= 0x5,
 	MAX77779_CHGR_MODE_BOOST_UNO_ON		= 0x8,
 	MAX77779_CHGR_MODE_BOOST_ON		= 0x9,
 	MAX77779_CHGR_MODE_OTG_BOOST_ON		= 0xa,
