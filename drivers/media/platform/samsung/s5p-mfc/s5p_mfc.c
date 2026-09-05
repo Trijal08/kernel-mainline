@@ -625,6 +625,9 @@ static void s5p_mfc_handle_seq_done(struct s5p_mfc_ctx *ctx,
 				ctx->head_processed = 0;
 			else
 				ctx->head_processed = 1;
+		} else if (IS_MFCV16_PLUS(dev) && ctx->codec_mode == S5P_MFC_CODEC_VP8_DEC) {
+			/* The sequence header is part of the first VP8 frame. */
+			ctx->head_processed = 0;
 		} else {
 			ctx->head_processed = 1;
 		}

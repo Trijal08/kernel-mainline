@@ -507,9 +507,11 @@ static void s5p_mfc_dec_calc_dpb_size_v6(struct s5p_mfc_ctx *ctx)
 		if (ctx->codec_mode == S5P_MFC_CODEC_HEVC_DEC)
 			ctx->mv_size = ALIGN(s5p_mfc_dec_hevc_mv_size(ctx->img_width,
 								   ctx->img_height), 32);
-		else
+		else if (ctx->codec_mode == S5P_MFC_CODEC_H264_DEC)
 			ctx->mv_size = ALIGN(S5P_MFC_DEC_MV_SIZE(ctx->img_width,
 							     ctx->img_height, 1024), 32);
+		else
+			ctx->mv_size = 0;
 		return;
 	}
 
