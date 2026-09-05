@@ -30,6 +30,7 @@
 #define S5P_FIMV_ENC_PROFILE_H264_BASELINE_V16	0
 #define S5P_FIMV_ENC_PROFILE_H264_MAIN_V16		1
 #define S5P_FIMV_ENC_PROFILE_H264_HIGH_V16		2
+#define S5P_FIMV_E_VPX_IVF_HEADER_DISABLE_V16	BIT(12)
 
 /* The RISC maps its registers above this firmware-relative memory window. */
 #define MFC_V16_MEM_WINDOW_SIZE			0xf0000000ULL
