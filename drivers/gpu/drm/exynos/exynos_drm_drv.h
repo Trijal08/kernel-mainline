@@ -13,6 +13,7 @@
 
 #include <linux/module.h>
 
+#include <drm/display/drm_dsc.h>
 #include <drm/drm_crtc.h>
 #include <drm/drm_device.h>
 #include <drm/drm_plane.h>
@@ -171,6 +172,8 @@ struct exynos_drm_crtc {
 	const struct exynos_drm_crtc_ops	*ops;
 	void				*ctx;
 	struct exynos_drm_clk		*pipe_clk;
+	/* the attached panel's DSC config, NULL when the link is uncompressed */
+	const struct drm_dsc_config	*dsc;
 	bool				i80_mode : 1;
 };
 
@@ -250,6 +253,8 @@ static inline int exynos_drm_check_fimc_device(struct device *dev)
 
 extern struct platform_driver dpp_driver;
 extern struct platform_driver dpu_dma_driver;
+/* Stops the bootloader's DECON0; must run before dpu_dma is registered. */
+void dpu_dma_quiesce_boot_decon(void);
 extern struct platform_driver fimd_driver;
 extern struct platform_driver exynos5433_decon_driver;
 extern struct platform_driver decon_driver;
