@@ -58,25 +58,78 @@
 	aoc-board-rev = <0x10000>;
 };
 
-&decon_autorefresh_bit {
+// &decon_autorefresh_bit {
+// 	status = "okay";
+// };
+//
+// &cont_splash_mem {
+// 	// reg = <0x0 0xfac00000 (1440 * 3120 * 4)>;
+// 	reg = <0x0 0xfac00000 (1280 * 2856 * 4)>;
+//
+// 	status = "okay";
+// };
+//
+// &framebuffer0 {
+// 	// width = <1440>;
+// 	// height = <3120>;
+// 	// stride = <(1440 * 4)>;
+// 	width = <1280>;
+// 	height = <2856>;
+// 	stride = <(1280 * 4)>;
+// 	format = "a8r8g8b8";
+//
+// 	status = "okay";
+// };
+
+/*
+ * Display (DPU) bring-up for caiman.
+ *
+ * The DECON0/DPP/DPU-DMA/DSIM0 topology is defined in zumapro.dtsi; this
+ * board section enables it and attaches the caiman (google,gs-km4) panel via
+ * a minimal boot-handoff panel driver (google,caiman-panel).
+ *
+ * The bootloader initialises the DCPHY, DSIM link and panel and leaves the
+ * (dual-DSC, command-mode) link streaming - that is what the simple-
+ * framebuffer splash draws into. The DECON DRM stack takes over scanning its
+ * own framebuffer into that running link (the DECON emits the matching
+ * dual-DSC stream). Disable the simple-framebuffer (and the decon-autorefresh
+ * mmio-init) before relying on the DECON output, since enabling decon0 runs
+ * decon_reset() and tears the bootloader splash down.
+ */
+&decon0 {
 	status = "okay";
 };
 
-&cont_splash_mem {
-	// reg = <0x0 0xfac00000 (1440 * 3120 * 4)>;
-	reg = <0x0 0xfac00000 (1280 * 2856 * 4)>;
-
+&dpu_dma {
 	status = "okay";
 };
 
-&framebuffer0 {
-	// width = <1440>;
-	// height = <3120>;
-	// stride = <(1440 * 4)>;
-	width = <1280>;
-	height = <2856>;
-	stride = <(1280 * 4)>;
-	format = "a8r8g8b8";
-
+&dpp0 {
 	status = "okay";
+};
+
+&dsim0 {
+	status = "okay";
+
+	panel0: panel@0 {
+		compatible = "google,caiman-panel";
+		reg = <0>;
+		/* DDIC reset for cold power-on (unused on boot handover) */
+		reset-gpios = <&gpp0 0 GPIO_ACTIVE_HIGH>;
+
+		port {
+			panel0_in: endpoint {
+				remote-endpoint = <&dsim0_out>;
+			};
+		};
+	};
+
+	ports {
+		port@1 {
+			reg = <1>;
+			dsim0_out: endpoint {
+				remote-endpoint = <&panel0_in>;
+			};
+		};
+	};
 };
