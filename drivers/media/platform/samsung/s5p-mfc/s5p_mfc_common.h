@@ -593,6 +593,7 @@ struct s5p_mfc_codec_ops {
  * @dst_bufs_cnt:	number of allocated destination buffers
  * @sequence:		counter for the sequence number for v4l2
  * @dec_dst_flag:	flags for buffers queued in the hardware
+ * @dec_dpb_used:	bitmap of dynamic DPBs retained by the firmware
  * @dec_src_buf_size:	size of the buffer for source buffers in decoding
  * @codec_mode:		number of codec mode used by MFC hw
  * @slice_interface:	slice interface flag
@@ -687,6 +688,7 @@ struct s5p_mfc_ctx {
 
 	unsigned int sequence;
 	unsigned long dec_dst_flag;
+	u32 dec_dpb_used;
 	size_t dec_src_buf_size;
 
 	/* Control values */

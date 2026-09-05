@@ -255,20 +255,39 @@ static struct mfc_control controls[] = {
 
 #define NUM_CTRLS ARRAY_SIZE(controls)
 
+/* MMAP keeps each DPB's DMA mapping stable until the queue is freed. */
+int s5p_mfc_dec_dpb_index(struct s5p_mfc_ctx *ctx)
+{
+	u32 queued = READ_ONCE(ctx->dec_dst_flag);
+	u32 used = READ_ONCE(ctx->dec_dpb_used);
+	u32 available = queued & ~used;
+
+	if (available)
+		return __ffs(available);
+	/* A full reference set needs a display-only command to release DPBs. */
+	if (queued && hweight32(used) == ctx->pb_count + MFC_MAX_EXTRA_DPB)
+		return __ffs(queued);
+	return -EAGAIN;
+}
+
 /* Check whether a context should be run on hardware */
 static int s5p_mfc_ctx_ready(struct s5p_mfc_ctx *ctx)
 {
+	bool dpb_ready = IS_MFCV16_PLUS(ctx->dev) ?
+		s5p_mfc_dec_dpb_index(ctx) >= 0 :
+		ctx->dst_queue_cnt >= ctx->pb_count;
+
 	/* Context is to parse header */
 	if (ctx->src_queue_cnt >= 1 && ctx->state == MFCINST_GOT_INST)
 		return 1;
 	/* Context is to decode a frame */
 	if (ctx->src_queue_cnt >= 1 &&
 	    ctx->state == MFCINST_RUNNING &&
-	    ctx->dst_queue_cnt >= ctx->pb_count)
+	    dpb_ready)
 		return 1;
 	/* Context is to return last frame */
 	if (ctx->state == MFCINST_FINISHING &&
-	    ctx->dst_queue_cnt >= ctx->pb_count)
+	    dpb_ready)
 		return 1;
 	/* Context is to set buffers */
 	if (ctx->src_queue_cnt >= 1 &&
@@ -278,7 +297,7 @@ static int s5p_mfc_ctx_ready(struct s5p_mfc_ctx *ctx)
 	/* Resolution change */
 	if ((ctx->state == MFCINST_RES_CHANGE_INIT ||
 		ctx->state == MFCINST_RES_CHANGE_FLUSH) &&
-		ctx->dst_queue_cnt >= ctx->pb_count)
+		dpb_ready)
 		return 1;
 	if (ctx->state == MFCINST_RES_CHANGE_END &&
 		ctx->src_queue_cnt >= 1)
