@@ -58,10 +58,14 @@ int s5p_mfc_alloc_priv_buf(struct s5p_mfc_dev *dev, unsigned int mem_ctx,
 		b->virt = dma_alloc_coherent(mem_dev, b->size, &b->dma, GFP_KERNEL);
 		if (!b->virt)
 			goto no_mem;
-		if (b->dma < base) {
+		if (b->dma < base ||
+		    (b != &dev->fw_buf && !s5p_mfc_dma_addr_valid(dev, b->dma))) {
 			mfc_err("Invalid memory configuration - buffer (%pad) is below base memory address(%pad)\n",
 				&b->dma, &base);
 			dma_free_coherent(mem_dev, b->size, b->virt, b->dma);
+			b->virt = NULL;
+			b->dma = 0;
+			b->size = 0;
 			return -ENOMEM;
 		}
 	}
@@ -84,6 +88,15 @@ int s5p_mfc_alloc_generic_buf(struct s5p_mfc_dev *dev, unsigned int mem_ctx,
 	b->virt = dma_alloc_coherent(mem_dev, b->size, &b->dma, GFP_KERNEL);
 	if (!b->virt)
 		goto no_mem;
+
+	if (!s5p_mfc_dma_addr_valid(dev, b->dma)) {
+		mfc_err("Buffer %pad is below the firmware allocation\n", &b->dma);
+		dma_free_coherent(mem_dev, b->size, b->virt, b->dma);
+		b->virt = NULL;
+		b->dma = 0;
+		b->size = 0;
+		return -ENOMEM;
+	}
 
 	mfc_debug(3, "Allocated addr %p %pad\n", b->virt, &b->dma);
 	return 0;
