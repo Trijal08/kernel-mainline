@@ -22,6 +22,7 @@
 #include <linux/iopoll.h>
 #include <linux/math64.h>
 #include <linux/mfd/syscon.h>
+#include <linux/module.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
@@ -41,12 +42,24 @@
 /* fallback refresh rate until the first mode_set (any sane value works) */
 #define DSIM_DEFAULT_VREFRESH	60
 
+static bool dsim_pkt_go;
+module_param_named(pkt_go, dsim_pkt_go, bool, 0644);
+MODULE_PARM_DESC(pkt_go, "release commands with the PKT_GO handshake");
+
+static bool dsim_te_cmd_allow;
+module_param_named(te_cmd_allow, dsim_te_cmd_allow, bool, 0644);
+MODULE_PARM_DESC(te_cmd_allow,
+		 "gate command transfers on the panel TE window (jams the FIFO)");
+
 struct zuma_dsim {
 	struct device *dev;
 	struct drm_encoder encoder;
 	struct drm_bridge bridge;
 	struct mipi_dsi_host dsi_host;
 	struct drm_bridge *panel_bridge;
+	struct device *panel_dev;
+	struct delayed_work hotplug_work;
+	unsigned int hotplug_tries;
 	struct clk *bus_clk;
 	void __iomem *regs;		/* "dsi" link registers */
 	void __iomem *phy_regs;		/* "dphy" DCPHY PLL/lane/timing */
@@ -552,6 +565,11 @@ static int zuma_dsim_dphy_enable_lanes(struct zuma_dsim *dsim)
 	return ret;
 }
 
+static int dsim_comp_align = 8;
+module_param_named(comp_align, dsim_comp_align, int, 0644);
+MODULE_PARM_DESC(comp_align,
+		 "pixel alignment of the per-slice compressed width (0 = none)");
+
 /* Program the command-mode + DSC link config (vendor set_config subset) */
 static void zuma_dsim_set_config(struct zuma_dsim *dsim)
 {
@@ -566,7 +584,13 @@ static void zuma_dsim_set_config(struct zuma_dsim *dsim)
 	u32 slice_px = dsc ? DIV_ROUND_UP(slice_w *
 					  dsc->bits_per_component, 8) : 0;
 	u32 comp_w = dsc ? DIV_ROUND_UP(slice_px, 6) * 2 : 0;
-	u32 width = dsc ? comp_w * slice_cnt : dsim->hactive;
+	/*
+	 * Not the DECON's OUTFIFO width: the DSIM carries the compressed bytes
+	 * as RGB24 pixels and needs the per-slice count rounded up to 8, which
+	 * is what the bootloader programs (216/slice where the DECON has 214).
+	 */
+	u32 width = dsc ? roundup(comp_w, dsim_comp_align ?: 1) * slice_cnt :
+			  dsim->hactive;
 
 	dsim_rmw(dsim, DSIM_SFR_CTRL, DSIM_SFR_CTRL_SHADOW_REG_READ_EN,
 		 DSIM_SFR_CTRL_SHADOW_REG_READ_EN);
@@ -579,7 +603,8 @@ static void zuma_dsim_set_config(struct zuma_dsim *dsim)
 	dsim_rmw(dsim, DSIM_ESCMODE,
 		 DSIM_ESCMODE_STOP_STATE_CNT(DSIM_STOP_STATE_CNT),
 		 DSIM_ESCMODE_STOP_STATE_CNT_MASK | DSIM_ESCMODE_CMD_LPDT);
-	dsim_rmw(dsim, DSIM_OPTION_SUITE, DSIM_OPTION_SUITE_OPT_TE_ON_CMD_ALLOW,
+	dsim_rmw(dsim, DSIM_OPTION_SUITE,
+		 dsim_te_cmd_allow ? DSIM_OPTION_SUITE_OPT_TE_ON_CMD_ALLOW : 0,
 		 DSIM_OPTION_SUITE_OPT_TE_ON_CMD_ALLOW);
 
 	writel(DSIM_THRESHOLD_LEVEL(width), dsim->regs + DSIM_THRESHOLD);
@@ -611,7 +636,9 @@ static void zuma_dsim_set_config(struct zuma_dsim *dsim)
 		       DSIM_SLICE01_SIZE_OF_SLICE1(slice_cnt > 1 ? slice_w : 0),
 		       dsim->regs + DSIM_SLICE01);
 	}
-	dsim_rmw(dsim, DSIM_CMD_CONFIG, 0, DSIM_CMD_CONFIG_PKT_GO_EN);
+	dsim_rmw(dsim, DSIM_CMD_CONFIG,
+		 dsim_pkt_go ? DSIM_CMD_CONFIG_PKT_GO_EN : 0,
+		 DSIM_CMD_CONFIG_PKT_GO_EN);
 }
 
 /* Full cold link init (vendor dsim_reg_init): own the DCPHY from scratch. */
@@ -658,7 +685,7 @@ static int zuma_dsim_cold_init(struct zuma_dsim *dsim)
 
 static void zuma_dsim_configure(struct zuma_dsim *dsim)
 {
-	u32 stable_vfp, te_protect, te_tout;
+	u32 stable_vfp, te_protect, te_tout, hs_ready;
 	u32 vrefresh = dsim->vrefresh ? dsim->vrefresh : DSIM_DEFAULT_VREFRESH;
 	u32 hs_mbps = dsim->hs_clk_mbps;
 
@@ -676,7 +703,8 @@ static void zuma_dsim_configure(struct zuma_dsim *dsim)
 	 * and (re)program the stable-VFP / TE protect+timeout. SFR-only, does not
 	 * touch the D-PHY, so the live HS link survives.
 	 */
-	dsim_rmw(dsim, DSIM_OPTION_SUITE, DSIM_OPTION_SUITE_OPT_TE_ON_CMD_ALLOW,
+	dsim_rmw(dsim, DSIM_OPTION_SUITE,
+		 dsim_te_cmd_allow ? DSIM_OPTION_SUITE_OPT_TE_ON_CMD_ALLOW : 0,
 		 DSIM_OPTION_SUITE_OPT_TE_ON_CMD_ALLOW);
 	stable_vfp = dsim->hactive * DSIM_STABLE_VFP_VALUE / 100;
 	/* TE protect/timeout windows scale with the frame period (vrefresh) */
@@ -695,6 +723,12 @@ static void zuma_dsim_configure(struct zuma_dsim *dsim)
 	 */
 	dsim_rmw(dsim, DSIM_CLK_CTRL, DSIM_CLK_CTRL_TX_REQUEST_HSCLK,
 		 DSIM_CLK_CTRL_TX_REQUEST_HSCLK);
+	/* vendor dsim_reg_set_hs_clock() waits for the clock lane here */
+	if (readl_poll_timeout(dsim->regs + DSIM_DPHY_STATUS, hs_ready,
+			       hs_ready & DSIM_DPHY_STATUS_TX_READY_HSCLK,
+			       10, 2000))
+		dev_warn(dsim->dev, "HS clock not ready (DPHY_STATUS 0x%08x)\n",
+			 hs_ready);
 	dsim_rmw(dsim, DSIM_INTMSK, 0,
 		 DSIM_INTMSK_SW_RST_RELEASE | DSIM_INTMSK_SFR_PL_FIFO_EMPTY |
 			 DSIM_INTMSK_SFR_PH_FIFO_EMPTY | DSIM_INTMSK_FRAME_DONE |
@@ -746,6 +780,31 @@ static const struct drm_bridge_funcs zuma_dsim_bridge_funcs = {
 /* mipi_dsi_host							      */
 /* ------------------------------------------------------------------ */
 
+/*
+ * The modeset this kicks runs the panel's enable, so it must not run until the
+ * panel driver's probe (which called mipi_dsi_attach()) has returned - a
+ * half-probed panel times out every command it sends.
+ */
+#define DSIM_HOTPLUG_MAX_TRIES	50
+
+static void zuma_dsim_hotplug_work(struct work_struct *work)
+{
+	struct zuma_dsim *dsim = container_of(to_delayed_work(work),
+					      struct zuma_dsim, hotplug_work);
+
+	if (dsim->panel_dev && !device_is_bound(dsim->panel_dev)) {
+		if (++dsim->hotplug_tries < DSIM_HOTPLUG_MAX_TRIES) {
+			schedule_delayed_work(&dsim->hotplug_work,
+					      msecs_to_jiffies(20));
+			return;
+		}
+		dev_warn(dsim->dev, "panel not bound, forcing hotplug\n");
+	}
+
+	if (dsim->encoder.dev)
+		drm_kms_helper_hotplug_event(dsim->encoder.dev);
+}
+
 static int zuma_dsim_host_attach(struct mipi_dsi_host *host,
 				 struct mipi_dsi_device *device)
 {
@@ -769,8 +828,24 @@ static int zuma_dsim_host_attach(struct mipi_dsi_host *host,
 
 	crtc = exynos_drm_crtc_get_by_type(dsim->encoder.dev,
 					   EXYNOS_DISPLAY_TYPE_LCD);
-	if (!IS_ERR(crtc))
+	if (!IS_ERR(crtc)) {
 		crtc->i80_mode = !(dsim->mode_flags & MIPI_DSI_MODE_VIDEO);
+		crtc->dsc = dsim->dsc;
+	}
+
+	/*
+	 * Cold modprobe: the panel attaches after drm_dev_register(), so the
+	 * fbdev client has already given up with "Cannot find any crtc or
+	 * sizes". Now that there is a connector with modes, kick it once the
+	 * panel has finished probing. On the reload path the device is not
+	 * registered yet and the normal initial config covers it.
+	 */
+	dsim->panel_dev = &device->dev;
+	if (dsim->encoder.dev && dsim->encoder.dev->registered) {
+		dsim->hotplug_tries = 0;
+		schedule_delayed_work(&dsim->hotplug_work,
+				      msecs_to_jiffies(20));
+	}
 
 	return 0;
 }
@@ -778,6 +853,7 @@ static int zuma_dsim_host_attach(struct mipi_dsi_host *host,
 static int zuma_dsim_host_detach(struct mipi_dsi_host *host,
 				 struct mipi_dsi_device *device)
 {
+	cancel_delayed_work_sync(&host_to_dsim(host)->hotplug_work);
 	return 0;
 }
 
@@ -834,6 +910,14 @@ static ssize_t zuma_dsim_host_transfer(struct mipi_dsi_host *host,
 		       DSIM_PKTHDR_DATA1(packet.header[2]),
 	       dsim->regs + DSIM_PKTHDR);
 
+	/*
+	 * With the DECON streaming, the header only leaves the FIFO once the
+	 * link opens a command window; the vendor releases it with PKT_GO.
+	 */
+	if (dsim_pkt_go)
+		dsim_rmw(dsim, DSIM_CMD_CONFIG, DSIM_CMD_CONFIG_PKT_GO_RDY,
+			 DSIM_CMD_CONFIG_PKT_GO_RDY);
+
 	/* wait for the header (and payload) FIFO to drain */
 	mask = DSIM_FIFOCTRL_EMPTY_PH_SFR;
 	if (packet.payload_length)
@@ -841,8 +925,15 @@ static ssize_t zuma_dsim_host_transfer(struct mipi_dsi_host *host,
 	ret = readl_poll_timeout_atomic(dsim->regs + DSIM_FIFOCTRL, val,
 					(val & mask) == mask, 10, 20000);
 	if (ret) {
-		dev_warn(dsim->dev, "cmd tx timeout (type 0x%02x, FIFOCTRL=0x%08x)\n",
-			 msg->type, val);
+		dev_warn(dsim->dev,
+			 "cmd tx timeout (type 0x%02x, FIFOCTRL=0x%08x) dphy_status 0x%08x clk_ctrl 0x%08x escmode 0x%08x cmd_config 0x%08x option_suite 0x%08x intsrc 0x%08x\n",
+			 msg->type, val,
+			 readl(dsim->regs + DSIM_DPHY_STATUS),
+			 readl(dsim->regs + DSIM_CLK_CTRL),
+			 readl(dsim->regs + DSIM_ESCMODE),
+			 readl(dsim->regs + DSIM_CMD_CONFIG),
+			 readl(dsim->regs + DSIM_OPTION_SUITE),
+			 readl(dsim->regs + DSIM_INTSRC));
 		return ret;
 	}
 
@@ -900,6 +991,7 @@ static int zuma_dsim_probe(struct platform_device *pdev)
 		return PTR_ERR(dsim);
 
 	dsim->dev = dev;
+	INIT_DELAYED_WORK(&dsim->hotplug_work, zuma_dsim_hotplug_work);
 
 	dsim->regs = devm_platform_ioremap_resource_byname(pdev, "dsi");
 	if (IS_ERR(dsim->regs))

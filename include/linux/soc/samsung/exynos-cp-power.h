@@ -8,6 +8,7 @@
 #define __LINUX_SOC_SAMSUNG_EXYNOS_CP_POWER_H
 
 #include <linux/err.h>
+#include <linux/types.h>
 
 struct device;
 struct exynos_cp_power;
@@ -19,8 +20,12 @@ struct exynos_cp_power;
  */
 struct exynos_cp_power *exynos_cp_power_get(struct device *consumer);
 
-/* Warm-reset the CP into its boot ROM (rails + PMIC/DCXO patch); MAIN survives. */
-int exynos_cp_power_warm_reset(struct exynos_cp_power *cp);
+/*
+ * Warm-reset the CP into its boot ROM (rails + PMIC/DCXO patch); MAIN survives.
+ * @dump latches AP2CP_DUMP_NOTI across the reset so the ROM starts its minidump
+ * agent, which decodes the CP's crash record into srinfo as ASCII.
+ */
+int exynos_cp_power_warm_reset(struct exynos_cp_power *cp, bool dump);
 
 /* Full cold power cycle of the CP rails (GPIO half; wipes the CP's DRAM). */
 int exynos_cp_power_cold_cycle(struct exynos_cp_power *cp);
@@ -30,7 +35,8 @@ static inline struct exynos_cp_power *exynos_cp_power_get(struct device *consume
 	return ERR_PTR(-ENODEV);
 }
 
-static inline int exynos_cp_power_warm_reset(struct exynos_cp_power *cp)
+static inline int exynos_cp_power_warm_reset(struct exynos_cp_power *cp,
+					     bool dump)
 {
 	return -ENODEV;
 }
