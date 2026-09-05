@@ -250,6 +250,8 @@ static inline int exynos_drm_check_fimc_device(struct device *dev)
 
 extern struct platform_driver dpp_driver;
 extern struct platform_driver dpu_dma_driver;
+/* Stops the bootloader's DECON0; must run before dpu_dma is registered. */
+void dpu_dma_quiesce_boot_decon(void);
 extern struct platform_driver fimd_driver;
 extern struct platform_driver exynos5433_decon_driver;
 extern struct platform_driver decon_driver;
