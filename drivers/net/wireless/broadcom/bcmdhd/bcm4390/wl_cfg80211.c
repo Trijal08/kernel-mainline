@@ -199,6 +199,28 @@ u32 wl_dbg_level = WL_DBG_ERR | WL_DBG_P2P_ACTION | WL_DBG_INFO;
 u32 wl_log_level = WL_DBG_ERR | WL_DBG_P2P_ACTION | WL_DBG_INFO;
 #endif /* DHD_DEBUG */
 
+#include <linux/stdarg.h>
+
+/* Callers are inconsistent about a trailing newline; an unterminated printk is
+ * buffered as a partial line and never reaches dmesg. */
+void
+wl_dbg_printk(const char *prefix, const char *func, const char *fmt, ...)
+{
+	char buf[256];
+	va_list ap;
+	int len;
+
+	va_start(ap, fmt);
+	len = vscnprintf(buf, sizeof(buf), fmt, ap);
+	va_end(ap);
+
+	while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r')) {
+		buf[--len] = '\0';
+	}
+
+	printk(KERN_ERR "%s%s : %s\n", prefix, func, buf);
+}
+
 #define MAX_WAIT_TIME 1500
 #ifdef WLAIBSS_MCHAN
 #define IBSS_IF_NAME "ibss%d"
