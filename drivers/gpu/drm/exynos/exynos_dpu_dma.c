@@ -3,6 +3,8 @@
 #include <linux/bits.h>
 #include <linux/clk.h>
 #include <linux/component.h>
+#include <linux/io.h>
+#include <linux/iopoll.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
@@ -365,6 +367,99 @@ static int dma_bind(struct device *dev, struct device *master, void *data)
 static const struct component_ops dma_component_ops = {
 	.bind = dma_bind,
 };
+
+/* DECON0 GLOBAL_CON, see regs-decon-zuma.h. */
+#define QUIESCE_DECON0_MAIN	0x19470000
+#define QUIESCE_GLOBAL_CON	0x0020
+#define QUIESCE_DECON_EN_F	BIT(0)
+#define QUIESCE_DECON_EN	BIT(1)
+#define QUIESCE_RUN_STATUS	BIT(4)
+#define QUIESCE_IDLE_STATUS	BIT(5)
+#define QUIESCE_SRESET		BIT(28)
+
+static bool quiesce_boot_decon = true;
+module_param(quiesce_boot_decon, bool, 0444);
+MODULE_PARM_DESC(quiesce_boot_decon,
+		 "stop the bootloader's DECON before powering the DPU SysMMU");
+
+/*
+ * The bootloader hands the panel over with DECON0 still fetching, and enabling
+ * SysMMU translation under a live DMA master resets the SoC. Stop the fetch
+ * first. Done with a bare mapping rather than through the DECON driver, which
+ * probes later and does not own the hardware until it binds.
+ *
+ * Called from exynos_drm_init(), NOT from dpu_dma_probe(): the "iommus" link
+ * makes the SysMMU a supplier of this device, so really_probe() runs
+ * pm_runtime_get_suppliers() -- and with it __sysmmu_enable() -- before .probe
+ * is entered. Quiescing inside the probe is 100ms too late, which is exactly
+ * what the first version of this patch did.
+ */
+void dpu_dma_quiesce_boot_decon(void)
+{
+	void __iomem *main;
+	u32 val;
+	int ret;
+
+	if (!quiesce_boot_decon)
+		return;
+
+	main = ioremap(QUIESCE_DECON0_MAIN, 0x100);
+	if (!main) {
+		pr_warn("exynos-dpu: quiesce: cannot map DECON0\n");
+		return;
+	}
+
+	val = readl(main + QUIESCE_GLOBAL_CON);
+	if (!(val & QUIESCE_RUN_STATUS)) {
+		pr_info("exynos-dpu: quiesce: DECON0 already idle (%#x)\n", val);
+		goto out;
+	}
+
+	/*
+	 * DECON_EN_F is the per-frame off: it retires at the next frame
+	 * boundary, and in command mode that boundary needs a TE trigger the
+	 * self-refreshing DDIC is not sending. Clearing it alone leaves
+	 * GLOBAL_CON at 0x132 -- DECON_EN still set, RUN_STATUS still set --
+	 * which is what let the fetch run into the SysMMU enable.
+	 */
+	writel(val & ~(QUIESCE_DECON_EN_F | QUIESCE_DECON_EN),
+	       main + QUIESCE_GLOBAL_CON);
+
+	ret = readl_poll_timeout(main + QUIESCE_GLOBAL_CON, val,
+				 !(val & QUIESCE_RUN_STATUS), 100, 100000);
+	if (!ret) {
+		pr_info("exynos-dpu: quiesce: DECON0 stopped (%#x)\n", val);
+		goto out;
+	}
+
+	pr_warn("exynos-dpu: quiesce: DECON0 still running (%#x), SRESET\n", val);
+
+	/*
+	 * Only SRESET between frames. Resetting mid-frame -- IDLE_STATUS clear,
+	 * GLOBAL_CON 0x110 -- jams the DSIM: every DCS command to the DDIC then
+	 * times out (62 of them) and the panel stays dark. 0x130, idle, is the
+	 * state that hands over cleanly. Measured over six boots, the bit
+	 * predicted the outcome exactly.
+	 */
+	ret = readl_poll_timeout(main + QUIESCE_GLOBAL_CON, val,
+				 val & QUIESCE_IDLE_STATUS, 100, 100000);
+	if (ret)
+		pr_warn("exynos-dpu: quiesce: DECON0 never idle (%#x), SRESET anyway\n",
+			val);
+	else
+		pr_info("exynos-dpu: quiesce: DECON0 idle (%#x)\n", val);
+
+	writel(val | QUIESCE_SRESET, main + QUIESCE_GLOBAL_CON);
+	ret = readl_poll_timeout(main + QUIESCE_GLOBAL_CON, val,
+				 !(val & (QUIESCE_SRESET | QUIESCE_RUN_STATUS)),
+				 100, 100000);
+	if (ret)
+		pr_warn("exynos-dpu: quiesce: SRESET did not settle (%#x)\n", val);
+	else
+		pr_info("exynos-dpu: quiesce: DECON0 reset (%#x)\n", val);
+out:
+	iounmap(main);
+}
 
 static int dpu_dma_probe(struct platform_device *pdev)
 {
