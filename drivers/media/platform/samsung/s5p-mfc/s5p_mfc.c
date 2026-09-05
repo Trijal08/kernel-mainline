@@ -307,7 +307,8 @@ static void s5p_mfc_handle_frame_copy_time(struct s5p_mfc_ctx *ctx)
 
 	/* Make sure we actually have a new frame before continuing. */
 	frame_type = s5p_mfc_hw_call(dev->mfc_ops, get_dec_frame_type, dev);
-	if (frame_type == S5P_FIMV_DECODE_FRAME_SKIPPED)
+	if (frame_type == S5P_FIMV_DECODE_FRAME_SKIPPED &&
+	    !s5p_mfc_dec_copy_not_coded(ctx))
 		return;
 	dec_y_addr = (u32)s5p_mfc_hw_call(dev->mfc_ops, get_dec_y_adr, dev);
 
@@ -329,6 +330,9 @@ static void s5p_mfc_handle_frame_copy_time(struct s5p_mfc_ctx *ctx)
 				src_buf->b->flags
 				& V4L2_BUF_FLAG_TSTAMP_SRC_MASK;
 			switch (frame_type) {
+			case S5P_FIMV_DECODE_FRAME_SKIPPED:
+				/* Firmware copied a reference for a non-coded picture. */
+				break;
 			case S5P_FIMV_DECODE_FRAME_I_FRAME:
 				dst_buf->b->flags |=
 						V4L2_BUF_FLAG_KEYFRAME;
@@ -370,7 +374,8 @@ static void s5p_mfc_handle_frame_new(struct s5p_mfc_ctx *ctx, unsigned int err)
 			get_dec_frame_type, dev);
 
 	/* If frame is same as previous then skip and do not dequeue */
-	if (frame_type == S5P_FIMV_DECODE_FRAME_SKIPPED) {
+	if (frame_type == S5P_FIMV_DECODE_FRAME_SKIPPED &&
+	    !s5p_mfc_dec_copy_not_coded(ctx)) {
 		if (!ctx->after_packed_pb)
 			ctx->sequence++;
 		ctx->after_packed_pb = 0;
@@ -421,6 +426,18 @@ static void s5p_mfc_handle_frame(struct s5p_mfc_ctx *ctx,
 	unsigned int dec_frame_status;
 	struct s5p_mfc_buf *src_buf;
 	unsigned int res_change;
+
+	if (IS_MFCV16_PLUS(dev) && ctx->codec_mode == S5P_MFC_CODEC_VP9_DEC &&
+	    (s5p_mfc_hw_call(dev->mfc_ops, get_dspl_status, dev) &
+	     S5P_FIMV_D_STATUS_INTER_RES_CHANGE_V16)) {
+		/* Do not resubmit until the new DPB/scratch requirements are handled. */
+		mfc_err("VP9 interframe buffer resizing is not supported\n");
+		ctx->state = MFCINST_ERROR;
+		vb2_queue_error(&ctx->vq_src);
+		vb2_queue_error(&ctx->vq_dst);
+		clear_work_bit(ctx);
+		goto leave_handle_frame;
+	}
 
 	dst_frame_status = s5p_mfc_hw_call(dev->mfc_ops, get_dspl_status, dev)
 				& S5P_FIMV_DEC_STATUS_DECODING_STATUS_MASK;
@@ -581,7 +598,9 @@ static void s5p_mfc_handle_seq_done(struct s5p_mfc_ctx *ctx,
 		if (ctx->c_ops->post_seq_start(ctx))
 			mfc_err("post_seq_start() failed\n");
 	} else {
-		if (IS_MFCV16_PLUS(dev) && ctx->codec_mode == S5P_MFC_CODEC_HEVC_DEC &&
+		if (IS_MFCV16_PLUS(dev) &&
+		    (ctx->codec_mode == S5P_MFC_CODEC_HEVC_DEC ||
+		     ctx->codec_mode == S5P_MFC_CODEC_VP9_DEC) &&
 		    ((mfc_read(dev, S5P_FIMV_D_DECODED_PICTURE_PROFILE_V16) &
 		      S5P_FIMV_D_BIT_DEPTH_MINUS8_MASK_V16) ||
 		     (mfc_read(dev, S5P_FIMV_D_CHROMA_FORMAT_V16) &
@@ -601,6 +620,10 @@ static void s5p_mfc_handle_seq_done(struct s5p_mfc_ctx *ctx,
 
 		ctx->pb_count = s5p_mfc_hw_call(dev->mfc_ops, get_dpb_count,
 				dev);
+		/* VP9 firmware needs two additional DPBs below its 4K boundary. */
+		if (IS_MFCV16_PLUS(dev) && ctx->codec_mode == S5P_MFC_CODEC_VP9_DEC &&
+		    ctx->img_width * ctx->img_height < 4096 * 2176)
+			ctx->pb_count += 2;
 		ctx->mv_count = s5p_mfc_hw_call(dev->mfc_ops, get_mv_count,
 				dev);
 		if (FW_HAS_E_MIN_SCRATCH_BUF(dev))
@@ -625,8 +648,10 @@ static void s5p_mfc_handle_seq_done(struct s5p_mfc_ctx *ctx,
 				ctx->head_processed = 0;
 			else
 				ctx->head_processed = 1;
-		} else if (IS_MFCV16_PLUS(dev) && ctx->codec_mode == S5P_MFC_CODEC_VP8_DEC) {
-			/* The sequence header is part of the first VP8 frame. */
+		} else if (IS_MFCV16_PLUS(dev) &&
+			   (ctx->codec_mode == S5P_MFC_CODEC_VP8_DEC ||
+			    ctx->codec_mode == S5P_MFC_CODEC_VP9_DEC)) {
+			/* The sequence header is part of the first VP8/VP9 frame. */
 			ctx->head_processed = 0;
 		} else {
 			ctx->head_processed = 1;

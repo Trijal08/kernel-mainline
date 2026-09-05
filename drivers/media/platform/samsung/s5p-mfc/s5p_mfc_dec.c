@@ -169,7 +169,7 @@ static const struct s5p_mfc_fmt formats[] = {
 		.codec_mode	= S5P_FIMV_CODEC_VP9_DEC,
 		.type		= MFC_FMT_DEC,
 		.num_planes	= 1,
-		.versions	= MFC_V10PLUS_BITS,
+		.versions	= MFC_V10PLUS_BITS | MFC_V16_BIT,
 		.flags		= V4L2_FMT_FLAG_DYN_RESOLUTION,
 	},
 };
@@ -254,6 +254,12 @@ static struct mfc_control controls[] = {
 };
 
 #define NUM_CTRLS ARRAY_SIZE(controls)
+
+bool s5p_mfc_dec_copy_not_coded(struct s5p_mfc_ctx *ctx)
+{
+	return IS_MFCV16_PLUS(ctx->dev) &&
+	       ctx->codec_mode == S5P_MFC_CODEC_VP9_DEC;
+}
 
 /* MMAP keeps each DPB's DMA mapping stable until the queue is freed. */
 int s5p_mfc_dec_dpb_index(struct s5p_mfc_ctx *ctx)

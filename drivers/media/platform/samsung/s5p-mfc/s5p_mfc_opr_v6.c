@@ -737,9 +737,14 @@ static int s5p_mfc_set_dec_frame_buffer_v6(struct s5p_mfc_ctx *ctx)
 	}
 
 	if (IS_MFCV16_PLUS(dev)) {
+		u32 options = S5P_FIMV_D_OPT_DYNAMIC_DPB_V16;
+
 		ctx->dec_dpb_used = 0;
-		writel(S5P_FIMV_D_OPT_DYNAMIC_DPB_V16,
-		       mfc_regs->d_init_buffer_options);
+		if (s5p_mfc_dec_copy_not_coded(ctx))
+			options |= S5P_FIMV_D_OPT_COPY_NOT_CODED_V16;
+		if (ctx->codec_mode == S5P_MFC_CODEC_VP9_DEC)
+			options |= S5P_FIMV_D_OPT_VP9_STRIDE_V16;
+		writel(options, mfc_regs->d_init_buffer_options);
 	}
 	writel(ctx->inst_no, mfc_regs->instance_id);
 	return s5p_mfc_hw_call(dev->mfc_cmds, cmd_host2risc, dev,
