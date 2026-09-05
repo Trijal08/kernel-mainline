@@ -106,7 +106,7 @@ static const struct s5p_mfc_fmt formats[] = {
 		.codec_mode	= S5P_FIMV_CODEC_HEVC_ENC,
 		.type		= MFC_FMT_ENC,
 		.num_planes	= 1,
-		.versions	= MFC_V10PLUS_BITS,
+		.versions	= MFC_V10PLUS_BITS | MFC_V16_BIT,
 	},
 };
 
@@ -2764,10 +2764,16 @@ int s5p_mfc_enc_ctrls_setup(struct s5p_mfc_ctx *ctx)
 			if ((controls[i].type == V4L2_CTRL_TYPE_MENU) ||
 				(controls[i].type ==
 					V4L2_CTRL_TYPE_INTEGER_MENU)) {
+				int maximum = controls[i].maximum;
+
+				/* v16's profile value 2 selects a 4:2:2 10-bit mode. */
+				if (IS_MFCV16_PLUS(ctx->dev) &&
+				    controls[i].id == V4L2_CID_MPEG_VIDEO_HEVC_PROFILE)
+					maximum = V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN;
 				ctx->ctrls[i] = v4l2_ctrl_new_std_menu(
 					&ctx->ctrl_handler,
 					&s5p_mfc_enc_ctrl_ops, controls[i].id,
-					controls[i].maximum, 0,
+					maximum, 0,
 					controls[i].default_value);
 			} else {
 				ctx->ctrls[i] = v4l2_ctrl_new_std(
