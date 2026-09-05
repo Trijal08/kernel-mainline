@@ -4,6 +4,7 @@ config VIDEO_SAMSUNG_S5P_MFC
 	depends on V4L_MEM2MEM_DRIVERS
 	depends on VIDEO_DEV
 	depends on ARCH_S5PV210 || ARCH_EXYNOS || COMPILE_TEST
+	select RATIONAL
 	select VIDEOBUF2_DMA_CONTIG
 	help
 	    MFC 5.1 and 6.x driver for V4L2
