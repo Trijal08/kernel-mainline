@@ -3752,6 +3752,20 @@ brcmf_pcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	 * makes this probe fail (D3cold-can't-exit). */
 	brcmf_pcie_reset_rc_l1ss(pdev);
 
+	/* The device consumes 64-bit DMA addresses -- see
+	 * brcmf_pcie_init_dmabuffer_for_device(), which writes the high half to
+	 * tcm_dma_phys_addr + 4. Without asking for a 64-bit mask the PCI default
+	 * of 32 bits applies, and on a platform whose memory all lives above 4G
+	 * every coherent allocation fails.
+	 */
+	ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64));
+	if (ret)
+		ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(32));
+	if (ret) {
+		pci_err(pdev, "no usable DMA mask\n");
+		return ret;
+	}
+
 	ret = -ENOMEM;
 	devinfo = kzalloc_obj(*devinfo);
 	if (devinfo == NULL)
