@@ -14,6 +14,7 @@
 #include <linux/io.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
+#include <linux/rational.h>
 #include <linux/sched.h>
 #include <linux/videodev2.h>
 #include <media/v4l2-event.h>
@@ -85,14 +86,14 @@ static const struct s5p_mfc_fmt formats[] = {
 		.codec_mode	= S5P_MFC_CODEC_MPEG4_ENC,
 		.type		= MFC_FMT_ENC,
 		.num_planes	= 1,
-		.versions	= MFC_V5PLUS_BITS,
+		.versions	= MFC_V5PLUS_BITS | MFC_V16_BIT,
 	},
 	{
 		.fourcc		= V4L2_PIX_FMT_H263,
 		.codec_mode	= S5P_MFC_CODEC_H263_ENC,
 		.type		= MFC_FMT_ENC,
 		.num_planes	= 1,
-		.versions	= MFC_V5PLUS_BITS,
+		.versions	= MFC_V5PLUS_BITS | MFC_V16_BIT,
 	},
 	{
 		.fourcc		= V4L2_PIX_FMT_VP8,
@@ -1189,7 +1190,8 @@ static int enc_post_seq_start(struct s5p_mfc_ctx *ctx)
 	if (p->seq_hdr_mode == V4L2_MPEG_VIDEO_HEADER_MODE_SEPARATE &&
 	    !(IS_MFCV16_PLUS(dev) &&
 	      (ctx->codec_mode == S5P_MFC_CODEC_VP8_ENC ||
-	       ctx->codec_mode == S5P_MFC_CODEC_VP9_ENC))) {
+	       ctx->codec_mode == S5P_MFC_CODEC_VP9_ENC ||
+	       ctx->codec_mode == S5P_MFC_CODEC_H263_ENC))) {
 		if (!list_empty(&ctx->dst_queue)) {
 			dst_mb = list_entry(ctx->dst_queue.next,
 					struct s5p_mfc_buf, list);
@@ -1514,7 +1516,23 @@ static int vidioc_try_fmt(struct file *file, void *priv, struct v4l2_format *f)
 	return 0;
 }
 
-static void s5p_mfc_enc_update_vpx_controls(struct s5p_mfc_ctx *ctx)
+static void s5p_mfc_enc_adjust_framerate(struct s5p_mfc_ctx *ctx)
+{
+	struct s5p_mfc_enc_params *p = &ctx->enc_params;
+	unsigned long num, denom;
+	unsigned int max = ctx->codec_mode == S5P_MFC_CODEC_H263_ENC ? 255 : 65535;
+
+	if (!p->rc_framerate_num || !p->rc_framerate_denom) {
+		p->rc_framerate_num = 30;
+		p->rc_framerate_denom = 1;
+	}
+	rational_best_approximation(p->rc_framerate_num, p->rc_framerate_denom,
+				    max, 65535, &num, &denom);
+	p->rc_framerate_num = max_t(unsigned long, num, 1);
+	p->rc_framerate_denom = max_t(unsigned long, denom, 1);
+}
+
+static void s5p_mfc_enc_update_controls(struct s5p_mfc_ctx *ctx)
 {
 	static const u32 qp_ids[] = {
 		V4L2_CID_MPEG_VIDEO_VPX_MIN_QP,
@@ -1523,16 +1541,20 @@ static void s5p_mfc_enc_update_vpx_controls(struct s5p_mfc_ctx *ctx)
 		V4L2_CID_MPEG_VIDEO_VPX_P_FRAME_QP,
 	};
 	bool vp9 = ctx->codec_mode == S5P_MFC_CODEC_VP9_ENC;
+	bool bframes = ctx->codec_mode == S5P_MFC_CODEC_H264_ENC ||
+		       ctx->codec_mode == S5P_MFC_CODEC_HEVC_ENC ||
+		       ctx->codec_mode == S5P_MFC_CODEC_MPEG4_ENC;
 	struct v4l2_ctrl *ctrl;
 	int i, max = vp9 ? 255 : 127;
 
+	s5p_mfc_enc_adjust_framerate(ctx);
 	for (i = 0; i < ARRAY_SIZE(qp_ids); i++) {
 		ctrl = v4l2_ctrl_find(&ctx->ctrl_handler, qp_ids[i]);
 		v4l2_ctrl_modify_range(ctrl, 0, max, 1,
 				       i == 1 ? max : i == 0 ? 0 : 10);
 	}
 	ctrl = v4l2_ctrl_find(&ctx->ctrl_handler, V4L2_CID_MPEG_VIDEO_B_FRAMES);
-	v4l2_ctrl_modify_range(ctrl, 0, vp9 ? 0 : 2, 1, 0);
+	v4l2_ctrl_modify_range(ctrl, 0, bframes ? 2 : 0, 1, 0);
 }
 
 static int vidioc_s_fmt(struct file *file, void *priv, struct v4l2_format *f)
@@ -1556,7 +1578,7 @@ static int vidioc_s_fmt(struct file *file, void *priv, struct v4l2_format *f)
 		ctx->state = MFCINST_INIT;
 		ctx->codec_mode = ctx->dst_fmt->codec_mode;
 		if (IS_MFCV16_PLUS(dev))
-			s5p_mfc_enc_update_vpx_controls(ctx);
+			s5p_mfc_enc_update_controls(ctx);
 		ctx->enc_dst_buf_size =	pix_fmt_mp->plane_fmt[0].sizeimage;
 		pix_fmt_mp->plane_fmt[0].bytesperline = 0;
 		ctx->dst_bufs_cnt = 0;
@@ -2367,6 +2389,13 @@ static int vidioc_s_parm(struct file *file, void *priv,
 					a->parm.output.timeperframe.denominator;
 		ctx->enc_params.rc_framerate_denom =
 					a->parm.output.timeperframe.numerator;
+		if (IS_MFCV16_PLUS(ctx->dev)) {
+			s5p_mfc_enc_adjust_framerate(ctx);
+			a->parm.output.timeperframe.denominator =
+				ctx->enc_params.rc_framerate_num;
+			a->parm.output.timeperframe.numerator =
+				ctx->enc_params.rc_framerate_denom;
+		}
 	} else {
 		mfc_err("Setting FPS is only possible for the output queue\n");
 		return -EINVAL;
@@ -2379,7 +2408,9 @@ static int vidioc_g_parm(struct file *file, void *priv,
 {
 	struct s5p_mfc_ctx *ctx = file_to_ctx(file);
 
-	if (a->type == V4L2_BUF_TYPE_VIDEO_OUTPUT) {
+	if (a->type == V4L2_BUF_TYPE_VIDEO_OUTPUT ||
+	    (IS_MFCV16_PLUS(ctx->dev) &&
+	     a->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE)) {
 		a->parm.output.timeperframe.denominator =
 					ctx->enc_params.rc_framerate_num;
 		a->parm.output.timeperframe.numerator =
@@ -2839,12 +2870,19 @@ int s5p_mfc_enc_ctrls_setup(struct s5p_mfc_ctx *ctx)
 					maximum, 0,
 					controls[i].default_value);
 			} else {
+				int min = controls[i].minimum;
+				int max = controls[i].maximum;
+				int def = controls[i].default_value;
+
+				if (IS_MFCV16_PLUS(ctx->dev) &&
+				    controls[i].id == V4L2_CID_MPEG_VIDEO_MPEG4_MAX_QP) {
+					min = 1;
+					max = def = 31;
+				}
 				ctx->ctrls[i] = v4l2_ctrl_new_std(
 					&ctx->ctrl_handler,
 					&s5p_mfc_enc_ctrl_ops, controls[i].id,
-					controls[i].minimum,
-					controls[i].maximum, controls[i].step,
-					controls[i].default_value);
+					min, max, controls[i].step, def);
 			}
 		}
 		if (ctx->ctrl_handler.error) {
