@@ -1009,6 +1009,14 @@ static int s5p_mfc_buf_init(struct vb2_buffer *vb)
 	struct s5p_mfc_ctx *ctx = vb2_get_drv_priv(vq);
 	unsigned int i;
 
+	for (i = 0; i < vb->num_planes; i++) {
+		if (!s5p_mfc_dma_addr_valid(ctx->dev,
+					  vb2_dma_contig_plane_dma_addr(vb, i))) {
+			mfc_err("Plane buffer is below the firmware allocation\n");
+			return -EINVAL;
+		}
+	}
+
 	if (vq->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
 		if (ctx->capture_state == QUEUE_BUFS_MMAPED)
 			return 0;
@@ -1253,4 +1261,3 @@ void s5p_mfc_dec_init(struct s5p_mfc_ctx *ctx)
 	mfc_debug(2, "Default src_fmt is %p, dest_fmt is %p\n",
 			ctx->src_fmt, ctx->dst_fmt);
 }
-
