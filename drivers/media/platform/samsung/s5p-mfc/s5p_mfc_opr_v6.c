@@ -343,6 +343,15 @@ static int s5p_mfc_alloc_codec_buffers_v6(struct s5p_mfc_ctx *ctx)
 			ctx->chroma_dpb_size + ctx->me_buffer_size));
 		ctx->bank2.size = 0;
 		break;
+	case S5P_MFC_CODEC_VP9_ENC:
+		ctx->me_buffer_size =
+			ALIGN(ENC_V160_VP9_ME_SIZE(lcu_width, lcu_height), 256);
+		ctx->scratch_buf_size = ALIGN(ctx->scratch_buf_size, 256);
+		ctx->bank1.size = ctx->scratch_buf_size +
+			ctx->pb_count * (ctx->luma_dpb_size +
+			ctx->chroma_dpb_size + ctx->me_buffer_size);
+		ctx->bank2.size = 0;
+		break;
 	case S5P_MFC_CODEC_HEVC_ENC:
 		if (IS_MFCV12(dev))
 			ctx->me_buffer_size =
@@ -413,6 +422,7 @@ static int s5p_mfc_alloc_instance_buffer_v6(struct s5p_mfc_ctx *ctx)
 	case S5P_MFC_CODEC_MPEG4_ENC:
 	case S5P_MFC_CODEC_H263_ENC:
 	case S5P_MFC_CODEC_VP8_ENC:
+	case S5P_MFC_CODEC_VP9_ENC:
 		ctx->ctx.size = buf_size->other_enc_ctx;
 		break;
 	default:
@@ -1542,7 +1552,7 @@ static int s5p_mfc_set_enc_params_vp8(struct s5p_mfc_ctx *ctx)
 	struct s5p_mfc_dev *dev = ctx->dev;
 	const struct s5p_mfc_regs *mfc_regs = dev->mfc_regs;
 	const struct s5p_mfc_enc_params *p = &ctx->enc_params;
-	const struct s5p_mfc_vp8_enc_params *p_vp8 = &p->codec.vp8;
+	const struct s5p_mfc_vpx_enc_params *p_vp8 = &p->codec.vpx;
 	unsigned int reg = 0;
 	unsigned int val = 0;
 
@@ -1631,6 +1641,42 @@ static int s5p_mfc_set_enc_params_vp8(struct s5p_mfc_ctx *ctx)
 	writel(reg, mfc_regs->e_vp8_options);
 
 	mfc_debug_leave();
+
+	return 0;
+}
+
+static int s5p_mfc_set_enc_params_vp9(struct s5p_mfc_ctx *ctx)
+{
+	struct s5p_mfc_dev *dev = ctx->dev;
+	const struct s5p_mfc_regs *mfc_regs = dev->mfc_regs;
+	const struct s5p_mfc_enc_params *p = &ctx->enc_params;
+	const struct s5p_mfc_vpx_enc_params *vp9 = &p->codec.vpx;
+	u32 reg;
+
+	s5p_mfc_set_enc_params(ctx);
+
+	/* Profile 0: the exposed raw format is 8-bit 4:2:0. */
+	writel(vp9->vp9_level << 8, mfc_regs->e_picture_profile);
+	reg = (vp9->num_ref & 1) | S5P_FIMV_E_VPX_IVF_HEADER_DISABLE_V16;
+	mfc_write(dev, reg, S5P_FIMV_E_VP9_OPTIONS_V16);
+	reg = vp9->golden_frame_sel | (vp9->golden_frame_ref_period << 1);
+	mfc_write(dev, reg, S5P_FIMV_E_VP9_GOLDEN_FRAME_OPTION_V16);
+	/* No temporal layers; bits 6:4 describe the maximum layer count. */
+	writel(3 << 4, mfc_regs->e_num_t_layer);
+
+	reg = readl(mfc_regs->e_rc_config);
+	reg &= ~GENMASK(8, 0);
+	reg |= (p->rc_mb << 8) | vp9->rc_frame_qp;
+	writel(reg, mfc_regs->e_rc_config);
+	if (p->rc_frame && p->rc_framerate_num && p->rc_framerate_denom)
+		writel((p->rc_framerate_num << 16) | p->rc_framerate_denom,
+		       mfc_regs->e_rc_frame_rate);
+
+	reg = (vp9->rc_p_frame_qp << 8) | vp9->rc_frame_qp;
+	writel(reg, mfc_regs->e_fixed_picture_qp);
+	reg = (vp9->rc_max_qp << 8) | vp9->rc_min_qp;
+	writel(reg, mfc_regs->e_rc_qp_bound);
+	mfc_write(dev, reg, S5P_FIMV_E_RC_QP_BOUND_PB_V16);
 
 	return 0;
 }
@@ -1925,6 +1971,8 @@ static int s5p_mfc_init_encode_v6(struct s5p_mfc_ctx *ctx)
 		s5p_mfc_set_enc_params_vp8(ctx);
 	else if (ctx->codec_mode == S5P_FIMV_CODEC_HEVC_ENC)
 		s5p_mfc_set_enc_params_hevc(ctx);
+	else if (ctx->codec_mode == S5P_MFC_CODEC_VP9_ENC)
+		s5p_mfc_set_enc_params_vp9(ctx);
 	else {
 		mfc_err("Unknown codec for encoding (%x).\n",
 			ctx->codec_mode);

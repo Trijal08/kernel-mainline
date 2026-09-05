@@ -31,6 +31,14 @@
 #define S5P_FIMV_ENC_PROFILE_H264_MAIN_V16		1
 #define S5P_FIMV_ENC_PROFILE_H264_HIGH_V16		2
 #define S5P_FIMV_E_VPX_IVF_HEADER_DISABLE_V16	BIT(12)
+#define S5P_FIMV_E_VP9_OPTIONS_V16		0xfd90
+#define S5P_FIMV_E_VP9_GOLDEN_FRAME_OPTION_V16	0xfd98
+#define S5P_FIMV_E_RC_QP_BOUND_PB_V16		0xf7a0
+
+/* x and y are the picture dimensions in 32x32 encoding units. */
+#define ENC_V160_VP9_ME_SIZE(x, y) \
+	(((((x) * 2) + 3) * (((y) * 2) + 3) * 128) + \
+	 ((((y) * 256) + 2304) * ((x) + 1) / 2))
 
 /* The RISC maps its registers above this firmware-relative memory window. */
 #define MFC_V16_MEM_WINDOW_SIZE			0xf0000000ULL

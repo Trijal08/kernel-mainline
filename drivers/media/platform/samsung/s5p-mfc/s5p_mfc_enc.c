@@ -108,6 +108,13 @@ static const struct s5p_mfc_fmt formats[] = {
 		.num_planes	= 1,
 		.versions	= MFC_V10PLUS_BITS | MFC_V16_BIT,
 	},
+	{
+		.fourcc		= V4L2_PIX_FMT_VP9,
+		.codec_mode	= S5P_MFC_CODEC_VP9_ENC,
+		.type		= MFC_FMT_ENC,
+		.num_planes	= 1,
+		.versions	= MFC_V16_BIT,
+	},
 };
 
 #define NUM_FORMATS ARRAY_SIZE(formats)
@@ -1079,6 +1086,20 @@ static struct mfc_control controls[] = {
 		.default_value = 1,
 		.is_volatile = 1,
 	},
+	{
+		.id = V4L2_CID_MPEG_VIDEO_VP9_PROFILE,
+		.type = V4L2_CTRL_TYPE_MENU,
+		.minimum = V4L2_MPEG_VIDEO_VP9_PROFILE_0,
+		.maximum = V4L2_MPEG_VIDEO_VP9_PROFILE_0,
+		.default_value = V4L2_MPEG_VIDEO_VP9_PROFILE_0,
+	},
+	{
+		.id = V4L2_CID_MPEG_VIDEO_VP9_LEVEL,
+		.type = V4L2_CTRL_TYPE_MENU,
+		.minimum = V4L2_MPEG_VIDEO_VP9_LEVEL_1_0,
+		.maximum = V4L2_MPEG_VIDEO_VP9_LEVEL_6_2,
+		.default_value = V4L2_MPEG_VIDEO_VP9_LEVEL_4_0,
+	},
 };
 
 #define NUM_CTRLS ARRAY_SIZE(controls)
@@ -1166,7 +1187,9 @@ static int enc_post_seq_start(struct s5p_mfc_ctx *ctx)
 	struct s5p_mfc_buf *dst_mb;
 
 	if (p->seq_hdr_mode == V4L2_MPEG_VIDEO_HEADER_MODE_SEPARATE &&
-	    !(IS_MFCV16_PLUS(dev) && ctx->codec_mode == S5P_MFC_CODEC_VP8_ENC)) {
+	    !(IS_MFCV16_PLUS(dev) &&
+	      (ctx->codec_mode == S5P_MFC_CODEC_VP8_ENC ||
+	       ctx->codec_mode == S5P_MFC_CODEC_VP9_ENC))) {
 		if (!list_empty(&ctx->dst_queue)) {
 			dst_mb = list_entry(ctx->dst_queue.next,
 					struct s5p_mfc_buf, list);
@@ -1491,6 +1514,27 @@ static int vidioc_try_fmt(struct file *file, void *priv, struct v4l2_format *f)
 	return 0;
 }
 
+static void s5p_mfc_enc_update_vpx_controls(struct s5p_mfc_ctx *ctx)
+{
+	static const u32 qp_ids[] = {
+		V4L2_CID_MPEG_VIDEO_VPX_MIN_QP,
+		V4L2_CID_MPEG_VIDEO_VPX_MAX_QP,
+		V4L2_CID_MPEG_VIDEO_VPX_I_FRAME_QP,
+		V4L2_CID_MPEG_VIDEO_VPX_P_FRAME_QP,
+	};
+	bool vp9 = ctx->codec_mode == S5P_MFC_CODEC_VP9_ENC;
+	struct v4l2_ctrl *ctrl;
+	int i, max = vp9 ? 255 : 127;
+
+	for (i = 0; i < ARRAY_SIZE(qp_ids); i++) {
+		ctrl = v4l2_ctrl_find(&ctx->ctrl_handler, qp_ids[i]);
+		v4l2_ctrl_modify_range(ctrl, 0, max, 1,
+				       i == 1 ? max : i == 0 ? 0 : 10);
+	}
+	ctrl = v4l2_ctrl_find(&ctx->ctrl_handler, V4L2_CID_MPEG_VIDEO_B_FRAMES);
+	v4l2_ctrl_modify_range(ctrl, 0, vp9 ? 0 : 2, 1, 0);
+}
+
 static int vidioc_s_fmt(struct file *file, void *priv, struct v4l2_format *f)
 {
 	struct s5p_mfc_ctx *ctx = file_to_ctx(file);
@@ -1511,6 +1555,8 @@ static int vidioc_s_fmt(struct file *file, void *priv, struct v4l2_format *f)
 		ctx->dst_fmt = find_format(f, MFC_FMT_ENC);
 		ctx->state = MFCINST_INIT;
 		ctx->codec_mode = ctx->dst_fmt->codec_mode;
+		if (IS_MFCV16_PLUS(dev))
+			s5p_mfc_enc_update_vpx_controls(ctx);
 		ctx->enc_dst_buf_size =	pix_fmt_mp->plane_fmt[0].sizeimage;
 		pix_fmt_mp->plane_fmt[0].bytesperline = 0;
 		ctx->dst_bufs_cnt = 0;
@@ -1838,7 +1884,8 @@ static void __enc_update_hevc_qp_ctrls_range(struct s5p_mfc_ctx *ctx,
 
 	for (i = 0; i < ARRAY_SIZE(__hevc_qp_ctrls); i++) {
 		for (j = 0; j < ARRAY_SIZE(ctx->ctrls); j++) {
-			if (ctx->ctrls[j]->id == __hevc_qp_ctrls[i]) {
+			if (ctx->ctrls[j] &&
+			    ctx->ctrls[j]->id == __hevc_qp_ctrls[i]) {
 				ctrl = ctx->ctrls[j];
 				break;
 			}
@@ -2070,41 +2117,52 @@ static int s5p_mfc_enc_s_ctrl(struct v4l2_ctrl *ctrl)
 		p->codec.mpeg4.quarter_pixel = ctrl->val;
 		break;
 	case V4L2_CID_MPEG_VIDEO_VPX_NUM_PARTITIONS:
-		p->codec.vp8.num_partitions = ctrl->val;
+		p->codec.vpx.num_partitions = ctrl->val;
 		break;
 	case V4L2_CID_MPEG_VIDEO_VPX_IMD_DISABLE_4X4:
-		p->codec.vp8.imd_4x4 = ctrl->val;
+		p->codec.vpx.imd_4x4 = ctrl->val;
 		break;
 	case V4L2_CID_MPEG_VIDEO_VPX_NUM_REF_FRAMES:
-		p->codec.vp8.num_ref = ctrl->val;
+		p->codec.vpx.num_ref = ctrl->val;
 		break;
 	case V4L2_CID_MPEG_VIDEO_VPX_FILTER_LEVEL:
-		p->codec.vp8.filter_level = ctrl->val;
+		p->codec.vpx.filter_level = ctrl->val;
 		break;
 	case V4L2_CID_MPEG_VIDEO_VPX_FILTER_SHARPNESS:
-		p->codec.vp8.filter_sharpness = ctrl->val;
+		p->codec.vpx.filter_sharpness = ctrl->val;
 		break;
 	case V4L2_CID_MPEG_VIDEO_VPX_GOLDEN_FRAME_REF_PERIOD:
-		p->codec.vp8.golden_frame_ref_period = ctrl->val;
+		p->codec.vpx.golden_frame_ref_period = ctrl->val;
 		break;
 	case V4L2_CID_MPEG_VIDEO_VPX_GOLDEN_FRAME_SEL:
-		p->codec.vp8.golden_frame_sel = ctrl->val;
+		p->codec.vpx.golden_frame_sel = ctrl->val;
 		break;
 	case V4L2_CID_MPEG_VIDEO_VPX_MIN_QP:
-		p->codec.vp8.rc_min_qp = ctrl->val;
+		p->codec.vpx.rc_min_qp = ctrl->val;
 		break;
 	case V4L2_CID_MPEG_VIDEO_VPX_MAX_QP:
-		p->codec.vp8.rc_max_qp = ctrl->val;
+		p->codec.vpx.rc_max_qp = ctrl->val;
 		break;
 	case V4L2_CID_MPEG_VIDEO_VPX_I_FRAME_QP:
-		p->codec.vp8.rc_frame_qp = ctrl->val;
+		p->codec.vpx.rc_frame_qp = ctrl->val;
 		break;
 	case V4L2_CID_MPEG_VIDEO_VPX_P_FRAME_QP:
-		p->codec.vp8.rc_p_frame_qp = ctrl->val;
+		p->codec.vpx.rc_p_frame_qp = ctrl->val;
 		break;
 	case V4L2_CID_MPEG_VIDEO_VP8_PROFILE:
-		p->codec.vp8.profile = ctrl->val;
+		p->codec.vpx.profile = ctrl->val;
 		break;
+	case V4L2_CID_MPEG_VIDEO_VP9_PROFILE:
+		/* Only profile 0 is exposed. */
+		break;
+	case V4L2_CID_MPEG_VIDEO_VP9_LEVEL: {
+		static const u8 levels[] = {
+			10, 11, 20, 21, 30, 31, 40, 41, 50, 51, 52, 60, 61, 62,
+		};
+
+		p->codec.vpx.vp9_level = levels[ctrl->val];
+		break;
+	}
 	case V4L2_CID_MPEG_VIDEO_HEVC_I_FRAME_QP:
 		p->codec.hevc.rc_frame_qp = ctrl->val;
 		break;
@@ -2740,6 +2798,10 @@ int s5p_mfc_enc_ctrls_setup(struct s5p_mfc_ctx *ctx)
 		return ctx->ctrl_handler.error;
 	}
 	for (i = 0; i < NUM_CTRLS; i++) {
+		if (!IS_MFCV16_PLUS(ctx->dev) &&
+		    (controls[i].id == V4L2_CID_MPEG_VIDEO_VP9_PROFILE ||
+		     controls[i].id == V4L2_CID_MPEG_VIDEO_VP9_LEVEL))
+			continue;
 		if (IS_MFC51_PRIV(controls[i].id)) {
 			memset(&cfg, 0, sizeof(struct v4l2_ctrl_config));
 			cfg.ops = &s5p_mfc_enc_ctrl_ops;
