@@ -93,7 +93,7 @@ static const struct s5p_mfc_fmt formats[] = {
 		.codec_mode	= S5P_MFC_CODEC_H263_DEC,
 		.type		= MFC_FMT_DEC,
 		.num_planes	= 1,
-		.versions	= MFC_V5PLUS_BITS,
+		.versions	= MFC_V5PLUS_BITS | MFC_V16_BIT,
 		.flags		= V4L2_FMT_FLAG_DYN_RESOLUTION,
 	},
 	{
@@ -119,7 +119,7 @@ static const struct s5p_mfc_fmt formats[] = {
 		.codec_mode	= S5P_MFC_CODEC_MPEG4_DEC,
 		.type		= MFC_FMT_DEC,
 		.num_planes	= 1,
-		.versions	= MFC_V5PLUS_BITS,
+		.versions	= MFC_V5PLUS_BITS | MFC_V16_BIT,
 		.flags		= V4L2_FMT_FLAG_DYN_RESOLUTION |
 				  V4L2_FMT_FLAG_CONTINUOUS_BYTESTREAM,
 	},
@@ -258,7 +258,8 @@ static struct mfc_control controls[] = {
 bool s5p_mfc_dec_copy_not_coded(struct s5p_mfc_ctx *ctx)
 {
 	return IS_MFCV16_PLUS(ctx->dev) &&
-	       ctx->codec_mode == S5P_MFC_CODEC_VP9_DEC;
+	       (ctx->codec_mode == S5P_MFC_CODEC_VP9_DEC ||
+		ctx->codec_mode == S5P_MFC_CODEC_MPEG4_DEC);
 }
 
 /* MMAP keeps each DPB's DMA mapping stable until the queue is freed. */
@@ -1278,6 +1279,10 @@ int s5p_mfc_dec_ctrls_setup(struct s5p_mfc_ctx *ctx)
 	}
 
 	for (i = 0; i < NUM_CTRLS; i++) {
+		/* v16 post-filtering needs additional DPBs, not implemented yet. */
+		if (IS_MFCV16_PLUS(ctx->dev) &&
+		    controls[i].id == V4L2_CID_MPEG_VIDEO_DECODER_MPEG4_DEBLOCK_FILTER)
+			continue;
 		if (IS_MFC51_PRIV(controls[i].id)) {
 			memset(&cfg, 0, sizeof(struct v4l2_ctrl_config));
 			cfg.ops = &s5p_mfc_dec_ctrl_ops;
