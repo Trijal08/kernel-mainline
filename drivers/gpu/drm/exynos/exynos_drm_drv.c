@@ -462,6 +462,15 @@ static int exynos_drm_init(void)
 	if (drm_firmware_drivers_only())
 		return -ENODEV;
 
+	/*
+	 * Before any DPU driver is registered. The "iommus" link on dpu_dma
+	 * makes the DPU SysMMU a supplier, so really_probe() enables
+	 * translation via pm_runtime_get_suppliers() before dpu_dma_probe() is
+	 * entered -- and doing that under the bootloader's still-running DECON
+	 * resets the SoC.
+	 */
+	dpu_dma_quiesce_boot_decon();
+
 	ret = exynos_drm_register_devices();
 	if (ret)
 		return ret;
