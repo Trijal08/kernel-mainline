@@ -686,6 +686,9 @@ static int s5p_mfc_set_dec_frame_buffer_v6(struct s5p_mfc_ctx *ctx)
 		writel(ctx->mv_size, mfc_regs->d_mv_buffer_size);
 		writel(ctx->mv_count, mfc_regs->d_num_mv);
 	}
+	/* Match the v16 firmware count even for codecs without external MVs. */
+	if (IS_MFCV16_PLUS(dev))
+		writel(ctx->mv_count, mfc_regs->d_num_mv);
 
 	frame_size = ctx->luma_size;
 	frame_size_ch = ctx->chroma_size;
