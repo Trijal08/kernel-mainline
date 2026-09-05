@@ -6,6 +6,8 @@
  *		http://www.samsung.com/
  */
 
+#include <linux/iopoll.h>
+
 #include "s5p_mfc_common.h"
 
 #include "s5p_mfc_cmd.h"
@@ -16,10 +18,28 @@
 
 static int s5p_mfc_cmd_host2risc_v6(struct s5p_mfc_dev *dev, int cmd)
 {
+	u32 status;
+	int ret;
+
+	if (READ_ONCE(dev->fw_failed))
+		return -EIO;
+
 	mfc_debug(2, "Issue the command: %d\n", cmd);
 
 	/* Reset RISC2HOST command */
 	mfc_write(dev, 0x0, S5P_FIMV_RISC2HOST_CMD_V6);
+
+	/* Commands can also be issued from the interrupt handler. */
+	if (IS_MFCV16_PLUS(dev) && cmd != S5P_FIMV_H2R_CMD_NAL_ABORT_V6) {
+		ret = readl_poll_timeout_atomic(dev->regs_base + S5P_FIMV_FIRMWARE_STATUS_V16,
+						status, status & BIT(0), 1,
+						1000);
+		if (ret) {
+			mfc_err("Firmware not ready for command %d: %#x\n", cmd, status);
+			s5p_mfc_abort_firmware(dev);
+			return ret;
+		}
+	}
 
 	/* Issue the command */
 	mfc_write(dev, cmd, S5P_FIMV_HOST2RISC_CMD_V6);

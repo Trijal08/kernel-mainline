@@ -9,6 +9,8 @@
 #include <linux/delay.h>
 #include <linux/err.h>
 #include <linux/firmware.h>
+#include <linux/iopoll.h>
+#include <linux/interrupt.h>
 #include <linux/jiffies.h>
 #include <linux/sched.h>
 #include "s5p_mfc_cmd.h"
@@ -47,6 +49,10 @@ int s5p_mfc_load_firmware(struct s5p_mfc_dev *dev)
 	struct firmware *fw_blob;
 	int i, err = -EINVAL;
 
+	/* A failed reset must not allow reuse of running firmware memory. */
+	if (IS_MFCV16_PLUS(dev) && dev->risc_on)
+		return -EBUSY;
+
 	/* Firmware has to be present as a separate file or compiled
 	 * into kernel. */
 	mfc_debug_enter();
@@ -80,6 +86,8 @@ int s5p_mfc_load_firmware(struct s5p_mfc_dev *dev)
 		release_firmware(fw_blob);
 		return -ENOMEM;
 	}
+	if (IS_MFCV16_PLUS(dev))
+		memset(dev->fw_buf.virt, 0, dev->fw_buf.size);
 	memcpy(dev->fw_buf.virt, fw_blob->data, fw_blob->size);
 	wmb();
 	dev->fw_get_done = true;
@@ -125,6 +133,17 @@ int s5p_mfc_reset(struct s5p_mfc_dev *dev)
 	int i;
 
 	mfc_debug_enter();
+
+	if (IS_MFCV16_PLUS(dev)) {
+		/* Bound the drain before forcing the RISC off and resetting it. */
+		if (dev->risc_on &&
+		    readl_poll_timeout_atomic(dev->regs_base + S5P_FIMV_BUS_STATUS_V16,
+					      mc_status, !mc_status, 1,
+					      1000))
+			mfc_err("Timeout draining MFC bus: %#x, forcing reset\n", mc_status);
+		mfc_write(dev, 0, S5P_FIMV_RISC_ON_V6);
+		dev->risc_on = 0;
+	}
 
 	if (IS_MFCV6_PLUS(dev)) {
 		/* Zero Initialization of MFC registers */
@@ -178,7 +197,9 @@ int s5p_mfc_reset(struct s5p_mfc_dev *dev)
 
 static inline void s5p_mfc_init_memctrl(struct s5p_mfc_dev *dev)
 {
-	if (IS_MFCV6_PLUS(dev)) {
+	if (IS_MFCV16_PLUS(dev)) {
+		mfc_write(dev, dev->fw_buf.dma, S5P_FIMV_RISC_NONSECURE_BASE_V16);
+	} else if (IS_MFCV6_PLUS(dev)) {
 		mfc_write(dev, dev->dma_base[BANK_L_CTX],
 			  S5P_FIMV_RISC_BASE_ADDRESS_V6);
 		mfc_debug(2, "Base Address : %pad\n",
@@ -222,12 +243,14 @@ int s5p_mfc_init_hw(struct s5p_mfc_dev *dev)
 	/* 0. MFC reset */
 	mfc_debug(2, "MFC reset..\n");
 	s5p_mfc_clock_on(dev);
-	dev->risc_on = 0;
+	if (!IS_MFCV16_PLUS(dev))
+		dev->risc_on = 0;
 	ret = s5p_mfc_reset(dev);
 	if (ret) {
 		mfc_err("Failed to reset MFC - timeout\n");
 		goto err_clock;
 	}
+	WRITE_ONCE(dev->fw_failed, false);
 	mfc_debug(2, "Done MFC reset..\n");
 	/* 1. Set DRAM base Addr */
 	s5p_mfc_init_memctrl(dev);
@@ -237,12 +260,14 @@ int s5p_mfc_init_hw(struct s5p_mfc_dev *dev)
 	s5p_mfc_clean_dev_int_flags(dev);
 	if (IS_MFCV6_PLUS(dev)) {
 		dev->risc_on = 1;
+		if (IS_MFCV16_PLUS(dev))
+			mfc_write(dev, 0, S5P_FIMV_MFC_CLOCK_OFF_V10);
 		mfc_write(dev, 0x1, S5P_FIMV_RISC_ON_V6);
 	}
 	else
 		mfc_write(dev, 0x3ff, S5P_FIMV_SW_RESET);
 
-	if (IS_MFCV10_PLUS(dev))
+	if (IS_MFCV10_PLUS(dev) && !IS_MFCV16_PLUS(dev))
 		mfc_write(dev, 0x0, S5P_FIMV_MFC_CLOCK_OFF_V10);
 
 	mfc_debug(2, "Will now wait for completion of firmware transfer\n");
@@ -280,6 +305,18 @@ int s5p_mfc_init_hw(struct s5p_mfc_dev *dev)
 
 	mfc_debug(2, "MFC F/W version : %02xyy, %02xmm, %02xdd\n",
 		(ver >> 16) & 0xFF, (ver >> 8) & 0xFF, ver & 0xFF);
+	if (IS_MFCV16_PLUS(dev)) {
+		unsigned int ip = mfc_read(dev, S5P_FIMV_MFC_VERSION_V16);
+
+		if (ip != MFC_VERSION_ZUMAPRO) {
+			mfc_err("Unexpected MFC firmware interface: %#x\n", ip);
+			ret = -EINVAL;
+			goto err_reset;
+		}
+		dev_info(&dev->plat_dev->dev,
+			 "MFC firmware %#x, date %06x, base %pad\n",
+			 ip, ver & 0xffffff, &dev->fw_buf.dma);
+	}
 	s5p_mfc_clock_off(dev);
 	mfc_debug_leave();
 	return 0;
@@ -295,19 +332,26 @@ err_clock:
 
 
 /* Deinitialize hardware */
-void s5p_mfc_deinit_hw(struct s5p_mfc_dev *dev)
+int s5p_mfc_deinit_hw(struct s5p_mfc_dev *dev)
 {
+	int ret;
+
 	s5p_mfc_clock_on(dev);
 
-	s5p_mfc_reset(dev);
-	s5p_mfc_hw_call(dev->mfc_ops, release_dev_context_buffer, dev);
+	ret = s5p_mfc_reset(dev);
+	if (!ret)
+		s5p_mfc_hw_call(dev->mfc_ops, release_dev_context_buffer, dev);
 
 	s5p_mfc_clock_off(dev);
+	return ret;
 }
 
 int s5p_mfc_sleep(struct s5p_mfc_dev *dev)
 {
 	int ret;
+
+	if (READ_ONCE(dev->fw_failed))
+		return 0;
 
 	mfc_debug_enter();
 	s5p_mfc_clock_on(dev);
@@ -340,6 +384,8 @@ static int s5p_mfc_v8_wait_wakeup(struct s5p_mfc_dev *dev)
 
 	/* Release reset signal to the RISC */
 	dev->risc_on = 1;
+	if (IS_MFCV16_PLUS(dev))
+		mfc_write(dev, 0, S5P_FIMV_MFC_CLOCK_OFF_V10);
 	mfc_write(dev, 0x1, S5P_FIMV_RISC_ON_V6);
 
 	if (s5p_mfc_wait_for_done_dev(dev, S5P_MFC_R2H_CMD_FW_STATUS_RET)) {
@@ -390,11 +436,15 @@ int s5p_mfc_wakeup(struct s5p_mfc_dev *dev)
 {
 	int ret;
 
+	if (READ_ONCE(dev->fw_failed))
+		return 0;
+
 	mfc_debug_enter();
 	/* 0. MFC reset */
 	mfc_debug(2, "MFC reset..\n");
 	s5p_mfc_clock_on(dev);
-	dev->risc_on = 0;
+	if (!IS_MFCV16_PLUS(dev))
+		dev->risc_on = 0;
 	ret = s5p_mfc_reset(dev);
 	if (ret) {
 		mfc_err("Failed to reset MFC - timeout\n");
@@ -432,6 +482,9 @@ int s5p_mfc_wakeup(struct s5p_mfc_dev *dev)
 int s5p_mfc_open_mfc_inst(struct s5p_mfc_dev *dev, struct s5p_mfc_ctx *ctx)
 {
 	int ret = 0;
+
+	if (READ_ONCE(dev->fw_failed))
+		return -EIO;
 
 	ret = s5p_mfc_hw_call(dev->mfc_ops, alloc_instance_buffer, ctx);
 	if (ret) {
@@ -472,6 +525,12 @@ err:
 
 void s5p_mfc_close_mfc_inst(struct s5p_mfc_dev *dev, struct s5p_mfc_ctx *ctx)
 {
+	if (READ_ONCE(dev->fw_failed)) {
+		/* A fault IRQ sets the latch before completing the reset. */
+		synchronize_irq(dev->irq);
+		goto free_resources;
+	}
+
 	ctx->state = MFCINST_RETURN_INST;
 	set_work_bit_irqsave(ctx);
 	s5p_mfc_hw_call(dev->mfc_ops, try_run, dev);
@@ -482,6 +541,7 @@ void s5p_mfc_close_mfc_inst(struct s5p_mfc_dev *dev, struct s5p_mfc_ctx *ctx)
 		mfc_err("Err returning instance\n");
 	}
 
+free_resources:
 	/* Free resources */
 	s5p_mfc_hw_call(dev->mfc_ops, release_codec_buffers, ctx);
 	s5p_mfc_hw_call(dev->mfc_ops, release_instance_buffer, ctx);
