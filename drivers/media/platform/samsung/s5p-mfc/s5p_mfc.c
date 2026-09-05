@@ -1828,8 +1828,36 @@ static struct s5p_mfc_variant mfc_drvdata_v12 = {
 	.num_clocks	= 1,
 };
 
+static const struct s5p_mfc_buf_size_v6 mfc_buf_size_v16 = {
+	.dev_ctx	= PAGE_ALIGN(30 * SZ_1K),
+	.h264_dec_ctx	= SZ_2M,
+	.other_dec_ctx	= PAGE_ALIGN(60 * SZ_1K),
+	.h264_enc_ctx	= PAGE_ALIGN(100 * SZ_1K),
+	.hevc_enc_ctx	= PAGE_ALIGN(50 * SZ_1K),
+	.other_enc_ctx	= PAGE_ALIGN(50 * SZ_1K),
+};
+
+static const struct s5p_mfc_buf_size buf_size_v16 = {
+	.fw	= SZ_1M,
+	.cpb	= 3 * SZ_1M,
+	.priv	= &mfc_buf_size_v16,
+};
+
+static const struct s5p_mfc_variant mfc_drvdata_zumapro = {
+	.version	= MFC_VERSION_V16,
+	.version_bit	= MFC_V16_BIT,
+	.port_num	= 1,
+	.buf_size	= &buf_size_v16,
+	.fw_name[0]	= "google/zumapro/mfc_fw.bin",
+	.clk_names	= { "mfc" },
+	.num_clocks	= 1,
+};
+
 static const struct of_device_id exynos_mfc_match[] = {
 	{
+		.compatible = "google,zumapro-mfc",
+		.data = &mfc_drvdata_zumapro,
+	}, {
 		.compatible = "samsung,mfc-v5",
 		.data = &mfc_drvdata_v5,
 	}, {
