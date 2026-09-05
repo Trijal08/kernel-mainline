@@ -78,6 +78,7 @@
 #define S5P_MFC_CODEC_H263_ENC		23
 #define S5P_MFC_CODEC_VP8_ENC		24
 #define S5P_MFC_CODEC_HEVC_ENC		26
+#define S5P_MFC_CODEC_VP9_ENC		27
 
 #define S5P_MFC_R2H_CMD_EMPTY			0
 #define S5P_MFC_R2H_CMD_SYS_INIT_RET		1
@@ -420,9 +421,9 @@ struct s5p_mfc_mpeg4_enc_params {
 };
 
 /*
- * struct s5p_mfc_vp8_enc_params - encoding parameters for vp8
+ * struct s5p_mfc_vpx_enc_params - encoding parameters for VP8 and VP9
  */
-struct s5p_mfc_vp8_enc_params {
+struct s5p_mfc_vpx_enc_params {
 	u8 imd_4x4;
 	enum v4l2_vp8_num_partitions num_partitions;
 	enum v4l2_vp8_num_ref_frames num_ref;
@@ -437,6 +438,7 @@ struct s5p_mfc_vp8_enc_params {
 	u8 rc_frame_qp;
 	u8 rc_p_frame_qp;
 	u8 profile;
+	u8 vp9_level;
 };
 
 struct s5p_mfc_hevc_enc_params {
@@ -524,7 +526,7 @@ struct s5p_mfc_enc_params {
 	struct {
 		struct s5p_mfc_h264_enc_params h264;
 		struct s5p_mfc_mpeg4_enc_params mpeg4;
-		struct s5p_mfc_vp8_enc_params vp8;
+		struct s5p_mfc_vpx_enc_params vpx;
 		struct s5p_mfc_hevc_enc_params hevc;
 	} codec;
 
