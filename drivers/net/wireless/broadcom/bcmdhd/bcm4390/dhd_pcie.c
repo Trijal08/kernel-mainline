@@ -14053,6 +14053,14 @@ BCMFASTPATH(dhd_bus_dpc)(struct dhd_bus *bus)
 
 	bus->dpc_entry_time = OSL_LOCALTIME_NS();
 
+	/* Re-arm the poll from inside the DPC itself: once anything has run the
+	 * DPC, the poll sustains itself without a separate timer. Harmless when
+	 * interrupts are healthy -- the DPC just finds the rings empty. */
+	if (dhd_dpc_poll_ms && bus->dhd->busstate == DHD_BUS_DATA) {
+		dhd_schedule_delayed_dpc_on_dpc_cpu(bus->dhd,
+			msecs_to_jiffies(dhd_dpc_poll_ms));
+	}
+
 	if (bus->dhd->db7_trap.fw_db7w_trap_received) {
 		DHD_PRINT(("%s: fw_db7w_trap_received exit\n", __FUNCTION__));
 		return 0;
