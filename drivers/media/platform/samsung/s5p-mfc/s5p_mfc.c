@@ -524,6 +524,13 @@ static void s5p_mfc_handle_error(struct s5p_mfc_dev *dev,
 {
 	mfc_err("Interrupt Error: %08x\n", err);
 
+	/* Firmware boot commands do not acquire the instance scheduler lock. */
+	if (!test_bit(0, &dev->hw_lock)) {
+		s5p_mfc_hw_call(dev->mfc_ops, clear_int_flags, dev);
+		wake_up_dev(dev, reason, err);
+		return;
+	}
+
 	if (ctx) {
 		/* Error recovery is dependent on the state of context */
 		switch (ctx->state) {
@@ -713,7 +720,7 @@ static irqreturn_t s5p_mfc_irq(int irq, void *priv)
 	switch (reason) {
 	case S5P_MFC_R2H_CMD_ERR_RET:
 		/* An error has occurred */
-		if (ctx->state == MFCINST_RUNNING &&
+		if (ctx && ctx->state == MFCINST_RUNNING &&
 			(s5p_mfc_hw_call(dev->mfc_ops, err_dec, err) >=
 				dev->warn_start ||
 				err == S5P_FIMV_ERR_NO_VALID_SEQ_HDR ||
