@@ -220,7 +220,12 @@ static int s5p_mfc_alloc_codec_buffers_v6(struct s5p_mfc_ctx *ctx)
 		ctx->bank1.size = ctx->scratch_buf_size;
 		break;
 	case S5P_MFC_CODEC_MPEG2_DEC:
-		ctx->bank1.size = 0;
+		if (IS_MFCV16_PLUS(dev)) {
+			ctx->scratch_buf_size = ALIGN(ctx->scratch_buf_size, 256);
+			ctx->bank1.size = ctx->scratch_buf_size;
+		} else {
+			ctx->bank1.size = 0;
+		}
 		ctx->bank2.size = 0;
 		break;
 	case S5P_MFC_CODEC_H263_DEC:
