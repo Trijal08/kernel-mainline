@@ -4938,21 +4938,21 @@ wl_priortize_scan_over_listen(struct bcm_cfg80211 *cfg,
 
 #if defined(WL_CFG80211_P2P_DEV_IF)
 s32
-/* NOTE(mainline): cfg80211_ops .remain_on_channel gained a trailing
- * "const u8 *rx_addr" parameter. */
+/* NOTE(mainline): 7.3: cfg80211 now assigns the cookie itself (via
+ * cfg80211_assign_cookie()) and passes it by value; the driver must echo it
+ * in the ready/expired events instead of generating its own. */
 wl_cfgscan_remain_on_channel(struct wiphy *wiphy, bcm_struct_cfgdev *cfgdev,
-	struct ieee80211_channel *channel, unsigned int duration, u64 *cookie,
+	struct ieee80211_channel *channel, unsigned int duration, u64 cookie,
 	const u8 *rx_addr)
 #else
 s32
 wl_cfgscan_remain_on_channel(struct wiphy *wiphy, bcm_struct_cfgdev *cfgdev,
 	struct ieee80211_channel *channel,
 	enum nl80211_channel_type channel_type,
-	unsigned int duration, u64 *cookie)
+	unsigned int duration, u64 cookie)
 #endif /* WL_CFG80211_P2P_DEV_IF */
 {
 	s32 target_channel;
-	u32 id;
 	s32 err = BCME_OK;
 	struct net_device *ndev = NULL;
 	struct bcm_cfg80211 *cfg = wiphy_priv(wiphy);
@@ -5085,18 +5085,14 @@ exit:
 #if defined(WL_ENABLE_P2P_IF)
 		cfg->remain_on_chan_type = channel_type;
 #endif /* WL_ENABLE_P2P_IF */
-		id = ++cfg->last_roc_id;
-		if (id == 0) {
-			id = ++cfg->last_roc_id;
-		}
-		*cookie = id;
+		cfg->last_roc_id = cookie;
 
 		/* Notify userspace that listen has started */
-		CFG80211_READY_ON_CHANNEL(cfgdev, *cookie, channel, channel_type, duration, flags);
+		CFG80211_READY_ON_CHANNEL(cfgdev, cookie, channel, channel_type, duration, flags);
 		WL_INFORM_MEM(("listen started on channel:%d duration (ms):%d cookie:%llu\n",
-				target_channel, duration, *cookie));
+				target_channel, duration, cookie));
 	} else {
-		WL_ERR(("Fail to Set (err=%d cookie:%llu)\n", err, *cookie));
+		WL_ERR(("Fail to Set (err=%d cookie:%llu)\n", err, cookie));
 		wl_flush_fw_log_buffer(ndev, FW_LOGSET_MASK_ALL);
 	}
 	return err;
