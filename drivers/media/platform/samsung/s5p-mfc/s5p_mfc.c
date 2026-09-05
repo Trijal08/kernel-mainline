@@ -504,8 +504,11 @@ static void s5p_mfc_handle_frame(struct s5p_mfc_ctx *ctx,
 		}
 	}
 leave_handle_frame:
+	if (IS_MFCV16_PLUS(dev))
+		ctx->dec_dpb_used = mfc_read(dev, S5P_FIMV_D_USED_DPB_FLAG_LOWER_V16);
 	if ((ctx->src_queue_cnt == 0 && ctx->state != MFCINST_FINISHING)
-				    || ctx->dst_queue_cnt < ctx->pb_count)
+	    || (IS_MFCV16_PLUS(dev) ? s5p_mfc_dec_dpb_index(ctx) < 0 :
+		ctx->dst_queue_cnt < ctx->pb_count))
 		clear_work_bit(ctx);
 	s5p_mfc_hw_call(dev->mfc_ops, clear_int_flags, dev);
 	wake_up_ctx(ctx, reason, err);
@@ -795,6 +798,7 @@ static irqreturn_t s5p_mfc_irq(int irq, void *priv)
 		break;
 
 	case S5P_MFC_R2H_CMD_DPB_FLUSH_RET:
+		ctx->dec_dpb_used = 0;
 		ctx->state = MFCINST_RUNNING;
 		goto irq_cleanup_hw;
 
