@@ -57,6 +57,9 @@ struct zuma_dsim {
 	struct drm_bridge bridge;
 	struct mipi_dsi_host dsi_host;
 	struct drm_bridge *panel_bridge;
+	struct device *panel_dev;
+	struct delayed_work hotplug_work;
+	unsigned int hotplug_tries;
 	struct clk *bus_clk;
 	void __iomem *regs;		/* "dsi" link registers */
 	void __iomem *phy_regs;		/* "dphy" DCPHY PLL/lane/timing */
@@ -777,6 +780,31 @@ static const struct drm_bridge_funcs zuma_dsim_bridge_funcs = {
 /* mipi_dsi_host							      */
 /* ------------------------------------------------------------------ */
 
+/*
+ * The modeset this kicks runs the panel's enable, so it must not run until the
+ * panel driver's probe (which called mipi_dsi_attach()) has returned - a
+ * half-probed panel times out every command it sends.
+ */
+#define DSIM_HOTPLUG_MAX_TRIES	50
+
+static void zuma_dsim_hotplug_work(struct work_struct *work)
+{
+	struct zuma_dsim *dsim = container_of(to_delayed_work(work),
+					      struct zuma_dsim, hotplug_work);
+
+	if (dsim->panel_dev && !device_is_bound(dsim->panel_dev)) {
+		if (++dsim->hotplug_tries < DSIM_HOTPLUG_MAX_TRIES) {
+			schedule_delayed_work(&dsim->hotplug_work,
+					      msecs_to_jiffies(20));
+			return;
+		}
+		dev_warn(dsim->dev, "panel not bound, forcing hotplug\n");
+	}
+
+	if (dsim->encoder.dev)
+		drm_kms_helper_hotplug_event(dsim->encoder.dev);
+}
+
 static int zuma_dsim_host_attach(struct mipi_dsi_host *host,
 				 struct mipi_dsi_device *device)
 {
@@ -805,12 +833,27 @@ static int zuma_dsim_host_attach(struct mipi_dsi_host *host,
 		crtc->dsc = dsim->dsc;
 	}
 
+	/*
+	 * Cold modprobe: the panel attaches after drm_dev_register(), so the
+	 * fbdev client has already given up with "Cannot find any crtc or
+	 * sizes". Now that there is a connector with modes, kick it once the
+	 * panel has finished probing. On the reload path the device is not
+	 * registered yet and the normal initial config covers it.
+	 */
+	dsim->panel_dev = &device->dev;
+	if (dsim->encoder.dev && dsim->encoder.dev->registered) {
+		dsim->hotplug_tries = 0;
+		schedule_delayed_work(&dsim->hotplug_work,
+				      msecs_to_jiffies(20));
+	}
+
 	return 0;
 }
 
 static int zuma_dsim_host_detach(struct mipi_dsi_host *host,
 				 struct mipi_dsi_device *device)
 {
+	cancel_delayed_work_sync(&host_to_dsim(host)->hotplug_work);
 	return 0;
 }
 
@@ -948,6 +991,7 @@ static int zuma_dsim_probe(struct platform_device *pdev)
 		return PTR_ERR(dsim);
 
 	dsim->dev = dev;
+	INIT_DELAYED_WORK(&dsim->hotplug_work, zuma_dsim_hotplug_work);
 
 	dsim->regs = devm_platform_ioremap_resource_byname(pdev, "dsi");
 	if (IS_ERR(dsim->regs))
