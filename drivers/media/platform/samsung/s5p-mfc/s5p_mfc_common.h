@@ -802,6 +802,7 @@ void s5p_mfc_cleanup_queue(struct list_head *lh, struct vb2_queue *vq);
 #define MFC_V8_BIT	BIT(3)
 #define MFC_V10_BIT	BIT(5)
 #define MFC_V12_BIT	BIT(7)
+#define MFC_V16_BIT	BIT(8)
 
 #define MFC_V5PLUS_BITS		(MFC_V5_BIT | MFC_V6_BIT | MFC_V7_BIT | \
 					MFC_V8_BIT | MFC_V10_BIT | MFC_V12_BIT)
