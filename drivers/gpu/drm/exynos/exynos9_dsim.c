@@ -562,6 +562,11 @@ static int zuma_dsim_dphy_enable_lanes(struct zuma_dsim *dsim)
 	return ret;
 }
 
+static int dsim_comp_align = 8;
+module_param_named(comp_align, dsim_comp_align, int, 0644);
+MODULE_PARM_DESC(comp_align,
+		 "pixel alignment of the per-slice compressed width (0 = none)");
+
 /* Program the command-mode + DSC link config (vendor set_config subset) */
 static void zuma_dsim_set_config(struct zuma_dsim *dsim)
 {
@@ -576,7 +581,13 @@ static void zuma_dsim_set_config(struct zuma_dsim *dsim)
 	u32 slice_px = dsc ? DIV_ROUND_UP(slice_w *
 					  dsc->bits_per_component, 8) : 0;
 	u32 comp_w = dsc ? DIV_ROUND_UP(slice_px, 6) * 2 : 0;
-	u32 width = dsc ? comp_w * slice_cnt : dsim->hactive;
+	/*
+	 * Not the DECON's OUTFIFO width: the DSIM carries the compressed bytes
+	 * as RGB24 pixels and needs the per-slice count rounded up to 8, which
+	 * is what the bootloader programs (216/slice where the DECON has 214).
+	 */
+	u32 width = dsc ? roundup(comp_w, dsim_comp_align ?: 1) * slice_cnt :
+			  dsim->hactive;
 
 	dsim_rmw(dsim, DSIM_SFR_CTRL, DSIM_SFR_CTRL_SHADOW_REG_READ_EN,
 		 DSIM_SFR_CTRL_SHADOW_REG_READ_EN);
