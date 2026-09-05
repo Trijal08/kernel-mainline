@@ -677,7 +677,9 @@ static void s5p_mfc_handle_stream_complete(struct s5p_mfc_ctx *ctx)
 
 	ctx->state = MFCINST_FINISHED;
 
-	if (!list_empty(&ctx->dst_queue)) {
+	if (ctx->type == MFCINST_ENCODER) {
+		s5p_mfc_enc_stream_complete(ctx);
+	} else if (!list_empty(&ctx->dst_queue)) {
 		mb_entry = list_entry(ctx->dst_queue.next, struct s5p_mfc_buf,
 									list);
 		list_del(&mb_entry->list);
