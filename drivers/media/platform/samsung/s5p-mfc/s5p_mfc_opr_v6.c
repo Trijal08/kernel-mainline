@@ -448,11 +448,14 @@ static int s5p_mfc_alloc_dev_context_buffer_v6(struct s5p_mfc_dev *dev)
 
 	mfc_debug_enter();
 
-	dev->ctx_buf.size = buf_size->dev_ctx;
-	ret = s5p_mfc_alloc_priv_buf(dev, BANK_L_CTX, &dev->ctx_buf);
-	if (ret) {
-		mfc_err("Failed to allocate device context buffer\n");
-		return ret;
+	/* A failed reset may have left the previous context allocated. */
+	if (!dev->ctx_buf.virt) {
+		dev->ctx_buf.size = buf_size->dev_ctx;
+		ret = s5p_mfc_alloc_priv_buf(dev, BANK_L_CTX, &dev->ctx_buf);
+		if (ret) {
+			mfc_err("Failed to allocate device context buffer\n");
+			return ret;
+		}
 	}
 
 	memset(dev->ctx_buf.virt, 0, buf_size->dev_ctx);
