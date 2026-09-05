@@ -100,6 +100,7 @@ struct decon_config {
 	unsigned int out_bpc;
 	struct decon_mode mode;
 	unsigned int fps;
+	const struct drm_dsc_config *dsc;
 };
 
 struct win_color_map {
