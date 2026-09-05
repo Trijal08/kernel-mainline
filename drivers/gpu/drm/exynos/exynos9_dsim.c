@@ -769,8 +769,10 @@ static int zuma_dsim_host_attach(struct mipi_dsi_host *host,
 
 	crtc = exynos_drm_crtc_get_by_type(dsim->encoder.dev,
 					   EXYNOS_DISPLAY_TYPE_LCD);
-	if (!IS_ERR(crtc))
+	if (!IS_ERR(crtc)) {
 		crtc->i80_mode = !(dsim->mode_flags & MIPI_DSI_MODE_VIDEO);
+		crtc->dsc = dsim->dsc;
+	}
 
 	return 0;
 }
