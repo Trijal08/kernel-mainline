@@ -160,7 +160,7 @@ static const struct s5p_mfc_fmt formats[] = {
 		.codec_mode	= S5P_FIMV_CODEC_HEVC_DEC,
 		.type		= MFC_FMT_DEC,
 		.num_planes	= 1,
-		.versions	= MFC_V10PLUS_BITS,
+		.versions	= MFC_V10PLUS_BITS | MFC_V16_BIT,
 		.flags		= V4L2_FMT_FLAG_DYN_RESOLUTION |
 				  V4L2_FMT_FLAG_CONTINUOUS_BYTESTREAM,
 	},
@@ -835,7 +835,8 @@ static int vidioc_g_selection(struct file *file, void *priv,
 		mfc_err("Can not get compose information\n");
 		return -EINVAL;
 	}
-	if (ctx->src_fmt->fourcc == V4L2_PIX_FMT_H264) {
+	if (ctx->src_fmt->fourcc == V4L2_PIX_FMT_H264 ||
+	    (IS_MFCV16_PLUS(dev) && ctx->src_fmt->fourcc == V4L2_PIX_FMT_HEVC)) {
 		left = s5p_mfc_hw_call(dev->mfc_ops, get_crop_info_h, ctx);
 		right = left >> S5P_FIMV_SHARED_CROP_RIGHT_SHIFT;
 		left = left & S5P_FIMV_SHARED_CROP_LEFT_MASK;
