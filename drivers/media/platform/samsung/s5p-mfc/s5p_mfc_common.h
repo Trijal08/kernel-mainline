@@ -611,6 +611,7 @@ struct s5p_mfc_codec_ops {
  * @mv_count:		number of MV buffers allocated for decoding
  * @enc_params:		encoding parameters for MFC
  * @enc_dst_buf_size:	size of the buffers for encoder output
+ * @enc_eos_pending:	encoder drain is waiting for a terminal capture buffer
  * @luma_dpb_size:	dpb buffer size for luma
  * @chroma_dpb_size:	dpb buffer size for chroma
  * @me_buffer_size:	size of the motion estimation buffer
@@ -706,6 +707,7 @@ struct s5p_mfc_ctx {
 	struct s5p_mfc_priv_buf shm;
 
 	struct s5p_mfc_enc_params enc_params;
+	bool enc_eos_pending;
 
 	size_t enc_dst_buf_size;
 	size_t luma_dpb_size;
