@@ -504,8 +504,12 @@ static void s5p_mfc_dec_calc_dpb_size_v6(struct s5p_mfc_ctx *ctx)
 			ctx->buf_width * ctx->buf_height / 2 + 256,
 			mfc_read(dev, S5P_FIMV_D_MIN_CHROMA_DPB_SIZE_V6));
 		ctx->chroma_size_1 = 0;
-		ctx->mv_size = ALIGN(S5P_MFC_DEC_MV_SIZE(ctx->img_width,
-						     ctx->img_height, 1024), 32);
+		if (ctx->codec_mode == S5P_MFC_CODEC_HEVC_DEC)
+			ctx->mv_size = ALIGN(s5p_mfc_dec_hevc_mv_size(ctx->img_width,
+								   ctx->img_height), 32);
+		else
+			ctx->mv_size = ALIGN(S5P_MFC_DEC_MV_SIZE(ctx->img_width,
+							     ctx->img_height, 1024), 32);
 		return;
 	}
 
