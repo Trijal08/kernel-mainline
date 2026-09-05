@@ -1622,7 +1622,12 @@ static int s5p_mfc_set_enc_params_vp8(struct s5p_mfc_ctx *ctx)
 		break;
 	}
 	reg |= (val & 0xF) << 3;
-	reg |= (p_vp8->num_ref & 0x2);
+	if (IS_MFCV16_PLUS(dev)) {
+		reg |= p_vp8->num_ref & 0x1;
+		reg |= S5P_FIMV_E_VPX_IVF_HEADER_DISABLE_V16;
+	} else {
+		reg |= p_vp8->num_ref & 0x2;
+	}
 	writel(reg, mfc_regs->e_vp8_options);
 
 	mfc_debug_leave();
