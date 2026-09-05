@@ -41,6 +41,7 @@ int zumapro_pcie_modem_link_up(struct device *rc_dev);
 int zumapro_pcie_modem_gen3(struct device *rc_dev);
 int zumapro_pcie_modem_wake(struct device *rc_dev);
 int zumapro_pcie_modem_reset(struct device *rc_dev);
+int zumapro_pcie_modem_dump_reset(struct device *rc_dev);
 int zumapro_pcie_modem_power_cycle(struct device *rc_dev);
 int zumapro_pcie_modem_link_speed(struct device *rc_dev);
 /* Wi-Fi (BCM4390) runtime relink for dhd D3 power management. */
@@ -77,6 +78,11 @@ static inline int zumapro_pcie_modem_wake(struct device *rc_dev)
 {
 	return -ENODEV;
 }
+static inline int zumapro_pcie_modem_dump_reset(struct device *rc_dev)
+{
+	return -ENODEV;
+}
+
 static inline int zumapro_pcie_modem_reset(struct device *rc_dev)
 {
 	return -ENODEV;
