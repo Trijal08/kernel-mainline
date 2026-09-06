@@ -2351,24 +2351,16 @@ static int s5p_mfc_enc_g_v_ctrl(struct v4l2_ctrl *ctrl)
 
 	switch (ctrl->id) {
 	case V4L2_CID_MIN_BUFFERS_FOR_OUTPUT:
+		/* Wait only for a header the hardware is already producing. */
+		if (ctx->state == MFCINST_GOT_INST &&
+		    dev->curr_ctx == ctx->num && dev->hw_lock)
+			s5p_mfc_wait_for_done_ctx(ctx,
+					S5P_MFC_R2H_CMD_SEQ_DONE_RET, 0);
 		if (ctx->state >= MFCINST_HEAD_PARSED &&
-		    ctx->state < MFCINST_ABORT) {
+		    ctx->state < MFCINST_ABORT)
 			ctrl->val = ctx->pb_count;
-			break;
-		} else if (ctx->state != MFCINST_INIT) {
-			v4l2_err(&dev->v4l2_dev, "Encoding not initialised\n");
-			return -EINVAL;
-		}
-		/* Should wait for the header to be produced */
-		s5p_mfc_wait_for_done_ctx(ctx,
-				S5P_MFC_R2H_CMD_SEQ_DONE_RET, 0);
-		if (ctx->state >= MFCINST_HEAD_PARSED &&
-		    ctx->state < MFCINST_ABORT) {
-			ctrl->val = ctx->pb_count;
-		} else {
-			v4l2_err(&dev->v4l2_dev, "Encoding not initialised\n");
-			return -EINVAL;
-		}
+		else
+			ctrl->val = ctrl->default_value;
 		break;
 	}
 	return 0;
