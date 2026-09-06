@@ -507,17 +507,25 @@ static void s5p_mfc_dec_calc_dpb_size_v6(struct s5p_mfc_ctx *ctx)
 	struct s5p_mfc_dev *dev = ctx->dev;
 
 	if (IS_MFCV16_PLUS(dev)) {
-		/* v16 exposes linear NV12M, including the firmware's DMA padding. */
+		/*
+		 * v16 exposes linear NV12M in the firmware's own single-buffer
+		 * layout: 64-byte strides, a luma plane of ALIGN(height, 16)
+		 * rows, a chroma plane of half that, and no pad bytes.
+		 */
 		ctx->buf_width = ALIGN(ctx->img_width, 64);
 		ctx->buf_height = ALIGN(ctx->img_height, 16);
 		ctx->stride[0] = ctx->buf_width;
 		ctx->stride[1] = ctx->buf_width;
 		ctx->luma_size = max_t(u32,
-			ctx->buf_width * ctx->buf_height + 256,
+			ctx->buf_width * ctx->buf_height,
 			mfc_read(dev, S5P_FIMV_D_MIN_LUMA_DPB_SIZE_V6));
 		ctx->chroma_size = max_t(u32,
-			ctx->buf_width * ctx->buf_height / 2 + 256,
+			ctx->buf_width * ctx->buf_height / 2,
 			mfc_read(dev, S5P_FIMV_D_MIN_CHROMA_DPB_SIZE_V6));
+		mfc_debug(2, "DPB planes %u/%u, firmware minimum %u/%u\n",
+			  ctx->luma_size, ctx->chroma_size,
+			  mfc_read(dev, S5P_FIMV_D_MIN_LUMA_DPB_SIZE_V6),
+			  mfc_read(dev, S5P_FIMV_D_MIN_CHROMA_DPB_SIZE_V6));
 		ctx->chroma_size_1 = 0;
 		if (ctx->codec_mode == S5P_MFC_CODEC_HEVC_DEC)
 			ctx->mv_size = ALIGN(s5p_mfc_dec_hevc_mv_size(ctx->img_width,
@@ -590,6 +598,20 @@ static void s5p_mfc_enc_calc_src_size_v6(struct s5p_mfc_dev *dev,
 	memset(l, 0, sizeof(*l));
 	mb_width = MB_WIDTH(width);
 	mb_height = MB_HEIGHT(height);
+
+	if (IS_MFCV16_PLUS(dev)) {
+		/*
+		 * The firmware's own single-buffer layout: a luma plane of
+		 * ALIGN(height, 16) rows, a chroma plane of half that, no pad
+		 * bytes between or after them.
+		 */
+		l->buf_width = ALIGN(width, S5P_FIMV_NV12M_HALIGN_V6);
+		l->stride[0] = l->buf_width;
+		l->stride[1] = l->buf_width;
+		l->luma_size = l->stride[0] * ALIGN(height, 16);
+		l->chroma_size = l->stride[1] * ALIGN(height, 16) / 2;
+		return;
+	}
 
 	if (IS_MFCV12(dev)) {
 		switch (fmt->fourcc) {
