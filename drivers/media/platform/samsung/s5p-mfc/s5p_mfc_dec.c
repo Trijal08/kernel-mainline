@@ -789,29 +789,25 @@ static int s5p_mfc_dec_s_ctrl(struct v4l2_ctrl *ctrl)
 static int s5p_mfc_dec_g_v_ctrl(struct v4l2_ctrl *ctrl)
 {
 	struct s5p_mfc_ctx *ctx = ctrl_to_ctx(ctrl);
-	struct s5p_mfc_dev *dev = ctx->dev;
 
 	switch (ctrl->id) {
 	case V4L2_CID_MIN_BUFFERS_FOR_CAPTURE:
+		/*
+		 * A header can only be parsed from a queued buffer while the
+		 * OUTPUT queue streams; legacy clients read this control to
+		 * wait for it.
+		 */
+		if ((ctx->state == MFCINST_INIT ||
+		     ctx->state == MFCINST_GOT_INST ||
+		     ctx->state == MFCINST_RES_CHANGE_END) &&
+		    vb2_is_streaming(&ctx->vq_src) && ctx->src_queue_cnt)
+			s5p_mfc_wait_for_done_ctx(ctx,
+					S5P_MFC_R2H_CMD_SEQ_DONE_RET, 0);
 		if (ctx->state >= MFCINST_HEAD_PARSED &&
-		    ctx->state < MFCINST_ABORT) {
+		    ctx->state < MFCINST_ABORT)
 			ctrl->val = ctx->pb_count;
-			break;
-		} else if (ctx->state != MFCINST_INIT &&
-				ctx->state != MFCINST_RES_CHANGE_END) {
-			v4l2_err(&dev->v4l2_dev, "Decoding not initialised\n");
-			return -EINVAL;
-		}
-		/* Should wait for the header to be parsed */
-		s5p_mfc_wait_for_done_ctx(ctx,
-				S5P_MFC_R2H_CMD_SEQ_DONE_RET, 0);
-		if (ctx->state >= MFCINST_HEAD_PARSED &&
-		    ctx->state < MFCINST_ABORT) {
-			ctrl->val = ctx->pb_count;
-		} else {
-			v4l2_err(&dev->v4l2_dev, "Decoding not initialised\n");
-			return -EINVAL;
-		}
+		else
+			ctrl->val = ctrl->default_value;
 		break;
 	}
 	return 0;
