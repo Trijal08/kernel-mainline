@@ -1942,6 +1942,9 @@ static int s5p_mfc_decode_one_frame_v6(struct s5p_mfc_ctx *ctx,
 
 		if (index < 0)
 			return index;
+		/* The size goes with every dynamic DPB, not only INIT_BUFFERS. */
+		writel(ctx->luma_size, mfc_regs->d_first_plane_dpb_size);
+		writel(ctx->chroma_size, mfc_regs->d_second_plane_dpb_size);
 		writel(ctx->dst_bufs[index].cookie.raw.luma,
 		       mfc_regs->d_first_plane_dpb + index * 4);
 		writel(ctx->dst_bufs[index].cookie.raw.chroma,
