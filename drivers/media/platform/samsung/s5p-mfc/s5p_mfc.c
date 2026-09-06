@@ -455,10 +455,15 @@ static void s5p_mfc_handle_frame_new(struct s5p_mfc_ctx *ctx, unsigned int err)
 			else
 				dst_buf->b->field =
 							V4L2_FIELD_INTERLACED;
-			vb2_set_plane_payload(&dst_buf->b->vb2_buf, 0,
-						ctx->luma_size);
-			vb2_set_plane_payload(&dst_buf->b->vb2_buf, 1,
-						ctx->chroma_size);
+			if (dst_buf->b->vb2_buf.num_planes == 1) {
+				vb2_set_plane_payload(&dst_buf->b->vb2_buf, 0,
+						      ctx->luma_size + ctx->chroma_size);
+			} else {
+				vb2_set_plane_payload(&dst_buf->b->vb2_buf, 0,
+						      ctx->luma_size);
+				vb2_set_plane_payload(&dst_buf->b->vb2_buf, 1,
+						      ctx->chroma_size);
+			}
 			clear_bit(dst_buf->b->vb2_buf.index,
 							&ctx->dec_dst_flag);
 
@@ -677,6 +682,13 @@ static void s5p_mfc_handle_seq_done(struct s5p_mfc_ctx *ctx,
 		}
 		ctx->img_width = width;
 		ctx->img_height = height;
+		/* Valid only now; S_FMT recomputes the layout from these. */
+		if (IS_MFCV16_PLUS(dev)) {
+			ctx->luma_dpb_min = mfc_read(dev,
+					S5P_FIMV_D_MIN_LUMA_DPB_SIZE_V6);
+			ctx->chroma_dpb_min = mfc_read(dev,
+					S5P_FIMV_D_MIN_CHROMA_DPB_SIZE_V6);
+		}
 
 		s5p_mfc_hw_call(dev->mfc_ops, dec_calc_dpb_size, ctx);
 

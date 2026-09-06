@@ -516,16 +516,11 @@ static void s5p_mfc_dec_calc_dpb_size_v6(struct s5p_mfc_ctx *ctx)
 		ctx->buf_height = ALIGN(ctx->img_height, 16);
 		ctx->stride[0] = ctx->buf_width;
 		ctx->stride[1] = ctx->buf_width;
-		ctx->luma_size = max_t(u32,
-			ctx->buf_width * ctx->buf_height,
-			mfc_read(dev, S5P_FIMV_D_MIN_LUMA_DPB_SIZE_V6));
-		ctx->chroma_size = max_t(u32,
-			ctx->buf_width * ctx->buf_height / 2,
-			mfc_read(dev, S5P_FIMV_D_MIN_CHROMA_DPB_SIZE_V6));
+		s5p_mfc_dpb_plane_sizes_v16(ctx, ctx->dst_fmt, &ctx->luma_size,
+					    &ctx->chroma_size);
 		mfc_debug(2, "DPB planes %u/%u, firmware minimum %u/%u\n",
 			  ctx->luma_size, ctx->chroma_size,
-			  mfc_read(dev, S5P_FIMV_D_MIN_LUMA_DPB_SIZE_V6),
-			  mfc_read(dev, S5P_FIMV_D_MIN_CHROMA_DPB_SIZE_V6));
+			  ctx->luma_dpb_min, ctx->chroma_dpb_min);
 		ctx->chroma_size_1 = 0;
 		if (ctx->codec_mode == S5P_MFC_CODEC_HEVC_DEC)
 			ctx->mv_size = ALIGN(s5p_mfc_dec_hevc_mv_size(ctx->img_width,
@@ -1003,7 +998,8 @@ static int s5p_mfc_set_enc_params(struct s5p_mfc_ctx *ctx)
 	writel(reg, mfc_regs->e_enc_options);
 
 	/* memory structure cur. frame */
-	if (ctx->src_fmt->fourcc == V4L2_PIX_FMT_NV12M) {
+	if (ctx->src_fmt->fourcc == V4L2_PIX_FMT_NV12M ||
+	    ctx->src_fmt->fourcc == V4L2_PIX_FMT_NV12) {
 		/* 0: Linear, 1: 2D tiled*/
 		reg = readl(mfc_regs->e_enc_options);
 		reg &= ~(0x1 << 7);
@@ -2159,14 +2155,9 @@ static inline int s5p_mfc_run_enc_frame(struct s5p_mfc_ctx *ctx)
 			s5p_mfc_set_enc_frame_buffer_v6(ctx, 0, 0, 0);
 			ctx->state = MFCINST_FINISHING;
 		} else {
-			src_y_addr = vb2_dma_contig_plane_dma_addr(&src_mb->b->vb2_buf, 0);
-			src_c_addr = vb2_dma_contig_plane_dma_addr(&src_mb->b->vb2_buf, 1);
-			if (ctx->src_fmt->fourcc == V4L2_PIX_FMT_YUV420M || ctx->src_fmt->fourcc ==
-					V4L2_PIX_FMT_YVU420M)
-				src_c_1_addr = vb2_dma_contig_plane_dma_addr
-					(&src_mb->b->vb2_buf, 2);
-			else
-				src_c_1_addr = 0;
+			s5p_mfc_raw_plane_addrs(ctx, ctx->src_fmt,
+						&src_mb->b->vb2_buf, &src_y_addr,
+						&src_c_addr, &src_c_1_addr);
 
 			mfc_debug(2, "enc src y addr: 0x%08lx\n", src_y_addr);
 			mfc_debug(2, "enc src c addr: 0x%08lx\n", src_c_addr);
