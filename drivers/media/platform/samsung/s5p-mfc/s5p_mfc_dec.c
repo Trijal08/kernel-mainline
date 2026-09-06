@@ -744,21 +744,17 @@ static int vidioc_querybuf(struct file *file, void *priv,
 	int ret;
 	int i;
 
-	if (buf->memory != V4L2_MEMORY_MMAP) {
-		mfc_err("Only mmapped buffers can be used\n");
-		return -EINVAL;
-	}
 	mfc_debug(2, "State: %d, buf->type: %d\n", ctx->state, buf->type);
-	if (ctx->state == MFCINST_GOT_INST &&
-			buf->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
+	if (buf->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
 		ret = vb2_querybuf(&ctx->vq_src, buf);
-	} else if (ctx->state == MFCINST_RUNNING &&
-			buf->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
+	} else if (buf->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
 		ret = vb2_querybuf(&ctx->vq_dst, buf);
-		for (i = 0; i < buf->length; i++)
-			buf->m.planes[i].m.mem_offset += DST_QUEUE_OFF_BASE;
+		/* Both queues share the mmap space; CAPTURE sits above. */
+		if (!ret && buf->memory == V4L2_MEMORY_MMAP)
+			for (i = 0; i < buf->length; i++)
+				buf->m.planes[i].m.mem_offset += DST_QUEUE_OFF_BASE;
 	} else {
-		mfc_err("vidioc_querybuf called in an inappropriate state\n");
+		mfc_err("invalid buf type\n");
 		ret = -EINVAL;
 	}
 	mfc_debug_leave();
