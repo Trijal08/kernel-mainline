@@ -722,6 +722,13 @@ static void s5p_mfc_handle_seq_done(struct s5p_mfc_ctx *ctx,
 done:
 	s5p_mfc_hw_call(dev->mfc_ops, clear_int_flags, dev);
 	clear_work_bit(ctx);
+	/* A restarted encoder has no STREAMON behind it to set its buffers. */
+	if (ctx->type == MFCINST_ENCODER && ctx->enc_seq_complete) {
+		ctx->enc_seq_complete = false;
+		if (ctx->state == MFCINST_HEAD_PRODUCED &&
+		    ctx->src_queue_cnt >= 1 && ctx->dst_queue_cnt >= 1)
+			set_work_bit_irqsave(ctx);
+	}
 	WARN_ON(test_and_clear_bit(0, &dev->hw_lock) == 0);
 	s5p_mfc_clock_off(dev);
 	s5p_mfc_hw_call(dev->mfc_ops, try_run, dev);
@@ -865,8 +872,9 @@ static irqreturn_t s5p_mfc_irq(int irq, void *priv)
 			if (ctx->c_ops->post_frame_start(ctx))
 				mfc_err("post_frame_start() failed\n");
 
+			/* v16 ends a sequence with LAST_FRAME up to COMPLETE_SEQ. */
 			if (ctx->state == MFCINST_FINISHING &&
-						list_empty(&ctx->ref_queue)) {
+			    list_empty(&ctx->ref_queue) && !IS_MFCV16_PLUS(dev)) {
 				s5p_mfc_hw_call(dev->mfc_ops, clear_int_flags, dev);
 				s5p_mfc_handle_stream_complete(ctx);
 				break;
