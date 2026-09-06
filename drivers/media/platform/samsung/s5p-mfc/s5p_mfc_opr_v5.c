@@ -319,6 +319,8 @@ static void s5p_mfc_enc_calc_src_size_v5(struct s5p_mfc_dev *dev,
 					 struct s5p_mfc_raw_layout *l)
 {
 	memset(l, 0, sizeof(*l));
+	l->frame_width = width;
+	l->buf_height = height;
 	if (fmt->fourcc == V4L2_PIX_FMT_NV12M) {
 		l->buf_width = ALIGN(width, S5P_FIMV_NV12M_HALIGN);
 
