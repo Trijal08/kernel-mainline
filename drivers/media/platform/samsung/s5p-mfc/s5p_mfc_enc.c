@@ -2471,7 +2471,7 @@ static int vidioc_subscribe_event(struct v4l2_fh *fh,
 	case V4L2_EVENT_EOS:
 		return v4l2_event_subscribe(fh, sub, 2, NULL);
 	default:
-		return -EINVAL;
+		return v4l2_ctrl_subscribe_event(fh, sub);
 	}
 }
 
