@@ -565,6 +565,7 @@ free_resources:
 	ctx->dpb_flush_flag = 0;
 	ctx->consumed_stream = 0;
 	ctx->enc_eos_pending = false;
+	ctx->enc_seq_complete = false;
 	ctx->draining = false;
 	s5p_mfc_release_ctx_slot(ctx);
 }
