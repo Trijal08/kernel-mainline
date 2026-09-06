@@ -2045,10 +2045,13 @@ static int s5p_mfc_encode_one_frame_v6(struct s5p_mfc_ctx *ctx)
 
 	s5p_mfc_set_slice_mode(ctx);
 
-	if (ctx->state != MFCINST_FINISHING)
+	if (ctx->state != MFCINST_FINISHING) {
 		cmd = S5P_FIMV_CH_FRAME_START_V6;
-	else
+	} else {
+		/* The sequence ends here; the next frame needs a header first. */
 		cmd = S5P_FIMV_CH_LAST_FRAME_V6;
+		ctx->enc_seq_complete = true;
+	}
 
 	writel(ctx->inst_no, mfc_regs->instance_id);
 	return s5p_mfc_hw_call(dev->mfc_cmds, cmd_host2risc, dev, cmd, NULL);
@@ -2220,12 +2223,15 @@ static inline int s5p_mfc_run_init_enc_buffers(struct s5p_mfc_ctx *ctx)
 	struct s5p_mfc_dev *dev = ctx->dev;
 	int ret;
 
-	ret = s5p_mfc_hw_call(ctx->dev->mfc_ops, alloc_codec_buffers, ctx);
-	if (ret) {
-		mfc_err("Failed to allocate encoding buffers\n");
-		return -ENOMEM;
+	/* A sequence restarted after its end keeps the codec buffers it had. */
+	if (!ctx->bank1.virt) {
+		ret = s5p_mfc_hw_call(ctx->dev->mfc_ops, alloc_codec_buffers, ctx);
+		if (ret) {
+			mfc_err("Failed to allocate encoding buffers\n");
+			return -ENOMEM;
+		}
+		mfc_debug(2, "Allocated Internal Encoding Buffers\n");
 	}
-	mfc_debug(2, "Allocated Internal Encoding Buffers\n");
 
 	dev->curr_ctx = ctx->num;
 	ret = s5p_mfc_set_enc_ref_buffer_v6(ctx);

@@ -647,6 +647,8 @@ struct s5p_mfc_codec_ops {
  * @enc_dst_buf_size:	size of the buffers for encoder output
  * @enc_dst_buf_size_req: coded buffer size the client asked for, 0 for the default
  * @enc_eos_pending:	encoder drain is waiting for a terminal capture buffer
+ * @enc_seq_complete:	a LAST_FRAME ended the encoder's sequence; the next
+ *			frame needs a new header first
  * @draining:		a STOP was issued and its terminal buffer is not out yet
  * @luma_dpb_size:	dpb buffer size for luma
  * @chroma_dpb_size:	dpb buffer size for chroma
@@ -750,6 +752,7 @@ struct s5p_mfc_ctx {
 
 	struct s5p_mfc_enc_params enc_params;
 	bool enc_eos_pending;
+	bool enc_seq_complete;
 	bool draining;
 
 	size_t enc_dst_buf_size;
