@@ -55,6 +55,13 @@ static const struct s5p_mfc_fmt formats[] = {
 		.versions	= MFC_V5PLUS_BITS | MFC_V16_BIT,
 	},
 	{
+		.fourcc		= V4L2_PIX_FMT_NV12,
+		.codec_mode	= S5P_MFC_CODEC_NONE,
+		.type		= MFC_FMT_RAW,
+		.num_planes	= 1,
+		.versions	= MFC_V16_BIT,
+	},
+	{
 		.fourcc		= V4L2_PIX_FMT_NV21M,
 		.codec_mode	= S5P_MFC_CODEC_NONE,
 		.type		= MFC_FMT_RAW,
@@ -1231,14 +1238,8 @@ static int enc_pre_frame_start(struct s5p_mfc_ctx *ctx)
 	unsigned int dst_size;
 
 	src_mb = list_entry(ctx->src_queue.next, struct s5p_mfc_buf, list);
-	src_y_addr = vb2_dma_contig_plane_dma_addr(&src_mb->b->vb2_buf, 0);
-	src_c_addr = vb2_dma_contig_plane_dma_addr(&src_mb->b->vb2_buf, 1);
-	if (ctx->src_fmt->fourcc == V4L2_PIX_FMT_YUV420M || ctx->src_fmt->fourcc ==
-			V4L2_PIX_FMT_YVU420M)
-		src_c_1_addr =
-			vb2_dma_contig_plane_dma_addr(&src_mb->b->vb2_buf, 2);
-	else
-		src_c_1_addr = 0;
+	s5p_mfc_raw_plane_addrs(ctx, ctx->src_fmt, &src_mb->b->vb2_buf,
+				&src_y_addr, &src_c_addr, &src_c_1_addr);
 	s5p_mfc_hw_call(dev->mfc_ops, set_enc_frame_buffer, ctx,
 					src_y_addr, src_c_addr, src_c_1_addr);
 
@@ -1289,18 +1290,9 @@ static int enc_post_frame_start(struct s5p_mfc_ctx *ctx)
 		s5p_mfc_hw_call(dev->mfc_ops, get_enc_frame_buffer, ctx,
 				&enc_y_addr, &enc_c_addr, &enc_c_1_addr);
 		list_for_each_entry(mb_entry, &ctx->src_queue, list) {
-			mb_y_addr = vb2_dma_contig_plane_dma_addr(
-					&mb_entry->b->vb2_buf, 0);
-			mb_c_addr = vb2_dma_contig_plane_dma_addr(
-					&mb_entry->b->vb2_buf, 1);
-			if (ctx->src_fmt->fourcc ==
-					V4L2_PIX_FMT_YUV420M ||
-					ctx->src_fmt->fourcc ==
-					V4L2_PIX_FMT_YVU420M)
-				mb_c_1_addr = vb2_dma_contig_plane_dma_addr
-					(&mb_entry->b->vb2_buf, 2);
-			else
-				mb_c_1_addr = 0;
+			s5p_mfc_raw_plane_addrs(ctx, ctx->src_fmt,
+						&mb_entry->b->vb2_buf, &mb_y_addr,
+						&mb_c_addr, &mb_c_1_addr);
 			if (enc_y_addr == mb_y_addr && enc_c_addr == mb_c_addr && enc_c_1_addr
 					== mb_c_1_addr) {
 				list_del(&mb_entry->list);
@@ -1312,17 +1304,9 @@ static int enc_post_frame_start(struct s5p_mfc_ctx *ctx)
 			}
 		}
 		list_for_each_entry(mb_entry, &ctx->ref_queue, list) {
-			mb_y_addr = vb2_dma_contig_plane_dma_addr(
-					&mb_entry->b->vb2_buf, 0);
-			mb_c_addr = vb2_dma_contig_plane_dma_addr(
-					&mb_entry->b->vb2_buf, 1);
-			if (ctx->src_fmt->fourcc ==
-					V4L2_PIX_FMT_YUV420M ||
-					ctx->src_fmt->fourcc == V4L2_PIX_FMT_YVU420M)
-				mb_c_1_addr = vb2_dma_contig_plane_dma_addr(&
-						mb_entry->b->vb2_buf, 2);
-			else
-				mb_c_1_addr = 0;
+			s5p_mfc_raw_plane_addrs(ctx, ctx->src_fmt,
+						&mb_entry->b->vb2_buf, &mb_y_addr,
+						&mb_c_addr, &mb_c_1_addr);
 			if (enc_y_addr == mb_y_addr && enc_c_addr == mb_c_addr && enc_c_1_addr
 					== mb_c_1_addr) {
 				list_del(&mb_entry->list);
@@ -1566,6 +1550,11 @@ static void s5p_mfc_enc_fill_output(struct v4l2_pix_format_mplane *pix_mp,
 	pix_mp->num_planes = fmt->num_planes;
 	memset(pix_mp->plane_fmt, 0, sizeof(pix_mp->plane_fmt));
 	pix_mp->plane_fmt[0].bytesperline = l->stride[0];
+	if (fmt->num_planes == 1) {
+		/* Luma, then chroma at bytesperline * height. */
+		pix_mp->plane_fmt[0].sizeimage = l->luma_size + l->chroma_size;
+		return;
+	}
 	pix_mp->plane_fmt[0].sizeimage = l->luma_size;
 	pix_mp->plane_fmt[1].bytesperline = l->stride[1];
 	pix_mp->plane_fmt[1].sizeimage = l->chroma_size;
@@ -2801,7 +2790,10 @@ static int s5p_mfc_queue_setup(struct vb2_queue *vq,
 		if (*buf_count > MFC_MAX_BUFFERS)
 			*buf_count = MFC_MAX_BUFFERS;
 
-		psize[0] = ctx->luma_size;
+		if (ctx->src_fmt && ctx->src_fmt->num_planes == 1)
+			psize[0] = ctx->luma_size + ctx->chroma_size;
+		else
+			psize[0] = ctx->luma_size;
 		psize[1] = ctx->chroma_size;
 		if (ctx->src_fmt && (ctx->src_fmt->fourcc ==
 					V4L2_PIX_FMT_YUV420M || ctx->src_fmt->fourcc ==
@@ -2849,15 +2841,10 @@ static int s5p_mfc_buf_init(struct vb2_buffer *vb)
 			return ret;
 		i = vb->index;
 		ctx->src_bufs[i].b = vbuf;
-		ctx->src_bufs[i].cookie.raw.luma =
-					vb2_dma_contig_plane_dma_addr(vb, 0);
-		ctx->src_bufs[i].cookie.raw.chroma =
-					vb2_dma_contig_plane_dma_addr(vb, 1);
-		if (ctx->src_fmt->fourcc ==
-				V4L2_PIX_FMT_YUV420M || ctx->src_fmt->fourcc ==
-				V4L2_PIX_FMT_YVU420M)
-			ctx->src_bufs[i].cookie.raw.chroma_1 =
-					vb2_dma_contig_plane_dma_addr(vb, 2);
+		s5p_mfc_raw_plane_addrs(ctx, ctx->src_fmt, vb,
+					&ctx->src_bufs[i].cookie.raw.luma,
+					&ctx->src_bufs[i].cookie.raw.chroma,
+					&ctx->src_bufs[i].cookie.raw.chroma_1);
 		ctx->src_bufs_cnt++;
 	} else {
 		mfc_err("invalid queue type: %d\n", vq->type);
@@ -2890,8 +2877,10 @@ static int s5p_mfc_buf_prepare(struct vb2_buffer *vb)
 			vb2_plane_size(vb, 0), ctx->luma_size);
 		mfc_debug(2, "plane size: %ld, chroma size: %d\n",
 			vb2_plane_size(vb, 1), ctx->chroma_size);
-		if (vb2_plane_size(vb, 0) < ctx->luma_size ||
-		    vb2_plane_size(vb, 1) < ctx->chroma_size) {
+		if (ctx->src_fmt->num_planes == 1 ?
+		    vb2_plane_size(vb, 0) < ctx->luma_size + ctx->chroma_size :
+		    (vb2_plane_size(vb, 0) < ctx->luma_size ||
+		     vb2_plane_size(vb, 1) < ctx->chroma_size)) {
 			mfc_err("plane size is too small for output\n");
 			return -EINVAL;
 		}
