@@ -1433,6 +1433,74 @@ static int vidioc_enum_fmt_vid_out(struct file *file, void *priv,
 	return vidioc_enum_fmt(file, f, true);
 }
 
+/* The v16 firmware bounds some codecs more tightly than the block itself. */
+static const struct v4l2_frmsize_stepwise *
+s5p_mfc_enc_frmsize(struct s5p_mfc_dev *dev, u32 codec_mode)
+{
+	static const struct v4l2_frmsize_stepwise hevc = {
+		.min_width = 64, .max_width = 8192, .step_width = 2,
+		.min_height = 64, .max_height = 8192, .step_height = 2,
+	};
+	static const struct v4l2_frmsize_stepwise vp9 = {
+		.min_width = 64, .max_width = 4096, .step_width = 2,
+		.min_height = 64, .max_height = 8192, .step_height = 2,
+	};
+	static const struct v4l2_frmsize_stepwise mpeg4 = {
+		.min_width = 32, .max_width = 2048, .step_width = 2,
+		.min_height = 32, .max_height = 2048, .step_height = 2,
+	};
+	static const struct v4l2_frmsize_stepwise h263 = {
+		.min_width = 32, .max_width = 2048, .step_width = 2,
+		.min_height = 32, .max_height = 1152, .step_height = 2,
+	};
+
+	if (!IS_MFCV16_PLUS(dev))
+		return dev->variant->enc_frmsize;
+
+	switch (codec_mode) {
+	case S5P_MFC_CODEC_HEVC_ENC:
+		return &hevc;
+	case S5P_MFC_CODEC_VP9_ENC:
+		return &vp9;
+	case S5P_MFC_CODEC_MPEG4_ENC:
+		return &mpeg4;
+	case S5P_MFC_CODEC_H263_ENC:
+		return &h263;
+	default:
+		return dev->variant->enc_frmsize;
+	}
+}
+
+static int vidioc_enum_framesizes(struct file *file, void *priv,
+				  struct v4l2_frmsizeenum *fsize)
+{
+	struct s5p_mfc_dev *dev = video_drvdata(file);
+	struct s5p_mfc_ctx *ctx = file_to_ctx(file);
+	struct v4l2_format f = { .fmt.pix_mp.pixelformat = fsize->pixel_format };
+	const struct s5p_mfc_fmt *fmt;
+	u32 codec_mode;
+
+	if (fsize->index)
+		return -EINVAL;
+
+	fmt = find_format(&f, MFC_FMT_ENC);
+	if (fmt) {
+		codec_mode = fmt->codec_mode;
+	} else {
+		/* A raw format is bounded by the coded format it feeds. */
+		fmt = find_format(&f, MFC_FMT_RAW);
+		if (!fmt)
+			return -EINVAL;
+		codec_mode = ctx->dst_fmt->codec_mode;
+	}
+	if ((dev->variant->version_bit & fmt->versions) == 0)
+		return -EINVAL;
+
+	fsize->type = V4L2_FRMSIZE_TYPE_STEPWISE;
+	fsize->stepwise = *s5p_mfc_enc_frmsize(dev, codec_mode);
+	return 0;
+}
+
 static int vidioc_g_fmt(struct file *file, void *priv, struct v4l2_format *f)
 {
 	struct v4l2_pix_format_mplane *pix_fmt_mp = &f->fmt.pix_mp;
@@ -1477,6 +1545,8 @@ static int vidioc_g_fmt(struct file *file, void *priv, struct v4l2_format *f)
 static int vidioc_try_fmt(struct file *file, void *priv, struct v4l2_format *f)
 {
 	struct s5p_mfc_dev *dev = video_drvdata(file);
+	struct s5p_mfc_ctx *ctx = file_to_ctx(file);
+	const struct v4l2_frmsize_stepwise *fs;
 	const struct s5p_mfc_fmt *fmt;
 	struct v4l2_pix_format_mplane *pix_fmt_mp = &f->fmt.pix_mp;
 
@@ -1503,12 +1573,10 @@ static int vidioc_try_fmt(struct file *file, void *priv, struct v4l2_format *f)
 			mfc_err("Unsupported format by this MFC version.\n");
 			return -EINVAL;
 		}
-		if (IS_MFCV12(dev))
-			v4l_bound_align_image(&pix_fmt_mp->width, 8, 3840, 1, &pix_fmt_mp
-					->height, 4, 2160, 1, 0);
-		else
-			v4l_bound_align_image(&pix_fmt_mp->width, 8, 1920, 1, &pix_fmt_mp
-					->height, 4, 1080, 1, 0);
+		fs = s5p_mfc_enc_frmsize(dev, ctx->dst_fmt->codec_mode);
+		v4l_bound_align_image(&pix_fmt_mp->width, fs->min_width,
+				      fs->max_width, 1, &pix_fmt_mp->height,
+				      fs->min_height, fs->max_height, 1, 0);
 	} else {
 		mfc_err("invalid buf type\n");
 		return -EINVAL;
@@ -2491,6 +2559,7 @@ static const struct v4l2_ioctl_ops s5p_mfc_enc_ioctl_ops = {
 	.vidioc_querycap = vidioc_querycap,
 	.vidioc_enum_fmt_vid_cap = vidioc_enum_fmt_vid_cap,
 	.vidioc_enum_fmt_vid_out = vidioc_enum_fmt_vid_out,
+	.vidioc_enum_framesizes = vidioc_enum_framesizes,
 	.vidioc_g_fmt_vid_cap_mplane = vidioc_g_fmt,
 	.vidioc_g_fmt_vid_out_mplane = vidioc_g_fmt,
 	.vidioc_try_fmt_vid_cap_mplane = vidioc_try_fmt,

@@ -368,6 +368,29 @@ static int vidioc_enum_fmt_vid_out(struct file *file, void *priv,
 	return vidioc_enum_fmt(file, f, true);
 }
 
+static int vidioc_enum_framesizes(struct file *file, void *priv,
+				  struct v4l2_frmsizeenum *fsize)
+{
+	struct s5p_mfc_dev *dev = video_drvdata(file);
+	struct v4l2_format f = { .fmt.pix_mp.pixelformat = fsize->pixel_format };
+	const struct s5p_mfc_fmt *fmt;
+
+	if (!dev->variant->dec_frmsize)
+		return -ENOTTY;
+	if (fsize->index)
+		return -EINVAL;
+
+	fmt = find_format(&f, MFC_FMT_DEC);
+	if (!fmt)
+		fmt = find_format(&f, MFC_FMT_RAW);
+	if (!fmt || (dev->variant->version_bit & fmt->versions) == 0)
+		return -EINVAL;
+
+	fsize->type = V4L2_FRMSIZE_TYPE_STEPWISE;
+	fsize->stepwise = *dev->variant->dec_frmsize;
+	return 0;
+}
+
 /* Get format */
 static int vidioc_g_fmt(struct file *file, void *priv, struct v4l2_format *f)
 {
@@ -972,6 +995,7 @@ static const struct v4l2_ioctl_ops s5p_mfc_dec_ioctl_ops = {
 	.vidioc_querycap = vidioc_querycap,
 	.vidioc_enum_fmt_vid_cap = vidioc_enum_fmt_vid_cap,
 	.vidioc_enum_fmt_vid_out = vidioc_enum_fmt_vid_out,
+	.vidioc_enum_framesizes = vidioc_enum_framesizes,
 	.vidioc_g_fmt_vid_cap_mplane = vidioc_g_fmt,
 	.vidioc_g_fmt_vid_out_mplane = vidioc_g_fmt,
 	.vidioc_try_fmt_vid_cap_mplane = vidioc_try_fmt,
