@@ -486,6 +486,10 @@ int s5p_mfc_open_mfc_inst(struct s5p_mfc_dev *dev, struct s5p_mfc_ctx *ctx)
 	if (READ_ONCE(dev->fw_failed))
 		return -EIO;
 
+	ret = s5p_mfc_claim_ctx_slot(ctx);
+	if (ret)
+		return ret;
+
 	ret = s5p_mfc_hw_call(dev->mfc_ops, alloc_instance_buffer, ctx);
 	if (ret) {
 		mfc_err("Failed allocating instance buffer\n");
@@ -520,6 +524,7 @@ err_free_desc_buf:
 err_free_inst_buf:
 	s5p_mfc_hw_call(dev->mfc_ops, release_instance_buffer, ctx);
 err:
+	s5p_mfc_release_ctx_slot(ctx);
 	return ret;
 }
 
@@ -561,4 +566,5 @@ free_resources:
 	ctx->consumed_stream = 0;
 	ctx->enc_eos_pending = false;
 	ctx->draining = false;
+	s5p_mfc_release_ctx_slot(ctx);
 }
