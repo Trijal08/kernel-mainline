@@ -226,6 +226,12 @@ struct s5p_mfc_buf_size {
 	const void *priv;
 };
 
+/**
+ * struct s5p_mfc_variant - per-SoC description of the codec block
+ * @enc_frmsize: raw and coded resolutions the encoder accepts
+ * @dec_frmsize: coded resolutions the decoder accepts, or NULL when the
+ *		 range is not known and ENUM_FRAMESIZES is left unsupported
+ */
 struct s5p_mfc_variant {
 	unsigned int version;
 	unsigned int port_num;
@@ -235,6 +241,8 @@ struct s5p_mfc_variant {
 	const char	*clk_names[MFC_MAX_CLOCKS];
 	int		num_clocks;
 	bool		use_clock_gating;
+	const struct v4l2_frmsize_stepwise *enc_frmsize;
+	const struct v4l2_frmsize_stepwise *dec_frmsize;
 };
 
 /**
