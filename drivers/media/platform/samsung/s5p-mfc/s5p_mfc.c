@@ -1122,7 +1122,7 @@ static int s5p_mfc_release(struct file *file)
 		 * If instance was initialised and not yet freed,
 		 * return instance and free resources
 		 */
-		if (ctx->state != MFCINST_FREE && ctx->state != MFCINST_INIT) {
+		if (ctx->inst_no != MFC_NO_INSTANCE_SET) {
 			mfc_debug(2, "Has to free instance\n");
 			s5p_mfc_close_mfc_inst(dev, ctx);
 		}
