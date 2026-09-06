@@ -876,6 +876,16 @@ static int vidioc_g_selection(struct file *file, void *priv,
 	return 0;
 }
 
+static int vidioc_try_decoder_cmd(struct file *file, void *priv,
+				  struct v4l2_decoder_cmd *cmd)
+{
+	if (cmd->cmd != V4L2_DEC_CMD_STOP)
+		return -EINVAL;
+	cmd->flags = 0;
+	cmd->stop.pts = 0;
+	return 0;
+}
+
 static int vidioc_decoder_cmd(struct file *file, void *priv,
 			      struct v4l2_decoder_cmd *cmd)
 {
@@ -883,12 +893,14 @@ static int vidioc_decoder_cmd(struct file *file, void *priv,
 	struct s5p_mfc_dev *dev = ctx->dev;
 	struct s5p_mfc_buf *buf;
 	unsigned long flags;
+	int ret;
+
+	ret = vidioc_try_decoder_cmd(file, priv, cmd);
+	if (ret)
+		return ret;
 
 	switch (cmd->cmd) {
 	case V4L2_DEC_CMD_STOP:
-		if (cmd->flags != 0)
-			return -EINVAL;
-
 		if (!vb2_is_streaming(&ctx->vq_src))
 			return -EINVAL;
 
@@ -951,6 +963,7 @@ static const struct v4l2_ioctl_ops s5p_mfc_dec_ioctl_ops = {
 	.vidioc_streamoff = vidioc_streamoff,
 	.vidioc_g_selection = vidioc_g_selection,
 	.vidioc_decoder_cmd = vidioc_decoder_cmd,
+	.vidioc_try_decoder_cmd = vidioc_try_decoder_cmd,
 	.vidioc_subscribe_event = vidioc_subscribe_event,
 	.vidioc_unsubscribe_event = v4l2_event_unsubscribe,
 };
