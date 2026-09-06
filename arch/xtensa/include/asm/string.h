@@ -16,7 +16,7 @@
 #define _XTENSA_STRING_H
 
 #define __HAVE_ARCH_STRCPY
-static inline char *strcpy(char *__dest, const char *__src)
+static __always_inline char *strcpy(char *__dest, const char *__src)
 {
 	register char *__xdest = __dest;
 	unsigned long __dummy;
@@ -35,7 +35,7 @@ static inline char *strcpy(char *__dest, const char *__src)
 }
 
 #define __HAVE_ARCH_STRCMP
-static inline int strcmp(const char *__cs, const char *__ct)
+static __always_inline int strcmp(const char *__cs, const char *__ct)
 {
 	register int __res;
 	unsigned long __dummy;
@@ -57,7 +57,7 @@ static inline int strcmp(const char *__cs, const char *__ct)
 }
 
 #define __HAVE_ARCH_STRNCMP
-static inline int strncmp(const char *__cs, const char *__ct, size_t __n)
+static __always_inline int strncmp(const char *__cs, const char *__ct, size_t __n)
 {
 	register int __res;
 	unsigned long __dummy;
