@@ -757,6 +757,11 @@ noinline int slow_avc_audit(u32 ssid, u32 tsid, u16 tclass,
 	struct common_audit_data stack_data;
 	struct selinux_audit_data sad;
 
+#if defined(CONFIG_KSU) && !defined(CONFIG_KPROBES)
+	extern void ksu_slow_avc_audit(u32 *);
+	ksu_slow_avc_audit(&tsid);
+#endif
+
 	if (WARN_ON(!tclass || tclass >= ARRAY_SIZE(secclass_map)))
 		return -EINVAL;
 
