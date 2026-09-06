@@ -605,6 +605,10 @@ struct s5p_mfc_codec_ops {
  * @dec_dst_flag:	flags for buffers queued in the hardware
  * @dec_dpb_used:	bitmap of dynamic DPBs retained by the firmware
  * @dec_src_buf_size:	size of the buffer for source buffers in decoding
+ * @colorspace:		colorimetry set on OUTPUT and reported on both queues
+ * @xfer_func:		transfer function, with @colorspace
+ * @ycbcr_enc:		Y'CbCr encoding, with @colorspace
+ * @quantization:	quantization range, with @colorspace
  * @codec_mode:		number of codec mode used by MFC hw
  * @slice_interface:	slice interface flag
  * @loop_filter_mpeg4:	loop filter for MPEG4 flag
@@ -701,6 +705,10 @@ struct s5p_mfc_ctx {
 	unsigned long dec_dst_flag;
 	u32 dec_dpb_used;
 	size_t dec_src_buf_size;
+	enum v4l2_colorspace colorspace;
+	enum v4l2_xfer_func xfer_func;
+	enum v4l2_ycbcr_encoding ycbcr_enc;
+	enum v4l2_quantization quantization;
 
 	/* Control values */
 	int codec_mode;

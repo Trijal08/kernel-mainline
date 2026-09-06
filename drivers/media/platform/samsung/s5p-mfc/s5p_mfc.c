@@ -603,6 +603,7 @@ static void s5p_mfc_handle_seq_done(struct s5p_mfc_ctx *ctx,
 				 unsigned int reason, unsigned int err)
 {
 	struct s5p_mfc_dev *dev;
+	int width, height;
 
 	if (!ctx)
 		return;
@@ -624,10 +625,18 @@ static void s5p_mfc_handle_seq_done(struct s5p_mfc_ctx *ctx,
 			vb2_queue_error(&ctx->vq_dst);
 			goto done;
 		}
-		ctx->img_width = s5p_mfc_hw_call(dev->mfc_ops, get_img_width,
-				dev);
-		ctx->img_height = s5p_mfc_hw_call(dev->mfc_ops, get_img_height,
-				dev);
+		width = s5p_mfc_hw_call(dev->mfc_ops, get_img_width, dev);
+		height = s5p_mfc_hw_call(dev->mfc_ops, get_img_height, dev);
+		/* Keep the placeholder rather than an empty picture. */
+		if (!width || !height) {
+			mfc_err("Parsed an empty picture size\n");
+			ctx->state = MFCINST_ERROR;
+			vb2_queue_error(&ctx->vq_src);
+			vb2_queue_error(&ctx->vq_dst);
+			goto done;
+		}
+		ctx->img_width = width;
+		ctx->img_height = height;
 
 		s5p_mfc_hw_call(dev->mfc_ops, dec_calc_dpb_size, ctx);
 
@@ -642,10 +651,7 @@ static void s5p_mfc_handle_seq_done(struct s5p_mfc_ctx *ctx,
 		if (FW_HAS_E_MIN_SCRATCH_BUF(dev))
 			ctx->scratch_buf_size = s5p_mfc_hw_call(dev->mfc_ops,
 						get_min_scratch_buf_size, dev);
-		if (ctx->img_width == 0 || ctx->img_height == 0)
-			ctx->state = MFCINST_ERROR;
-		else
-			ctx->state = MFCINST_HEAD_PARSED;
+		ctx->state = MFCINST_HEAD_PARSED;
 
 		if ((ctx->codec_mode == S5P_MFC_CODEC_H264_DEC ||
 			ctx->codec_mode == S5P_MFC_CODEC_H264_MVC_DEC ||
