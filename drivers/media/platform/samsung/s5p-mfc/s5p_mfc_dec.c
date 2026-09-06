@@ -582,6 +582,12 @@ static int vidioc_s_fmt(struct file *file, void *priv, struct v4l2_format *f)
 			ret = -EBUSY;
 			goto out;
 		}
+		/* An instance left by freed buffers belongs to the old codec. */
+		if (ctx->inst_no != MFC_NO_INSTANCE_SET) {
+			s5p_mfc_clock_on(dev);
+			s5p_mfc_close_mfc_inst(dev, ctx);
+			s5p_mfc_clock_off(dev);
+		}
 		/* src_fmt is validated by call to vidioc_try_fmt */
 		ctx->src_fmt = find_format(f, MFC_FMT_DEC);
 		ctx->codec_mode = ctx->src_fmt->codec_mode;
@@ -618,33 +624,34 @@ static int reqbufs_output(struct s5p_mfc_dev *dev, struct s5p_mfc_ctx *ctx,
 			goto out;
 		ctx->src_bufs_cnt = 0;
 		ctx->output_state = QUEUE_FREE;
-	} else if (ctx->output_state == QUEUE_FREE) {
-		/* Can only request buffers when we have a valid format set. */
-		WARN_ON(ctx->src_bufs_cnt != 0);
+		goto out;
+	}
+
+	mfc_debug(2, "Allocating %d buffers for OUTPUT queue\n",
+			reqbufs->count);
+	/* vb2 frees an earlier set itself; count its replacement afresh. */
+	ctx->src_bufs_cnt = 0;
+	ret = vb2_reqbufs(&ctx->vq_src, reqbufs);
+	if (ret)
+		goto out;
+
+	/* The first buffers bind the context to a firmware instance. */
+	if (ctx->inst_no == MFC_NO_INSTANCE_SET) {
 		if (ctx->state != MFCINST_INIT) {
 			mfc_err("Reqbufs called in an invalid state\n");
 			ret = -EINVAL;
-			goto out;
+		} else {
+			ret = s5p_mfc_open_mfc_inst(dev, ctx);
 		}
-
-		mfc_debug(2, "Allocating %d buffers for OUTPUT queue\n",
-				reqbufs->count);
-		ret = vb2_reqbufs(&ctx->vq_src, reqbufs);
-		if (ret)
-			goto out;
-
-		ret = s5p_mfc_open_mfc_inst(dev, ctx);
 		if (ret) {
 			reqbufs->count = 0;
 			vb2_reqbufs(&ctx->vq_src, reqbufs);
+			ctx->src_bufs_cnt = 0;
 			goto out;
 		}
-
-		ctx->output_state = QUEUE_BUFS_REQUESTED;
-	} else {
-		mfc_err("Buffers have already been requested\n");
-		ret = -EINVAL;
 	}
+
+	ctx->output_state = QUEUE_BUFS_REQUESTED;
 out:
 	s5p_mfc_clock_off(dev);
 	if (ret)
@@ -666,6 +673,7 @@ static int reqbufs_capture(struct s5p_mfc_dev *dev, struct s5p_mfc_ctx *ctx,
 			goto out;
 		s5p_mfc_hw_call(dev->mfc_ops, release_codec_buffers, ctx);
 		ctx->dst_bufs_cnt = 0;
+		ctx->capture_state = QUEUE_FREE;
 	} else if (ctx->capture_state == QUEUE_FREE) {
 		WARN_ON(ctx->dst_bufs_cnt != 0);
 		mfc_debug(2, "Allocating %d buffers for CAPTURE queue\n",
@@ -1091,7 +1099,7 @@ static int s5p_mfc_queue_setup(struct vb2_queue *vq,
 
 	/* Video output for decoding (source)
 	 * this can be set after getting an instance */
-	if (ctx->state == MFCINST_INIT &&
+	if (ctx->state != MFCINST_ERROR &&
 	    vq->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
 		/* A single plane is required for input */
 		*plane_count = 1;
@@ -1140,7 +1148,8 @@ static int s5p_mfc_queue_setup(struct vb2_queue *vq,
 		if (ctx->dst_fmt->fourcc == V4L2_PIX_FMT_YUV420M || ctx->dst_fmt->fourcc ==
 				V4L2_PIX_FMT_YVU420M)
 			alloc_devs[2] = ctx->dev->mem_dev[BANK_L_CTX];
-	} else if (vq->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE && ctx->state == MFCINST_INIT) {
+	} else if (vq->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE &&
+		   ctx->state != MFCINST_ERROR) {
 		psize[0] = ctx->dec_src_buf_size;
 		alloc_devs[0] = ctx->dev->mem_dev[BANK_L_CTX];
 	} else {
