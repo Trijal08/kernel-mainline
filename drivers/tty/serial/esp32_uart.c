@@ -726,6 +726,8 @@ static int esp32_uart_probe(struct platform_device *pdev)
 	port->type = PORT_GENERIC;
 	port->iotype = UPIO_MEM;
 	port->irq = platform_get_irq(pdev, 0);
+	if (port->irq < 0)
+		return port->irq;
 	port->ops = &esp32_uart_pops;
 	port->flags = UPF_BOOT_AUTOCONF;
 	port->has_sysrq = 1;
