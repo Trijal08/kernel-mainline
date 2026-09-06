@@ -539,7 +539,7 @@ static int vidioc_try_fmt(struct file *file, void *priv, struct v4l2_format *f)
 	if (f->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
 		fmt = find_format(f, MFC_FMT_DEC);
 		if (!fmt) {
-			mfc_err("Unsupported format for source.\n");
+			mfc_debug(2, "Unsupported format for source.\n");
 			return -EINVAL;
 		}
 		if (fmt->codec_mode == S5P_FIMV_CODEC_NONE) {
@@ -547,7 +547,7 @@ static int vidioc_try_fmt(struct file *file, void *priv, struct v4l2_format *f)
 			return -EINVAL;
 		}
 		if ((dev->variant->version_bit & fmt->versions) == 0) {
-			mfc_err("Unsupported format by this MFC version.\n");
+			mfc_debug(2, "Unsupported format by this MFC version.\n");
 			return -EINVAL;
 		}
 		width = pix_mp->width;
@@ -560,11 +560,11 @@ static int vidioc_try_fmt(struct file *file, void *priv, struct v4l2_format *f)
 	} else if (f->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
 		fmt = find_format(f, MFC_FMT_RAW);
 		if (!fmt) {
-			mfc_err("Unsupported format for destination.\n");
+			mfc_debug(2, "Unsupported format for destination.\n");
 			return -EINVAL;
 		}
 		if ((dev->variant->version_bit & fmt->versions) == 0) {
-			mfc_err("Unsupported format by this MFC version.\n");
+			mfc_debug(2, "Unsupported format by this MFC version.\n");
 			return -EINVAL;
 		}
 		s5p_mfc_dec_fill_capture(ctx, pix_mp, fmt);
