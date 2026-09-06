@@ -16,6 +16,7 @@
 #include <linux/slab.h>
 #include <linux/videodev2.h>
 #include <linux/workqueue.h>
+#include <media/v4l2-common.h>
 #include <media/v4l2-ctrls.h>
 #include <media/v4l2-event.h>
 #include <media/videobuf2-v4l2.h>
@@ -391,62 +392,115 @@ static int vidioc_enum_framesizes(struct file *file, void *priv,
 	return 0;
 }
 
+/* A coded size only bounds the placeholder; the parsed header replaces it. */
+static const struct v4l2_frmsize_stepwise dec_frmsize_placeholder = {
+	.min_width = 16, .max_width = 8192, .step_width = 1,
+	.min_height = 16, .max_height = 8192, .step_height = 1,
+};
+
+static void s5p_mfc_dec_bound_coded_size(struct s5p_mfc_ctx *ctx,
+					 u32 *width, u32 *height)
+{
+	const struct v4l2_frmsize_stepwise *fs = ctx->dev->variant->dec_frmsize;
+
+	if (!fs)
+		fs = &dec_frmsize_placeholder;
+	if (!*width || !*height) {
+		*width = ctx->img_width;
+		*height = ctx->img_height;
+	}
+	v4l_bound_align_image(width, fs->min_width, fs->max_width, 0,
+			      height, fs->min_height, fs->max_height, 0, 0);
+}
+
+static u32 s5p_mfc_dec_bound_src_size(struct s5p_mfc_ctx *ctx, u32 sizeimage)
+{
+	if (!sizeimage)
+		return DEF_CPB_SIZE;
+	return min_t(u32, sizeimage, ctx->dev->variant->buf_size->cpb);
+}
+
+static void s5p_mfc_dec_fill_output(struct v4l2_pix_format_mplane *pix_mp,
+				    const struct s5p_mfc_fmt *fmt,
+				    u32 width, u32 height, u32 sizeimage)
+{
+	pix_mp->pixelformat = fmt->fourcc;
+	pix_mp->width = width;
+	pix_mp->height = height;
+	pix_mp->field = V4L2_FIELD_NONE;
+	pix_mp->flags = 0;
+	pix_mp->num_planes = 1;
+	memset(pix_mp->plane_fmt, 0, sizeof(pix_mp->plane_fmt));
+	pix_mp->plane_fmt[0].sizeimage = sizeimage;
+}
+
+/*
+ * The frame buffer format is known once the header has been parsed; until
+ * then the coded-size placeholder describes it, as the stateful decoder
+ * interface requires.
+ */
+static void s5p_mfc_dec_fill_capture(struct s5p_mfc_ctx *ctx,
+				     struct v4l2_pix_format_mplane *pix_mp,
+				     const struct s5p_mfc_fmt *fmt)
+{
+	pix_mp->field = V4L2_FIELD_NONE;
+	pix_mp->flags = 0;
+	pix_mp->colorspace = ctx->colorspace;
+	pix_mp->xfer_func = ctx->xfer_func;
+	pix_mp->ycbcr_enc = ctx->ycbcr_enc;
+	pix_mp->quantization = ctx->quantization;
+	memset(pix_mp->plane_fmt, 0, sizeof(pix_mp->plane_fmt));
+
+	if (fmt != ctx->dst_fmt || ctx->state < MFCINST_HEAD_PARSED ||
+	    ctx->state >= MFCINST_ABORT) {
+		v4l2_fill_pixfmt_mp(pix_mp, fmt->fourcc, ctx->img_width,
+				    ctx->img_height);
+		return;
+	}
+
+	/* Width and height are set to the dimensions
+	   of the movie, the buffer is bigger and
+	   further processing stages should crop to this
+	   rectangle. */
+	pix_mp->pixelformat = fmt->fourcc;
+	pix_mp->width = ctx->buf_width;
+	pix_mp->height = ctx->buf_height;
+	pix_mp->num_planes = fmt->num_planes;
+	pix_mp->plane_fmt[0].bytesperline = ctx->stride[0];
+	pix_mp->plane_fmt[0].sizeimage = ctx->luma_size;
+	pix_mp->plane_fmt[1].bytesperline = ctx->stride[1];
+	pix_mp->plane_fmt[1].sizeimage = ctx->chroma_size;
+	if (fmt->fourcc == V4L2_PIX_FMT_YUV420M ||
+	    fmt->fourcc == V4L2_PIX_FMT_YVU420M) {
+		pix_mp->plane_fmt[2].bytesperline = ctx->stride[2];
+		pix_mp->plane_fmt[2].sizeimage = ctx->chroma_size_1;
+	}
+}
+
 /* Get format */
 static int vidioc_g_fmt(struct file *file, void *priv, struct v4l2_format *f)
 {
 	struct s5p_mfc_ctx *ctx = file_to_ctx(file);
-	struct v4l2_pix_format_mplane *pix_mp;
+	struct v4l2_pix_format_mplane *pix_mp = &f->fmt.pix_mp;
 
 	mfc_debug_enter();
-	pix_mp = &f->fmt.pix_mp;
-	if (f->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE &&
-	    (ctx->state == MFCINST_GOT_INST || ctx->state ==
-						MFCINST_RES_CHANGE_END)) {
-		/* If the MFC is parsing the header,
-		 * so wait until it is finished */
+	if (f->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
+		s5p_mfc_dec_fill_output(pix_mp, ctx->src_fmt, ctx->img_width,
+					ctx->img_height, ctx->dec_src_buf_size);
+		pix_mp->colorspace = ctx->colorspace;
+		pix_mp->xfer_func = ctx->xfer_func;
+		pix_mp->ycbcr_enc = ctx->ycbcr_enc;
+		pix_mp->quantization = ctx->quantization;
+		mfc_debug_leave();
+		return 0;
+	}
+	/* Legacy clients read the CAPTURE format to wait for the header. */
+	if ((ctx->state == MFCINST_GOT_INST ||
+	     ctx->state == MFCINST_RES_CHANGE_END) &&
+	    vb2_is_streaming(&ctx->vq_src))
 		s5p_mfc_wait_for_done_ctx(ctx, S5P_MFC_R2H_CMD_SEQ_DONE_RET,
 									0);
-	}
-	if (f->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE &&
-	    ctx->state >= MFCINST_HEAD_PARSED &&
-	    ctx->state < MFCINST_ABORT) {
-		/* This is run on CAPTURE (decode output) */
-		/* Width and height are set to the dimensions
-		   of the movie, the buffer is bigger and
-		   further processing stages should crop to this
-		   rectangle. */
-		pix_mp->width = ctx->buf_width;
-		pix_mp->height = ctx->buf_height;
-		pix_mp->field = V4L2_FIELD_NONE;
-		pix_mp->num_planes = ctx->dst_fmt->num_planes;
-		/* Set pixelformat to the format in which MFC
-		   outputs the decoded frame */
-		pix_mp->pixelformat = ctx->dst_fmt->fourcc;
-		pix_mp->plane_fmt[0].bytesperline = ctx->stride[0];
-		pix_mp->plane_fmt[0].sizeimage = ctx->luma_size;
-		pix_mp->plane_fmt[1].bytesperline = ctx->stride[1];
-		pix_mp->plane_fmt[1].sizeimage = ctx->chroma_size;
-		if (ctx->dst_fmt->fourcc == V4L2_PIX_FMT_YUV420M || ctx->dst_fmt->fourcc ==
-				V4L2_PIX_FMT_YVU420M) {
-			pix_mp->plane_fmt[2].bytesperline = ctx->stride[2];
-			pix_mp->plane_fmt[2].sizeimage = ctx->chroma_size_1;
-		}
-	} else if (f->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
-		/* This is run on OUTPUT
-		   The buffer contains compressed image
-		   so width and height have no meaning */
-		pix_mp->width = 0;
-		pix_mp->height = 0;
-		pix_mp->field = V4L2_FIELD_NONE;
-		pix_mp->plane_fmt[0].bytesperline = ctx->dec_src_buf_size;
-		pix_mp->plane_fmt[0].sizeimage = ctx->dec_src_buf_size;
-		pix_mp->pixelformat = ctx->src_fmt->fourcc;
-		pix_mp->num_planes = ctx->src_fmt->num_planes;
-	} else {
-		mfc_err("Format could not be read\n");
-		mfc_debug(2, "%s-- with error\n", __func__);
-		return -EINVAL;
-	}
+	s5p_mfc_dec_fill_capture(ctx, pix_mp, ctx->dst_fmt);
 	mfc_debug_leave();
 	return 0;
 }
@@ -455,7 +509,10 @@ static int vidioc_g_fmt(struct file *file, void *priv, struct v4l2_format *f)
 static int vidioc_try_fmt(struct file *file, void *priv, struct v4l2_format *f)
 {
 	struct s5p_mfc_dev *dev = video_drvdata(file);
+	struct s5p_mfc_ctx *ctx = file_to_ctx(file);
+	struct v4l2_pix_format_mplane *pix_mp = &f->fmt.pix_mp;
 	const struct s5p_mfc_fmt *fmt;
+	u32 width, height;
 
 	mfc_debug(2, "Type is %d\n", f->type);
 	if (f->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
@@ -472,6 +529,13 @@ static int vidioc_try_fmt(struct file *file, void *priv, struct v4l2_format *f)
 			mfc_err("Unsupported format by this MFC version.\n");
 			return -EINVAL;
 		}
+		width = pix_mp->width;
+		height = pix_mp->height;
+		s5p_mfc_dec_bound_coded_size(ctx, &width, &height);
+		/* Colorimetry is the client's to set on OUTPUT. */
+		s5p_mfc_dec_fill_output(pix_mp, fmt, width, height,
+					s5p_mfc_dec_bound_src_size(ctx,
+						pix_mp->plane_fmt[0].sizeimage));
 	} else if (f->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
 		fmt = find_format(f, MFC_FMT_RAW);
 		if (!fmt) {
@@ -482,6 +546,7 @@ static int vidioc_try_fmt(struct file *file, void *priv, struct v4l2_format *f)
 			mfc_err("Unsupported format by this MFC version.\n");
 			return -EINVAL;
 		}
+		s5p_mfc_dec_fill_capture(ctx, pix_mp, fmt);
 	}
 
 	return 0;
@@ -492,47 +557,46 @@ static int vidioc_s_fmt(struct file *file, void *priv, struct v4l2_format *f)
 {
 	struct s5p_mfc_dev *dev = video_drvdata(file);
 	struct s5p_mfc_ctx *ctx = file_to_ctx(file);
-	int ret = 0;
-	struct v4l2_pix_format_mplane *pix_mp;
-	const struct s5p_mfc_buf_size *buf_size = dev->variant->buf_size;
+	struct v4l2_pix_format_mplane *pix_mp = &f->fmt.pix_mp;
+	int ret;
 
 	mfc_debug_enter();
 	ret = vidioc_try_fmt(file, priv, f);
-	pix_mp = &f->fmt.pix_mp;
 	if (ret)
-		return ret;
-	if (vb2_is_streaming(&ctx->vq_src) || vb2_is_streaming(&ctx->vq_dst)) {
-		v4l2_err(&dev->v4l2_dev, "%s queue busy\n", __func__);
-		ret = -EBUSY;
 		goto out;
-	}
 	if (f->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
+		if (vb2_is_busy(&ctx->vq_dst)) {
+			v4l2_err(&dev->v4l2_dev, "%s queue busy\n", __func__);
+			ret = -EBUSY;
+			goto out;
+		}
 		/* dst_fmt is validated by call to vidioc_try_fmt */
 		ctx->dst_fmt = find_format(f, MFC_FMT_RAW);
-		ret = 0;
-		goto out;
+		/* Before v16 the DPB layout follows the raw format. */
+		if (ctx->state >= MFCINST_HEAD_PARSED &&
+		    ctx->state < MFCINST_ABORT && !IS_MFCV16_PLUS(dev))
+			s5p_mfc_hw_call(dev->mfc_ops, dec_calc_dpb_size, ctx);
 	} else if (f->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
+		if (vb2_is_busy(&ctx->vq_src) || vb2_is_busy(&ctx->vq_dst)) {
+			v4l2_err(&dev->v4l2_dev, "%s queue busy\n", __func__);
+			ret = -EBUSY;
+			goto out;
+		}
 		/* src_fmt is validated by call to vidioc_try_fmt */
 		ctx->src_fmt = find_format(f, MFC_FMT_DEC);
 		ctx->codec_mode = ctx->src_fmt->codec_mode;
 		mfc_debug(2, "The codec number is: %d\n", ctx->codec_mode);
-		pix_mp->height = 0;
-		pix_mp->width = 0;
-		if (pix_mp->plane_fmt[0].sizeimage == 0)
-			pix_mp->plane_fmt[0].sizeimage = ctx->dec_src_buf_size =
-								DEF_CPB_SIZE;
-		else if (pix_mp->plane_fmt[0].sizeimage > buf_size->cpb)
-			ctx->dec_src_buf_size = buf_size->cpb;
-		else
-			ctx->dec_src_buf_size = pix_mp->plane_fmt[0].sizeimage;
-		pix_mp->plane_fmt[0].bytesperline = 0;
+		ctx->img_width = pix_mp->width;
+		ctx->img_height = pix_mp->height;
+		ctx->dec_src_buf_size = pix_mp->plane_fmt[0].sizeimage;
+		ctx->colorspace = pix_mp->colorspace;
+		ctx->xfer_func = pix_mp->xfer_func;
+		ctx->ycbcr_enc = pix_mp->ycbcr_enc;
+		ctx->quantization = pix_mp->quantization;
 		ctx->state = MFCINST_INIT;
-		ret = 0;
-		goto out;
 	} else {
 		mfc_err("Wrong type error for S_FMT : %d", f->type);
 		ret = -EINVAL;
-		goto out;
 	}
 
 out:
@@ -1396,4 +1460,10 @@ void s5p_mfc_dec_init(struct s5p_mfc_ctx *ctx)
 	ctx->dst_fmt = find_format(&f, MFC_FMT_RAW);
 	mfc_debug(2, "Default src_fmt is %p, dest_fmt is %p\n",
 			ctx->src_fmt, ctx->dst_fmt);
+	/* A complete default format lets a client stream without S_FMT. */
+	ctx->codec_mode = ctx->src_fmt->codec_mode;
+	ctx->img_width = DEF_WIDTH;
+	ctx->img_height = DEF_HEIGHT;
+	ctx->dec_src_buf_size = DEF_CPB_SIZE;
+	ctx->state = MFCINST_INIT;
 }
