@@ -222,14 +222,18 @@ struct s5p_mfc_buf_size_v6 {
 
 /**
  * struct s5p_mfc_raw_layout - memory layout of one raw frame
+ * @frame_width:	width of the frame the layout was made for
  * @buf_width:		luma width in pixels after hardware alignment
+ * @buf_height:		rows in the luma plane, the visible height padded
  * @stride:		bytes per line of each plane
  * @luma_size:		size of the luma plane
  * @chroma_size:	size of the chroma plane, or of the Cb plane
  * @chroma_size_1:	size of the Cr plane of a three-plane format
  */
 struct s5p_mfc_raw_layout {
+	unsigned int frame_width;
 	unsigned int buf_width;
+	unsigned int buf_height;
 	unsigned int stride[3];
 	unsigned int luma_size;
 	unsigned int chroma_size;
@@ -599,6 +603,8 @@ struct s5p_mfc_codec_ops {
  * @inst_no:		number of hw instance associated with the context
  * @img_width:		width of the image that is decoded or encoded
  * @img_height:		height of the image that is decoded or encoded
+ * @frame_width:	width of the encoder's source frame as set, before
+ *			alignment; the OUTPUT format reports it
  * @buf_width:		width of the buffer for processed image
  * @buf_height:		height of the buffer for processed image
  * @luma_size:		size of a luma plane
@@ -700,6 +706,7 @@ struct s5p_mfc_ctx {
 	/* Image parameters */
 	int img_width;
 	int img_height;
+	int frame_width;
 	int buf_width;
 	int buf_height;
 
