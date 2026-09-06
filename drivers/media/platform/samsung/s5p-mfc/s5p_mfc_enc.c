@@ -2414,6 +2414,15 @@ static int vidioc_g_parm(struct file *file, void *priv,
 	return 0;
 }
 
+static int vidioc_try_encoder_cmd(struct file *file, void *priv,
+				  struct v4l2_encoder_cmd *cmd)
+{
+	if (cmd->cmd != V4L2_ENC_CMD_STOP)
+		return -EINVAL;
+	cmd->flags = 0;
+	return 0;
+}
+
 static int vidioc_encoder_cmd(struct file *file, void *priv,
 			      struct v4l2_encoder_cmd *cmd)
 {
@@ -2421,12 +2430,14 @@ static int vidioc_encoder_cmd(struct file *file, void *priv,
 	struct s5p_mfc_dev *dev = ctx->dev;
 	struct s5p_mfc_buf *buf;
 	unsigned long flags;
+	int ret;
+
+	ret = vidioc_try_encoder_cmd(file, priv, cmd);
+	if (ret)
+		return ret;
 
 	switch (cmd->cmd) {
 	case V4L2_ENC_CMD_STOP:
-		if (cmd->flags != 0)
-			return -EINVAL;
-
 		if (!ctx->vq_src.streaming)
 			return -EINVAL;
 
@@ -2487,6 +2498,7 @@ static const struct v4l2_ioctl_ops s5p_mfc_enc_ioctl_ops = {
 	.vidioc_s_parm = vidioc_s_parm,
 	.vidioc_g_parm = vidioc_g_parm,
 	.vidioc_encoder_cmd = vidioc_encoder_cmd,
+	.vidioc_try_encoder_cmd = vidioc_try_encoder_cmd,
 	.vidioc_subscribe_event = vidioc_subscribe_event,
 	.vidioc_unsubscribe_event = v4l2_event_unsubscribe,
 };
