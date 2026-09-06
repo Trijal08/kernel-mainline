@@ -1213,12 +1213,9 @@ static int enc_post_seq_start(struct s5p_mfc_ctx *ctx)
 		s5p_mfc_hw_call(dev->mfc_ops, try_run, dev);
 	} else {
 		ctx->pb_count = s5p_mfc_hw_call(dev->mfc_ops, get_enc_dpb_count, dev);
-		if (FW_HAS_E_MIN_SCRATCH_BUF(dev)) {
+		if (FW_HAS_E_MIN_SCRATCH_BUF(dev))
 			ctx->scratch_buf_size = s5p_mfc_hw_call(dev->mfc_ops,
 					get_e_min_scratch_buf_size, dev);
-			if (!IS_MFCV12(dev))
-				ctx->bank1.size += ctx->scratch_buf_size;
-		}
 		ctx->state = MFCINST_HEAD_PRODUCED;
 	}
 
@@ -1373,7 +1370,9 @@ static int enc_post_frame_start(struct s5p_mfc_ctx *ctx)
 	src_ready = true;
 	if (ctx->state == MFCINST_RUNNING && ctx->src_queue_cnt == 0)
 		src_ready = false;
-	if (ctx->state == MFCINST_FINISHING && ctx->ref_queue_cnt == 0)
+	/* v16 keeps sending LAST_FRAME until the firmware completes the sequence. */
+	if (ctx->state == MFCINST_FINISHING && ctx->ref_queue_cnt == 0 &&
+	    !IS_MFCV16_PLUS(dev))
 		src_ready = false;
 	if (!src_ready || ctx->dst_queue_cnt == 0)
 		clear_work_bit_irqsave(ctx);
@@ -2623,7 +2622,8 @@ static int vidioc_encoder_cmd(struct file *file, void *priv,
 		break;
 	case V4L2_ENC_CMD_START:
 		if (ctx->state == MFCINST_FINISHED)
-			ctx->state = MFCINST_RUNNING;
+			ctx->state = ctx->enc_seq_complete ?
+				     MFCINST_GOT_INST : MFCINST_RUNNING;
 		spin_unlock_irqrestore(&dev->irqlock, flags);
 		vb2_clear_last_buffer_dequeued(&ctx->vq_dst);
 		if (s5p_mfc_ctx_ready(ctx))
@@ -2848,9 +2848,10 @@ static int s5p_mfc_start_streaming(struct vb2_queue *q, unsigned int count)
 	struct s5p_mfc_dev *dev = ctx->dev;
 	int ret;
 
-	/* A stopped stream resumes with the state it had. */
+	/* A stopped stream resumes where it was; an ended sequence restarts. */
 	if (ctx->state == MFCINST_FINISHING || ctx->state == MFCINST_FINISHED)
-		ctx->state = MFCINST_RUNNING;
+		ctx->state = ctx->enc_seq_complete ?
+			     MFCINST_GOT_INST : MFCINST_RUNNING;
 
 	if (q->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
 		/* Each CAPTURE streaming session is one firmware instance. */
