@@ -300,7 +300,12 @@
 
 		intc: intc@600c2000 {
 			compatible = "esp,esp32-intc";
-			reg = <0x600c2000 0x800>;
+			/* One bank of interrupt matrix map registers per
+			 * core; the driver picks the bank belonging to the
+			 * core Linux was started on.
+			 */
+			reg = <0x600c2000 0x800>,	/* core 0 */
+			      <0x600c2800 0x800>;	/* core 1 */
 			/* first cell: interrupt matrix row
 			 * second cell: internal xtensa core IRQ number to connect to
 			 * third cell: target CPU

@@ -8,6 +8,9 @@
 #include <linux/of_platform.h>
 #include <linux/platform_device.h>
 
+#include <asm/core.h>
+#include <asm/processor.h>
+
 #define ESP32_INTC_DISCONNECTED 6
 #ifdef CONFIG_SMP
 #define MAX_CPU_COUNT 2
@@ -20,6 +23,23 @@ struct esp32_intc {
 	int n_irq;
 	int n_cpus;
 };
+
+/*
+ * ESP32 and ESP32S3 report the physical core in bit 13 of PRID (0 = PRO,
+ * 1 = APP). Linux is not necessarily started on core 0 -- on ESP-IDF that is
+ * the linux_boot app's CONFIG_LINUX_CORE -- and the interrupt matrix has a
+ * separate bank of map registers per core, so routing has to be programmed in
+ * the bank belonging to the core we are actually running on. Getting this
+ * wrong is silent: every peripheral interrupt is simply never delivered.
+ */
+static unsigned int esp32_intc_core_id(void)
+{
+#if XCHAL_HAVE_PRID
+	return (xtensa_get_sr(prid) >> 13) & 1;
+#else
+	return 0;
+#endif
+}
 
 static void esp32_intc_write(struct esp32_intc *priv, int cpu, int irq, int p)
 {
@@ -127,6 +147,7 @@ static int __init esp32_intc_hw_init(struct device_node *node,
 	struct platform_device *pdev;
 	struct esp32_intc *priv;
 	resource_size_t size;
+	unsigned int first;
 	int cpu;
 
 	pdev = of_find_device_by_node(node);
@@ -137,8 +158,15 @@ static int __init esp32_intc_hw_init(struct device_node *node,
 	if (!priv)
 		return -ENOMEM;
 
+	/*
+	 * An SMP kernel drives every core's bank, a UP kernel only the one it
+	 * runs on -- which is not necessarily reg index 0.
+	 */
+	first = IS_ENABLED(CONFIG_SMP) ? 0 : esp32_intc_core_id();
+
 	for (cpu = 0; cpu < MAX_CPU_COUNT; ++cpu) {
-		priv->base[cpu] = devm_of_iomap(&pdev->dev, node, cpu, &size);
+		priv->base[cpu] = devm_of_iomap(&pdev->dev, node, first + cpu,
+						&size);
 		if (IS_ERR(priv->base[cpu])) {
 			if (cpu == 0)
 				return PTR_ERR(priv->base[cpu]);
@@ -150,6 +178,9 @@ static int __init esp32_intc_hw_init(struct device_node *node,
 			return -EINVAL;
 	}
 	priv->n_cpus = cpu;
+
+	pr_info("%pOF: core %u, %d irqs, %d cpu bank(s)\n",
+		node, esp32_intc_core_id(), priv->n_irq, priv->n_cpus);
 
 	*hw = priv;
 
