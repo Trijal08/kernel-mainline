@@ -2371,47 +2371,40 @@ static const struct v4l2_ctrl_ops s5p_mfc_enc_ctrl_ops = {
 	.g_volatile_ctrl = s5p_mfc_enc_g_v_ctrl,
 };
 
-static int vidioc_s_parm(struct file *file, void *priv,
-			 struct v4l2_streamparm *a)
-{
-	struct s5p_mfc_ctx *ctx = file_to_ctx(file);
-
-	if (a->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
-		ctx->enc_params.rc_framerate_num =
-					a->parm.output.timeperframe.denominator;
-		ctx->enc_params.rc_framerate_denom =
-					a->parm.output.timeperframe.numerator;
-		if (IS_MFCV16_PLUS(ctx->dev)) {
-			s5p_mfc_enc_adjust_framerate(ctx);
-			a->parm.output.timeperframe.denominator =
-				ctx->enc_params.rc_framerate_num;
-			a->parm.output.timeperframe.numerator =
-				ctx->enc_params.rc_framerate_denom;
-		}
-	} else {
-		mfc_err("Setting FPS is only possible for the output queue\n");
-		return -EINVAL;
-	}
-	return 0;
-}
-
 static int vidioc_g_parm(struct file *file, void *priv,
 			 struct v4l2_streamparm *a)
 {
 	struct s5p_mfc_ctx *ctx = file_to_ctx(file);
 
-	if (a->type == V4L2_BUF_TYPE_VIDEO_OUTPUT ||
-	    (IS_MFCV16_PLUS(ctx->dev) &&
-	     a->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE)) {
-		a->parm.output.timeperframe.denominator =
-					ctx->enc_params.rc_framerate_num;
-		a->parm.output.timeperframe.numerator =
-					ctx->enc_params.rc_framerate_denom;
-	} else {
+	if (a->type != V4L2_BUF_TYPE_VIDEO_OUTPUT &&
+	    a->type != V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE)
+		return -EINVAL;
+
+	memset(&a->parm, 0, sizeof(a->parm));
+	a->parm.output.capability = V4L2_CAP_TIMEPERFRAME;
+	a->parm.output.timeperframe.denominator =
+				ctx->enc_params.rc_framerate_num;
+	a->parm.output.timeperframe.numerator =
+				ctx->enc_params.rc_framerate_denom;
+	return 0;
+}
+
+static int vidioc_s_parm(struct file *file, void *priv,
+			 struct v4l2_streamparm *a)
+{
+	struct s5p_mfc_ctx *ctx = file_to_ctx(file);
+	struct v4l2_fract *tpf = &a->parm.output.timeperframe;
+
+	if (a->type != V4L2_BUF_TYPE_VIDEO_OUTPUT &&
+	    a->type != V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
 		mfc_err("Setting FPS is only possible for the output queue\n");
 		return -EINVAL;
 	}
-	return 0;
+
+	ctx->enc_params.rc_framerate_num = tpf->denominator;
+	ctx->enc_params.rc_framerate_denom = tpf->numerator;
+	s5p_mfc_enc_adjust_framerate(ctx);
+	return vidioc_g_parm(file, priv, a);
 }
 
 static int vidioc_try_encoder_cmd(struct file *file, void *priv,
@@ -2934,4 +2927,6 @@ void s5p_mfc_enc_init(struct s5p_mfc_ctx *ctx)
 	ctx->src_fmt = find_format(&f, MFC_FMT_RAW);
 	f.fmt.pix_mp.pixelformat = DEF_DST_FMT_ENC;
 	ctx->dst_fmt = find_format(&f, MFC_FMT_ENC);
+	ctx->enc_params.rc_framerate_num = 30;
+	ctx->enc_params.rc_framerate_denom = 1;
 }
