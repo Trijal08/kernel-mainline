@@ -782,6 +782,9 @@
 };
 
 &usi17 {
+	status = "disabled";
+};
+
 &usi18 {
 	samsung,clkreq-on; /* needed for UART mode */
 
