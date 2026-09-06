@@ -2417,7 +2417,7 @@ static int vidioc_g_parm(struct file *file, void *priv,
 static int vidioc_try_encoder_cmd(struct file *file, void *priv,
 				  struct v4l2_encoder_cmd *cmd)
 {
-	if (cmd->cmd != V4L2_ENC_CMD_STOP)
+	if (cmd->cmd != V4L2_ENC_CMD_STOP && cmd->cmd != V4L2_ENC_CMD_START)
 		return -EINVAL;
 	cmd->flags = 0;
 	return 0;
@@ -2436,12 +2436,19 @@ static int vidioc_encoder_cmd(struct file *file, void *priv,
 	if (ret)
 		return ret;
 
+	/* A drain needs both queues; until then the command is a no-op. */
+	if (!vb2_is_streaming(&ctx->vq_src) || !vb2_is_streaming(&ctx->vq_dst))
+		return 0;
+
+	spin_lock_irqsave(&dev->irqlock, flags);
+	/* The drain owns the context until its terminal buffer is out. */
+	if (ctx->draining) {
+		spin_unlock_irqrestore(&dev->irqlock, flags);
+		return -EBUSY;
+	}
 	switch (cmd->cmd) {
 	case V4L2_ENC_CMD_STOP:
-		if (!ctx->vq_src.streaming)
-			return -EINVAL;
-
-		spin_lock_irqsave(&dev->irqlock, flags);
+		ctx->draining = true;
 		if (list_empty(&ctx->src_queue)) {
 			mfc_debug(2, "EOS: empty src queue, entering finishing state\n");
 			ctx->state = MFCINST_FINISHING;
@@ -2460,9 +2467,18 @@ static int vidioc_encoder_cmd(struct file *file, void *priv,
 			spin_unlock_irqrestore(&dev->irqlock, flags);
 		}
 		break;
+	case V4L2_ENC_CMD_START:
+		if (ctx->state == MFCINST_FINISHED)
+			ctx->state = MFCINST_RUNNING;
+		spin_unlock_irqrestore(&dev->irqlock, flags);
+		vb2_clear_last_buffer_dequeued(&ctx->vq_dst);
+		if (s5p_mfc_ctx_ready(ctx))
+			set_work_bit_irqsave(ctx);
+		s5p_mfc_hw_call(dev->mfc_ops, try_run, dev);
+		break;
 	default:
+		spin_unlock_irqrestore(&dev->irqlock, flags);
 		return -EINVAL;
-
 	}
 	return 0;
 }
@@ -2714,6 +2730,7 @@ static void enc_return_last_buffer(struct s5p_mfc_ctx *ctx)
 	list_del(&buf->list);
 	ctx->dst_queue_cnt--;
 	ctx->enc_eos_pending = false;
+	ctx->draining = false;
 	buf->b->flags &= ~(V4L2_BUF_FLAG_KEYFRAME | V4L2_BUF_FLAG_PFRAME |
 			   V4L2_BUF_FLAG_BFRAME);
 	buf->b->flags |= V4L2_BUF_FLAG_LAST;
@@ -2734,6 +2751,7 @@ static void s5p_mfc_stop_streaming(struct vb2_queue *q)
 	struct s5p_mfc_ctx *ctx = vb2_get_drv_priv(q);
 	struct s5p_mfc_dev *dev = ctx->dev;
 
+	ctx->draining = false;
 	if ((ctx->state == MFCINST_FINISHING ||
 		ctx->state == MFCINST_RUNNING) &&
 		dev->curr_ctx == ctx->num && dev->hw_lock) {

@@ -269,33 +269,46 @@ unlock:
 
 static void s5p_mfc_handle_frame_all_extracted(struct s5p_mfc_ctx *ctx)
 {
-	struct s5p_mfc_buf *dst_buf;
+	struct s5p_mfc_buf *dst_buf = NULL, *b;
 	struct s5p_mfc_dev *dev = ctx->dev;
 
 	ctx->state = MFCINST_FINISHED;
+	ctx->draining = false;
 	ctx->sequence++;
-	while (!list_empty(&ctx->dst_queue)) {
-		dst_buf = list_entry(ctx->dst_queue.next,
-				     struct s5p_mfc_buf, list);
-		mfc_debug(2, "Cleaning up buffer: %d\n",
-					  dst_buf->b->vb2_buf.index);
-		vb2_set_plane_payload(&dst_buf->b->vb2_buf, 0, 0);
-		vb2_set_plane_payload(&dst_buf->b->vb2_buf, 1, 0);
-		list_del(&dst_buf->list);
-		dst_buf->flags |= MFC_BUF_FLAG_EOS;
-		ctx->dst_queue_cnt--;
-		dst_buf->b->sequence = (ctx->sequence++);
-
-		if (s5p_mfc_hw_call(dev->mfc_ops, get_pic_type_top, ctx) ==
-			s5p_mfc_hw_call(dev->mfc_ops, get_pic_type_bot, ctx))
-			dst_buf->b->field = V4L2_FIELD_NONE;
-		else
-			dst_buf->b->field = V4L2_FIELD_INTERLACED;
-		dst_buf->b->flags |= V4L2_BUF_FLAG_LAST;
-
-		ctx->dec_dst_flag &= ~(1 << dst_buf->b->vb2_buf.index);
-		vb2_buffer_done(&dst_buf->b->vb2_buf, VB2_BUF_STATE_DONE);
+	/* Nothing runs in this state; START or a queue restart reschedules. */
+	clear_work_bit(ctx);
+	/* One terminal buffer ends the drain; the rest wait for START. */
+	if (list_empty(&ctx->dst_queue))
+		return;
+	if (IS_MFCV16_PLUS(dev)) {
+		/* References survive the drain; the terminal buffer must not be one. */
+		ctx->dec_dpb_used = mfc_read(dev, S5P_FIMV_D_USED_DPB_FLAG_LOWER_V16);
+		list_for_each_entry(b, &ctx->dst_queue, list) {
+			if (!(ctx->dec_dpb_used & BIT(b->b->vb2_buf.index))) {
+				dst_buf = b;
+				break;
+			}
+		}
 	}
+	if (!dst_buf)
+		dst_buf = list_first_entry(&ctx->dst_queue, struct s5p_mfc_buf, list);
+	mfc_debug(2, "Cleaning up buffer: %d\n", dst_buf->b->vb2_buf.index);
+	vb2_set_plane_payload(&dst_buf->b->vb2_buf, 0, 0);
+	vb2_set_plane_payload(&dst_buf->b->vb2_buf, 1, 0);
+	list_del(&dst_buf->list);
+	dst_buf->flags |= MFC_BUF_FLAG_EOS;
+	ctx->dst_queue_cnt--;
+	dst_buf->b->sequence = (ctx->sequence++);
+
+	if (s5p_mfc_hw_call(dev->mfc_ops, get_pic_type_top, ctx) ==
+		s5p_mfc_hw_call(dev->mfc_ops, get_pic_type_bot, ctx))
+		dst_buf->b->field = V4L2_FIELD_NONE;
+	else
+		dst_buf->b->field = V4L2_FIELD_INTERLACED;
+	dst_buf->b->flags |= V4L2_BUF_FLAG_LAST;
+
+	ctx->dec_dst_flag &= ~(1 << dst_buf->b->vb2_buf.index);
+	vb2_buffer_done(&dst_buf->b->vb2_buf, VB2_BUF_STATE_DONE);
 }
 
 static void s5p_mfc_handle_frame_copy_time(struct s5p_mfc_ctx *ctx)
@@ -491,9 +504,9 @@ static void s5p_mfc_handle_frame(struct s5p_mfc_ctx *ctx,
 	} else {
 		mfc_debug(2, "No frame decode\n");
 	}
-	/* Mark source buffer as complete */
-	if (dst_frame_status != S5P_FIMV_DEC_STATUS_DISPLAY_ONLY
-		&& !list_empty(&ctx->src_queue)) {
+	/* Mark source buffer as complete; a finished drain consumed none. */
+	if (dst_frame_status != S5P_FIMV_DEC_STATUS_DISPLAY_ONLY &&
+	    ctx->state != MFCINST_FINISHED && !list_empty(&ctx->src_queue)) {
 		src_buf = list_entry(ctx->src_queue.next, struct s5p_mfc_buf,
 								list);
 		ctx->consumed_stream += s5p_mfc_hw_call(dev->mfc_ops,
@@ -726,13 +739,17 @@ static void s5p_mfc_handle_stream_complete(struct s5p_mfc_ctx *ctx)
 
 	if (ctx->type == MFCINST_ENCODER) {
 		s5p_mfc_enc_stream_complete(ctx);
-	} else if (!list_empty(&ctx->dst_queue)) {
-		mb_entry = list_entry(ctx->dst_queue.next, struct s5p_mfc_buf,
-									list);
-		list_del(&mb_entry->list);
-		ctx->dst_queue_cnt--;
-		vb2_set_plane_payload(&mb_entry->b->vb2_buf, 0, 0);
-		vb2_buffer_done(&mb_entry->b->vb2_buf, VB2_BUF_STATE_DONE);
+	} else {
+		ctx->draining = false;
+		if (!list_empty(&ctx->dst_queue)) {
+			mb_entry = list_entry(ctx->dst_queue.next,
+					      struct s5p_mfc_buf, list);
+			list_del(&mb_entry->list);
+			ctx->dst_queue_cnt--;
+			vb2_set_plane_payload(&mb_entry->b->vb2_buf, 0, 0);
+			vb2_buffer_done(&mb_entry->b->vb2_buf,
+					VB2_BUF_STATE_DONE);
+		}
 	}
 
 	clear_work_bit(ctx);
