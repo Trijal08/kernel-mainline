@@ -1504,7 +1504,9 @@ static int vidioc_enum_framesizes(struct file *file, void *priv,
 static void s5p_mfc_enc_apply_layout(struct s5p_mfc_ctx *ctx,
 				     const struct s5p_mfc_raw_layout *l)
 {
+	ctx->frame_width = l->frame_width;
 	ctx->buf_width = l->buf_width;
+	ctx->buf_height = l->buf_height;
 	ctx->stride[0] = l->stride[0];
 	ctx->stride[1] = l->stride[1];
 	ctx->stride[2] = l->stride[2];
@@ -1516,7 +1518,9 @@ static void s5p_mfc_enc_apply_layout(struct s5p_mfc_ctx *ctx,
 static void s5p_mfc_enc_ctx_layout(const struct s5p_mfc_ctx *ctx,
 				   struct s5p_mfc_raw_layout *l)
 {
+	l->frame_width = ctx->frame_width;
 	l->buf_width = ctx->buf_width;
+	l->buf_height = ctx->buf_height;
 	l->stride[0] = ctx->stride[0];
 	l->stride[1] = ctx->stride[1];
 	l->stride[2] = ctx->stride[2];
@@ -1549,14 +1553,14 @@ static void s5p_mfc_enc_bound_source(struct s5p_mfc_dev *dev, u32 codec_mode,
 			      height, fs->min_height, fs->max_height, 1, 0);
 }
 
+/* The format describes the buffer; the visible frame is the CROP selection. */
 static void s5p_mfc_enc_fill_output(struct v4l2_pix_format_mplane *pix_mp,
 				    const struct s5p_mfc_fmt *fmt,
-				    u32 width, u32 height,
 				    const struct s5p_mfc_raw_layout *l)
 {
 	pix_mp->pixelformat = fmt->fourcc;
-	pix_mp->width = width;
-	pix_mp->height = height;
+	pix_mp->width = l->frame_width;
+	pix_mp->height = l->buf_height;
 	pix_mp->field = V4L2_FIELD_NONE;
 	pix_mp->flags = 0;
 	pix_mp->num_planes = fmt->num_planes;
@@ -1572,15 +1576,15 @@ static void s5p_mfc_enc_fill_output(struct v4l2_pix_format_mplane *pix_mp,
 	}
 }
 
-/* The coded stream carries the source frame size and colorimetry. */
+/* The coded stream: the visible frame in whole macroblocks, its colorimetry. */
 static void s5p_mfc_enc_fill_capture(struct s5p_mfc_ctx *ctx,
 				     struct v4l2_pix_format_mplane *pix_mp,
 				     const struct s5p_mfc_fmt *fmt,
 				     u32 width, u32 height, u32 sizeimage)
 {
 	pix_mp->pixelformat = fmt->fourcc;
-	pix_mp->width = width;
-	pix_mp->height = height;
+	pix_mp->width = ALIGN(width, 16);
+	pix_mp->height = ALIGN(height, 16);
 	pix_mp->field = V4L2_FIELD_NONE;
 	pix_mp->flags = 0;
 	pix_mp->colorspace = ctx->colorspace;
@@ -1607,8 +1611,7 @@ static int vidioc_g_fmt(struct file *file, void *priv, struct v4l2_format *f)
 	} else if (f->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
 		/* This is run on capture (encoder src) */
 		s5p_mfc_enc_ctx_layout(ctx, &l);
-		s5p_mfc_enc_fill_output(pix_fmt_mp, ctx->src_fmt, ctx->img_width,
-					ctx->img_height, &l);
+		s5p_mfc_enc_fill_output(pix_fmt_mp, ctx->src_fmt, &l);
 		pix_fmt_mp->colorspace = ctx->colorspace;
 		pix_fmt_mp->xfer_func = ctx->xfer_func;
 		pix_fmt_mp->ycbcr_enc = ctx->ycbcr_enc;
@@ -1664,8 +1667,7 @@ static int vidioc_try_fmt(struct file *file, void *priv, struct v4l2_format *f)
 		s5p_mfc_hw_call(dev->mfc_ops, enc_calc_src_size, dev, fmt,
 				pix_fmt_mp->width, pix_fmt_mp->height, &l);
 		/* Colorimetry is the client's to set on OUTPUT. */
-		s5p_mfc_enc_fill_output(pix_fmt_mp, fmt, pix_fmt_mp->width,
-					pix_fmt_mp->height, &l);
+		s5p_mfc_enc_fill_output(pix_fmt_mp, fmt, &l);
 	} else {
 		mfc_err("invalid buf type\n");
 		return -EINVAL;
@@ -1720,6 +1722,7 @@ static int vidioc_s_fmt(struct file *file, void *priv, struct v4l2_format *f)
 	struct s5p_mfc_dev *dev = video_drvdata(file);
 	struct v4l2_pix_format_mplane *pix_fmt_mp = &f->fmt.pix_mp;
 	u32 sizeimage_req = pix_fmt_mp->plane_fmt[0].sizeimage;
+	u32 width = pix_fmt_mp->width, height = pix_fmt_mp->height;
 	struct s5p_mfc_raw_layout l;
 	int ret = 0;
 
@@ -1745,9 +1748,13 @@ static int vidioc_s_fmt(struct file *file, void *priv, struct v4l2_format *f)
 		ctx->codec_mode = ctx->dst_fmt->codec_mode;
 		if (IS_MFCV16_PLUS(dev))
 			s5p_mfc_enc_update_controls(ctx);
-		/* TRY_FMT already bounded the source to this codec's range. */
-		ctx->img_width = pix_fmt_mp->width;
-		ctx->img_height = pix_fmt_mp->height;
+		/* The source frame, bounded to this codec's range as TRY_FMT did. */
+		width = ctx->img_width;
+		height = ctx->img_height;
+		s5p_mfc_enc_bound_source(dev, ctx->dst_fmt->codec_mode,
+					 &width, &height);
+		ctx->img_width = width;
+		ctx->img_height = height;
 		s5p_mfc_hw_call(dev->mfc_ops, enc_calc_src_size, dev,
 				ctx->src_fmt, ctx->img_width, ctx->img_height,
 				&l);
@@ -1759,8 +1766,11 @@ static int vidioc_s_fmt(struct file *file, void *priv, struct v4l2_format *f)
 	} else if (f->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
 		/* src_fmt is validated by call to vidioc_try_fmt */
 		ctx->src_fmt = find_format(f, MFC_FMT_RAW);
-		ctx->img_width = pix_fmt_mp->width;
-		ctx->img_height = pix_fmt_mp->height;
+		/* The frame asked for is the visible one; TRY_FMT padded the buffer. */
+		s5p_mfc_enc_bound_source(dev, ctx->dst_fmt->codec_mode,
+					 &width, &height);
+		ctx->img_width = width;
+		ctx->img_height = height;
 		mfc_debug(2, "codec number: %d\n", ctx->src_fmt->codec_mode);
 		mfc_debug(2, "fmt - w: %d, h: %d, ctx - w: %d, h: %d\n",
 			pix_fmt_mp->width, pix_fmt_mp->height,
@@ -2648,6 +2658,60 @@ static int vidioc_subscribe_event(struct v4l2_fh *fh,
 	}
 }
 
+/* The visible frame inside a padded source buffer. */
+static int vidioc_g_selection(struct file *file, void *priv,
+			      struct v4l2_selection *s)
+{
+	struct s5p_mfc_ctx *ctx = file_to_ctx(file);
+
+	if (s->type != V4L2_BUF_TYPE_VIDEO_OUTPUT)
+		return -EINVAL;
+
+	s->r.left = 0;
+	s->r.top = 0;
+	switch (s->target) {
+	case V4L2_SEL_TGT_CROP_BOUNDS:
+		s->r.width = ctx->frame_width;
+		s->r.height = ctx->buf_height;
+		break;
+	case V4L2_SEL_TGT_CROP_DEFAULT:
+	case V4L2_SEL_TGT_CROP:
+		s->r.width = ctx->img_width;
+		s->r.height = ctx->img_height;
+		break;
+	default:
+		return -EINVAL;
+	}
+	return 0;
+}
+
+static int vidioc_s_selection(struct file *file, void *priv,
+			      struct v4l2_selection *s)
+{
+	struct s5p_mfc_ctx *ctx = file_to_ctx(file);
+	struct s5p_mfc_dev *dev = ctx->dev;
+
+	if (s->type != V4L2_BUF_TYPE_VIDEO_OUTPUT ||
+	    s->target != V4L2_SEL_TGT_CROP)
+		return -EINVAL;
+	/* The coded size is fixed with the source buffers. */
+	if (vb2_is_busy(&ctx->vq_src) || vb2_is_busy(&ctx->vq_dst))
+		return -EBUSY;
+	/* The firmware takes its source from the buffer's origin. */
+	s->r.left = 0;
+	s->r.top = 0;
+	s->r.width = clamp_t(u32, s->r.width, 1, ctx->frame_width);
+	s->r.height = clamp_t(u32, s->r.height, 1, ctx->buf_height);
+	s5p_mfc_enc_bound_source(dev, ctx->dst_fmt->codec_mode,
+				 &s->r.width, &s->r.height);
+	/* Before v7 the firmware derives the source pitch from the width. */
+	if (!IS_MFCV7_PLUS(dev))
+		s->r.width = ctx->frame_width;
+	ctx->img_width = s->r.width;
+	ctx->img_height = s->r.height;
+	return 0;
+}
+
 static const struct v4l2_ioctl_ops s5p_mfc_enc_ioctl_ops = {
 	.vidioc_querycap = vidioc_querycap,
 	.vidioc_enum_fmt_vid_cap = vidioc_enum_fmt_vid_cap,
@@ -2659,6 +2723,8 @@ static const struct v4l2_ioctl_ops s5p_mfc_enc_ioctl_ops = {
 	.vidioc_try_fmt_vid_out_mplane = vidioc_try_fmt,
 	.vidioc_s_fmt_vid_cap_mplane = vidioc_s_fmt,
 	.vidioc_s_fmt_vid_out_mplane = vidioc_s_fmt,
+	.vidioc_g_selection = vidioc_g_selection,
+	.vidioc_s_selection = vidioc_s_selection,
 	.vidioc_reqbufs = vidioc_reqbufs,
 	.vidioc_querybuf = vidioc_querybuf,
 	.vidioc_qbuf = vidioc_qbuf,

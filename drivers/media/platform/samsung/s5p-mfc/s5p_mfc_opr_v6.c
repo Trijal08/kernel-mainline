@@ -596,6 +596,8 @@ static void s5p_mfc_enc_calc_src_size_v6(struct s5p_mfc_dev *dev,
 	unsigned int mb_width, mb_height;
 
 	memset(l, 0, sizeof(*l));
+	l->frame_width = width;
+	l->buf_height = height;
 	mb_width = MB_WIDTH(width);
 	mb_height = MB_HEIGHT(height);
 
@@ -606,10 +608,11 @@ static void s5p_mfc_enc_calc_src_size_v6(struct s5p_mfc_dev *dev,
 		 * bytes between or after them.
 		 */
 		l->buf_width = ALIGN(width, S5P_FIMV_NV12M_HALIGN_V6);
+		l->buf_height = ALIGN(height, 16);
 		l->stride[0] = l->buf_width;
 		l->stride[1] = l->buf_width;
-		l->luma_size = l->stride[0] * ALIGN(height, 16);
-		l->chroma_size = l->stride[1] * ALIGN(height, 16) / 2;
+		l->luma_size = l->stride[0] * l->buf_height;
+		l->chroma_size = l->stride[1] * l->buf_height / 2;
 		return;
 	}
 
