@@ -51,6 +51,13 @@ static const struct s5p_mfc_fmt formats[] = {
 		.versions	= MFC_V6PLUS_BITS | MFC_V16_BIT,
 	},
 	{
+		.fourcc		= V4L2_PIX_FMT_NV12,
+		.codec_mode	= S5P_MFC_CODEC_NONE,
+		.type		= MFC_FMT_RAW,
+		.num_planes	= 1,
+		.versions	= MFC_V16_BIT,
+	},
+	{
 		.fourcc		= V4L2_PIX_FMT_NV21M,
 		.codec_mode	= S5P_MFC_CODEC_NONE,
 		.type		= MFC_FMT_RAW,
@@ -443,6 +450,8 @@ static void s5p_mfc_dec_fill_capture(struct s5p_mfc_ctx *ctx,
 				     struct v4l2_pix_format_mplane *pix_mp,
 				     const struct s5p_mfc_fmt *fmt)
 {
+	int luma_size = ctx->luma_size, chroma_size = ctx->chroma_size;
+
 	pix_mp->field = V4L2_FIELD_NONE;
 	pix_mp->flags = 0;
 	pix_mp->colorspace = ctx->colorspace;
@@ -451,12 +460,19 @@ static void s5p_mfc_dec_fill_capture(struct s5p_mfc_ctx *ctx,
 	pix_mp->quantization = ctx->quantization;
 	memset(pix_mp->plane_fmt, 0, sizeof(pix_mp->plane_fmt));
 
-	if (fmt != ctx->dst_fmt || ctx->state < MFCINST_HEAD_PARSED ||
-	    ctx->state >= MFCINST_ABORT) {
+	/*
+	 * Before the header only the placeholder is known; afterwards the
+	 * parsed layout describes the current format, and on v16 any raw
+	 * format, whose planes differ only by the firmware's minimum.
+	 */
+	if (ctx->state < MFCINST_HEAD_PARSED || ctx->state >= MFCINST_ABORT ||
+	    (fmt != ctx->dst_fmt && !IS_MFCV16_PLUS(ctx->dev))) {
 		v4l2_fill_pixfmt_mp(pix_mp, fmt->fourcc, ctx->img_width,
 				    ctx->img_height);
 		return;
 	}
+	if (fmt != ctx->dst_fmt)
+		s5p_mfc_dpb_plane_sizes_v16(ctx, fmt, &luma_size, &chroma_size);
 
 	/* Width and height are set to the dimensions
 	   of the movie, the buffer is bigger and
@@ -467,9 +483,14 @@ static void s5p_mfc_dec_fill_capture(struct s5p_mfc_ctx *ctx,
 	pix_mp->height = ctx->buf_height;
 	pix_mp->num_planes = fmt->num_planes;
 	pix_mp->plane_fmt[0].bytesperline = ctx->stride[0];
-	pix_mp->plane_fmt[0].sizeimage = ctx->luma_size;
+	if (fmt->num_planes == 1) {
+		/* Luma, then chroma at bytesperline * height. */
+		pix_mp->plane_fmt[0].sizeimage = luma_size + chroma_size;
+		return;
+	}
+	pix_mp->plane_fmt[0].sizeimage = luma_size;
 	pix_mp->plane_fmt[1].bytesperline = ctx->stride[1];
-	pix_mp->plane_fmt[1].sizeimage = ctx->chroma_size;
+	pix_mp->plane_fmt[1].sizeimage = chroma_size;
 	if (fmt->fourcc == V4L2_PIX_FMT_YUV420M ||
 	    fmt->fourcc == V4L2_PIX_FMT_YVU420M) {
 		pix_mp->plane_fmt[2].bytesperline = ctx->stride[2];
@@ -572,10 +593,13 @@ static int vidioc_s_fmt(struct file *file, void *priv, struct v4l2_format *f)
 		}
 		/* dst_fmt is validated by call to vidioc_try_fmt */
 		ctx->dst_fmt = find_format(f, MFC_FMT_RAW);
-		/* Before v16 the DPB layout follows the raw format. */
+		/* Once the header is parsed the DPB layout follows the raw format. */
 		if (ctx->state >= MFCINST_HEAD_PARSED &&
-		    ctx->state < MFCINST_ABORT && !IS_MFCV16_PLUS(dev))
+		    ctx->state < MFCINST_ABORT) {
 			s5p_mfc_hw_call(dev->mfc_ops, dec_calc_dpb_size, ctx);
+			/* TRY_FMT answered for the previous format's layout. */
+			s5p_mfc_dec_fill_capture(ctx, pix_mp, ctx->dst_fmt);
+		}
 	} else if (f->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
 		if (vb2_is_busy(&ctx->vq_src) || vb2_is_busy(&ctx->vq_dst)) {
 			v4l2_err(&dev->v4l2_dev, "%s queue busy\n", __func__);
@@ -1091,7 +1115,6 @@ static int s5p_mfc_queue_setup(struct vb2_queue *vq,
 {
 	struct s5p_mfc_ctx *ctx = vb2_get_drv_priv(vq);
 	struct s5p_mfc_dev *dev = ctx->dev;
-	const struct v4l2_format_info *format;
 
 	/* Video output for decoding (source)
 	 * this can be set after getting an instance */
@@ -1107,13 +1130,7 @@ static int s5p_mfc_queue_setup(struct vb2_queue *vq,
 	 * this can be set after the header was parsed */
 	} else if (ctx->state == MFCINST_HEAD_PARSED &&
 		   vq->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
-		/* Output plane count is 2 - one for Y and one for CbCr */
-		format = v4l2_format_info(ctx->dst_fmt->fourcc);
-		if (!format) {
-			mfc_err("invalid format\n");
-			return -EINVAL;
-		}
-		*plane_count = format->comp_planes;
+		*plane_count = ctx->dst_fmt->num_planes;
 
 		/* Setup buffer count */
 		if (*buf_count < ctx->pb_count)
@@ -1131,7 +1148,10 @@ static int s5p_mfc_queue_setup(struct vb2_queue *vq,
 						*buf_count, *plane_count);
 	if (ctx->state == MFCINST_HEAD_PARSED &&
 	    vq->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
-		psize[0] = ctx->luma_size;
+		if (ctx->dst_fmt->num_planes == 1)
+			psize[0] = ctx->luma_size + ctx->chroma_size;
+		else
+			psize[0] = ctx->luma_size;
 		psize[1] = ctx->chroma_size;
 		if (ctx->dst_fmt->fourcc == V4L2_PIX_FMT_YUV420M || ctx->dst_fmt->fourcc ==
 				V4L2_PIX_FMT_YVU420M)
@@ -1180,8 +1200,10 @@ static int s5p_mfc_buf_init(struct vb2_buffer *vb)
 				return -EINVAL;
 			}
 		}
-		if (vb2_plane_size(vb, 0) < ctx->luma_size ||
-			vb2_plane_size(vb, 1) < ctx->chroma_size) {
+		if (ctx->dst_fmt->num_planes == 1 ?
+		    vb2_plane_size(vb, 0) < ctx->luma_size + ctx->chroma_size :
+		    (vb2_plane_size(vb, 0) < ctx->luma_size ||
+		     vb2_plane_size(vb, 1) < ctx->chroma_size)) {
 			mfc_err("Plane buffer (CAPTURE) is too small\n");
 			return -EINVAL;
 		}
@@ -1194,15 +1216,10 @@ static int s5p_mfc_buf_init(struct vb2_buffer *vb)
 		}
 		i = vb->index;
 		ctx->dst_bufs[i].b = vbuf;
-		ctx->dst_bufs[i].cookie.raw.luma =
-					vb2_dma_contig_plane_dma_addr(vb, 0);
-		ctx->dst_bufs[i].cookie.raw.chroma =
-					vb2_dma_contig_plane_dma_addr(vb, 1);
-		if (ctx->dst_fmt->fourcc == V4L2_PIX_FMT_YUV420M || ctx->dst_fmt->fourcc ==
-				V4L2_PIX_FMT_YVU420M) {
-			ctx->dst_bufs[i].cookie.raw.chroma_1 =
-					vb2_dma_contig_plane_dma_addr(vb, 2);
-		}
+		s5p_mfc_raw_plane_addrs(ctx, ctx->dst_fmt, vb,
+					&ctx->dst_bufs[i].cookie.raw.luma,
+					&ctx->dst_bufs[i].cookie.raw.chroma,
+					&ctx->dst_bufs[i].cookie.raw.chroma_1);
 		ctx->dst_bufs_cnt++;
 	} else if (vq->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
 		if (IS_ERR_OR_NULL(ERR_PTR(
