@@ -46,11 +46,15 @@ MODULE_PARM_DESC(mem, "Preallocated memory size for the firmware and context buf
 
 /* Helper functions for interrupt processing */
 
+/* A context holds a scheduler slot only while it has a firmware instance. */
+
 /* Remove from hw execution round robin */
 void clear_work_bit(struct s5p_mfc_ctx *ctx)
 {
 	struct s5p_mfc_dev *dev = ctx->dev;
 
+	if (ctx->num < 0)
+		return;
 	spin_lock(&dev->condlock);
 	__clear_bit(ctx->num, &dev->ctx_work_bits);
 	spin_unlock(&dev->condlock);
@@ -61,6 +65,8 @@ void set_work_bit(struct s5p_mfc_ctx *ctx)
 {
 	struct s5p_mfc_dev *dev = ctx->dev;
 
+	if (WARN_ON(ctx->num < 0))
+		return;
 	spin_lock(&dev->condlock);
 	__set_bit(ctx->num, &dev->ctx_work_bits);
 	spin_unlock(&dev->condlock);
@@ -72,6 +78,8 @@ void clear_work_bit_irqsave(struct s5p_mfc_ctx *ctx)
 	struct s5p_mfc_dev *dev = ctx->dev;
 	unsigned long flags;
 
+	if (ctx->num < 0)
+		return;
 	spin_lock_irqsave(&dev->condlock, flags);
 	__clear_bit(ctx->num, &dev->ctx_work_bits);
 	spin_unlock_irqrestore(&dev->condlock, flags);
@@ -83,9 +91,41 @@ void set_work_bit_irqsave(struct s5p_mfc_ctx *ctx)
 	struct s5p_mfc_dev *dev = ctx->dev;
 	unsigned long flags;
 
+	if (WARN_ON(ctx->num < 0))
+		return;
 	spin_lock_irqsave(&dev->condlock, flags);
 	__set_bit(ctx->num, &dev->ctx_work_bits);
 	spin_unlock_irqrestore(&dev->condlock, flags);
+}
+
+/* Claim a scheduler slot for a context about to open a firmware instance. */
+int s5p_mfc_claim_ctx_slot(struct s5p_mfc_ctx *ctx)
+{
+	struct s5p_mfc_dev *dev = ctx->dev;
+	int num;
+
+	for (num = 0; num < MFC_NUM_CONTEXTS; num++)
+		if (!dev->ctx[num])
+			break;
+	if (num == MFC_NUM_CONTEXTS) {
+		mfc_debug(2, "Too many open contexts\n");
+		return -EBUSY;
+	}
+	ctx->num = num;
+	dev->ctx[num] = ctx;
+	clear_work_bit_irqsave(ctx);
+	return 0;
+}
+
+void s5p_mfc_release_ctx_slot(struct s5p_mfc_ctx *ctx)
+{
+	struct s5p_mfc_dev *dev = ctx->dev;
+
+	if (ctx->num < 0)
+		return;
+	clear_work_bit_irqsave(ctx);
+	dev->ctx[ctx->num] = NULL;
+	ctx->num = -1;
 }
 
 int s5p_mfc_get_new_ctx(struct s5p_mfc_dev *dev)
@@ -789,6 +829,20 @@ static irqreturn_t s5p_mfc_irq(int irq, void *priv)
 	reason = s5p_mfc_hw_call(dev->mfc_ops, get_int_reason, dev);
 	err = s5p_mfc_hw_call(dev->mfc_ops, get_int_err, dev);
 	mfc_debug(1, "Int reason: %d (err: %08x)\n", reason, err);
+	if (!ctx && reason != S5P_MFC_R2H_CMD_ERR_RET &&
+	    reason != S5P_MFC_R2H_CMD_SYS_INIT_RET &&
+	    reason != S5P_MFC_R2H_CMD_FW_STATUS_RET &&
+	    reason != S5P_MFC_R2H_CMD_SLEEP_RET &&
+	    reason != S5P_MFC_R2H_CMD_WAKEUP_RET) {
+		/* A late completion for a context that gave its slot back. */
+		mfc_err("Interrupt %d for a released context\n", reason);
+		s5p_mfc_hw_call(dev->mfc_ops, clear_int_flags, dev);
+		if (test_and_clear_bit(0, &dev->hw_lock))
+			s5p_mfc_clock_off(dev);
+		s5p_mfc_hw_call(dev->mfc_ops, try_run, dev);
+		spin_unlock(&dev->irqlock);
+		return IRQ_HANDLED;
+	}
 	switch (reason) {
 	case S5P_MFC_R2H_CMD_ERR_RET:
 		/* An error has occurred */
@@ -944,19 +998,8 @@ static int s5p_mfc_open(struct file *file)
 	ctx->dst_queue_cnt = 0;
 	ctx->is_422 = 0;
 	ctx->is_10bit = 0;
-	/* Get context number */
-	ctx->num = 0;
-	while (dev->ctx[ctx->num]) {
-		ctx->num++;
-		if (ctx->num >= MFC_NUM_CONTEXTS) {
-			mfc_debug(2, "Too many open contexts\n");
-			ret = -EBUSY;
-			goto err_no_ctx;
-		}
-	}
-	/* Mark context as idle */
-	clear_work_bit_irqsave(ctx);
-	dev->ctx[ctx->num] = ctx;
+	/* A scheduler slot is claimed with the firmware instance. */
+	ctx->num = -1;
 	if (vdev == dev->vfd_dec) {
 		ctx->type = MFCINST_DECODER;
 		ctx->c_ops = get_dec_codec_ops();
@@ -1070,6 +1113,7 @@ static int s5p_mfc_open(struct file *file)
 		mfc_err("Failed to initialize videobuf2 queue(output)\n");
 		goto err_queue_init;
 	}
+	list_add(&ctx->node, &dev->open_ctxs);
 	mutex_unlock(&dev->mfc_mutex);
 	mfc_debug_leave();
 	return ret;
@@ -1088,8 +1132,6 @@ err_pwr_enable:
 err_ctrls_setup:
 	s5p_mfc_dec_ctrls_delete(ctx);
 err_bad_node:
-	dev->ctx[ctx->num] = NULL;
-err_no_ctx:
 	v4l2_fh_del(&ctx->fh, file);
 	v4l2_fh_exit(&ctx->fh);
 	kfree(ctx);
@@ -1116,8 +1158,6 @@ static int s5p_mfc_release(struct file *file)
 	if (dev) {
 		s5p_mfc_clock_on(dev);
 
-		/* Mark context as idle */
-		clear_work_bit_irqsave(ctx);
 		/*
 		 * If instance was initialised and not yet freed,
 		 * return instance and free resources
@@ -1126,9 +1166,8 @@ static int s5p_mfc_release(struct file *file)
 			mfc_debug(2, "Has to free instance\n");
 			s5p_mfc_close_mfc_inst(dev, ctx);
 		}
-		/* hardware locking scheme */
-		if (dev->curr_ctx == ctx->num)
-			clear_bit(0, &dev->hw_lock);
+		s5p_mfc_release_ctx_slot(ctx);
+		list_del(&ctx->node);
 		dev->num_inst--;
 		if (dev->num_inst == 0) {
 			mfc_debug(2, "Last instance\n");
@@ -1142,8 +1181,6 @@ static int s5p_mfc_release(struct file *file)
 			s5p_mfc_clock_off(dev);
 		}
 	}
-	if (dev)
-		dev->ctx[ctx->num] = NULL;
 	s5p_mfc_dec_ctrls_delete(ctx);
 	v4l2_fh_del(&ctx->fh, file);
 	/* vdev is gone if dev is null */
@@ -1560,6 +1597,7 @@ static int s5p_mfc_probe(struct platform_device *pdev)
 	s5p_mfc_load_firmware(dev);
 
 	mutex_init(&dev->mfc_mutex);
+	INIT_LIST_HEAD(&dev->open_ctxs);
 	init_waitqueue_head(&dev->queue);
 	dev->hw_lock = 0;
 	INIT_WORK(&dev->watchdog_work, s5p_mfc_watchdog_worker);
@@ -1658,7 +1696,6 @@ static void s5p_mfc_remove(struct platform_device *pdev)
 {
 	struct s5p_mfc_dev *dev = platform_get_drvdata(pdev);
 	struct s5p_mfc_ctx *ctx;
-	int i;
 
 	v4l2_info(&dev->v4l2_dev, "Removing %s\n", pdev->name);
 
@@ -1668,13 +1705,8 @@ static void s5p_mfc_remove(struct platform_device *pdev)
 	 * after s5p_mfc_remove() is run during unbind.
 	 */
 	mutex_lock(&dev->mfc_mutex);
-	for (i = 0; i < MFC_NUM_CONTEXTS; i++) {
-		ctx = dev->ctx[i];
-		if (!ctx)
-			continue;
-		/* clear ctx->dev */
+	list_for_each_entry(ctx, &dev->open_ctxs, node)
 		ctx->dev = NULL;
-	}
 	mutex_unlock(&dev->mfc_mutex);
 
 	timer_delete_sync(&dev->watchdog_timer);
