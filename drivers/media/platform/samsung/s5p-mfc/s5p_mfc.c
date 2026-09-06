@@ -1746,6 +1746,32 @@ static const struct s5p_mfc_buf_size buf_size_v5 = {
 	.priv	= &mfc_buf_size_v5,
 };
 
+/*
+ * Encoder bounds: the limits the format handlers have always applied, with
+ * the even alignment they imposed expressed as the step. The v16 firmware's
+ * per-codec limits come from the vendor driver's resolution check; the
+ * decoder range there is the same span, and no other variant documents one.
+ */
+static const struct v4l2_frmsize_stepwise enc_frmsize_fhd = {
+	.min_width = 8, .max_width = 1920, .step_width = 2,
+	.min_height = 4, .max_height = 1080, .step_height = 2,
+};
+
+static const struct v4l2_frmsize_stepwise enc_frmsize_uhd = {
+	.min_width = 8, .max_width = 3840, .step_width = 2,
+	.min_height = 4, .max_height = 2160, .step_height = 2,
+};
+
+static const struct v4l2_frmsize_stepwise enc_frmsize_v16 = {
+	.min_width = 32, .max_width = 8192, .step_width = 2,
+	.min_height = 32, .max_height = 8192, .step_height = 2,
+};
+
+static const struct v4l2_frmsize_stepwise dec_frmsize_v16 = {
+	.min_width = 32, .max_width = 8192, .step_width = 1,
+	.min_height = 32, .max_height = 8192, .step_height = 1,
+};
+
 static const struct s5p_mfc_variant mfc_drvdata_v5 = {
 	.version	= MFC_VERSION,
 	.version_bit	= MFC_V5_BIT,
@@ -1755,6 +1781,7 @@ static const struct s5p_mfc_variant mfc_drvdata_v5 = {
 	.clk_names	= {"mfc", "sclk_mfc"},
 	.num_clocks	= 2,
 	.use_clock_gating = true,
+	.enc_frmsize	= &enc_frmsize_fhd,
 };
 
 static const struct s5p_mfc_buf_size_v6 mfc_buf_size_v6 = {
@@ -1784,6 +1811,7 @@ static const struct s5p_mfc_variant mfc_drvdata_v6 = {
 	.fw_name[1]     = "s5p-mfc-v6-v2.fw",
 	.clk_names	= {"mfc"},
 	.num_clocks	= 1,
+	.enc_frmsize	= &enc_frmsize_fhd,
 };
 
 static const struct s5p_mfc_buf_size_v6 mfc_buf_size_v7 = {
@@ -1808,6 +1836,7 @@ static const struct s5p_mfc_variant mfc_drvdata_v7 = {
 	.fw_name[0]     = "s5p-mfc-v7.fw",
 	.clk_names	= {"mfc"},
 	.num_clocks	= 1,
+	.enc_frmsize	= &enc_frmsize_fhd,
 };
 
 static const struct s5p_mfc_variant mfc_drvdata_v7_3250 = {
@@ -1818,6 +1847,7 @@ static const struct s5p_mfc_variant mfc_drvdata_v7_3250 = {
 	.fw_name[0]     = "s5p-mfc-v7.fw",
 	.clk_names      = {"mfc", "sclk_mfc"},
 	.num_clocks     = 2,
+	.enc_frmsize	= &enc_frmsize_fhd,
 };
 
 static const struct s5p_mfc_buf_size_v6 mfc_buf_size_v8 = {
@@ -1842,6 +1872,7 @@ static const struct s5p_mfc_variant mfc_drvdata_v8 = {
 	.fw_name[0]     = "s5p-mfc-v8.fw",
 	.clk_names	= {"mfc"},
 	.num_clocks	= 1,
+	.enc_frmsize	= &enc_frmsize_fhd,
 };
 
 static const struct s5p_mfc_variant mfc_drvdata_v8_5433 = {
@@ -1852,6 +1883,7 @@ static const struct s5p_mfc_variant mfc_drvdata_v8_5433 = {
 	.fw_name[0]     = "s5p-mfc-v8.fw",
 	.clk_names	= {"pclk", "aclk", "aclk_xiu"},
 	.num_clocks	= 3,
+	.enc_frmsize	= &enc_frmsize_fhd,
 };
 
 static const struct s5p_mfc_buf_size_v6 mfc_buf_size_v10 = {
@@ -1875,6 +1907,7 @@ static const struct s5p_mfc_variant mfc_drvdata_v10 = {
 	.port_num       = MFC_NUM_PORTS_V10,
 	.buf_size       = &buf_size_v10,
 	.fw_name[0]     = "s5p-mfc-v10.fw",
+	.enc_frmsize	= &enc_frmsize_fhd,
 };
 
 static struct s5p_mfc_buf_size_v6 mfc_buf_size_v12 = {
@@ -1900,6 +1933,7 @@ static struct s5p_mfc_variant mfc_drvdata_v12 = {
 	.fw_name[0]     = "s5p-mfc-v12.fw",
 	.clk_names	= {"mfc"},
 	.num_clocks	= 1,
+	.enc_frmsize	= &enc_frmsize_uhd,
 };
 
 static const struct s5p_mfc_buf_size_v6 mfc_buf_size_v16 = {
@@ -1925,6 +1959,8 @@ static const struct s5p_mfc_variant mfc_drvdata_zumapro = {
 	.fw_name[0]	= "google/zumapro/mfc_fw.bin",
 	.clk_names	= { "mfc" },
 	.num_clocks	= 1,
+	.enc_frmsize	= &enc_frmsize_v16,
+	.dec_frmsize	= &dec_frmsize_v16,
 };
 
 static const struct of_device_id exynos_mfc_match[] = {
