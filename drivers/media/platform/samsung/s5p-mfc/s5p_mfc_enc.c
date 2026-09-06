@@ -1858,19 +1858,18 @@ static int vidioc_querybuf(struct file *file, void *priv,
 {
 	struct s5p_mfc_ctx *ctx = file_to_ctx(file);
 	int ret = 0;
+	int i;
 
-	/* if memory is not mmp or userptr or dmabuf return error */
-	if ((buf->memory != V4L2_MEMORY_MMAP) &&
-		(buf->memory != V4L2_MEMORY_USERPTR) &&
-		(buf->memory != V4L2_MEMORY_DMABUF))
-		return -EINVAL;
 	if (buf->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
 		ret = vb2_querybuf(&ctx->vq_dst, buf);
 		if (ret != 0) {
 			mfc_err("error in vb2_querybuf() for E(D)\n");
 			return ret;
 		}
-		buf->m.planes[0].m.mem_offset += DST_QUEUE_OFF_BASE;
+		/* Both queues share the mmap space; CAPTURE sits above. */
+		if (buf->memory == V4L2_MEMORY_MMAP)
+			for (i = 0; i < buf->length; i++)
+				buf->m.planes[i].m.mem_offset += DST_QUEUE_OFF_BASE;
 	} else if (buf->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
 		ret = vb2_querybuf(&ctx->vq_src, buf);
 		if (ret != 0) {
