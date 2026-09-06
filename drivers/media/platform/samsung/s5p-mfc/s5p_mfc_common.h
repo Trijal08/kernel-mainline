@@ -311,6 +311,7 @@ struct s5p_mfc_priv_buf {
  * @ctx:		array of driver contexts
  * @curr_ctx:		number of the currently running context
  * @ctx_work_bits:	used to mark which contexts are waiting for hardware
+ * @open_ctxs:		every open context, whether or not it holds a slot
  * @watchdog_cnt:	counter for the watchdog
  * @watchdog_timer:	timer for the watchdog
  * @watchdog_workqueue:	workqueue for the watchdog
@@ -359,6 +360,7 @@ struct s5p_mfc_dev {
 	struct s5p_mfc_ctx *ctx[MFC_NUM_CONTEXTS];
 	int curr_ctx;
 	unsigned long ctx_work_bits;
+	struct list_head open_ctxs;
 	atomic_t watchdog_cnt;
 	struct timer_list watchdog_timer;
 	struct workqueue_struct *watchdog_workqueue;
@@ -576,6 +578,7 @@ struct s5p_mfc_codec_ops {
  * struct s5p_mfc_ctx - This struct contains the instance context
  *
  * @dev:		pointer to the s5p_mfc_dev of the device
+ * @node:		link in the device's list of open contexts
  * @fh:			struct v4l2_fh
  * @num:		number of the context that this structure describes
  * @int_cond:		variable used by the waitqueue
@@ -666,6 +669,7 @@ struct s5p_mfc_codec_ops {
  */
 struct s5p_mfc_ctx {
 	struct s5p_mfc_dev *dev;
+	struct list_head node;
 	struct v4l2_fh fh;
 
 	int num;
@@ -824,6 +828,8 @@ void clear_work_bit(struct s5p_mfc_ctx *ctx);
 void set_work_bit(struct s5p_mfc_ctx *ctx);
 void clear_work_bit_irqsave(struct s5p_mfc_ctx *ctx);
 void set_work_bit_irqsave(struct s5p_mfc_ctx *ctx);
+int s5p_mfc_claim_ctx_slot(struct s5p_mfc_ctx *ctx);
+void s5p_mfc_release_ctx_slot(struct s5p_mfc_ctx *ctx);
 int s5p_mfc_get_new_ctx(struct s5p_mfc_dev *dev);
 void s5p_mfc_cleanup_queue(struct list_head *lh, struct vb2_queue *vq);
 
