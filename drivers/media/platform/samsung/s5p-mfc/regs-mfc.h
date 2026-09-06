@@ -441,6 +441,9 @@
 #define SHARED_BUF_SIZE		(8 * SZ_1K)	/* 8KB for shared buffer */
 
 #define DEF_CPB_SIZE		(256 * SZ_1K)	/* 256KB */
+/* Frame size of a context before the client sets one */
+#define DEF_WIDTH		1280
+#define DEF_HEIGHT		720
 #define MAX_CPB_SIZE		(4 * SZ_1M)	/* 4MB */
 #define MAX_FW_SIZE		(384 * SZ_1K)
 
