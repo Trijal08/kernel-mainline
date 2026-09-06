@@ -27,6 +27,7 @@
 #include "s5p_mfc_enc.h"
 #include "s5p_mfc_intr.h"
 #include "s5p_mfc_opr.h"
+#include "s5p_mfc_pm.h"
 
 #define DEF_SRC_FMT_ENC	V4L2_PIX_FMT_NV12M
 #define DEF_DST_FMT_ENC	V4L2_PIX_FMT_H264
@@ -1733,6 +1734,12 @@ static int vidioc_s_fmt(struct file *file, void *priv, struct v4l2_format *f)
 		goto out;
 	}
 	if (f->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
+		/* An instance left by freed buffers belongs to the old codec. */
+		if (ctx->inst_no != MFC_NO_INSTANCE_SET) {
+			s5p_mfc_clock_on(dev);
+			s5p_mfc_close_mfc_inst(dev, ctx);
+			s5p_mfc_clock_off(dev);
+		}
 		/* dst_fmt is validated by call to vidioc_try_fmt */
 		ctx->dst_fmt = find_format(f, MFC_FMT_ENC);
 		ctx->state = MFCINST_INIT;
@@ -1750,7 +1757,6 @@ static int vidioc_s_fmt(struct file *file, void *priv, struct v4l2_format *f)
 		ctx->enc_dst_buf_size =	pix_fmt_mp->plane_fmt[0].sizeimage;
 		ctx->dst_bufs_cnt = 0;
 		ctx->capture_state = QUEUE_FREE;
-		ret = s5p_mfc_open_mfc_inst(dev, ctx);
 	} else if (f->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
 		/* src_fmt is validated by call to vidioc_try_fmt */
 		ctx->src_fmt = find_format(f, MFC_FMT_RAW);
@@ -1805,11 +1811,7 @@ static int vidioc_reqbufs(struct file *file, void *priv,
 			ctx->capture_state = QUEUE_FREE;
 			return ret;
 		}
-		if (ctx->capture_state != QUEUE_FREE) {
-			mfc_err("invalid capture state: %d\n",
-							ctx->capture_state);
-			return -EINVAL;
-		}
+		ctx->dst_bufs_cnt = 0;
 		ret = vb2_reqbufs(&ctx->vq_dst, reqbufs);
 		if (ret != 0) {
 			mfc_err("error in vb2_reqbufs() for E(D)\n");
@@ -1826,11 +1828,7 @@ static int vidioc_reqbufs(struct file *file, void *priv,
 			ctx->output_state = QUEUE_FREE;
 			return ret;
 		}
-		if (ctx->output_state != QUEUE_FREE) {
-			mfc_err("invalid output state: %d\n",
-							ctx->output_state);
-			return -EINVAL;
-		}
+		ctx->src_bufs_cnt = 0;
 
 		if (IS_MFCV6_PLUS(dev) && (!IS_MFCV12(dev))) {
 			/* Check for min encoder buffers */
@@ -1867,10 +1865,6 @@ static int vidioc_querybuf(struct file *file, void *priv,
 		(buf->memory != V4L2_MEMORY_DMABUF))
 		return -EINVAL;
 	if (buf->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
-		if (ctx->state != MFCINST_GOT_INST) {
-			mfc_err("invalid context state: %d\n", ctx->state);
-			return -EINVAL;
-		}
 		ret = vb2_querybuf(&ctx->vq_dst, buf);
 		if (ret != 0) {
 			mfc_err("error in vb2_querybuf() for E(D)\n");
@@ -2716,7 +2710,7 @@ static int s5p_mfc_queue_setup(struct vb2_queue *vq,
 	struct s5p_mfc_dev *dev = ctx->dev;
 
 	if (vq->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
-		if (ctx->state != MFCINST_GOT_INST) {
+		if (ctx->state == MFCINST_ERROR) {
 			mfc_err("invalid state: %d\n", ctx->state);
 			return -EINVAL;
 		}
@@ -2853,20 +2847,41 @@ static int s5p_mfc_start_streaming(struct vb2_queue *q, unsigned int count)
 {
 	struct s5p_mfc_ctx *ctx = vb2_get_drv_priv(q);
 	struct s5p_mfc_dev *dev = ctx->dev;
+	int ret;
 
-	if (IS_MFCV6_PLUS(dev) &&
-			(q->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE)) {
+	/* A stopped stream resumes with the state it had. */
+	if (ctx->state == MFCINST_FINISHING || ctx->state == MFCINST_FINISHED)
+		ctx->state = MFCINST_RUNNING;
 
-		if ((ctx->state == MFCINST_GOT_INST) &&
-			(dev->curr_ctx == ctx->num) && dev->hw_lock) {
-			s5p_mfc_wait_for_done_ctx(ctx,
-						S5P_MFC_R2H_CMD_SEQ_DONE_RET,
-						0);
+	if (q->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
+		/* Each CAPTURE streaming session is one firmware instance. */
+		if (ctx->inst_no == MFC_NO_INSTANCE_SET) {
+			if (ctx->state != MFCINST_INIT) {
+				mfc_err("invalid state: %d\n", ctx->state);
+				return -EINVAL;
+			}
+			ret = s5p_mfc_open_mfc_inst(dev, ctx);
+			if (ret)
+				return ret;
 		}
-		if (q->memory != V4L2_MEMORY_DMABUF) {
-			if (ctx->src_bufs_cnt < ctx->pb_count) {
-				mfc_err("Need minimum %d OUTPUT buffers\n", ctx->pb_count);
-				return -ENOBUFS;
+		if (IS_MFCV6_PLUS(dev)) {
+			/*
+			 * The header fixes how many OUTPUT buffers are needed;
+			 * produce it now, even if another context runs first.
+			 */
+			if (ctx->state == MFCINST_GOT_INST &&
+			    s5p_mfc_ctx_ready(ctx)) {
+				set_work_bit_irqsave(ctx);
+				s5p_mfc_hw_call(dev->mfc_ops, try_run, dev);
+				s5p_mfc_wait_for_done_ctx(ctx,
+							S5P_MFC_R2H_CMD_SEQ_DONE_RET,
+							0);
+			}
+			if (q->memory != V4L2_MEMORY_DMABUF) {
+				if (ctx->src_bufs_cnt < ctx->pb_count) {
+					mfc_err("Need minimum %d OUTPUT buffers\n", ctx->pb_count);
+					return -ENOBUFS;
+				}
 			}
 		}
 	}
@@ -2912,6 +2927,7 @@ static void s5p_mfc_stop_streaming(struct vb2_queue *q)
 	unsigned long flags;
 	struct s5p_mfc_ctx *ctx = vb2_get_drv_priv(q);
 	struct s5p_mfc_dev *dev = ctx->dev;
+	struct s5p_mfc_buf *mb_entry;
 
 	ctx->draining = false;
 	if ((ctx->state == MFCINST_FINISHING ||
@@ -2921,13 +2937,25 @@ static void s5p_mfc_stop_streaming(struct vb2_queue *q)
 		s5p_mfc_wait_for_done_ctx(ctx, S5P_MFC_R2H_CMD_FRAME_DONE_RET,
 					  0);
 	}
-	ctx->state = MFCINST_FINISHED;
+	/* Only a started stream is finished; an unstarted one keeps its step. */
+	if (ctx->state == MFCINST_RUNNING || ctx->state == MFCINST_FINISHING ||
+	    ctx->state == MFCINST_ABORT)
+		ctx->state = MFCINST_FINISHED;
 	spin_lock_irqsave(&dev->irqlock, flags);
 	if (q->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
 		ctx->enc_eos_pending = false;
 		s5p_mfc_cleanup_queue(&ctx->dst_queue, &ctx->vq_dst);
 		INIT_LIST_HEAD(&ctx->dst_queue);
 		ctx->dst_queue_cnt = 0;
+		/* The instance that referenced these frames closes below. */
+		while (!list_empty(&ctx->ref_queue)) {
+			mb_entry = list_first_entry(&ctx->ref_queue,
+						    struct s5p_mfc_buf, list);
+			list_del(&mb_entry->list);
+			ctx->ref_queue_cnt--;
+			vb2_buffer_done(&mb_entry->b->vb2_buf,
+					VB2_BUF_STATE_DONE);
+		}
 	}
 	if (q->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
 		cleanup_ref_queue(ctx);
@@ -2936,6 +2964,14 @@ static void s5p_mfc_stop_streaming(struct vb2_queue *q)
 		ctx->src_queue_cnt = 0;
 	}
 	spin_unlock_irqrestore(&dev->irqlock, flags);
+	if (q->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE &&
+	    ctx->inst_no != MFC_NO_INSTANCE_SET) {
+		/* The coded stream ends with its instance; STREAMON opens another. */
+		s5p_mfc_clock_on(dev);
+		s5p_mfc_close_mfc_inst(dev, ctx);
+		s5p_mfc_clock_off(dev);
+		ctx->state = MFCINST_INIT;
+	}
 }
 
 static void s5p_mfc_buf_queue(struct vb2_buffer *vb)
