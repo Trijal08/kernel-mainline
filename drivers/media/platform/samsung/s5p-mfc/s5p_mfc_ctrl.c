@@ -550,4 +550,15 @@ free_resources:
 
 	ctx->inst_no = MFC_NO_INSTANCE_SET;
 	ctx->state = MFCINST_FREE;
+	/* Whatever the stream left behind belonged to this instance. */
+	ctx->pb_count = 0;
+	ctx->total_dpb_count = 0;
+	ctx->capture_state = QUEUE_FREE;
+	ctx->dec_dst_flag = 0;
+	ctx->dec_dpb_used = 0;
+	ctx->head_processed = 0;
+	ctx->dpb_flush_flag = 0;
+	ctx->consumed_stream = 0;
+	ctx->enc_eos_pending = false;
+	ctx->draining = false;
 }
