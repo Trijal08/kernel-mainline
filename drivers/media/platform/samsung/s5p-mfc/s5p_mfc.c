@@ -1205,9 +1205,15 @@ static __poll_t s5p_mfc_poll(struct file *file,
 	__poll_t rc = 0;
 	unsigned long flags;
 
-	mutex_lock(&dev->mfc_mutex);
 	src_q = &ctx->vq_src;
 	dst_q = &ctx->vq_dst;
+	poll_wait(file, &ctx->fh.wait, wait);
+	poll_wait(file, &src_q->done_wq, wait);
+	poll_wait(file, &dst_q->done_wq, wait);
+	mutex_lock(&dev->mfc_mutex);
+	/* Events do not need a stream, as vb2_poll() also reports them. */
+	if (v4l2_event_pending(&ctx->fh))
+		rc |= EPOLLPRI;
 	/*
 	 * There has to be at least one buffer queued on each queued_list, which
 	 * means either in driver already or waiting for driver to claim it
@@ -1215,16 +1221,9 @@ static __poll_t s5p_mfc_poll(struct file *file,
 	 */
 	if ((!vb2_is_streaming(src_q) || list_empty(&src_q->queued_list)) &&
 	    (!vb2_is_streaming(dst_q) || list_empty(&dst_q->queued_list))) {
-		rc = EPOLLERR;
+		rc |= EPOLLERR;
 		goto end;
 	}
-	mutex_unlock(&dev->mfc_mutex);
-	poll_wait(file, &ctx->fh.wait, wait);
-	poll_wait(file, &src_q->done_wq, wait);
-	poll_wait(file, &dst_q->done_wq, wait);
-	mutex_lock(&dev->mfc_mutex);
-	if (v4l2_event_pending(&ctx->fh))
-		rc |= EPOLLPRI;
 	spin_lock_irqsave(&src_q->done_lock, flags);
 	if (!list_empty(&src_q->done_list))
 		src_vb = list_first_entry(&src_q->done_list, struct vb2_buffer,
