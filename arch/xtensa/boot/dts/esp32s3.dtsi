@@ -8,7 +8,7 @@
 	interrupt-parent = <&pic>;
 
 	chosen {
-		bootargs = "earlycon=esp32s3uart,mmio32,0x60000000,115200n8,40000000 console=ttyS0,115200n8 debug rw root=mtd:rootfs no_hash_pointers ";
+		bootargs = "earlycon=esp32s3uart,mmio32,0x60000000,115200n8,40000000 console=ttyS0,115200n8 debug ro root=mtd:rootfs no_hash_pointers ";
 	};
 
 	aliases {
@@ -99,8 +99,43 @@
 			device-width = <2>;
 			erase-size = <0x10000>;
 			controller = <&flash_controller>;
+			/*
+			 * Mirrors the IDF partition table in
+			 * examples/get-started/linux_boot/partition_table.esp32s3.
+			 * The "esp,esp32-partition-table" parser reads the real table
+			 * over the IPC channel, which needs a peer on the other core;
+			 * these offsets are flash offsets, and this mapping is
+			 * identity, so they double as offsets into the MTD.
+			 */
 			partitions {
-				compatible = "esp,esp32-partition-table";
+				compatible = "fixed-partitions";
+				#address-cells = <1>;
+				#size-cells = <1>;
+
+				partition@a000 {
+					label = "nvs";
+					reg = <0x0000a000 0x00005000>;
+				};
+				partition@f000 {
+					label = "phy_init";
+					reg = <0x0000f000 0x00001000>;
+				};
+				partition@10000 {
+					label = "factory";
+					reg = <0x00010000 0x000a0000>;
+				};
+				partition@b0000 {
+					label = "etc";
+					reg = <0x000b0000 0x00070000>;
+				};
+				partition@120000 {
+					label = "linux";
+					reg = <0x00120000 0x004e0000>;
+				};
+				partition@600000 {
+					label = "rootfs";
+					reg = <0x00600000 0x009f0000>;
+				};
 			};
 		};
 
