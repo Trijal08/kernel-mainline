@@ -580,47 +580,51 @@ static void s5p_mfc_dec_calc_dpb_size_v6(struct s5p_mfc_ctx *ctx)
 	}
 }
 
-static void s5p_mfc_enc_calc_src_size_v6(struct s5p_mfc_ctx *ctx)
+static void s5p_mfc_enc_calc_src_size_v6(struct s5p_mfc_dev *dev,
+					 const struct s5p_mfc_fmt *fmt,
+					 unsigned int width, unsigned int height,
+					 struct s5p_mfc_raw_layout *l)
 {
 	unsigned int mb_width, mb_height;
 
-	mb_width = MB_WIDTH(ctx->img_width);
-	mb_height = MB_HEIGHT(ctx->img_height);
+	memset(l, 0, sizeof(*l));
+	mb_width = MB_WIDTH(width);
+	mb_height = MB_HEIGHT(height);
 
-	if (IS_MFCV12(ctx->dev)) {
-		switch (ctx->src_fmt->fourcc) {
+	if (IS_MFCV12(dev)) {
+		switch (fmt->fourcc) {
 		case V4L2_PIX_FMT_NV12M:
 		case V4L2_PIX_FMT_NV21M:
-			ctx->stride[0] = ALIGN(ctx->img_width, S5P_FIMV_NV12M_HALIGN_V6);
-			ctx->stride[1] = ALIGN(ctx->img_width, S5P_FIMV_NV12M_HALIGN_V6);
-			ctx->luma_size = ALIGN(ctx->stride[0] * ALIGN(ctx->img_height, 16), 256);
-			ctx->chroma_size = ALIGN(ctx->stride[0] * ALIGN(ctx->img_height / 2, 16),
+			l->stride[0] = ALIGN(width, S5P_FIMV_NV12M_HALIGN_V6);
+			l->stride[1] = ALIGN(width, S5P_FIMV_NV12M_HALIGN_V6);
+			l->luma_size = ALIGN(l->stride[0] * ALIGN(height, 16), 256);
+			l->chroma_size = ALIGN(l->stride[0] * ALIGN(height / 2, 16),
 					256);
 			break;
 		case V4L2_PIX_FMT_YUV420M:
 		case V4L2_PIX_FMT_YVU420M:
-			ctx->stride[0] = ALIGN(ctx->img_width, S5P_FIMV_NV12M_HALIGN_V6);
-			ctx->stride[1] = ALIGN(ctx->img_width / 2, S5P_FIMV_NV12M_HALIGN_V6);
-			ctx->stride[2] = ALIGN(ctx->img_width / 2, S5P_FIMV_NV12M_HALIGN_V6);
-			ctx->luma_size = ctx->stride[0] * ALIGN(ctx->img_height, 16);
-			ctx->chroma_size =  ctx->stride[1] * ALIGN(ctx->img_height / 2, 16);
-			ctx->chroma_size_1 =  ctx->stride[2] * ALIGN(ctx->img_height / 2, 16);
+			l->stride[0] = ALIGN(width, S5P_FIMV_NV12M_HALIGN_V6);
+			l->stride[1] = ALIGN(width / 2, S5P_FIMV_NV12M_HALIGN_V6);
+			l->stride[2] = ALIGN(width / 2, S5P_FIMV_NV12M_HALIGN_V6);
+			l->luma_size = l->stride[0] * ALIGN(height, 16);
+			l->chroma_size =  l->stride[1] * ALIGN(height / 2, 16);
+			l->chroma_size_1 =  l->stride[2] * ALIGN(height / 2, 16);
 			break;
 		}
-		ctx->luma_size += MFC_LUMA_PAD_BYTES_V7;
-		ctx->chroma_size += MFC_CHROMA_PAD_BYTES_V12;
-		ctx->chroma_size_1 += MFC_CHROMA_PAD_BYTES_V12;
+		l->luma_size += MFC_LUMA_PAD_BYTES_V7;
+		l->chroma_size += MFC_CHROMA_PAD_BYTES_V12;
+		l->chroma_size_1 += MFC_CHROMA_PAD_BYTES_V12;
 	} else {
-		ctx->buf_width = ALIGN(ctx->img_width, S5P_FIMV_NV12M_HALIGN_V6);
-		ctx->stride[0] = ctx->buf_width;
-		ctx->stride[1] = ctx->buf_width;
-		ctx->luma_size = ALIGN((mb_width * mb_height) * 256, 256);
-		ctx->chroma_size = ALIGN((mb_width * mb_height) * 128, 256);
-		ctx->chroma_size_1 = 0;
+		l->buf_width = ALIGN(width, S5P_FIMV_NV12M_HALIGN_V6);
+		l->stride[0] = l->buf_width;
+		l->stride[1] = l->buf_width;
+		l->luma_size = ALIGN((mb_width * mb_height) * 256, 256);
+		l->chroma_size = ALIGN((mb_width * mb_height) * 128, 256);
+		l->chroma_size_1 = 0;
 		/* MFCv7 needs pad bytes for Luma and Chroma */
-		if (IS_MFCV7_PLUS(ctx->dev)) {
-			ctx->luma_size += MFC_LUMA_PAD_BYTES_V7;
-			ctx->chroma_size += MFC_LUMA_PAD_BYTES_V7;
+		if (IS_MFCV7_PLUS(dev)) {
+			l->luma_size += MFC_LUMA_PAD_BYTES_V7;
+			l->chroma_size += MFC_LUMA_PAD_BYTES_V7;
 		}
 	}
 }

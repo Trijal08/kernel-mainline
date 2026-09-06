@@ -220,6 +220,22 @@ struct s5p_mfc_buf_size_v6 {
 	unsigned int other_enc_ctx;
 };
 
+/**
+ * struct s5p_mfc_raw_layout - memory layout of one raw frame
+ * @buf_width:		luma width in pixels after hardware alignment
+ * @stride:		bytes per line of each plane
+ * @luma_size:		size of the luma plane
+ * @chroma_size:	size of the chroma plane, or of the Cb plane
+ * @chroma_size_1:	size of the Cr plane of a three-plane format
+ */
+struct s5p_mfc_raw_layout {
+	unsigned int buf_width;
+	unsigned int stride[3];
+	unsigned int luma_size;
+	unsigned int chroma_size;
+	unsigned int chroma_size_1;
+};
+
 struct s5p_mfc_buf_size {
 	unsigned int fw;
 	unsigned int cpb;
@@ -626,6 +642,7 @@ struct s5p_mfc_codec_ops {
  * @mv_count:		number of MV buffers allocated for decoding
  * @enc_params:		encoding parameters for MFC
  * @enc_dst_buf_size:	size of the buffers for encoder output
+ * @enc_dst_buf_size_req: coded buffer size the client asked for, 0 for the default
  * @enc_eos_pending:	encoder drain is waiting for a terminal capture buffer
  * @draining:		a STOP was issued and its terminal buffer is not out yet
  * @luma_dpb_size:	dpb buffer size for luma
@@ -732,6 +749,7 @@ struct s5p_mfc_ctx {
 	bool draining;
 
 	size_t enc_dst_buf_size;
+	size_t enc_dst_buf_size_req;
 	size_t luma_dpb_size;
 	size_t chroma_dpb_size;
 	size_t me_buffer_size;
