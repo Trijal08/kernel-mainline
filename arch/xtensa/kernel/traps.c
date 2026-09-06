@@ -37,6 +37,7 @@
 #include <linux/ratelimit.h>
 #include <linux/pgtable.h>
 
+#include <asm/perf_event.h>
 #include <asm/stacktrace.h>
 #include <asm/ptrace.h>
 #include <asm/timex.h>
@@ -253,8 +254,6 @@ static inline void check_valid_nmi(void)
 }
 
 #endif
-
-irqreturn_t xtensa_pmu_irq_handler(int irq, void *dev_id);
 
 DEFINE_PER_CPU(unsigned long, nmi_count);
 
