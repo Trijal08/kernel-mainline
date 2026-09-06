@@ -3078,15 +3078,20 @@ int s5p_mfc_enc_ctrls_setup(struct s5p_mfc_ctx *ctx)
 				(controls[i].type ==
 					V4L2_CTRL_TYPE_INTEGER_MENU)) {
 				int maximum = controls[i].maximum;
+				u64 skip = controls[i].menu_skip_mask;
 
 				/* v16's profile value 2 selects a 4:2:2 10-bit mode. */
 				if (IS_MFCV16_PLUS(ctx->dev) &&
 				    controls[i].id == V4L2_CID_MPEG_VIDEO_HEVC_PROFILE)
 					maximum = V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN;
+				/* Constrained baseline needs v6 firmware. */
+				if (IS_MFCV6_PLUS(ctx->dev) &&
+				    controls[i].id == V4L2_CID_MPEG_VIDEO_H264_PROFILE)
+					skip &= ~BIT_ULL(V4L2_MPEG_VIDEO_H264_PROFILE_CONSTRAINED_BASELINE);
 				ctx->ctrls[i] = v4l2_ctrl_new_std_menu(
 					&ctx->ctrl_handler,
 					&s5p_mfc_enc_ctrl_ops, controls[i].id,
-					maximum, 0,
+					maximum, skip,
 					controls[i].default_value);
 			} else {
 				int min = controls[i].minimum;
