@@ -313,31 +313,32 @@ static void s5p_mfc_dec_calc_dpb_size_v5(struct s5p_mfc_ctx *ctx)
 	}
 }
 
-static void s5p_mfc_enc_calc_src_size_v5(struct s5p_mfc_ctx *ctx)
+static void s5p_mfc_enc_calc_src_size_v5(struct s5p_mfc_dev *dev,
+					 const struct s5p_mfc_fmt *fmt,
+					 unsigned int width, unsigned int height,
+					 struct s5p_mfc_raw_layout *l)
 {
-	if (ctx->src_fmt->fourcc == V4L2_PIX_FMT_NV12M) {
-		ctx->buf_width = ALIGN(ctx->img_width, S5P_FIMV_NV12M_HALIGN);
+	memset(l, 0, sizeof(*l));
+	if (fmt->fourcc == V4L2_PIX_FMT_NV12M) {
+		l->buf_width = ALIGN(width, S5P_FIMV_NV12M_HALIGN);
 
-		ctx->luma_size = ALIGN(ctx->img_width, S5P_FIMV_NV12M_HALIGN)
-			* ALIGN(ctx->img_height, S5P_FIMV_NV12M_LVALIGN);
-		ctx->chroma_size = ALIGN(ctx->img_width, S5P_FIMV_NV12M_HALIGN)
-			* ALIGN((ctx->img_height >> 1), S5P_FIMV_NV12M_CVALIGN);
+		l->luma_size = ALIGN(width, S5P_FIMV_NV12M_HALIGN)
+			* ALIGN(height, S5P_FIMV_NV12M_LVALIGN);
+		l->chroma_size = ALIGN(width, S5P_FIMV_NV12M_HALIGN)
+			* ALIGN((height >> 1), S5P_FIMV_NV12M_CVALIGN);
 
-		ctx->luma_size = ALIGN(ctx->luma_size, S5P_FIMV_NV12M_SALIGN);
-		ctx->chroma_size =
-			ALIGN(ctx->chroma_size, S5P_FIMV_NV12M_SALIGN);
-	} else if (ctx->src_fmt->fourcc == V4L2_PIX_FMT_NV12MT) {
-		ctx->buf_width = ALIGN(ctx->img_width, S5P_FIMV_NV12MT_HALIGN);
+		l->luma_size = ALIGN(l->luma_size, S5P_FIMV_NV12M_SALIGN);
+		l->chroma_size = ALIGN(l->chroma_size, S5P_FIMV_NV12M_SALIGN);
+	} else if (fmt->fourcc == V4L2_PIX_FMT_NV12MT) {
+		l->buf_width = ALIGN(width, S5P_FIMV_NV12MT_HALIGN);
 
-		ctx->luma_size = ALIGN(ctx->img_width, S5P_FIMV_NV12MT_HALIGN)
-			* ALIGN(ctx->img_height, S5P_FIMV_NV12MT_VALIGN);
-		ctx->chroma_size =
-			ALIGN(ctx->img_width, S5P_FIMV_NV12MT_HALIGN)
-			* ALIGN((ctx->img_height >> 1), S5P_FIMV_NV12MT_VALIGN);
+		l->luma_size = ALIGN(width, S5P_FIMV_NV12MT_HALIGN)
+			* ALIGN(height, S5P_FIMV_NV12MT_VALIGN);
+		l->chroma_size = ALIGN(width, S5P_FIMV_NV12MT_HALIGN)
+			* ALIGN((height >> 1), S5P_FIMV_NV12MT_VALIGN);
 
-		ctx->luma_size = ALIGN(ctx->luma_size, S5P_FIMV_NV12MT_SALIGN);
-		ctx->chroma_size =
-			ALIGN(ctx->chroma_size, S5P_FIMV_NV12MT_SALIGN);
+		l->luma_size = ALIGN(l->luma_size, S5P_FIMV_NV12MT_SALIGN);
+		l->chroma_size = ALIGN(l->chroma_size, S5P_FIMV_NV12MT_SALIGN);
 	}
 }
 
