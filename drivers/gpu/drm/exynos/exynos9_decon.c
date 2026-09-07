@@ -1675,6 +1675,12 @@ static void decon_disable(struct exynos_drm_crtc *crtc)
 
 	disable_irq(ctx->irq_fd);
 	timer_delete_sync(&ctx->vblank_timer);
+
+	/*
+	 * The next enable quiesces with a per-frame off, which retires at a frame
+	 * boundary that one frame per commit no longer guarantees. Stop it here.
+	 */
+	ctx->cal_ops->disable(ctx);
 }
 
 static irqreturn_t decon_te_irq_handler(int irq, void *dev_id)
