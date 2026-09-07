@@ -134,6 +134,8 @@ struct decon_context {
 	struct clk *aclk;
 
 	u32 irq_fd; /* frame done */
+	/* tracks irq_fd's masking, which disable_irq() nests */
+	bool enabled;
 	int te_irq; /* panel hardware TE, drives vblank in command mode */
 	/* completes the vblank when a command-mode frame never starts */
 	struct timer_list vblank_timer;
