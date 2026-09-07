@@ -142,6 +142,40 @@ struct cmd_audio_output_bind {
 } __packed;
 
 /*
+ * Voice call.  The call's audio never crosses the AP: the modem hands its
+ * downlink to the AOC and takes its uplink back from it, and the AP's only job
+ * is to tell the AOC to open the two halves.  So there is no PCM device here,
+ * just the switch that opens the path -- which is why this is a mixer control
+ * and not a DAI link.
+ *
+ * Downlink is an ordinary source-to-sink bind, with the telephony downlink as
+ * the source.  Uplink is its own command because the mic feeds the modem
+ * directly rather than a ring the AP reads, and it carries the echo-cancel
+ * reference alongside the mic: the AOC needs to know what is being played in
+ * order to subtract it from what the mic hears.
+ *
+ * Order matters in one direction only -- the DSP wants the mic source live
+ * before the sink is bound, and the vendor stack opens a default mic first if
+ * none is up.  Teardown is the reverse.
+ */
+#define AOC_CMD_AUDIO_INPUT_MODEM_INPUT_START2_ID	324
+#define AOC_CMD_AUDIO_INPUT_MODEM_INPUT_STOP_ID		211
+#define AOC_MODEM_MIC_INPUT_INDEX			0	/* enum ModemInputIndex */
+#define AOC_SRC_TELEPHONY_DOWNLINK			8
+/*
+ * Muting the call mic is its high-power gain driven to the floor, not a mute
+ * command: the AOC has none for this path, and the vendor stack does the same.
+ * -700 cB is its value, far below anything the capture path asks for.
+ */
+#define AOC_VOICE_MIC_MUTE_GAIN_CB			(-700)
+
+struct cmd_audio_input_modem_input_start2 {
+	struct aoc_cmd_hdr hdr;
+	u8 mic_input_source;
+	u8 ref_input_source;
+} __packed;
+
+/*
  * Per-(source,sink) playback volume. The AOC boots each sink's mixer gain at a
  * low default, so without this the speaker plays far quieter than Android --
  * the stock HAL sets this on every stream (dhd aoc_audio_volume_set). The value
@@ -237,6 +271,8 @@ struct aoc_audio {
 	struct snd_soc_card card;
 	struct aoc_service *ctrl;		/* audio_output_control channel */
 	struct aoc_service *ctrl_in;		/* audio_input_control channel */
+	bool			voice_call;	/* the call path is open */
+	bool			voice_mic_mute;
 	struct mutex cmd_lock;			/* serialises control commands */
 	struct completion cmd_done;		/* a control reply arrived */
 	int mic_hw_gain_cb;			/* mic preamp gain, centibels */
@@ -449,7 +485,8 @@ static int aoc_audio_mic_gain(struct aoc_audio *aud)
 	hw.hdr.type = AOC_CMD_TYPE_CMD;
 	hw.hdr.len = cpu_to_le16(sizeof(hw));
 	hw.hdr.id = cpu_to_le16(AOC_CMD_AUDIO_INPUT_SET_MIC_HP_GAIN_ID);
-	hw.gain_cb = cpu_to_le32(aud->mic_hw_gain_cb);
+	hw.gain_cb = cpu_to_le32(aud->voice_mic_mute ? AOC_VOICE_MIC_MUTE_GAIN_CB :
+						       aud->mic_hw_gain_cb);
 	ret = aoc_audio_cmd_on(aud, aud->ctrl_in, &hw, sizeof(hw), rsp,
 			       sizeof(rsp));
 	if (ret)
@@ -520,7 +557,127 @@ static int aoc_mic_gain_put(struct snd_kcontrol *kc,
 	return 1;
 }
 
-static const struct snd_kcontrol_new aoc_mic_controls[] = {
+/*
+ * Uplink: hand the modem a mic, and tell it which input to use as the
+ * echo-cancel reference.  Taking the mic itself as the reference is the
+ * vendor's DEFAULT_PLAYBACK case, which is what applies while the call is on
+ * the built-in speaker; a headset or Bluetooth route would name that input
+ * instead, and is not modelled here because no other route exists yet.
+ */
+static int aoc_voice_mic_set(struct aoc_audio *aud, bool on)
+{
+	struct cmd_audio_input_modem_input_start2 start = { };
+	struct aoc_cmd_hdr stop = { };
+	char rsp[64];
+
+	if (!aud->ctrl_in)
+		return -ENODEV;
+
+	if (!on) {
+		stop.type = AOC_CMD_TYPE_CMD;
+		stop.len = cpu_to_le16(sizeof(stop));
+		stop.id = cpu_to_le16(AOC_CMD_AUDIO_INPUT_MODEM_INPUT_STOP_ID);
+		return aoc_audio_cmd_on(aud, aud->ctrl_in, &stop, sizeof(stop),
+					rsp, sizeof(rsp));
+	}
+
+	start.hdr.type = AOC_CMD_TYPE_CMD;
+	start.hdr.len = cpu_to_le16(sizeof(start));
+	start.hdr.id = cpu_to_le16(AOC_CMD_AUDIO_INPUT_MODEM_INPUT_START2_ID);
+	start.mic_input_source = AOC_MODEM_MIC_INPUT_INDEX;
+	start.ref_input_source = AOC_MODEM_MIC_INPUT_INDEX;
+	return aoc_audio_cmd_on(aud, aud->ctrl_in, &start, sizeof(start), rsp,
+				sizeof(rsp));
+}
+
+/* Open or close both halves of the call path, mic first (see above). */
+static int aoc_voice_call_set(struct aoc_audio *aud, bool on)
+{
+	int ret;
+
+	if (on) {
+		ret = aoc_voice_mic_set(aud, true);
+		if (ret)
+			return ret;
+
+		ret = aoc_audio_bind(aud, AOC_SRC_TELEPHONY_DOWNLINK,
+				     AOC_SINK_SPEAKER, true);
+		if (ret) {
+			/* Do not leave the mic feeding a modem with no sink. */
+			aoc_voice_mic_set(aud, false);
+			return ret;
+		}
+		return 0;
+	}
+
+	ret = aoc_audio_bind(aud, AOC_SRC_TELEPHONY_DOWNLINK, AOC_SINK_SPEAKER,
+			     false);
+	/* Release the mic even if the unbind failed; it is the scarcer half. */
+	if (aoc_voice_mic_set(aud, false) && !ret)
+		ret = -EIO;
+
+	return ret;
+}
+
+static int aoc_voice_switch_get(struct snd_kcontrol *kc,
+				struct snd_ctl_elem_value *uc)
+{
+	struct snd_soc_card *card = snd_kcontrol_chip(kc);
+	struct aoc_audio *aud = container_of(card, struct aoc_audio, card);
+
+	uc->value.integer.value[0] = aud->voice_call;
+	return 0;
+}
+
+static int aoc_voice_switch_put(struct snd_kcontrol *kc,
+				struct snd_ctl_elem_value *uc)
+{
+	struct snd_soc_card *card = snd_kcontrol_chip(kc);
+	struct aoc_audio *aud = container_of(card, struct aoc_audio, card);
+	bool on = !!uc->value.integer.value[0];
+	int ret;
+
+	if (on == aud->voice_call)
+		return 0;
+
+	ret = aoc_voice_call_set(aud, on);
+	if (ret)
+		return ret;
+
+	aud->voice_call = on;
+	return 1;
+}
+
+static int aoc_voice_mute_get(struct snd_kcontrol *kc,
+			      struct snd_ctl_elem_value *uc)
+{
+	struct snd_soc_card *card = snd_kcontrol_chip(kc);
+	struct aoc_audio *aud = container_of(card, struct aoc_audio, card);
+
+	uc->value.integer.value[0] = aud->voice_mic_mute;
+	return 0;
+}
+
+static int aoc_voice_mute_put(struct snd_kcontrol *kc,
+			      struct snd_ctl_elem_value *uc)
+{
+	struct snd_soc_card *card = snd_kcontrol_chip(kc);
+	struct aoc_audio *aud = container_of(card, struct aoc_audio, card);
+	bool mute = !!uc->value.integer.value[0];
+
+	if (mute == aud->voice_mic_mute)
+		return 0;
+
+	aud->voice_mic_mute = mute;
+	aoc_audio_mic_gain(aud);	/* a no-op until the AOC is up */
+	return 1;
+}
+
+static const struct snd_kcontrol_new aoc_card_controls[] = {
+	SOC_SINGLE_BOOL_EXT("Voice Call Switch", 0,
+			    aoc_voice_switch_get, aoc_voice_switch_put),
+	SOC_SINGLE_BOOL_EXT("Voice Call Mic Mute Switch", 0,
+			    aoc_voice_mute_get, aoc_voice_mute_put),
 	{
 		.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
 		.name = "Mic HW Gain (cB)",
@@ -1207,8 +1364,8 @@ static int aoc_audio_probe(struct platform_device *pdev)
 	aud->card.num_links = ARRAY_SIZE(aoc_dai_links);
 	aud->card.dapm_routes = aoc_dapm_routes;
 	aud->card.num_dapm_routes = ARRAY_SIZE(aoc_dapm_routes);
-	aud->card.controls = aoc_mic_controls;
-	aud->card.num_controls = ARRAY_SIZE(aoc_mic_controls);
+	aud->card.controls = aoc_card_controls;
+	aud->card.num_controls = ARRAY_SIZE(aoc_card_controls);
 
 	ret = devm_snd_soc_register_card(dev, &aud->card);
 	if (ret) {
