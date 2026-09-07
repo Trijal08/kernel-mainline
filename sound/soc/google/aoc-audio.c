@@ -557,6 +557,9 @@ static int aoc_mic_gain_put(struct snd_kcontrol *kc,
 	return 1;
 }
 
+/* Defined with the back end it configures. */
+static int aoc_tdm0_configure(struct snd_soc_pcm_runtime *rtd);
+
 /*
  * Uplink: hand the modem a mic, and tell it which input to use as the
  * echo-cancel reference.  Taking the mic itself as the reference is the
@@ -634,15 +637,48 @@ static int aoc_voice_switch_put(struct snd_kcontrol *kc,
 {
 	struct snd_soc_card *card = snd_kcontrol_chip(kc);
 	struct aoc_audio *aud = container_of(card, struct aoc_audio, card);
+	struct snd_soc_pcm_runtime *rtd, *be = NULL;
 	bool on = !!uc->value.integer.value[0];
 	int ret;
 
 	if (on == aud->voice_call)
 		return 0;
 
-	ret = aoc_voice_call_set(aud, on);
-	if (ret)
-		return ret;
+	if (on) {
+		for_each_card_rtds(card, rtd) {
+			if (!strcmp(rtd->dai_link->name, "aoc-tdm0")) {
+				be = rtd;
+				break;
+			}
+		}
+		if (!be)
+			return -ENODEV;
+
+		/*
+		 * Point the amplifiers at the wire before anything drives it,
+		 * then open the path so the AoC starts clocking TDM_0, and only
+		 * then power them: they lock their PLL to the bit clock as they
+		 * come up, and powering into a dead wire fails the enable.
+		 */
+		ret = aoc_tdm0_configure(be);
+		if (ret)
+			return ret;
+
+		ret = aoc_voice_call_set(aud, true);
+		if (ret)
+			return ret;
+
+		snd_soc_dapm_force_enable_pin(card->dapm, "Voice Call");
+	} else {
+		/* Drop the amplifiers before the clock they are locked to. */
+		snd_soc_dapm_disable_pin(card->dapm, "Voice Call");
+		snd_soc_dapm_sync(card->dapm);
+
+		ret = aoc_voice_call_set(aud, false);
+		if (ret)
+			return ret;
+	}
+	snd_soc_dapm_sync(card->dapm);
 
 	aud->voice_call = on;
 	return 1;
@@ -1158,8 +1194,20 @@ static struct snd_soc_dai_driver aoc_dais[] = {
 };
 
 /* The front-end feeds the TDM the AOC clocks out. */
+/*
+ * A voice call carries no PCM, so nothing would otherwise power the back end:
+ * DAPM brings the amplifiers up for a stream and takes them down again when it
+ * ends, and a call is neither.  This supply is the call's claim on the speaker
+ * path -- held for as long as the call switch is on, independent of playback,
+ * so the two can overlap without either tearing down the other.
+ */
+static const struct snd_soc_dapm_widget aoc_dapm_widgets[] = {
+	SND_SOC_DAPM_SUPPLY("Voice Call", SND_SOC_NOPM, 0, 0, NULL, 0),
+};
+
 static const struct snd_soc_dapm_route aoc_dapm_routes[] = {
 	{ "TDM_0_RX Playback", NULL, "AOC Playback" },
+	{ "TDM_0_RX Playback", NULL, "Voice Call" },
 };
 
 /*
@@ -1182,12 +1230,14 @@ static int aoc_tdm0_fixup(struct snd_soc_pcm_runtime *rtd,
 	return 0;
 }
 
-static int aoc_tdm0_hw_params(struct snd_pcm_substream *substream,
-			      struct snd_pcm_hw_params *params)
+/*
+ * Configure the amplifiers for the TDM_0 wire.  The wire is fixed by the AoC's
+ * firmware, so this takes no parameters and is equally valid for a stream and
+ * for a voice call, which has no stream to carry them.
+ */
+static int aoc_tdm0_configure(struct snd_soc_pcm_runtime *rtd)
 {
-	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
-	unsigned int bclk = params_rate(params) * AOC_TDM0_SLOTS *
-			    AOC_TDM0_SLOT_WIDTH;
+	unsigned int bclk = AOC_TDM0_RATE * AOC_TDM0_SLOTS * AOC_TDM0_SLOT_WIDTH;
 	struct snd_soc_dai *codec_dai;
 	int i, ret;
 
@@ -1225,6 +1275,12 @@ static int aoc_tdm0_hw_params(struct snd_pcm_substream *substream,
 			return ret;
 	}
 	return 0;
+}
+
+static int aoc_tdm0_hw_params(struct snd_pcm_substream *substream,
+			      struct snd_pcm_hw_params *params)
+{
+	return aoc_tdm0_configure(snd_soc_substream_to_rtd(substream));
 }
 
 static const struct snd_soc_ops aoc_tdm0_ops = {
@@ -1362,6 +1418,8 @@ static int aoc_audio_probe(struct platform_device *pdev)
 	aud->card.dev = dev;
 	aud->card.dai_link = aoc_dai_links;
 	aud->card.num_links = ARRAY_SIZE(aoc_dai_links);
+	aud->card.dapm_widgets = aoc_dapm_widgets;
+	aud->card.num_dapm_widgets = ARRAY_SIZE(aoc_dapm_widgets);
 	aud->card.dapm_routes = aoc_dapm_routes;
 	aud->card.num_dapm_routes = ARRAY_SIZE(aoc_dapm_routes);
 	aud->card.controls = aoc_card_controls;
