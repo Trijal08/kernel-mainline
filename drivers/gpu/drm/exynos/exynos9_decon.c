@@ -13,6 +13,7 @@
 #include <linux/platform_device.h>
 #include <linux/irq.h>
 #include <linux/iopoll.h>
+#include <linux/timer.h>
 
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_vblank.h>
@@ -1501,6 +1502,41 @@ static void decon_disable_plane(struct exynos_drm_crtc *crtc,
 		dev_name(window->dpp->dev));
 }
 
+/*
+ * A command-mode frame is triggered by the panel's TE, and that same TE is the
+ * vblank (see decon_te_irq_handler).  A TE that never arrives therefore strands
+ * the commit that armed it: the vblank counter does not advance and the flip
+ * event queued by exynos_crtc_handle_event() is never delivered.
+ * drm_atomic_helper_wait_for_vblanks() warns after 100 ms, and the *next*
+ * commit then blocks 10 s per object in
+ * drm_atomic_helper_wait_for_dependencies(), so one lost TE freezes the display
+ * for ~30 s.
+ *
+ * The vendor driver does not assume that cannot happen: decon_wait_for_flip_done()
+ * bounds the wait and calls decon_force_vblank_event() on a miss.  Do the same
+ * with a timer, since this driver uses the generic commit tail.  The timeout is
+ * deliberately shorter than the 100 ms the vblank helper allows, so recovery
+ * lands before it gives up; it is still more than three TE periods at 60 Hz.
+ *
+ * Damage control, not a cure: the frame did not scan out, completing the vblank
+ * only keeps the pipeline moving.
+ */
+#define DECON_VBLANK_TIMEOUT_MS	60
+
+static void decon_vblank_timeout(struct timer_list *t)
+{
+	struct decon_context *ctx = timer_container_of(ctx, t, vblank_timer);
+
+	if (!ctx->crtc)
+		return;
+
+	dev_warn_ratelimited(ctx->dev,
+			     "DECON%u TE timed out, completing vblank\n",
+			     ctx->idx);
+
+	drm_crtc_handle_vblank(&ctx->crtc->base);
+}
+
 static void decon_atomic_flush(struct exynos_drm_crtc *crtc)
 {
 	struct decon_context *ctx = crtc->ctx;
@@ -1526,6 +1562,15 @@ static void decon_atomic_flush(struct exynos_drm_crtc *crtc)
 	ctx->cal_ops->update_req_global(ctx);
 
 	ctx->cal_ops->set_te(ctx, DECON_TRIG_UNMASK);
+
+	/*
+	 * A frame is now expected.  Arm the recovery timer before handing the
+	 * event over, so a TE that never arrives cannot strand this commit.
+	 */
+	if (ctx->config.mode.op_mode == DECON_MIPI_COMMAND_MODE)
+		mod_timer(&ctx->vblank_timer,
+			  jiffies + msecs_to_jiffies(DECON_VBLANK_TIMEOUT_MS));
+
 	exynos_crtc_handle_event(crtc);
 }
 
@@ -1621,6 +1666,7 @@ static void decon_disable(struct exynos_drm_crtc *crtc)
 	struct decon_context *ctx = crtc->ctx;
 
 	disable_irq(ctx->irq_fd);
+	timer_delete_sync(&ctx->vblank_timer);
 }
 
 static irqreturn_t decon_te_irq_handler(int irq, void *dev_id)
@@ -1632,6 +1678,8 @@ static irqreturn_t decon_te_irq_handler(int irq, void *dev_id)
 	 * continuous (every panel refresh) and synced to the panel, independent
 	 * of whether the DECON emitted a frame this cycle.
 	 */
+	timer_delete(&ctx->vblank_timer);
+
 	if (ctx->crtc)
 		drm_crtc_handle_vblank(&ctx->crtc->base);
 
@@ -1654,6 +1702,8 @@ static void decon_disable_vblank(struct exynos_drm_crtc *crtc)
 
 	if (ctx->te_irq > 0)
 		disable_irq_nosync(ctx->te_irq);
+
+	timer_delete(&ctx->vblank_timer);
 }
 
 static const struct exynos_drm_crtc_ops decon_crtc_ops = {
@@ -1807,6 +1857,8 @@ static int decon_probe(struct platform_device *pdev)
 	if (IS_ERR(ctx->aclk))
 		return dev_err_probe(dev, PTR_ERR(ctx->aclk),
 				     "Cannot get aclk\n");
+
+	timer_setup(&ctx->vblank_timer, decon_vblank_timeout, 0);
 
 	ctx->irq_fd = platform_get_irq(pdev, 0);
 	irq_set_status_flags(ctx->irq_fd, IRQ_NOAUTOEN);
