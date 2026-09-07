@@ -1649,6 +1649,9 @@ static void decon_enable(struct exynos_drm_crtc *crtc)
 {
 	struct decon_context *ctx = crtc->ctx;
 
+	if (ctx->enabled)
+		return;
+
 	drm_display_mode_to_videomode(&crtc->base.mode, &ctx->v_mode);
 
 	ctx->config.image_width = ctx->v_mode.hactive;
@@ -1661,6 +1664,7 @@ static void decon_enable(struct exynos_drm_crtc *crtc)
 	ctx->cal_ops->enable(ctx);
 
 	enable_irq(ctx->irq_fd);
+	ctx->enabled = true;
 
 	decon_config_print(&ctx->config);
 	drm_info(ctx->drm_dev, "enabled! crtc[%d] = %dx%d-%dHz (%d out_bpc)\n",
@@ -1672,6 +1676,15 @@ static void decon_enable(struct exynos_drm_crtc *crtc)
 static void decon_disable(struct exynos_drm_crtc *crtc)
 {
 	struct decon_context *ctx = crtc->ctx;
+
+	/*
+	 * A CRTC can be disabled twice without an enable in between, so this has
+	 * to be idempotent: disable_irq() nests, and a second one leaves frame
+	 * done masked for good once the next enable has undone only one of them.
+	 */
+	if (!ctx->enabled)
+		return;
+	ctx->enabled = false;
 
 	disable_irq(ctx->irq_fd);
 	timer_delete_sync(&ctx->vblank_timer);
