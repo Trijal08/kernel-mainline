@@ -341,6 +341,14 @@ struct s5xxx_variant {
  * AT (21, EXYNOS_CH_ID_BT_DUN) = umts_router AT commands on the NORM_RAW ring.
  */
 #define S5XXX_CH_FMT			245
+/*
+ * The CP runs two logical SIT control channels over that ring, umts_ipc0 (245)
+ * and umts_ipc1 (246), and a RIL opens both: the second carries the requests
+ * the first is busy blocking on, so a stack that only finds wwan0sit0 stalls
+ * partway through modem init.  They are consecutive from S5XXX_CH_FMT, so the
+ * ports come up in channel order as wwan0sit0 and wwan0sit1.
+ */
+#define S5XXX_SIT_PORTS			2
 #define S5XXX_CH_AT			21
 /*
  * RFS file channel (EXYNOS_CH_ID_RFS_0, umts_rfs0) on the NORM_RAW ring: once
@@ -488,6 +496,18 @@ struct s5xxx_rfs_file {
 
 struct s5xxx_modem;
 
+/*
+ * One SIT control port.  Same shape as the OEM channels below and for the same
+ * reason -- the port ops need to know which channel they are speaking on, and
+ * the link-header sequence is counted per channel, not per ring.
+ */
+struct s5xxx_sit_ch {
+	struct s5xxx_modem	*sm;
+	struct wwan_port	*port;
+	u8			ch;
+	u8			ch_seq;		/* per-channel link-header seq */
+};
+
 /* One OEM char port: the port ops need the channel, not just the modem. */
 struct s5xxx_oem_ch {
 	struct s5xxx_modem	*sm;
@@ -551,13 +571,12 @@ struct s5xxx_modem {
 	u8			at_ch_seq;	/* per-channel header sequence */
 
 	/*
-	 * SIT control plane on the FMT ring (umts_ipc0, ch 0xF5).  The CP gates
-	 * its secondary channels on this being serviced + acked; exposed as its
-	 * own port so a userspace RIL can drive the modem init handshake.
+	 * SIT control plane on the FMT ring (umts_ipc0/1, ch 245/246).  The CP
+	 * gates its secondary channels on this being serviced + acked; exposed as
+	 * ports so a userspace RIL can drive the modem init handshake.
 	 */
-	struct wwan_port	*ctrl_port;
+	struct s5xxx_sit_ch	sit[S5XXX_SIT_PORTS];
 	u16			fmt_frame_seq;	/* FMT SIT frame counter */
-	u8			fmt_ch_seq;	/* FMT per-channel sequence */
 
 	/*
 	 * The three OEM/GEMS channels (0x81/0x82/0x84) on the FMT ring, one
@@ -1451,7 +1470,8 @@ static void s5xxx_init_ipc_queues(struct s5xxx_modem *sm)
 	int i;
 
 	sm->fmt_frame_seq = 0;
-	sm->fmt_ch_seq = 0;
+	for (i = 0; i < S5XXX_SIT_PORTS; i++)
+		sm->sit[i].ch_seq = 0;
 	sm->at_ch_seq = 0;
 	sm->rfs_ch_seq = 0;
 
@@ -1792,7 +1812,8 @@ static int s5xxx_fmt_ring_tx(struct s5xxx_modem *sm, u8 ch, u8 *ch_seq,
 
 static int s5xxx_ctrl_tx(struct wwan_port *port, struct sk_buff *skb)
 {
-	struct s5xxx_modem *sm = wwan_port_get_drvdata(port);
+	struct s5xxx_sit_ch *sc = wwan_port_get_drvdata(port);
+	struct s5xxx_modem *sm = sc->sm;
 	u32 needed = round_up(S5XXX_SIT_HDR + skb->len, 8);
 	int ret;
 
@@ -1805,7 +1826,7 @@ static int s5xxx_ctrl_tx(struct wwan_port *port, struct sk_buff *skb)
 	 * from the IRQ handler) and retry.
 	 */
 	for (;;) {
-		ret = s5xxx_fmt_ring_tx(sm, S5XXX_CH_FMT, &sm->fmt_ch_seq,
+		ret = s5xxx_fmt_ring_tx(sm, sc->ch, &sc->ch_seq,
 					S5XXX_FMT_MAX, skb->data, skb->len);
 		if (ret != -EBUSY)
 			break;
@@ -1893,6 +1914,16 @@ static int s5xxx_oem_tx_blocking(struct wwan_port *port, struct sk_buff *skb)
 		return ret;
 	consume_skb(skb);
 	return 0;
+}
+
+static struct s5xxx_sit_ch *s5xxx_sit_lookup(struct s5xxx_modem *sm, u8 ch)
+{
+	int i;
+
+	for (i = 0; i < S5XXX_SIT_PORTS; i++)
+		if (sm->sit[i].ch == ch)
+			return &sm->sit[i];
+	return NULL;
 }
 
 static struct s5xxx_oem_ch *s5xxx_oem_lookup(struct s5xxx_modem *sm, u8 ch)
@@ -2403,6 +2434,7 @@ static void s5xxx_drain_fmt_rxq(struct s5xxx_modem *sm, u32 intval)
 	while (in != out) {
 		u32 usage = s5xxx_circ_usage(S5XXX_FMT_RXQ_SIZE, in, out);
 		struct s5xxx_oem_ch *oc;
+		struct s5xxx_sit_ch *sc;
 		u8 hdr[S5XXX_SIT_HDR];
 		u32 flen, total, plen;
 
@@ -2422,6 +2454,7 @@ static void s5xxx_drain_fmt_rxq(struct s5xxx_modem *sm, u32 intval)
 		plen = flen - S5XXX_SIT_HDR;
 
 		oc = s5xxx_oem_lookup(sm, hdr[8]);
+		sc = oc ? NULL : s5xxx_sit_lookup(sm, hdr[8]);
 		if (oc) {
 			if (oc->port && plen)
 				s5xxx_fmt_deliver(oc->port, buff, out, plen);
@@ -2430,7 +2463,7 @@ static void s5xxx_drain_fmt_rxq(struct s5xxx_modem *sm, u32 intval)
 			 * (multi-frame) reply; keep the link up so it drains at L0.
 			 */
 			s5xxx_fmt_mark_busy(sm);
-		} else if (hdr[8] != S5XXX_CH_FMT) {
+		} else if (!sc) {
 			u8 dump[256];
 			u32 n = min_t(u32, plen, sizeof(dump));
 
@@ -2444,10 +2477,18 @@ static void s5xxx_drain_fmt_rxq(struct s5xxx_modem *sm, u32 intval)
 					       DUMP_PREFIX_OFFSET, 16, 1, dump, n,
 					       false);
 			}
-		} else if (sm->ctrl_port && plen) {
+		} else if (plen) {
+			/*
+			 * Pairs with the smp_store_release() that publishes the
+			 * port: this runs in the hard IRQ and can see a channel
+			 * whose port is still being brought up.
+			 */
+			struct wwan_port *port = READ_ONCE(sc->port);
+
 			dev_info(sm->dev, "fmt rxq SIT ch %#x payload %u\n",
 				 hdr[8], plen);
-			s5xxx_fmt_deliver(sm->ctrl_port, buff, out, plen);
+			if (port)
+				s5xxx_fmt_deliver(port, buff, out, plen);
 		}
 		out = (out + total) % S5XXX_FMT_RXQ_SIZE;
 	}
@@ -2848,20 +2889,30 @@ static void s5xxx_online(struct s5xxx_modem *sm)
 		 S5XXX_CH_AT);
 
 	/*
-	 * The SIT control plane (umts_ipc0, FMT ring, ch 0xF5).  The CP services
-	 * the secondary channels (umts_router AT) only once this control plane is
-	 * driven and its REQ_ACK round-trips answered, so expose it as its own
-	 * port for a userspace RIL to run the modem init handshake.
+	 * The SIT control plane (umts_ipc0/1, FMT ring, ch 245/246).  The CP
+	 * services the secondary channels (umts_router AT) only once this control
+	 * plane is driven and its REQ_ACK round-trips answered, so expose it for a
+	 * userspace RIL to run the modem init handshake.  Registered in channel
+	 * order, so they name as wwan0sit0 and wwan0sit1.
 	 */
-	sm->ctrl_port = wwan_create_port(sm->dev, WWAN_PORT_SIT, &s5xxx_ctrl_ops,
-					 NULL, sm);
-	if (IS_ERR(sm->ctrl_port)) {
-		dev_err(sm->dev, "failed to create SIT port: %ld\n",
-			PTR_ERR(sm->ctrl_port));
-		sm->ctrl_port = NULL;
-	} else {
-		dev_info(sm->dev, "SIT control port up (umts_ipc0, ch %u)\n",
-			 S5XXX_CH_FMT);
+	for (i = 0; i < S5XXX_SIT_PORTS; i++) {
+		struct s5xxx_sit_ch *sc = &sm->sit[i];
+		struct wwan_port *port;
+
+		port = wwan_create_port(sm->dev, WWAN_PORT_SIT, &s5xxx_ctrl_ops,
+					NULL, sc);
+		if (IS_ERR(port)) {
+			dev_err(sm->dev, "failed to create SIT port %u: %ld\n",
+				sc->ch, PTR_ERR(port));
+			continue;
+		}
+		/*
+		 * The FMT drain reads this pointer in the hard IRQ and
+		 * dereferences it, so order the port's init ahead of the store.
+		 */
+		smp_store_release(&sc->port, port);
+		dev_info(sm->dev, "SIT control port up (umts_ipc%d, ch %u)\n",
+			 sc->ch - S5XXX_CH_FMT, sc->ch);
 	}
 
 	/*
@@ -4326,6 +4377,10 @@ static int s5xxx_probe(struct platform_device *pdev)
 		sm->oem[i].sm = sm;
 		sm->oem[i].ch = oem_chs[i];
 	}
+	for (i = 0; i < S5XXX_SIT_PORTS; i++) {
+		sm->sit[i].sm = sm;
+		sm->sit[i].ch = S5XXX_CH_FMT + i;
+	}
 	sm->link_up = true;	/* boot handshake rings directly; PM arms at ONLINE */
 	platform_set_drvdata(pdev, sm);
 
@@ -4671,8 +4726,9 @@ static void s5xxx_remove(struct platform_device *pdev)
 			wwan_remove_port(sm->oem[i].port);
 	if (sm->rfs_port)
 		wwan_remove_port(sm->rfs_port);
-	if (sm->ctrl_port)
-		wwan_remove_port(sm->ctrl_port);
+	for (i = 0; i < S5XXX_SIT_PORTS; i++)
+		if (sm->sit[i].port)
+			wwan_remove_port(sm->sit[i].port);
 	if (sm->at_port)
 		wwan_remove_port(sm->at_port);
 	release_firmware(sm->pbl);
