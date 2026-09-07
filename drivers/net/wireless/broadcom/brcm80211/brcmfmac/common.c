@@ -123,10 +123,10 @@ static int brcmf_phy_wd = -1;
 module_param_named(phy_wd, brcmf_phy_wd, int, 0644);
 MODULE_PARM_DESC(phy_wd, "Firmware PHY watchdog + noise metric: -1=fw default (default), 0=disable all periodic PHY maintenance");
 
-/* Generic iovar lever, applied at the end of preinit: brcmfmac.iovars=
- * "name=val,name2=val2". Integer values only (0x prefix accepted); each result
- * is logged, and an unknown name is harmless -- the firmware rejects it with
- * -EBADE and the next pair is still tried.
+/* Generic iovar lever, applied at the end of preinit:
+ * brcmfmac.iovars="name=val,name2:8=val2". Integer values, little endian, with
+ * a selectable payload width; each result is logged and a bad pair is skipped
+ * rather than aborting the rest.
  *
  * Why this exists: the iovar set is firmware-build specific, and guessing wrong
  * used to cost a kernel rebuild each time. On BCM4390 27.10.1121.57.18,
@@ -136,10 +136,13 @@ MODULE_PARM_DESC(phy_wd, "Firmware PHY watchdog + noise metric: -1=fw default (d
  * preinit re-running on a PCI remove/rescan, a hypothesis is now a sysfs write
  * plus a rescan instead of a build.
  *
+ * Read the return code, not just the symptom: a wrong payload width also gives
+ * -EBADE, so a setting can look applied while doing nothing.
+ *
  * Diagnostic only: nothing here should be relied on in a shipping config. */
 static char brcmf_iovars[256];
 module_param_string(iovars, brcmf_iovars, sizeof(brcmf_iovars), 0644);
-MODULE_PARM_DESC(iovars, "Comma-separated name=value integer iovars set at preinit, e.g. \"radio_health_check=0\". Diagnostic.");
+MODULE_PARM_DESC(iovars, "Comma-separated iovars set at preinit: name=val (4 bytes) or name:N=val (N=1/2/4/8, LE), e.g. \"rsdb_mode:8=0\". Diagnostic.");
 
 /* TX A-MSDU. The BCM4390 firmware self-preinits the TX-aggregation config
  * (A-MSDU, ampdu_mpdu depth, ampdu_ba_wsize) as one set sized to its SAQM
@@ -405,7 +408,14 @@ static int brcmf_c_process_cal_blob(struct brcmf_if *ifp)
 }
 
 /* Apply the brcmfmac.iovars= list. Parses a private copy: the module-param
- * buffer stays writable through sysfs, so it must not be tokenised in place. */
+ * buffer stays writable through sysfs, so it must not be tokenised in place.
+ *
+ * "name=val" sends the default 4 bytes; "name:N=val" sends N (1/2/4/8), little
+ * endian, zero padded. The width matters -- the firmware rejects a wrong-sized
+ * payload with -EBADE and the setting silently does nothing. rsdb_mode is the
+ * case in point: it takes wl_config_t {u32 config; u32 status}, so disabling
+ * RSDB the way the vendor DHD does is "rsdb_mode:8=0", not "rsdb_mode=0".
+ */
 static void brcmf_c_set_extra_iovars(struct brcmf_if *ifp)
 {
 	struct brcmf_pub *drvr = ifp->drvr;
@@ -421,21 +431,39 @@ static void brcmf_c_set_extra_iovars(struct brcmf_if *ifp)
 	pos = buf;
 	while ((pair = strsep(&pos, ",")) != NULL) {
 		char *name = strim(pair);
-		char *val = strchr(name, '=');
-		s32 v;
+		char *width, *val = strchr(name, '=');
+		__le64 le;
+		u32 len = 4;
+		s64 v;
+		int err;
 
 		if (!val)
 			continue;
 		*val++ = '\0';
+
+		width = strchr(name, ':');
+		if (width) {
+			*width++ = '\0';
+			if (kstrtou32(strim(width), 0, &len) ||
+			    (len != 1 && len != 2 && len != 4 && len != 8)) {
+				bphy_err(drvr, "DBG iovars: %s: bad width\n",
+					 name);
+				continue;
+			}
+		}
+
 		name = strim(name);
 		if (!*name)
 			continue;
-		if (kstrtos32(strim(val), 0, &v)) {
+		if (kstrtos64(strim(val), 0, &v)) {
 			bphy_err(drvr, "DBG iovars: %s: bad value\n", name);
 			continue;
 		}
-		bphy_err(drvr, "DBG iovars: %s=%d -> %d\n", name, v,
-			 brcmf_fil_iovar_int_set(ifp, name, v));
+
+		le = cpu_to_le64((u64)v);
+		err = brcmf_fil_iovar_data_set(ifp, name, &le, len);
+		bphy_err(drvr, "DBG iovars: %s:%u=%lld -> %d\n", name, len, v,
+			 err);
 	}
 
 	kfree(buf);
