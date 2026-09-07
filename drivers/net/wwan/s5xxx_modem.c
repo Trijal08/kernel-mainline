@@ -239,6 +239,16 @@ struct s5xxx_variant {
  * id would be 1.  Keep ap_cap bit1 set or this must change.
  */
 #define S5XXX_CH_PDP_FIRST		0xb5
+/*
+ * The CP keys PS data on a channel per PDP context, EXYNOS_CH_EX_ID_PDP_0 (181)
+ * through +29 (210), one raw-IP interface each: a context's channel is what
+ * picks its interface, and a modem stack selects the interface for a context by
+ * name.  So the netdevs are keyed on the channel rather than on the pktproc DL
+ * queue that happened to carry the packet -- any queue can deliver any channel,
+ * and a second APN lands on a channel no queue index would have reached.
+ */
+#define S5XXX_PDP_CH_COUNT		30
+#define S5XXX_PDP_CH_LAST		(S5XXX_CH_PDP_FIRST + S5XXX_PDP_CH_COUNT - 1)
 #define S5XXX_IPC_AP2CP_MSG		0x800
 #define S5XXX_IPC_CP2AP_MSG		0x804
 #define S5XXX_IPC_AP2CP_STATUS		0x808
@@ -619,15 +629,15 @@ struct s5xxx_modem {
 
 	/*
 	 * PKTPROC data path: the raw-IP data netdevs (rmnet0..).  DL queue q is
-	 * drained from the MSI handler into rmnet q (cid q+1; the vendor RIL names
-	 * rmnet from the cid) -- the lcid the CP tags the DL descriptor with tells
-	 * the same queue.  dl_fore is the AP's re-arm (buffers-available) pointer
-	 * and dl_done its private consumer cursor, both per DL queue.  The UL NORM
-	 * ring is fed by ndo_start_xmit on any of them, tagged lcid = ch base +
-	 * the netdev's index; ul_done is the producer index, touched only under
-	 * tx_lock.
+	 * drained from the MSI handler and delivered to the netdev owning the lcid
+	 * the CP tagged the descriptor with -- the queue is transport, not
+	 * identity.  dl_fore is the AP's re-arm (buffers-available) pointer and
+	 * dl_done its private consumer cursor, both per DL queue.  The UL NORM ring
+	 * is fed by ndo_start_xmit on any interface, tagged with that interface's
+	 * own channel; ul_done is the producer index, touched only under tx_lock.
 	 */
-	struct net_device	*ndev[S5XXX_PKTPROC_DL_NUM_QUEUE];
+	struct net_device	*ndev[S5XXX_PDP_CH_COUNT];
+	bool			pdp_up;		/* netdevs registered (release/acquire) */
 	u32			dl_fore[S5XXX_PKTPROC_DL_NUM_QUEUE];
 	u32			dl_done[S5XXX_PKTPROC_DL_NUM_QUEUE];
 	u32			ul_done;
@@ -2515,17 +2525,29 @@ static void s5xxx_drain_fmt_rxq(struct s5xxx_modem *sm, u32 intval)
  * version nibble and hand it to the raw-IP netdev.  Bounded by num_desc so a
  * garbled rear pointer cannot spin.  Runs in the MSI hard-IRQ once ONLINE.
  */
+/*
+ * The netdev carrying PDP channel @ch, or NULL if @ch is not a data channel or
+ * its interface does not exist.  READ_ONCE because the DL drain and the raw-ring
+ * fallback both run in the hard IRQ, against s5xxx_online() publishing them.
+ */
+static struct net_device *s5xxx_pdp_ndev(struct s5xxx_modem *sm, u8 ch)
+{
+	if (ch < S5XXX_CH_PDP_FIRST || ch > S5XXX_PDP_CH_LAST)
+		return NULL;
+	return READ_ONCE(sm->ndev[ch - S5XXX_CH_PDP_FIRST]);
+}
+
 static void s5xxx_pktproc_dl_drain(struct s5xxx_modem *sm)
 {
 	void __iomem *info = sm->pktproc + S5XXX_PKTPROC_DL_INFO_OFS;
 	u32 n = S5XXX_PKTPROC_DL_NUM_DESC;
 	int q;
 
-	if (!sm->pktproc)
+	/* Pairs with the release in s5xxx_register_netdev(). */
+	if (!sm->pktproc || !smp_load_acquire(&sm->pdp_up))
 		return;
 
 	for (q = 0; q < S5XXX_PKTPROC_DL_NUM_QUEUE; q++) {
-		struct net_device *ndev = sm->ndev[q];
 		void __iomem *qinfo = info + 4 + q * 20;
 		void __iomem *descs = sm->pktproc + S5XXX_PKTPROC_DL_DESC_OFS +
 				      q * S5XXX_PKTPROC_DL_Q_DESC_SZ;
@@ -2538,7 +2560,7 @@ static void s5xxx_pktproc_dl_drain(struct s5xxx_modem *sm)
 		u32 fore = sm->dl_fore[q];
 		u32 space, guard, i;
 
-		if (!ndev || done == rear)
+		if (done == rear)
 			continue;
 		/* order the descriptor/buffer reads after the rear-ptr sample */
 		dma_rmb();
@@ -2548,12 +2570,15 @@ static void s5xxx_pktproc_dl_drain(struct s5xxx_modem *sm)
 					  done * S5XXX_PKTPROC_DESC_SKTBUF_SZ;
 			u32 len = readl(d + 8) & 0xffff;	/* length @ byte 8 */
 			u8 lcid = (readl(d + 12) >> 16) & 0xff;	/* lcid @ byte 14 */
-			int idx = (int)lcid - S5XXX_CH_PDP_FIRST;
-			struct net_device *tgt =
-				(idx >= 0 && idx < S5XXX_PKTPROC_DL_NUM_QUEUE &&
-				 sm->ndev[idx]) ? sm->ndev[idx] : ndev;
+			struct net_device *tgt = s5xxx_pdp_ndev(sm, lcid);
 			struct sk_buff *skb;
 
+			if (!tgt) {
+				dev_warn_ratelimited(sm->dev,
+					"DL q%d lcid %#x has no netdev\n",
+					q, lcid);
+				goto next;	/* still drain and re-arm */
+			}
 			dev_info_ratelimited(sm->dev,
 				"DL q%d lcid %#x len %u -> %s\n",
 				q, lcid, len, netdev_name(tgt));
@@ -2710,12 +2735,14 @@ static bool s5xxx_pktproc_ul_xmit(struct s5xxx_modem *sm, struct sk_buff *skb,
 	return true;
 }
 
-/* rmnet q answers for DL queue q == cid q+1 (the vendor RIL names rmnet from
- * the cid); UL is tagged with the matching lcid so the CP keys it to the same
- * PDP context. */
+/*
+ * Private area of a raw-IP data netdev: the PDP channel it carries.  Uplink is
+ * tagged with that channel so the CP keys it to the same context downlink
+ * arrived on.
+ */
 struct s5xxx_rmnet_priv {
 	struct s5xxx_modem *sm;
-	u8 q;
+	u8 ch;
 };
 
 static int s5xxx_ndo_open(struct net_device *ndev)
@@ -2749,8 +2776,7 @@ static netdev_tx_t s5xxx_ndo_start_xmit(struct sk_buff *skb,
 	len = skb->len;
 
 	if (sm->ul_active &&
-	    s5xxx_pktproc_ul_xmit(sm, skb, S5XXX_CH_PDP_FIRST + priv->q,
-				  !netdev_xmit_more())) {
+	    s5xxx_pktproc_ul_xmit(sm, skb, priv->ch, !netdev_xmit_more())) {
 		ndev->stats.tx_packets++;
 		ndev->stats.tx_bytes += len;
 	} else {
@@ -2781,19 +2807,23 @@ static void s5xxx_netdev_setup(struct net_device *ndev)
 }
 
 /*
- * Register one raw-IP data netdev per pktproc DL queue (rmnet0..3).  Called
- * from s5xxx_online: RX is guarded by sm->ndev[q] in the drain and TX by
+ * Register one raw-IP data netdev per PDP channel (rmnet0..rmnet29).  Called
+ * from s5xxx_online: RX is gated on sm->pdp_up in the drain and TX on
  * sm->ul_active, so the interfaces appear exactly when the modem is ONLINE.
  * pktproc-off (legacy IPC) builds skip it -- there is no UL/DL ring to back it.
+ *
+ * The whole range comes up at once rather than on demand: there is no control
+ * path for userspace to ask for an interface, and a modem stack picks the one
+ * for a PDP context by name.  They are cheap while down.
  */
 static void s5xxx_register_netdev(struct s5xxx_modem *sm)
 {
-	int q;
+	int i;
 
 	if (!sm->pktproc || sm->ndev[0])
 		return;
 
-	for (q = 0; q < S5XXX_PKTPROC_DL_NUM_QUEUE; q++) {
+	for (i = 0; i < S5XXX_PDP_CH_COUNT; i++) {
 		struct s5xxx_rmnet_priv *priv;
 		struct net_device *ndev;
 		int ret;
@@ -2806,7 +2836,7 @@ static void s5xxx_register_netdev(struct s5xxx_modem *sm)
 		}
 		priv = netdev_priv(ndev);
 		priv->sm = sm;
-		priv->q = q;
+		priv->ch = S5XXX_CH_PDP_FIRST + i;
 		SET_NETDEV_DEV(ndev, sm->dev);
 
 		ret = register_netdev(ndev);
@@ -2815,10 +2845,14 @@ static void s5xxx_register_netdev(struct s5xxx_modem *sm)
 			free_netdev(ndev);
 			break;
 		}
-		sm->ndev[q] = ndev;
-		dev_info(sm->dev, "raw-IP data netdev %s up (ch %#x)\n",
-			 ndev->name, S5XXX_CH_PDP_FIRST + q);
+		WRITE_ONCE(sm->ndev[i], ndev);
 	}
+	dev_info(sm->dev, "raw-IP data netdevs up (%s.. ch %#x..%#x)\n",
+		 sm->ndev[0] ? netdev_name(sm->ndev[0]) : "none",
+		 S5XXX_CH_PDP_FIRST, S5XXX_PDP_CH_LAST);
+
+	/* Publish the interfaces before the drain may deliver into them. */
+	smp_store_release(&sm->pdp_up, true);
 }
 
 /* Expose the runtime control channel once the CP is ONLINE (process context). */
@@ -4713,7 +4747,7 @@ static void s5xxx_remove(struct platform_device *pdev)
 	cancel_work_sync(&sm->boot_work);
 	free_irq(pci_irq_vector(sm->pdev, 0), sm);
 	/* Main IRQ gone -> no more DL drains or RFS enqueues. */
-	for (i = 0; i < S5XXX_PKTPROC_DL_NUM_QUEUE; i++)
+	for (i = 0; i < S5XXX_PDP_CH_COUNT; i++)
 		if (sm->ndev[i])
 			unregister_netdev(sm->ndev[i]); /* needs_free_netdev frees it */
 	cancel_work_sync(&sm->rfs_work);
@@ -4761,7 +4795,7 @@ static void s5xxx_shutdown(struct platform_device *pdev)
 
 	/* Stop rmnet TX from ringing the doorbell on a link about to die. */
 	sm->ul_active = false;
-	for (i = 0; i < S5XXX_PKTPROC_DL_NUM_QUEUE; i++)
+	for (i = 0; i < S5XXX_PDP_CH_COUNT; i++)
 		if (sm->ndev[i])
 			netif_tx_disable(sm->ndev[i]);
 
