@@ -2283,6 +2283,18 @@ static void s5xxx_rfs_cleanup(struct s5xxx_modem *sm)
  * (@intval is the cp2ap_msg sampled there; skbs GFP_ATOMIC), and bounds the
  * alloc against a corrupt CP length.
  */
+/*
+ * The netdev carrying PDP channel @ch, or NULL if @ch is not a data channel or
+ * its interface does not exist.  READ_ONCE because the DL drain and the raw-ring
+ * fallback both run in the hard IRQ, against s5xxx_online() publishing them.
+ */
+static struct net_device *s5xxx_pdp_ndev(struct s5xxx_modem *sm, u8 ch)
+{
+	if (ch < S5XXX_CH_PDP_FIRST || ch > S5XXX_PDP_CH_LAST)
+		return NULL;
+	return READ_ONCE(sm->ndev[ch - S5XXX_CH_PDP_FIRST]);
+}
+
 static void s5xxx_drain_raw_rxq(struct s5xxx_modem *sm, u32 intval)
 {
 	void __iomem *buff = sm->ipc + S5XXX_RAW_RXQ_BUFF;
@@ -2300,6 +2312,7 @@ static void s5xxx_drain_raw_rxq(struct s5xxx_modem *sm, u32 intval)
 	while (in != out) {
 		u32 usage = s5xxx_circ_usage(S5XXX_RAW_RXQ_SIZE, in, out);
 		u8 hdr[S5XXX_SIT_HDR];
+		struct net_device *pdp;
 		struct wwan_port *port;
 		u32 flen, total, plen, max;
 		u8 ch;
@@ -2319,6 +2332,7 @@ static void s5xxx_drain_raw_rxq(struct s5xxx_modem *sm, u32 intval)
 			break;			/* partial frame; wait for more */
 		ch = hdr[8];
 		plen = flen - S5XXX_SIT_HDR;
+		pdp = s5xxx_pdp_ndev(sm, ch);
 
 		if (ch == S5XXX_CH_RFS) {
 			had_raw = true;
@@ -2361,6 +2375,38 @@ static void s5xxx_drain_raw_rxq(struct s5xxx_modem *sm, u32 intval)
 				port = NULL;
 				max = 0;
 			}
+		} else if (pdp) {
+			/*
+			 * PS data on the legacy ring rather than on pktproc.
+			 * The CP uses this path for some contexts, and
+			 * downstream's rx_multi_pdp accepts these channels here
+			 * too; without it the packets are dropped as an unknown
+			 * channel while the interface looks up and idle.
+			 */
+			had_raw = true;
+			if (plen) {
+				struct sk_buff *skb = netdev_alloc_skb(pdp, plen);
+
+				if (skb) {
+					s5xxx_circ_read(skb_put(skb, plen), buff,
+							S5XXX_RAW_RXQ_SIZE,
+							(out + S5XXX_SIT_HDR) %
+								S5XXX_RAW_RXQ_SIZE,
+							plen);
+					skb->protocol =
+						htons((skb->data[0] >> 4) == 6 ?
+						      ETH_P_IPV6 : ETH_P_IP);
+					skb_reset_mac_header(skb);
+					skb_reset_network_header(skb);
+					pdp->stats.rx_packets++;
+					pdp->stats.rx_bytes += plen;
+					netif_rx(skb);
+				} else {
+					pdp->stats.rx_dropped++;
+				}
+			}
+			port = NULL;
+			max = 0;
 		} else {
 			port = NULL;
 			max = 0;
@@ -2525,18 +2571,6 @@ static void s5xxx_drain_fmt_rxq(struct s5xxx_modem *sm, u32 intval)
  * version nibble and hand it to the raw-IP netdev.  Bounded by num_desc so a
  * garbled rear pointer cannot spin.  Runs in the MSI hard-IRQ once ONLINE.
  */
-/*
- * The netdev carrying PDP channel @ch, or NULL if @ch is not a data channel or
- * its interface does not exist.  READ_ONCE because the DL drain and the raw-ring
- * fallback both run in the hard IRQ, against s5xxx_online() publishing them.
- */
-static struct net_device *s5xxx_pdp_ndev(struct s5xxx_modem *sm, u8 ch)
-{
-	if (ch < S5XXX_CH_PDP_FIRST || ch > S5XXX_PDP_CH_LAST)
-		return NULL;
-	return READ_ONCE(sm->ndev[ch - S5XXX_CH_PDP_FIRST]);
-}
-
 static void s5xxx_pktproc_dl_drain(struct s5xxx_modem *sm)
 {
 	void __iomem *info = sm->pktproc + S5XXX_PKTPROC_DL_INFO_OFS;
