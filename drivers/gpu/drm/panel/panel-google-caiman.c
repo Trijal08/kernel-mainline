@@ -43,6 +43,8 @@ static bool caiman_handoff;
 module_param_named(handoff, caiman_handoff, bool, 0644);
 MODULE_PARM_DESC(handoff, "leave the panel in the bootloader's state");
 
+struct caiman_mode;
+
 struct caiman_panel {
 	struct drm_panel panel;
 	struct mipi_dsi_device *dsi;
@@ -54,6 +56,10 @@ struct caiman_panel {
 	 */
 	struct drm_connector *connector;
 	struct gpio_desc *reset_gpio;
+	/* mode the DDIC is currently programmed for; NULL before the first enable */
+	const struct caiman_mode *cur;
+	/* set by disable() when the pending modeset only changes the refresh rate */
+	bool rate_only;
 };
 
 /*
@@ -220,6 +226,8 @@ static const struct caiman_mode caiman_modes[] = {
 	},
 };
 
+static const struct caiman_mode *caiman_cur_mode(struct caiman_panel *ctx);
+
 /* Panel is already powered and streaming from the bootloader: keep it as-is. */
 static int caiman_panel_noop(struct drm_panel *panel)
 {
@@ -242,21 +250,42 @@ static int caiman_panel_prepare(struct drm_panel *panel)
 {
 	struct caiman_panel *ctx = to_caiman_panel(panel);
 
-	if (ctx->reset_gpio && !caiman_handoff)
+	if (ctx->reset_gpio && !caiman_handoff && !ctx->rate_only)
 		caiman_reset(ctx);
 	return 0;
 }
 
-/* Sleep the panel down; the next enable fully re-initialises it. */
+/*
+ * Sleep the panel down; the next enable fully re-initialises it.
+ *
+ * Except for a refresh-rate change. The DDIC switches 60/120 Hz through a
+ * register write with the link untouched, and in command mode it keeps
+ * self-refreshing its GRAM while the DECON and DSIM bounce, so tearing the
+ * panel down here (display off, sleep in, hardware reset, full re-init, 120 ms)
+ * is what makes an otherwise invisible switch blank the screen. Flag the
+ * rate-only case and let prepare()/enable() take the short path.
+ *
+ * Same resolution means the DSC config, image-size and bit-depth selectors are
+ * unchanged, so only the frequency select has to be re-sent.
+ */
 static int caiman_panel_disable(struct drm_panel *panel)
 {
 	struct caiman_panel *ctx = to_caiman_panel(panel);
+	const struct caiman_mode *next = caiman_cur_mode(ctx);
 
 	if (caiman_handoff)
 		return 0;
 
+	ctx->rate_only = ctx->cur && next &&
+			 next->dsc == ctx->cur->dsc &&
+			 drm_mode_vrefresh(&next->mode) !=
+			 drm_mode_vrefresh(&ctx->cur->mode);
+	if (ctx->rate_only)
+		return 0;
+
 	mipi_dsi_dcs_set_display_off(ctx->dsi);
 	mipi_dsi_dcs_enter_sleep_mode(ctx->dsi);
+	ctx->cur = NULL;
 	return 0;
 }
 
@@ -271,22 +300,51 @@ static int caiman_panel_disable(struct drm_panel *panel)
 	mipi_dsi_dcs_write_buffer((dsi), (const u8[]){ seq },                  \
 				  sizeof((const u8[]){ seq }))
 
-static const struct caiman_mode *caiman_cur_mode(struct caiman_panel *ctx);
+/*
+ * Select the DDIC refresh rate (vendor cm4_set_panel_feat frequency block):
+ * manual HS, 0x60 picks the rate, 0xF7 latches it. The 120 Hz DBI reference
+ * write is 120-only, matching cm4_set_panel_feat_dbi.
+ */
+static void caiman_set_freq(struct mipi_dsi_device *dsi, int vrefresh)
+{
+	caiman_dcs(dsi, 0xF0, 0x5A, 0x5A);				/* unlock */
+	if (vrefresh == 120) {
+		caiman_dcs(dsi, 0xB0, 0x00, 0x67, 0x69);
+		caiman_dcs(dsi, 0x69, 60);
+	}
+	caiman_dcs(dsi, 0xBD, 0x21);
+	caiman_dcs(dsi, 0x60, vrefresh == 120 ? 0x00 : 0x01);
+	caiman_dcs(dsi, 0xF7, 0x0F);					/* freq update */
+	caiman_dcs(dsi, 0xF0, 0xA5, 0xA5);				/* lock */
+}
 
 static int caiman_panel_enable(struct drm_panel *panel)
 {
 	struct caiman_panel *ctx = to_caiman_panel(panel);
 	struct mipi_dsi_device *dsi = ctx->dsi;
 	const struct caiman_mode *cm = caiman_cur_mode(ctx);
-	const struct drm_display_mode *mode = &cm->mode;
+	const struct drm_display_mode *mode;
 	struct drm_dsc_picture_parameter_set pps;
 	static const u8 dsc_en[] = { 0x9D, 0x01 };
-	u16 xe = mode->hdisplay - 1;
-	u16 ye = mode->vdisplay - 1;
+	u16 xe, ye;
 	int ret;
 
 	if (caiman_handoff)
 		return 0;
+
+	if (!cm)
+		cm = &caiman_modes[0];
+	mode = &cm->mode;
+	xe = mode->hdisplay - 1;
+	ye = mode->vdisplay - 1;
+
+	/* Rate-only switch: the DDIC is still lit and configured, just retune. */
+	if (ctx->rate_only) {
+		ctx->rate_only = false;
+		ctx->cur = cm;
+		caiman_set_freq(dsi, drm_mode_vrefresh(mode));
+		return 0;
+	}
 
 	/*
 	 * Full power-on (vendor cm4_enable, needs_reset path): the panel was just
@@ -374,22 +432,16 @@ static int caiman_panel_enable(struct drm_panel *panel)
 	caiman_dcs(dsi, 0xF2, 0xD0);
 	caiman_dcs(dsi, 0xB0, 0x00, 0x41, 0xB9);
 	caiman_dcs(dsi, 0xB9, 0x02);
-	/* DBI reference frequency (vendor cm4_set_panel_feat_dbi, 120Hz only) */
-	if (drm_mode_vrefresh(mode) == 120) {
-		caiman_dcs(dsi, 0xB0, 0x00, 0x67, 0x69);
-		caiman_dcs(dsi, 0x69, 60);
-	}
-	/* frequency: manual HS - 0x60 selects the rate (0x00 = 120Hz, 0x01 = 60Hz) */
-	caiman_dcs(dsi, 0xBD, 0x21);
-	caiman_dcs(dsi, 0x60, drm_mode_vrefresh(mode) == 120 ? 0x00 : 0x01);
-	caiman_dcs(dsi, 0xF7, 0x0F);					/* freq update */
 	caiman_dcs(dsi, 0xF0, 0xA5, 0xA5);				/* lock */
+
+	caiman_set_freq(dsi, drm_mode_vrefresh(mode));
 
 	/* WRCTRLD: enable brightness control (vendor cm4_write_display_mode) */
 	caiman_dcs(dsi, 0x53, 0x20);
 
 	mipi_dsi_dcs_set_display_on(dsi);
 
+	ctx->cur = cm;
 	return 0;
 }
 
@@ -420,10 +472,11 @@ static int caiman_panel_get_modes(struct drm_panel *panel,
 }
 
 /*
- * Find the descriptor for the active mode. drm_panel has no mode_set, so reach
- * the committed mode through the cached connector's atomic state (valid during
- * the enable phase of a modeset) and match it against the mode table. Defaults
- * to the preferred mode (index 0) if the state is not available.
+ * Find the descriptor for the mode being committed. drm_panel has no mode_set,
+ * so reach it through the cached connector's atomic state; the state is already
+ * swapped by commit_tail, so this is the incoming mode during both the disable
+ * and the enable phase of a modeset. NULL when the connector is not headed for
+ * an active CRTC (a real power-off, not a mode change).
  */
 static const struct caiman_mode *caiman_cur_mode(struct caiman_panel *ctx)
 {
@@ -432,8 +485,8 @@ static const struct caiman_mode *caiman_cur_mode(struct caiman_panel *ctx)
 	unsigned int i;
 
 	if (!conn || !conn->state || !conn->state->crtc ||
-	    !conn->state->crtc->state)
-		return &caiman_modes[0];
+	    !conn->state->crtc->state || !conn->state->crtc->state->active)
+		return NULL;
 
 	cur = &conn->state->crtc->state->adjusted_mode;
 	for (i = 0; i < ARRAY_SIZE(caiman_modes); i++)
@@ -441,7 +494,7 @@ static const struct caiman_mode *caiman_cur_mode(struct caiman_panel *ctx)
 				   DRM_MODE_MATCH_TIMINGS))
 			return &caiman_modes[i];
 
-	return &caiman_modes[0];
+	return NULL;
 }
 
 static const struct drm_panel_funcs caiman_panel_funcs = {
