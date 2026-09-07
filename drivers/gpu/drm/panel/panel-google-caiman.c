@@ -19,10 +19,13 @@
  */
 
 #include <linux/backlight.h>
+#include <linux/cleanup.h>
 #include <linux/delay.h>
 #include <linux/gpio/consumer.h>
 #include <linux/module.h>
+#include <linux/mutex.h>
 #include <linux/of.h>
+#include <linux/sysfs.h>
 
 #include <video/mipi_display.h>
 
@@ -60,6 +63,13 @@ struct caiman_panel {
 	const struct caiman_mode *cur;
 	/* set by disable() when the pending modeset only changes the refresh rate */
 	bool rate_only;
+	/*
+	 * Frame-insertion floor in Hz, from the min_refresh_rate attribute. 0 or
+	 * anything not below the mode's rate means no insertion.
+	 */
+	unsigned int min_vrefresh;
+	/* guards cur/min_vrefresh against a concurrent attribute write */
+	struct mutex lock;
 };
 
 /*
@@ -276,6 +286,7 @@ static int caiman_panel_disable(struct drm_panel *panel)
 	if (caiman_handoff)
 		return 0;
 
+	guard(mutex)(&ctx->lock);
 	ctx->rate_only = ctx->cur && next &&
 			 next->dsc == ctx->cur->dsc &&
 			 drm_mode_vrefresh(&next->mode) !=
@@ -300,22 +311,124 @@ static int caiman_panel_disable(struct drm_panel *panel)
 	mipi_dsi_dcs_write_buffer((dsi), (const u8[]){ seq },                  \
 				  sizeof((const u8[]){ seq }))
 
-/*
- * Select the DDIC refresh rate (vendor cm4_set_panel_feat frequency block):
- * manual HS, 0x60 picks the rate, 0xF7 latches it. The 120 Hz DBI reference
- * write is 120-only, matching cm4_set_panel_feat_dbi.
- */
-static void caiman_set_freq(struct mipi_dsi_device *dsi, int vrefresh)
+/* DCS 0x60 manual frequency select, HS operation (vendor cm4 values). */
+static u8 caiman_freq_sel(int vrefresh)
 {
+	switch (vrefresh) {
+	case 1:		return 0x07;
+	case 10:	return 0x03;
+	case 30:	return 0x02;
+	case 60:	return 0x01;
+	case 80:	return 0x04;
+	default:	return 0x00;	/* 120 */
+	}
+}
+
+/*
+ * Frame-insertion floors the DDIC supports, with the 0xBD target-frequency byte
+ * and the per-step frame counts for each starting rate (vendor
+ * cm4_set_panel_feat_frequency, FEAT_FRAME_AUTO path, HS only).
+ */
+static const struct caiman_fi {
+	unsigned int min;
+	u8 target;
+	u8 step_from_120[3];
+	u8 step_from_60[3];
+} caiman_fi[] = {
+	{ 30, 0x06, { 0x00, 0x00, 0x00 }, { 0x01, 0x00, 0x00 } },
+	{ 10, 0x16, { 0x00, 0x03, 0x00 }, { 0x01, 0x01, 0x00 } },
+	{  1, 0xEE, { 0x00, 0x01, 0x03 }, { 0x01, 0x01, 0x03 } },
+};
+
+static const struct caiman_fi *caiman_find_fi(unsigned int min)
+{
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(caiman_fi); i++)
+		if (caiman_fi[i].min == min)
+			return &caiman_fi[i];
+	return NULL;
+}
+
+/*
+ * TE: fixed keeps the tear signal at the mode's rate whatever the DDIC actually
+ * emits, which is what lets frame insertion run without the vblank rate moving
+ * under the DECON. Changeable TE follows the emitted frames instead.
+ */
+static void caiman_set_te(struct mipi_dsi_device *dsi, bool fixed, int vrefresh)
+{
+	if (fixed) {
+		caiman_dcs(dsi, 0xB9, 0x51);
+		caiman_dcs(dsi, 0xB0, 0x00, 0x08, 0xB9);		/* TE width */
+		caiman_dcs(dsi, 0xB9, 0x0B, 0x1E, 0x00, 0x1F,
+				      0x0B, 0x1E, 0x00, 0x1F);
+		caiman_dcs(dsi, 0xB0, 0x00, 0x02, 0xB9);		/* TE freq */
+		caiman_dcs(dsi, 0xB9, vrefresh == 60 ? 0x01 : 0x00);
+	} else {
+		caiman_dcs(dsi, 0xB9, 0x04);
+		caiman_dcs(dsi, 0xB0, 0x00, 0x04, 0xB9);		/* TE width */
+		caiman_dcs(dsi, 0xB9, 0x0B, 0x1E, 0x00, 0x1F);
+	}
+}
+
+/*
+ * Program what the DDIC emits: @vrefresh per frame the host sends, and, when
+ * @fi is non-NULL, hardware frame insertion stepping down to fi->min once the
+ * host stops sending. Insertion needs the early-exit bit so the DDIC abandons a
+ * long inserted frame the moment new content arrives - without it the floor
+ * becomes the response latency.
+ *
+ * Vendor cm4_set_panel_feat: TE, early exit, DBI reference, frequency block.
+ */
+static void caiman_set_freq(struct mipi_dsi_device *dsi, int vrefresh,
+			    const struct caiman_fi *fi)
+{
+	const u8 *step;
+
 	caiman_dcs(dsi, 0xF0, 0x5A, 0x5A);				/* unlock */
-	if (vrefresh == 120) {
+
+	caiman_set_te(dsi, fi, vrefresh);
+
+	caiman_dcs(dsi, 0xB0, 0x00, 0x01, 0xBD);			/* early exit */
+	caiman_dcs(dsi, 0xBD, fi ? 0x01 : 0x81);
+
+	/* DBI reference (vendor cm4_set_panel_feat_dbi): auto FI or 120 Hz only */
+	if (fi || vrefresh == 120) {
 		caiman_dcs(dsi, 0xB0, 0x00, 0x67, 0x69);
 		caiman_dcs(dsi, 0x69, 60);
 	}
-	caiman_dcs(dsi, 0xBD, 0x21);
-	caiman_dcs(dsi, 0x60, vrefresh == 120 ? 0x00 : 0x01);
+
+	if (fi) {
+		step = vrefresh == 60 ? fi->step_from_60 : fi->step_from_120;
+		caiman_dcs(dsi, 0xB0, 0x00, 0x92, 0xBD);	/* initial freq */
+		caiman_dcs(dsi, 0xBD, 0x00, vrefresh == 60 ? 0x02 : 0x00);
+		caiman_dcs(dsi, 0xB0, 0x00, 0x12, 0xBD);	/* target freq */
+		caiman_dcs(dsi, 0xBD, 0x00, 0x00, fi->target);
+		caiman_dcs(dsi, 0xB0, 0x00, 0x9E, 0xBD);	/* step table */
+		caiman_dcs(dsi, 0xBD, 0x00, 0x02, 0x00, 0x06, 0x00, 0x16);
+		caiman_dcs(dsi, 0xB0, 0x00, 0xAE, 0xBD);	/* step counts */
+		caiman_dcs(dsi, 0xBD, step[0], step[1], step[2]);
+		caiman_dcs(dsi, 0xBD, 0xA3);			/* auto FI on */
+	} else {
+		caiman_dcs(dsi, 0xBD, 0x21);			/* manual */
+		caiman_dcs(dsi, 0x60, caiman_freq_sel(vrefresh));
+	}
+
 	caiman_dcs(dsi, 0xF7, 0x0F);					/* freq update */
 	caiman_dcs(dsi, 0xF0, 0xA5, 0xA5);				/* lock */
+}
+
+/* Apply the rate configuration for @cm under the current min_vrefresh. */
+static void caiman_apply_rate(struct caiman_panel *ctx,
+			      const struct caiman_mode *cm)
+{
+	int vrefresh = drm_mode_vrefresh(&cm->mode);
+	const struct caiman_fi *fi = NULL;
+
+	if (ctx->min_vrefresh && ctx->min_vrefresh < vrefresh)
+		fi = caiman_find_fi(ctx->min_vrefresh);
+
+	caiman_set_freq(ctx->dsi, vrefresh, fi);
 }
 
 static int caiman_panel_enable(struct drm_panel *panel)
@@ -340,9 +453,10 @@ static int caiman_panel_enable(struct drm_panel *panel)
 
 	/* Rate-only switch: the DDIC is still lit and configured, just retune. */
 	if (ctx->rate_only) {
+		guard(mutex)(&ctx->lock);
 		ctx->rate_only = false;
 		ctx->cur = cm;
-		caiman_set_freq(dsi, drm_mode_vrefresh(mode));
+		caiman_apply_rate(ctx, cm);
 		return 0;
 	}
 
@@ -398,10 +512,6 @@ static int caiman_panel_enable(struct drm_panel *panel)
 	 * to the running (bootloader-lit) panel.
 	 */
 	caiman_dcs(dsi, 0xF0, 0x5A, 0x5A);				/* unlock */
-	/* TE (changeable), EVT1-and-later width */
-	caiman_dcs(dsi, 0xB9, 0x04);
-	caiman_dcs(dsi, 0xB0, 0x00, 0x04, 0xB9);
-	caiman_dcs(dsi, 0xB9, 0x0B, 0x1E, 0x00, 0x1F);
 	/* HBM / IRC (flat default) */
 	caiman_dcs(dsi, 0xB0, 0x02, 0x00, 0x92);
 	caiman_dcs(dsi, 0x92, 0x00, 0x00, 0xFF, 0xD0);
@@ -411,14 +521,7 @@ static int caiman_panel_enable(struct drm_panel *panel)
 	/* operating mode: HS */
 	caiman_dcs(dsi, 0xF2, 0x01);
 	caiman_dcs(dsi, 0x60, 0x00);
-	/* early-exit off */
-	caiman_dcs(dsi, 0xB0, 0x00, 0x01, 0xBD);
-	caiman_dcs(dsi, 0xBD, 0x81);
-	caiman_dcs(dsi, 0xB0, 0x00, 0x10, 0xBD);
-	caiman_dcs(dsi, 0xBD, 0x00);
-	caiman_dcs(dsi, 0xB0, 0x00, 0x82, 0xBD);
-	caiman_dcs(dsi, 0xBD, 0x00, 0x00, 0x00, 0x00);
-	/* manual FI off */
+	/* manual FI off (hardware auto FI is programmed by caiman_set_freq) */
 	caiman_dcs(dsi, 0xB0, 0x00, 0x10, 0xBD);
 	caiman_dcs(dsi, 0xBD, 0x00);
 	caiman_dcs(dsi, 0xB0, 0x00, 0x82, 0xBD);
@@ -434,14 +537,16 @@ static int caiman_panel_enable(struct drm_panel *panel)
 	caiman_dcs(dsi, 0xB9, 0x02);
 	caiman_dcs(dsi, 0xF0, 0xA5, 0xA5);				/* lock */
 
-	caiman_set_freq(dsi, drm_mode_vrefresh(mode));
+	scoped_guard(mutex, &ctx->lock) {
+		caiman_apply_rate(ctx, cm);
+		ctx->cur = cm;
+	}
 
 	/* WRCTRLD: enable brightness control (vendor cm4_write_display_mode) */
 	caiman_dcs(dsi, 0x53, 0x20);
 
 	mipi_dsi_dcs_set_display_on(dsi);
 
-	ctx->cur = cm;
 	return 0;
 }
 
@@ -552,6 +657,55 @@ static int caiman_panel_backlight_init(struct caiman_panel *ctx)
 	return 0;
 }
 
+/*
+ * min_refresh_rate: the floor the DDIC may insert frames down to while the host
+ * has nothing new to send. Writing a rate below the mode's puts the panel into
+ * fixed-TE early-exit operation and lets it step itself down; 0 (or the mode's
+ * own rate) turns insertion off. The DECON is unaffected either way - TE, and
+ * so vblank, stays at the mode's rate.
+ *
+ * The vendor stack drives the equivalent from the compositor's per-frame rate
+ * vote (gs_panel refresh_ctrl); mainline has no such uAPI, so this is the knob.
+ */
+static ssize_t min_refresh_rate_show(struct device *dev,
+				     struct device_attribute *attr, char *buf)
+{
+	struct caiman_panel *ctx = mipi_dsi_get_drvdata(to_mipi_dsi_device(dev));
+
+	return sysfs_emit(buf, "%u\n", READ_ONCE(ctx->min_vrefresh));
+}
+
+static ssize_t min_refresh_rate_store(struct device *dev,
+				      struct device_attribute *attr,
+				      const char *buf, size_t count)
+{
+	struct caiman_panel *ctx = mipi_dsi_get_drvdata(to_mipi_dsi_device(dev));
+	unsigned int min;
+	int ret;
+
+	ret = kstrtouint(buf, 10, &min);
+	if (ret)
+		return ret;
+	if (min && !caiman_find_fi(min))
+		return -EINVAL;
+
+	guard(mutex)(&ctx->lock);
+	ctx->min_vrefresh = min;
+	if (ctx->cur && !caiman_handoff)
+		caiman_apply_rate(ctx, ctx->cur);
+
+	return count;
+}
+static DEVICE_ATTR_RW(min_refresh_rate);
+
+static struct attribute *caiman_attrs[] = {
+	&dev_attr_min_refresh_rate.attr,
+	NULL,
+};
+static const struct attribute_group caiman_attr_group = {
+	.attrs = caiman_attrs,
+};
+
 static int caiman_panel_probe(struct mipi_dsi_device *dsi)
 {
 	struct device *dev = &dsi->dev;
@@ -566,6 +720,14 @@ static int caiman_panel_probe(struct mipi_dsi_device *dsi)
 
 	ctx->dsi = dsi;
 	mipi_dsi_set_drvdata(dsi, ctx);
+
+	ret = devm_mutex_init(dev, &ctx->lock);
+	if (ret)
+		return ret;
+
+	ret = devm_device_add_group(dev, &caiman_attr_group);
+	if (ret)
+		return ret;
 
 	/*
 	 * DDIC reset, pulsed on every prepare() to bring the panel up from a
