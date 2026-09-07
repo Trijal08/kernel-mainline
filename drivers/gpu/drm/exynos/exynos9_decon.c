@@ -35,6 +35,14 @@
 #include "exynos9_decon.h"
 #include "regs-decon9.h"
 
+/*
+ * Command-mode escape hatch: leaving the trigger armed makes the DECON re-send
+ * the last frame on every TE, which is how this driver ran before one-shot.
+ */
+static bool decon_oneshot = true;
+module_param_named(oneshot, decon_oneshot, bool, 0644);
+MODULE_PARM_DESC(oneshot, "command mode: send one frame per commit");
+
 /* PD : Porter-Duff */
 enum decon_blend_pd_func {
 	PD_FUNC_CLEAR = 0x0,
@@ -1825,8 +1833,24 @@ static irqreturn_t decon_irq_handler(int irq, void *dev_id)
 	 * frame) still observe a vblank instead of timing out.  In video mode
 	 * there is no panel TE, so frame-done is the vblank.
 	 */
-	if (ctx->config.mode.op_mode == DECON_VIDEO_MODE)
+	if (ctx->config.mode.op_mode == DECON_VIDEO_MODE) {
 		drm_crtc_handle_vblank(&ctx->crtc->base);
+		return IRQ_HANDLED;
+	}
+
+	/*
+	 * The frame is out.  Disarm the trigger so the next TE does not send it
+	 * again: the panel holds the image in its own GRAM, and re-sending it
+	 * every TE keeps the DSI link at full rate on a static screen and denies
+	 * the DDIC the gap in host traffic that its frame insertion waits for.
+	 * decon_atomic_flush() re-arms the trigger when there is a new frame.
+	 *
+	 * Assumes frame-done for a frame lands before the commit after it arms
+	 * the trigger again - a late one would disarm a frame that has not been
+	 * sent, stalling it until the next commit.
+	 */
+	if (decon_oneshot)
+		ctx->cal_ops->set_te(ctx, DECON_TRIG_MASK);
 
 	return IRQ_HANDLED;
 }
