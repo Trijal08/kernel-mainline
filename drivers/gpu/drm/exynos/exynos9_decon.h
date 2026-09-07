@@ -135,6 +135,8 @@ struct decon_context {
 
 	u32 irq_fd; /* frame done */
 	int te_irq; /* panel hardware TE, drives vblank in command mode */
+	/* completes the vblank when a command-mode frame never starts */
+	struct timer_list vblank_timer;
 
 	/* device ops */
 	const struct decon_cal_ops *cal_ops;
