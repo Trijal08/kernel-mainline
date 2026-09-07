@@ -818,7 +818,9 @@ static int zuma_decon_enable(struct decon_context *ctx)
 	 * image from GRAM self-refresh while the DECON is briefly stopped.
 	 */
 	zuma_reg_per_frame_off(id);
-	zuma_reg_wait_run_is_off(id, 20 * 1000);
+	if (zuma_reg_wait_run_is_off(id, 20 * 1000))
+		pr_warn("decon%u: still running before reinit (GLOBAL_CON 0x%08x)\n",
+			id, zd_main_read(id, ZD_GLOBAL_CON));
 
 	/*
 	 * Handover reinit (vendor _decon_reinit_locked): clear any windows the
