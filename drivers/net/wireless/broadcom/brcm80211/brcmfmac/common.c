@@ -123,6 +123,24 @@ static int brcmf_phy_wd = -1;
 module_param_named(phy_wd, brcmf_phy_wd, int, 0644);
 MODULE_PARM_DESC(phy_wd, "Firmware PHY watchdog + noise metric: -1=fw default (default), 0=disable all periodic PHY maintenance");
 
+/* Generic iovar lever, applied at the end of preinit: brcmfmac.iovars=
+ * "name=val,name2=val2". Integer values only (0x prefix accepted); each result
+ * is logged, and an unknown name is harmless -- the firmware rejects it with
+ * -EBADE and the next pair is still tried.
+ *
+ * Why this exists: the iovar set is firmware-build specific, and guessing wrong
+ * used to cost a kernel rebuild each time. On BCM4390 27.10.1121.57.18,
+ * phy_watchdog / phy_percal / noise_metric / phymsglevel do NOT exist (all
+ * -EBADE), while radio_health_check and phycal_tempdelta do -- verified against
+ * the firmware's own iovar table. Combined with the params being 0644 and
+ * preinit re-running on a PCI remove/rescan, a hypothesis is now a sysfs write
+ * plus a rescan instead of a build.
+ *
+ * Diagnostic only: nothing here should be relied on in a shipping config. */
+static char brcmf_iovars[256];
+module_param_string(iovars, brcmf_iovars, sizeof(brcmf_iovars), 0644);
+MODULE_PARM_DESC(iovars, "Comma-separated name=value integer iovars set at preinit, e.g. \"radio_health_check=0\". Diagnostic.");
+
 /* TX A-MSDU. The BCM4390 firmware self-preinits the TX-aggregation config
  * (A-MSDU, ampdu_mpdu depth, ampdu_ba_wsize) as one set sized to its SAQM
  * descriptor budget, and the vendor DHD leaves it intact at bring-up. But the
@@ -386,6 +404,43 @@ static int brcmf_c_process_cal_blob(struct brcmf_if *ifp)
 	return err;
 }
 
+/* Apply the brcmfmac.iovars= list. Parses a private copy: the module-param
+ * buffer stays writable through sysfs, so it must not be tokenised in place. */
+static void brcmf_c_set_extra_iovars(struct brcmf_if *ifp)
+{
+	struct brcmf_pub *drvr = ifp->drvr;
+	char *buf, *pos, *pair;
+
+	if (!brcmf_iovars[0])
+		return;
+
+	buf = kstrdup(brcmf_iovars, GFP_KERNEL);
+	if (!buf)
+		return;
+
+	pos = buf;
+	while ((pair = strsep(&pos, ",")) != NULL) {
+		char *name = strim(pair);
+		char *val = strchr(name, '=');
+		s32 v;
+
+		if (!val)
+			continue;
+		*val++ = '\0';
+		name = strim(name);
+		if (!*name)
+			continue;
+		if (kstrtos32(strim(val), 0, &v)) {
+			bphy_err(drvr, "DBG iovars: %s: bad value\n", name);
+			continue;
+		}
+		bphy_err(drvr, "DBG iovars: %s=%d -> %d\n", name, v,
+			 brcmf_fil_iovar_int_set(ifp, name, v));
+	}
+
+	kfree(buf);
+}
+
 int brcmf_c_preinit_dcmds(struct brcmf_if *ifp)
 {
 	struct brcmf_pub *drvr = ifp->drvr;
@@ -552,6 +607,8 @@ int brcmf_c_preinit_dcmds(struct brcmf_if *ifp)
 		bphy_err(drvr, "DBG phy_wd=%d: noise_metric -> %d\n", brcmf_phy_wd,
 			 brcmf_fil_iovar_int_set(ifp, "noise_metric", brcmf_phy_wd));
 	}
+
+	brcmf_c_set_extra_iovars(ifp);
 
 	brcmf_c_set_joinpref_default(ifp);
 
