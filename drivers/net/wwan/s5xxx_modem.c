@@ -254,6 +254,13 @@ struct s5xxx_variant {
 #define S5XXX_IPC_AP2CP_STATUS		0x808
 #define S5XXX_IPC_CP2AP_STATUS		0x80c
 /*
+ * The one runtime payload of cp2ap_status (downstream shmem_tx_state_handler):
+ * the CP asks the AP to stop feeding it uplink while its ingress quiesces, and
+ * to resume afterwards.  Only the PKTPROC UL path is gated -- the legacy
+ * FMT/RAW rings are CP-paced and stay open.
+ */
+#define S5XXX_CP2AP_FLOWCTL		BIT(2)
+/*
  * Handover block (downstream ap2cp_handover_block_info = <0x02 0x82c>): a
  * 161-byte struct t_handover_block_info the AP stages before BL1, carrying the
  * modem's HW/RF configuration (project/revision/rf_config/rf_sub...), the two
@@ -644,6 +651,8 @@ struct s5xxx_modem {
 	u16			ul_cp_quota;
 	u8			ul_end_bit_owner;
 	bool			ul_active;
+	bool			tx_suspended;	/* CP TX flow control (cp2ap_status) */
+	int			nvec;		/* MSI vectors actually allocated */
 };
 
 /*
@@ -928,6 +937,49 @@ static bool s5xxx_tx_pending(struct s5xxx_modem *sm)
 			readl(sm->ipc + S5XXX_FMT_TXQ_TAIL) ||
 	       readl(sm->ipc + S5XXX_RAW_TXQ_HEAD) !=
 			readl(sm->ipc + S5XXX_RAW_TXQ_TAIL);
+}
+
+/*
+ * Stop or wake the data interfaces' queues.  Only the netdevs are gated: the
+ * legacy rings are CP-paced, so the control planes stay open while uplink is
+ * held.  netif_stop_queue()/netif_wake_queue() are idempotent.
+ */
+static void s5xxx_pdp_flowctl(struct s5xxx_modem *sm, bool suspend)
+{
+	int i;
+
+	for (i = 0; i < S5XXX_PDP_CH_COUNT; i++) {
+		/* Snapshot: s5xxx_online() publishes these from process context. */
+		struct net_device *ndev = READ_ONCE(sm->ndev[i]);
+
+		if (!ndev)
+			continue;
+		if (suspend)
+			netif_stop_queue(ndev);
+		else
+			netif_wake_queue(ndev);
+	}
+}
+
+/*
+ * MSI vector 1: the CP's cp2ap_status interrupt.  It carries the global TX
+ * flow-control bit; the CP raises it to quiesce its ingress and clears it to
+ * resume.  Edge-triggered against our own view so a repeated status write does
+ * not churn every queue.
+ */
+static irqreturn_t s5xxx_tx_state_irq(int irq, void *data)
+{
+	struct s5xxx_modem *sm = data;
+	u32 status = readl(sm->ipc + S5XXX_IPC_CP2AP_STATUS);
+	bool suspend = status & S5XXX_CP2AP_FLOWCTL;
+
+	if (suspend == READ_ONCE(sm->tx_suspended))
+		return IRQ_HANDLED;
+
+	WRITE_ONCE(sm->tx_suspended, suspend);
+	s5xxx_pdp_flowctl(sm, suspend);
+
+	return IRQ_HANDLED;
 }
 
 /*
@@ -1478,6 +1530,13 @@ static void s5xxx_init_ipc_queues(struct s5xxx_modem *sm)
 {
 	u32 magic, access;
 	int i;
+
+	/*
+	 * A rebooted CP starts un-flow-controlled; clear any stop the previous
+	 * incarnation left behind so the surviving netdevs are not held down.
+	 */
+	WRITE_ONCE(sm->tx_suspended, false);
+	s5xxx_pdp_flowctl(sm, false);
 
 	sm->fmt_frame_seq = 0;
 	for (i = 0; i < S5XXX_SIT_PORTS; i++)
@@ -2797,6 +2856,19 @@ static netdev_tx_t s5xxx_ndo_start_xmit(struct sk_buff *skb,
 	struct s5xxx_rmnet_priv *priv = netdev_priv(ndev);
 	struct s5xxx_modem *sm = priv->sm;
 	unsigned int len;
+
+	/*
+	 * CP-driven TX flow control: the CP asked for uplink silence, so hold the
+	 * packet in the qdisc until it resumes rather than dropping it.  The
+	 * re-check closes the race with a resume landing between the flag read
+	 * and the queue stop.
+	 */
+	if (READ_ONCE(sm->tx_suspended)) {
+		netif_stop_queue(ndev);
+		if (READ_ONCE(sm->tx_suspended))
+			return NETDEV_TX_BUSY;
+		netif_wake_queue(ndev);
+	}
 
 	/*
 	 * ul_xmit copies only the linear head; no scatter-gather feature is
@@ -4656,6 +4728,7 @@ static int s5xxx_probe(struct platform_device *pdev)
 			ret, sm->pdev->current_state, sm->pdev->msi_cap);
 		goto err_disable;
 	}
+	sm->nvec = ret;
 	dev_info(dev, "%d MSI vector(s) (reserved base 4)\n", ret);
 
 	/*
@@ -4677,6 +4750,23 @@ static int s5xxx_probe(struct platform_device *pdev)
 			  "s5xxx-ipc", sm);
 	if (ret)
 		goto err_vectors;
+
+	/*
+	 * Vector 1 is the CP's cp2ap_status TX flow-control interrupt.  A vector
+	 * that is never requested stays disabled in iMSI-RX, so the CP's suspend
+	 * request would be dropped at the RC and uplink would keep flowing into a
+	 * quiescing modem.  This mask ROM advertises MMC=0, so only one vector is
+	 * usually allocated and there is nothing to hook; take it when the part
+	 * does give us more.
+	 */
+	if (sm->nvec > 1) {
+		ret = request_irq(pci_irq_vector(sm->pdev, 1),
+				  s5xxx_tx_state_irq, 0, "s5xxx-tx-state", sm);
+		if (ret)
+			goto err_irq0;
+	} else {
+		dev_info(dev, "one MSI vector: CP TX flow control not hooked\n");
+	}
 
 	/*
 	 * CP-driven runtime PCIe PM: the CP toggles CP2AP_WAKEUP to ask for the
@@ -4746,6 +4836,9 @@ err_rfs:
 err_wq:
 	destroy_workqueue(sm->pm_wq);
 err_irq:
+	if (sm->nvec > 1)
+		free_irq(pci_irq_vector(sm->pdev, 1), sm);
+err_irq0:
 	free_irq(pci_irq_vector(sm->pdev, 0), sm);
 err_vectors:
 	pci_free_irq_vectors(sm->pdev);
@@ -4779,6 +4872,8 @@ static void s5xxx_remove(struct platform_device *pdev)
 	destroy_workqueue(sm->pm_wq);
 
 	cancel_work_sync(&sm->boot_work);
+	if (sm->nvec > 1)
+		free_irq(pci_irq_vector(sm->pdev, 1), sm);
 	free_irq(pci_irq_vector(sm->pdev, 0), sm);
 	/* Main IRQ gone -> no more DL drains or RFS enqueues. */
 	for (i = 0; i < S5XXX_PDP_CH_COUNT; i++)
@@ -4838,6 +4933,8 @@ static void s5xxx_shutdown(struct platform_device *pdev)
 		free_irq(sm->cp_active_irq, sm);
 	cancel_work_sync(&sm->pm_work);
 	cancel_work_sync(&sm->boot_work);
+	if (sm->nvec > 1)
+		free_irq(pci_irq_vector(sm->pdev, 1), sm);
 	free_irq(pci_irq_vector(sm->pdev, 0), sm);
 	cancel_work_sync(&sm->rfs_work);
 	dev_info(sm->dev, "quiesced for shutdown\n");
