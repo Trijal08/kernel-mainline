@@ -464,8 +464,15 @@ static void s5p_mfc_dec_fill_capture(struct s5p_mfc_ctx *ctx,
 	 * Before the header only the placeholder is known; afterwards the
 	 * parsed layout describes the current format, and on v16 any raw
 	 * format, whose planes differ only by the firmware's minimum.
+	 *
+	 * A firmware error while the header is being parsed leaves the state
+	 * at MFCINST_ERROR, which sorts above MFCINST_HEAD_PARSED and below
+	 * MFCINST_ABORT, so the state test alone would take the parsed path
+	 * with no layout behind it.  Requiring a parsed size keeps that from
+	 * reporting 0x0, which a client cannot tell from a real format.
 	 */
 	if (ctx->state < MFCINST_HEAD_PARSED || ctx->state >= MFCINST_ABORT ||
+	    !ctx->buf_width || !ctx->buf_height ||
 	    (fmt != ctx->dst_fmt && !IS_MFCV16_PLUS(ctx->dev))) {
 		v4l2_fill_pixfmt_mp(pix_mp, fmt->fourcc, ctx->img_width,
 				    ctx->img_height);
