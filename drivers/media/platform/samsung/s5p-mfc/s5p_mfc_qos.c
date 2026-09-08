@@ -67,8 +67,11 @@ static u32 s5p_mfc_qos_fps(struct s5p_mfc_ctx *ctx)
 				interval = min(interval, delta);
 		}
 	}
-	/* Unknown cadence is budgeted for playback at 60 fps, not dequeue speed. */
-	if (interval == U64_MAX)
+	/*
+	 * Some clients use microsecond-spaced tracking IDs instead of PTS.
+	 * Treat intervals beyond 480 fps as unknown, as with absent timestamps.
+	 */
+	if (interval == U64_MAX || interval < 2000000)
 		return 60;
 	/* Downstream's cadence buckets tolerate timestamp quantisation/jitter. */
 	if (interval > 40000000)
