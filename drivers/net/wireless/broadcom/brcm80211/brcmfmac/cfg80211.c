@@ -8076,6 +8076,8 @@ static s32 brcmf_config_dongle(struct brcmf_cfg80211_info *cfg)
 		goto default_conf_out;
 	}
 
+	brcmf_c_set_extra_iovars_up(ifp);
+
 	cfg->dongle_up = true;
 default_conf_out:
 

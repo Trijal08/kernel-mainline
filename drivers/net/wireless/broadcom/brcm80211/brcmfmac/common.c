@@ -144,6 +144,15 @@ static char brcmf_iovars[256];
 module_param_string(iovars, brcmf_iovars, sizeof(brcmf_iovars), 0644);
 MODULE_PARM_DESC(iovars, "Comma-separated iovars set at preinit: name=val (4 bytes) or name:N=val (N=1/2/4/8, LE), e.g. \"rsdb_mode:8=0\". Diagnostic.");
 
+/* Same syntax, but applied after WLC_UP in brcmf_config_dongle(). Preinit runs
+ * before the interface is up, and an iovar that needs it up fails there with
+ * BCME_NOTUP (-4) -- which brcmfmac flattens to the same -EBADE as "no such
+ * iovar", so it looks tested when it never ran. radio_health_check is exactly
+ * that case. Diagnostic only. */
+static char brcmf_iovars_up[256];
+module_param_string(iovars_up, brcmf_iovars_up, sizeof(brcmf_iovars_up), 0644);
+MODULE_PARM_DESC(iovars_up, "Like iovars, but applied after the interface is up (for iovars that return BCME_NOTUP at preinit). Diagnostic.");
+
 /* TX A-MSDU. The BCM4390 firmware self-preinits the TX-aggregation config
  * (A-MSDU, ampdu_mpdu depth, ampdu_ba_wsize) as one set sized to its SAQM
  * descriptor budget, and the vendor DHD leaves it intact at bring-up. But the
@@ -416,15 +425,16 @@ static int brcmf_c_process_cal_blob(struct brcmf_if *ifp)
  * case in point: it takes wl_config_t {u32 config; u32 status}, so disabling
  * RSDB the way the vendor DHD does is "rsdb_mode:8=0", not "rsdb_mode=0".
  */
-static void brcmf_c_set_extra_iovars(struct brcmf_if *ifp)
+static void brcmf_c_apply_iovars(struct brcmf_if *ifp, const char *list,
+				 const char *phase)
 {
 	struct brcmf_pub *drvr = ifp->drvr;
 	char *buf, *pos, *pair;
 
-	if (!brcmf_iovars[0])
+	if (!list[0])
 		return;
 
-	buf = kstrdup(brcmf_iovars, GFP_KERNEL);
+	buf = kstrdup(list, GFP_KERNEL);
 	if (!buf)
 		return;
 
@@ -462,11 +472,21 @@ static void brcmf_c_set_extra_iovars(struct brcmf_if *ifp)
 
 		le = cpu_to_le64((u64)v);
 		err = brcmf_fil_iovar_data_set(ifp, name, &le, len);
-		bphy_err(drvr, "DBG iovars: %s:%u=%lld -> %d\n", name, len, v,
-			 err);
+		bphy_err(drvr, "DBG iovars[%s]: %s:%u=%lld -> %d\n", phase, name,
+			 len, v, err);
 	}
 
 	kfree(buf);
+}
+
+static void brcmf_c_set_extra_iovars(struct brcmf_if *ifp)
+{
+	brcmf_c_apply_iovars(ifp, brcmf_iovars, "preinit");
+}
+
+void brcmf_c_set_extra_iovars_up(struct brcmf_if *ifp)
+{
+	brcmf_c_apply_iovars(ifp, brcmf_iovars_up, "up");
 }
 
 int brcmf_c_preinit_dcmds(struct brcmf_if *ifp)
