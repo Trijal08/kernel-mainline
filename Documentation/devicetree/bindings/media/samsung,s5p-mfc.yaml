@@ -42,6 +42,13 @@ properties:
     minItems: 1
     maxItems: 3
 
+  interconnects:
+    maxItems: 1
+
+  interconnect-names:
+    items:
+      - const: memory
+
   interrupts:
     maxItems: 1
 
@@ -101,6 +108,10 @@ allOf:
         - iommus
         - power-domains
         - memory-region
+    else:
+      properties:
+        interconnects: false
+        interconnect-names: false
 
   - if:
       properties:
