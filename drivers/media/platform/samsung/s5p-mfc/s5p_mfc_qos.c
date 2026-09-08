@@ -3,6 +3,9 @@
 
 #include <linux/clk.h>
 #include <linux/math64.h>
+#include <linux/interconnect.h>
+
+#include <dt-bindings/interconnect/google,zumapro.h>
 
 #include "s5p_mfc_common.h"
 #include "s5p_mfc_debug.h"
@@ -174,42 +177,157 @@ static u64 s5p_mfc_qos_kbps(struct s5p_mfc_ctx *ctx, u32 fps)
 	return s5p_mfc_qos_high_perf(ctx) ? kbps : kbps * 3;
 }
 
+struct s5p_mfc_qos_bw {
+	u32 peak;
+	u32 read;
+	u32 write;
+};
+
+/* KB/s per UHD frame/s, for uncompressed 8-bit 4:2:0 buffers. */
+static const struct s5p_mfc_qos_bw zumapro_dec_bw[] = {
+	{ 32605, 34381, 21263 }, /* H.264 */
+	{ 29973, 28851, 17538 }, /* HEVC */
+	{ 28672, 30468, 22324 }, /* VP8 */
+	{ 18351, 18947, 16877 }, /* VP9 */
+	{ 31540, 25368, 15770 }, /* MPEG-4 and other legacy codecs */
+};
+
+static const struct s5p_mfc_qos_bw zumapro_enc_bw[] = {
+	{ 45456, 56112, 11170 }, /* H.264 */
+	{ 46756, 52766,  9763 }, /* HEVC */
+	{ 64000, 67318, 22518 }, /* VP8 */
+	{ 72326, 59726, 16530 }, /* VP9 */
+	{ 44647, 55324,  9531 }, /* MPEG-4 and H.263 */
+};
+
+static void s5p_mfc_qos_bw(struct s5p_mfc_ctx *ctx, u64 mbs,
+			   u64 *avg, u64 *peak)
+{
+	const struct s5p_mfc_qos_bw *bw;
+	unsigned int i;
+
+	switch (ctx->codec_mode) {
+	case S5P_MFC_CODEC_H264_DEC:
+	case S5P_MFC_CODEC_H264_MVC_DEC:
+	case S5P_MFC_CODEC_H264_ENC:
+		i = 0;
+		break;
+	case S5P_MFC_CODEC_HEVC_DEC:
+	case S5P_MFC_CODEC_HEVC_ENC:
+		i = 1;
+		break;
+	case S5P_MFC_CODEC_VP8_DEC:
+	case S5P_MFC_CODEC_VP8_ENC:
+		i = 2;
+		break;
+	case S5P_MFC_CODEC_VP9_DEC:
+	case S5P_MFC_CODEC_VP9_ENC:
+		i = 3;
+		break;
+	default:
+		i = 4;
+		break;
+	}
+	bw = ctx->type == MFCINST_DECODER ? &zumapro_dec_bw[i] : &zumapro_enc_bw[i];
+	mbs = min_t(u64, mbs, 32400 * 120);
+	*avg += max_t(u64, div_u64(bw->read * mbs, 32400), 1) +
+		max_t(u64, div_u64(bw->write * mbs, 32400), 1);
+	*peak += max_t(u64, div_u64(bw->peak * mbs, 32400), 1);
+}
+
+static u32 s5p_mfc_qos_tag(u32 rate)
+{
+	switch (rate) {
+	case 664000000:
+		return ZUMAPRO_BTS_MFC_664;
+	case 465000000:
+		return ZUMAPRO_BTS_MFC_465;
+	case 400000000:
+		return ZUMAPRO_BTS_MFC_400;
+	case 310000000:
+		return ZUMAPRO_BTS_MFC_310;
+	default:
+		return 0;
+	}
+}
+
 static int s5p_mfc_qos_set_rate(struct s5p_mfc_dev *dev, unsigned long rate)
 {
 	struct clk *clk = dev->pm.rate_clock;
-	unsigned long old_rate;
-	int ret, rollback_ret;
+	int ret;
 
-	old_rate = clk_get_rate(clk);
-	if (!old_rate) {
-		dev->pm.qos_dirty = true;
+	/* Refresh CCF before its same-rate shortcut, and verify firmware readback. */
+	if (!clk_get_rate(clk))
 		return -EIO;
-	}
 	ret = clk_set_rate(clk, rate);
 	if (!ret && clk_get_rate(clk) != rate)
 		ret = -EIO;
-	if (ret) {
-		/* Preserve the prior workload when a new request cannot be applied. */
-		rollback_ret = clk_set_rate(clk, old_rate);
-		if (!rollback_ret && clk_get_rate(clk) != old_rate)
-			rollback_ret = -EIO;
-		dev->pm.qos_dirty = rollback_ret || old_rate != dev->pm.qos_rate;
-		if (rollback_ret)
-			dev_err(dev->pm.device, "cannot restore MFC to %lu Hz: %d\n",
-				old_rate, rollback_ret);
+	if (ret)
 		dev_err(dev->pm.device, "cannot set MFC to %lu Hz: %d\n", rate, ret);
-		return ret;
-	}
-	dev->pm.qos_rate = rate;
-	dev->pm.qos_dirty = false;
+	return ret;
+}
+
+static int s5p_mfc_qos_set_bw(struct s5p_mfc_dev *dev, u32 avg, u32 peak, u32 tag)
+{
+	icc_set_tag(dev->pm.memory_path, tag);
+	return icc_set_bw(dev->pm.memory_path, avg, peak);
+}
+
+static int s5p_mfc_qos_apply(struct s5p_mfc_dev *dev, u32 rate,
+			    u32 avg, u32 peak, u32 tag)
+{
+	struct s5p_mfc_pm *pm = &dev->pm;
+	u32 guard_avg = max(avg, pm->qos_avg_bw);
+	u32 guard_peak = max(peak, pm->qos_peak_bw);
+	u32 guard_tag = tag | pm->qos_tag;
+	unsigned long old_rate = pm->qos_rate ?: 100000000;
+	int ret, rollback_ret;
+
+	if (rate == pm->qos_rate && avg == pm->qos_avg_bw &&
+	    peak == pm->qos_peak_bw && tag == pm->qos_tag && !pm->qos_dirty)
+		return 0;
+
+	/* Cover both workloads while the clock moves, including failed retries. */
+	if (pm->qos_dirty)
+		guard_tag |= ZUMAPRO_BTS_MFC_664;
+	ret = s5p_mfc_qos_set_bw(dev, guard_avg, guard_peak, guard_tag);
+	if (ret)
+		goto rollback;
+	ret = s5p_mfc_qos_set_rate(dev, rate);
+	if (ret)
+		goto rollback;
+	/* Only release bandwidth after the new clock has been confirmed. */
+	ret = s5p_mfc_qos_set_bw(dev, avg, peak, tag);
+	if (ret)
+		goto rollback;
+
+	pm->qos_rate = rate;
+	pm->qos_avg_bw = avg;
+	pm->qos_peak_bw = peak;
+	pm->qos_tag = tag;
+	pm->qos_dirty = false;
 	return 0;
+
+rollback:
+	/* ICC rolls back bandwidth on error, but does not roll back its tag. */
+	rollback_ret = s5p_mfc_qos_set_bw(dev, guard_avg, guard_peak, guard_tag);
+	if (!rollback_ret)
+		rollback_ret = s5p_mfc_qos_set_rate(dev, old_rate);
+	if (!rollback_ret)
+		rollback_ret = s5p_mfc_qos_set_bw(dev, pm->qos_avg_bw,
+					       pm->qos_peak_bw, pm->qos_tag);
+	if (rollback_ret)
+		dev_err(pm->device, "cannot restore MFC workload vote: %d\n", rollback_ret);
+	/* Retain only the last complete transaction as the resume/retry target. */
+	pm->qos_dirty = true;
+	return ret;
 }
 
 static int s5p_mfc_qos_update(struct s5p_mfc_dev *dev)
 {
 	const struct s5p_mfc_qos_step *steps;
 	struct s5p_mfc_ctx *ctx;
-	u64 mbs = 0, kbps = 0, load;
+	u64 mbs = 0, kbps = 0, load, avg = 0, peak = 0;
 	u32 fps = 0, rate = 100000000;
 	bool decoder = false, uhd60 = false;
 	unsigned int count, i;
@@ -223,6 +341,7 @@ static int s5p_mfc_qos_update(struct s5p_mfc_dev *dev)
 			continue;
 		ctx_fps = s5p_mfc_qos_fps(ctx);
 		ctx_mbs = s5p_mfc_qos_mbs(ctx, ctx_fps);
+		s5p_mfc_qos_bw(ctx, ctx_mbs, &avg, &peak);
 		mbs += div_u64(ctx_mbs * s5p_mfc_qos_weight(ctx), 1000);
 		fps += ctx_fps;
 		kbps += s5p_mfc_qos_kbps(ctx, ctx_fps);
@@ -253,10 +372,13 @@ static int s5p_mfc_qos_update(struct s5p_mfc_dev *dev)
 	/* Budget at least 664 MHz for uncompressed 4K60 decoding. */
 	if (uhd60)
 		rate = max(rate, 664000000U);
-	if (rate == dev->pm.qos_rate && !dev->pm.qos_dirty)
-		return 0;
-	dev_dbg(dev->pm.device, "MFC workload %llu MB/s, %u fps -> %u Hz\n", mbs, fps, rate);
-	return s5p_mfc_qos_set_rate(dev, rate);
+	if (rate != dev->pm.qos_rate || avg != dev->pm.qos_avg_bw ||
+	    peak != dev->pm.qos_peak_bw || dev->pm.qos_dirty)
+		dev_dbg(dev->pm.device,
+			"MFC workload %llu MB/s, %u fps -> %u Hz, BW %llu/%llu KB/s\n",
+			mbs, fps, rate, avg, peak);
+	return s5p_mfc_qos_apply(dev, rate, min_t(u64, avg, U32_MAX),
+				 min_t(u64, peak, U32_MAX), s5p_mfc_qos_tag(rate));
 }
 
 int s5p_mfc_qos_queue(struct vb2_buffer *vb)
@@ -309,13 +431,15 @@ int s5p_mfc_qos_restore(struct s5p_mfc_dev *dev)
 {
 	if (!dev->pm.rate_clock)
 		return 0;
-	return s5p_mfc_qos_set_rate(dev, dev->pm.qos_rate ?: 100000000);
+	dev->pm.qos_dirty = true;
+	return s5p_mfc_qos_apply(dev, dev->pm.qos_rate ?: 100000000,
+				 dev->pm.qos_avg_bw, dev->pm.qos_peak_bw, dev->pm.qos_tag);
 }
 
 void s5p_mfc_qos_cleanup(struct s5p_mfc_dev *dev)
 {
 	if (!IS_ERR_OR_NULL(dev->pm.rate_clock) &&
 	    (dev->pm.qos_rate || dev->pm.qos_dirty) &&
-	    s5p_mfc_qos_set_rate(dev, 100000000))
-		dev_warn(dev->pm.device, "cannot release MFC frequency vote\n");
+	    s5p_mfc_qos_apply(dev, 100000000, 0, 0, 0))
+		dev_warn(dev->pm.device, "cannot release MFC workload vote\n");
 }
