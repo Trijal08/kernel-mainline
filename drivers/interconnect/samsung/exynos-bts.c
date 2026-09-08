@@ -353,7 +353,12 @@ static u32 exynos_bts_int_floor(u32 total_bw, u32 peak_freq)
 /* CCF can discard the provider's set_rate error; check the recalculated rate. */
 static int exynos_bts_set_rate(struct clk *clk, unsigned long rate)
 {
-	int ret = clk_set_rate(clk, rate);
+	int ret;
+
+	/* Refresh CCF before its same-rate shortcut, including after sleep. */
+	if (!clk_get_rate(clk))
+		return -EIO;
+	ret = clk_set_rate(clk, rate);
 
 	if (ret)
 		return ret;
