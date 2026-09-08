@@ -8,6 +8,7 @@
 
 #include <linux/clk.h>
 #include <linux/err.h>
+#include <linux/interconnect.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
 #include "s5p_mfc_common.h"
@@ -47,6 +48,10 @@ int s5p_mfc_init_pm(struct s5p_mfc_dev *dev)
 		if (IS_ERR(pm->rate_clock))
 			return dev_err_probe(pm->device, PTR_ERR(pm->rate_clock),
 					     "cannot get MFC DVFS clock\n");
+		pm->memory_path = devm_of_icc_get(pm->device, "memory");
+		if (IS_ERR(pm->memory_path))
+			return dev_err_probe(pm->device, PTR_ERR(pm->memory_path),
+					     "cannot get MFC memory path\n");
 	}
 
 	pm_runtime_enable(pm->device);
