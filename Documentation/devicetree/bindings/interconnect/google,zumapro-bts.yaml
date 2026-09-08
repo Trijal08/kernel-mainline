@@ -1,0 +1,70 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/interconnect/google,zumapro-bts.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Google Zumapro Bus Traffic Shaper
+
+maintainers:
+  - Steffen Deusch <steffen@deusch.me>
+
+description: |
+  The Samsung Bus Traffic Shaper (BTS) in Google's Zumapro SoC controls AXI
+  quality of service at individual NoC masters and translates aggregate client
+  bandwidth into minimum MIF and INT ACPM DVFS rates.
+
+  The register resources describe the BTS blocks managed by this provider.
+  Initially these are the two MFC memory ports. Client bandwidth and workload
+  tags select per-master clock floors and outstanding-transaction profiles.
+
+properties:
+  compatible:
+    const: google,zumapro-bts
+
+  reg:
+    items:
+      - description: MFC channel 0 BTS registers
+      - description: MFC channel 1 BTS registers
+
+  reg-names:
+    items:
+      - const: mfc0
+      - const: mfc1
+
+  clocks:
+    items:
+      - description: MIF ACPM DVFS domain
+      - description: INT ACPM DVFS domain
+
+  clock-names:
+    items:
+      - const: mif
+      - const: int
+
+  '#interconnect-cells':
+    const: 1
+
+required:
+  - compatible
+  - reg
+  - reg-names
+  - clocks
+  - clock-names
+  - '#interconnect-cells'
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/clock/google,zumapro-acpm.h>
+
+    interconnect@26c48380 {
+        compatible = "google,zumapro-bts";
+        reg = <0x26c48380 0x80>, <0x26c48400 0x80>;
+        reg-names = "mfc0", "mfc1";
+        clocks = <&acpm_ipc ZUMAPRO_CLK_ACPM_DVFS_MIF>,
+                 <&acpm_ipc ZUMAPRO_CLK_ACPM_DVFS_INT>;
+        clock-names = "mif", "int";
+        #interconnect-cells = <1>;
+    };
