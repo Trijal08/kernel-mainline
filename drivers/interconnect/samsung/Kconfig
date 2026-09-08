@@ -13,3 +13,12 @@ config INTERCONNECT_EXYNOS
 	  Generic interconnect driver for Samsung Exynos SoCs (e.g. Exynos3250,
 	  Exynos4210, Exynos4412, Exynos542x, Exynos5433).
 	  Choose Y here only if you build for such Samsung SoC.
+
+config INTERCONNECT_EXYNOS_BTS
+	tristate "Exynos Bus Traffic Shaper interconnect driver"
+	depends on INTERCONNECT_SAMSUNG
+	depends on COMMON_CLK
+	help
+	  Interconnect provider for the Samsung Bus Traffic Shaper found in
+	  Google Tensor SoCs. It programs per-master AXI quality of service and
+	  converts aggregate bandwidth constraints into ACPM DVFS clock floors.
