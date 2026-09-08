@@ -173,15 +173,13 @@ static void wake_up_dev(struct s5p_mfc_dev *dev, unsigned int reason,
 	wake_up(&dev->queue);
 }
 
-/* A device reset invalidates every firmware instance. */
-void s5p_mfc_abort_firmware(struct s5p_mfc_dev *dev)
+/* Prevent further commands when the firmware cannot service its instances. */
+static void s5p_mfc_fail_firmware(struct s5p_mfc_dev *dev)
 {
 	struct s5p_mfc_ctx *ctx;
 	int i;
 
 	WRITE_ONCE(dev->fw_failed, true);
-	s5p_mfc_reset(dev);
-	s5p_mfc_hw_call(dev->mfc_ops, clear_int_flags, dev);
 	for (i = 0; i < MFC_NUM_CONTEXTS; i++) {
 		ctx = dev->ctx[i];
 		if (!ctx)
@@ -197,6 +195,15 @@ void s5p_mfc_abort_firmware(struct s5p_mfc_dev *dev)
 	}
 	clear_bit(0, &dev->enter_suspend);
 	wake_up_dev(dev, S5P_MFC_R2H_CMD_ERR_RET, 0);
+}
+
+/* A device reset invalidates every firmware instance. */
+void s5p_mfc_abort_firmware(struct s5p_mfc_dev *dev)
+{
+	WRITE_ONCE(dev->fw_failed, true);
+	s5p_mfc_reset(dev);
+	s5p_mfc_hw_call(dev->mfc_ops, clear_int_flags, dev);
+	s5p_mfc_fail_firmware(dev);
 }
 
 void s5p_mfc_cleanup_queue(struct list_head *lh, struct vb2_queue *vq)
@@ -485,6 +492,11 @@ static void s5p_mfc_handle_frame(struct s5p_mfc_ctx *ctx,
 	struct s5p_mfc_buf *src_buf;
 	unsigned int res_change;
 
+	if (IS_MFCV16_PLUS(dev) &&
+	    FIELD_GET(S5P_FIMV_D_NUM_TILES_MASK_V16,
+		      mfc_read(dev, S5P_FIMV_D_DECODED_STATUS_V16)) >= 4)
+		WRITE_ONCE(ctx->qos.tiled, true);
+
 	if (IS_MFCV16_PLUS(dev) && ctx->codec_mode == S5P_MFC_CODEC_VP9_DEC &&
 	    (s5p_mfc_hw_call(dev->mfc_ops, get_dspl_status, dev) &
 	     S5P_FIMV_D_STATUS_INTER_RES_CHANGE_V16)) {
@@ -684,6 +696,12 @@ static void s5p_mfc_handle_seq_done(struct s5p_mfc_ctx *ctx,
 		ctx->img_height = height;
 		/* Valid only now; S_FMT recomputes the layout from these. */
 		if (IS_MFCV16_PLUS(dev)) {
+			WRITE_ONCE(ctx->qos.tiled, false);
+			WRITE_ONCE(ctx->qos.mbaff,
+				   (ctx->codec_mode == S5P_MFC_CODEC_H264_DEC ||
+				    ctx->codec_mode == S5P_MFC_CODEC_H264_MVC_DEC) &&
+				   (mfc_read(dev, S5P_FIMV_D_H264_INFO_V16) &
+				    S5P_FIMV_D_MBAFF_V16));
 			ctx->luma_dpb_min = mfc_read(dev,
 					S5P_FIMV_D_MIN_LUMA_DPB_SIZE_V6);
 			ctx->chroma_dpb_min = mfc_read(dev,
@@ -1186,6 +1204,7 @@ static int s5p_mfc_release(struct file *file)
 			mfc_debug(2, "Has to free instance\n");
 			s5p_mfc_close_mfc_inst(dev, ctx);
 		}
+		s5p_mfc_qos_release(ctx);
 		s5p_mfc_release_ctx_slot(ctx);
 		list_del(&ctx->node);
 		dev->num_inst--;
@@ -1778,9 +1797,18 @@ static int s5p_mfc_suspend(struct device *dev)
 static int s5p_mfc_resume(struct device *dev)
 {
 	struct s5p_mfc_dev *m_dev = dev_get_drvdata(dev);
+	int ret;
 
 	if (m_dev->num_inst == 0)
 		return 0;
+	ret = s5p_mfc_qos_restore(m_dev);
+	if (ret) {
+		/* Firmware is still asleep; a later rate retry cannot wake it. */
+		mutex_lock(&m_dev->mfc_mutex);
+		s5p_mfc_fail_firmware(m_dev);
+		mutex_unlock(&m_dev->mfc_mutex);
+		return ret;
+	}
 	return s5p_mfc_wakeup(m_dev);
 }
 #endif

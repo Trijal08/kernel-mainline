@@ -18,6 +18,7 @@
 #include <media/v4l2-device.h>
 #include <media/v4l2-ioctl.h>
 #include <media/videobuf2-v4l2.h>
+#include "s5p_mfc_qos.h"
 #include "regs-mfc.h"
 #include "regs-mfc-v16.h"
 
@@ -196,6 +197,9 @@ struct s5p_mfc_buf {
  */
 struct s5p_mfc_pm {
 	struct clk	*clock_gate;
+	struct clk	*rate_clock;
+	unsigned long	qos_rate;
+	bool		qos_dirty;
 	const char * const *clk_names;
 	struct clk	*clocks[MFC_MAX_CLOCKS];
 	int		num_clocks;
@@ -682,6 +686,7 @@ struct s5p_mfc_ctx {
 	struct s5p_mfc_dev *dev;
 	struct list_head node;
 	struct v4l2_fh fh;
+	struct s5p_mfc_qos qos;
 
 	int num;
 
