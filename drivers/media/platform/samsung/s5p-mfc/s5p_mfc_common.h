@@ -198,7 +198,11 @@ struct s5p_mfc_buf {
 struct s5p_mfc_pm {
 	struct clk	*clock_gate;
 	struct clk	*rate_clock;
+	struct icc_path	*memory_path;
 	unsigned long	qos_rate;
+	u32		qos_avg_bw;
+	u32		qos_peak_bw;
+	u32		qos_tag;
 	bool		qos_dirty;
 	const char * const *clk_names;
 	struct clk	*clocks[MFC_MAX_CLOCKS];
