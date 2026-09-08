@@ -2897,7 +2897,7 @@ static int s5p_mfc_buf_prepare(struct vb2_buffer *vb)
 	return 0;
 }
 
-static int s5p_mfc_start_streaming(struct vb2_queue *q, unsigned int count)
+static int s5p_mfc_start_streaming_inner(struct vb2_queue *q, unsigned int count)
 {
 	struct s5p_mfc_ctx *ctx = vb2_get_drv_priv(q);
 	struct s5p_mfc_dev *dev = ctx->dev;
@@ -2947,6 +2947,15 @@ static int s5p_mfc_start_streaming(struct vb2_queue *q, unsigned int count)
 	s5p_mfc_hw_call(dev->mfc_ops, try_run, dev);
 
 	return 0;
+}
+
+static int s5p_mfc_start_streaming(struct vb2_queue *q, unsigned int count)
+{
+	int ret = s5p_mfc_start_streaming_inner(q, count);
+
+	if (ret)
+		s5p_mfc_qos_stop(q);
+	return ret;
 }
 
 /* Caller holds irqlock, including when the last buffer arrives after drain. */
@@ -3027,6 +3036,7 @@ static void s5p_mfc_stop_streaming(struct vb2_queue *q)
 		s5p_mfc_clock_off(dev);
 		ctx->state = MFCINST_INIT;
 	}
+	s5p_mfc_qos_stop(q);
 }
 
 static void s5p_mfc_buf_queue(struct vb2_buffer *vb)
@@ -3036,6 +3046,11 @@ static void s5p_mfc_buf_queue(struct vb2_buffer *vb)
 	struct s5p_mfc_dev *dev = ctx->dev;
 	unsigned long flags;
 	struct s5p_mfc_buf *mfc_buf;
+
+	if (s5p_mfc_qos_queue(vb)) {
+		vb2_buffer_done(vb, VB2_BUF_STATE_ERROR);
+		return;
+	}
 
 	if (ctx->state == MFCINST_ERROR) {
 		vb2_buffer_done(vb, VB2_BUF_STATE_ERROR);
