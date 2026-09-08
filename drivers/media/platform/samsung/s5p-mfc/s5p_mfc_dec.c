@@ -1357,6 +1357,7 @@ static void s5p_mfc_stop_streaming(struct vb2_queue *q)
 	if (aborted)
 		ctx->state = MFCINST_RUNNING;
 	spin_unlock_irqrestore(&dev->irqlock, flags);
+	s5p_mfc_qos_stop(q);
 }
 
 
@@ -1367,6 +1368,11 @@ static void s5p_mfc_buf_queue(struct vb2_buffer *vb)
 	struct s5p_mfc_dev *dev = ctx->dev;
 	unsigned long flags;
 	struct s5p_mfc_buf *mfc_buf;
+
+	if (s5p_mfc_qos_queue(vb)) {
+		vb2_buffer_done(vb, VB2_BUF_STATE_ERROR);
+		return;
+	}
 
 	if (vq->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
 		mfc_buf = &ctx->src_bufs[vb->index];

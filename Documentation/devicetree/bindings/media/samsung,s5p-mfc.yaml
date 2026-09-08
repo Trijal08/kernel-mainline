@@ -80,10 +80,12 @@ allOf:
     then:
       properties:
         clocks:
-          maxItems: 1
+          maxItems: 2
         clock-names:
+          minItems: 1
           items:
             - const: mfc
+            - const: sclk_mfc
         iommus:
           maxItems: 1
         iommu-names: false
