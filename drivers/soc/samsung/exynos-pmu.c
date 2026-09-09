@@ -9,6 +9,7 @@
 #include <linux/bitmap.h>
 #include <linux/cpuhotplug.h>
 #include <linux/cpu_pm.h>
+#include <linux/io.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/mfd/core.h>
@@ -18,6 +19,8 @@
 #include <linux/delay.h>
 #include <linux/reboot.h>
 #include <linux/regmap.h>
+#include <linux/suspend.h>
+#include <linux/syscore_ops.h>
 
 #include <linux/soc/samsung/exynos-regs-pmu.h>
 #include <linux/soc/samsung/exynos-pmu.h>
@@ -229,7 +232,9 @@ EXPORT_SYMBOL_GPL(exynos_get_pmu_regmap_by_phandle);
  */
 #define CPU_INFORM_CLEAR	0
 #define CPU_INFORM_C2		1
+#define CPU_INFORM_CPD		2
 #define CPU_INFORM_SICD		3
+#define CPU_INFORM_SLEEP	4
 
 /* PMU_INFORM0 value telling EL3/TF-A that Linux may use the C2 idle state. */
 #define PMU_ALLOWED_C2		1
@@ -414,13 +419,25 @@ static struct notifier_block exynos_cpupm_reboot_nb = {
 	.notifier_call = exynos_cpupm_reboot_notifier,
 };
 
-static int setup_cpuhp_and_cpuidle(struct device *dev)
+/*
+ * Build the raw-spinlock mmio regmap for the PMU interrupt generator and
+ * register it as that node's syscon.  Both the gs101 cpuidle/hotplug hints and
+ * the zumapro SYS_SLEEP enter sequence program GRP*_INTR_BID through it.
+ *
+ * Returns 0 with pmu_context->pmuintrgen left NULL when the DT has no
+ * google,pmu-intr-gen-syscon phandle, so older DTs keep probing; callers that
+ * need the block must check for NULL.
+ */
+static int setup_pmu_intr_gen(struct device *dev)
 {
 	struct device_node *intr_gen_node __free(device_node) =
 		of_parse_phandle(dev->of_node, "google,pmu-intr-gen-syscon", 0);
 	struct resource intrgen_res;
 	void __iomem *virt_addr;
-	int ret, cpu;
+	int ret;
+
+	if (pmu_context->pmuintrgen)
+		return 0;
 
 	if (!intr_gen_node) {
 		/*
@@ -455,6 +472,21 @@ static int setup_cpuhp_and_cpuidle(struct device *dev)
 	if (ret)
 		return ret;
 
+	return 0;
+}
+
+static int setup_cpuhp_and_cpuidle(struct device *dev)
+{
+	int ret, cpu;
+
+	ret = setup_pmu_intr_gen(dev);
+	if (ret)
+		return ret;
+
+	/* older DTs without the phandle: keep probing without the hints */
+	if (!pmu_context->pmuintrgen)
+		return 0;
+
 	pmu_context->in_cpuhp = devm_bitmap_zalloc(dev, num_possible_cpus(),
 						   GFP_KERNEL);
 	if (!pmu_context->in_cpuhp)
@@ -486,21 +518,46 @@ static int setup_cpuhp_and_cpuidle(struct device *dev)
 static const struct {
 	unsigned int stat_reg;
 	unsigned int en_reg;
-	u32 mask;
+	u32 sicd_mask;
+	u32 sleep_mask;
 } zumapro_wakeup_mask[] = {
-	{ GS101_WAKEUP_STAT, GS101_TOP_INT_EN, 0xff00000 },
-	{ 0x3970, GS101_WAKEUP2_INT_EN, 0x0 },
+	/*
+	 * System idle (SICD) keeps the GIC alive, so the per-core
+	 * CLUSTERn_CPUm_GIC_WAKEUP bits are the wake sources and an armed
+	 * device interrupt reaches the core the ordinary way.
+	 *
+	 * Suspend-to-RAM (SYS_SLEEP) powers the GIC down, so those bits can
+	 * wake nothing; the sources are the aggregates the PMU itself latches
+	 * -- RTC/TRTC alarm and tick (bits 0-3), the external-interrupt
+	 * aggregate that carries the power button (bit 4), and the PCIe/USB
+	 * and timer bits above them.  Values are downstream's, from the
+	 * exynos-pm node's wakeup_int_en in research/dumped.dts:17683 and
+	 * confirmed live in research/tracing/downstream-sys-sleep-decoded.md.
+	 */
+	{ GS101_WAKEUP_STAT, GS101_TOP_INT_EN, 0xff00000, 0x1d0bf },
+	/*
+	 * The status register paired with GS101_WAKEUP2_INT_EN.  Spelled out
+	 * rather than using GS101_WAKEUP2_STAT, which the header puts at
+	 * 0x3954: the register layout around it (0x3960 IN, 0x3964 EN, 0x3968
+	 * TYPE, 0x396c DIR) and the downstream exynos-pm node's
+	 * wakeup_stat_offset in research/dumped.dts:17681 both say 0x3970.
+	 */
+	{ 0x3970, GS101_WAKEUP2_INT_EN, 0x0, 0x1f0 },
 };
 
 static void zumapro_set_wakeup_mask(bool arm)
 {
+	bool deep = pm_suspend_target_state == PM_SUSPEND_MEM;
 	int i;
 
 	for (i = 0; i < ARRAY_SIZE(zumapro_wakeup_mask); i++) {
+		u32 mask = deep ? zumapro_wakeup_mask[i].sleep_mask
+				: zumapro_wakeup_mask[i].sicd_mask;
+
 		regmap_write(pmu_context->pmureg,
 			     zumapro_wakeup_mask[i].stat_reg, 0);
 		regmap_write(pmu_context->pmureg, zumapro_wakeup_mask[i].en_reg,
-			     arm ? zumapro_wakeup_mask[i].mask : 0);
+			     arm ? mask : 0);
 	}
 }
 
@@ -519,6 +576,14 @@ static u32 zumapro_dbg_c2, zumapro_dbg_sicd, zumapro_dbg_fail;
  * CPU_INFORM hints; no pmu-intr-gen handshake is needed (downstream does not
  * touch it on the idle-enter path).  Only active inside a system suspend, when
  * the mask is armed and all cores are parking; awake idle uses standard PSCI.
+ *
+ * Suspend-to-RAM is a different power mode with a different hint (SLEEP, from
+ * the syscore callback below) and its secondaries are hotplugged out rather
+ * than idled, so this election must stay out of that path.  The gate is load
+ * bearing, not defensive: cpu_pm_suspend() is itself a syscore callback, and
+ * syscore suspend runs the list in reverse registration order, so it fires
+ * CPU_PM_ENTER on the boot core *after* the sleep hint below has been
+ * published and before the firmware call -- overwriting SLEEP with SICD.
  */
 static int zumapro_cpu_pm_notify(struct notifier_block *self,
 				 unsigned long action, void *v)
@@ -528,7 +593,8 @@ static int zumapro_cpu_pm_notify(struct notifier_block *self,
 
 	raw_spin_lock(&pmu_context->cpupm_lock);
 
-	if (!pmu_context->sys_insuspend) {
+	if (!pmu_context->sys_insuspend ||
+	    pm_suspend_target_state != PM_SUSPEND_TO_IDLE) {
 		raw_spin_unlock(&pmu_context->cpupm_lock);
 		return NOTIFY_OK;
 	}
@@ -601,6 +667,253 @@ static void zumapro_enable_dsu_drcg(struct device *dev)
 	writel(~0u, va + CPUCL0_DSU_DRCG_EN);
 	writel(~0u, va + CPUCL0_DSU_DRCG_EN_INT);
 	iounmap(va);
+}
+
+/*
+ * Suspend-to-RAM (the firmware's SYS_SLEEP power mode).
+ *
+ * Downstream reaches it from exynos-pm's syscore callbacks: cal_pm_enter()
+ * publishes the boot core's SLEEP hint and runs a three-register "enter"
+ * sequence, and the cores that went down before it published a C2 (or CPD, for
+ * the last core of a cluster) hint from the cpu-hotplug teardown.  The kernel
+ * then makes the ordinary PSCI SYSTEM_SUSPEND call; the ACPM firmware watches
+ * those hints to decide how deep to take the SoC and how to bring it back.
+ *
+ * Mainline made none of those writes, so an "echo mem" so far armed the system
+ * idle state's registers and then asked the firmware to power the SoC down --
+ * a request the firmware has no wake path for.  The sequences below are the
+ * downstream ones, from research/tracing/downstream-sys-sleep-decoded.md and
+ * the zuma flexpmu_cal_system_zuma.h tables.
+ */
+
+/* tegu cluster membership: cluster0 = {0-3}, cluster1 = {4-6}, cluster2 = {7} */
+static const u8 zumapro_cpu_cluster[] = { 0, 0, 0, 0, 1, 1, 1, 2 };
+
+/*
+ * Set while a suspend-to-RAM is in flight, for the hotplug hints below.  Unlike
+ * its siblings in pmu_context this needs no lock: it is written in the noirq
+ * phases, and the CPU teardown that reads it is separated from both writes by
+ * the hotplug machinery, with userspace frozen throughout.
+ */
+static bool zumapro_in_sys_sleep;
+
+static void zumapro_sys_sleep_arm(void)
+{
+	unsigned int cl0_int_en =
+		GS101_CLUSTER_CPU_INT_EN(GS101_CLUSTER0_OFFSET, 0);
+	unsigned int reg;
+
+	/*
+	 * Only the boot core's hint is published here, exactly like downstream:
+	 * the secondaries' CPU_INFORM belongs to the hotplug teardown, which
+	 * ran before this on each dying core, and the firmware stamps its own
+	 * "powered down" acknowledgement into the same word as it takes each
+	 * core down.  Rewriting them here would clobber that.
+	 */
+	regmap_write(pmu_context->pmureg, GS101_CPU_INFORM(0), CPU_INFORM_SLEEP);
+
+	/*
+	 * Without the interrupt generator the wake cannot be routed back, so
+	 * leave the rest of the sequence alone rather than half-arm it; the
+	 * disarm below bails at the same point.
+	 */
+	if (!pmu_context->pmuintrgen)
+		return;
+
+	regmap_update_bits(pmu_context->pmuintrgen,
+			   GS101_GRP2_INTR_BID_ENABLE, BIT(0), BIT(0));
+
+	/*
+	 * Clear-pending is "read the pending register, write what was pending
+	 * into the clear register", so it writes 0 when nothing is pending.
+	 * The capture in downstream-sys-sleep-decoded.md shows a literal 1 here
+	 * because that machine had the bit pending at the time, not because the
+	 * value is a constant; mainline reads 0 while awake, so it writes 0 and
+	 * clears nothing, which is the same behaviour with nothing to clear.
+	 */
+	regmap_read(pmu_context->pmuintrgen, GS101_GRP1_INTR_BID_UPEND, &reg);
+	regmap_write(pmu_context->pmuintrgen, GS101_GRP1_INTR_BID_CLEAR,
+		     reg & BIT(0));
+
+	/*
+	 * A plain read-modify-write, not regmap_update_bits(): for PMU_ALIVE
+	 * offsets the secure regmap turns update_bits into the hardware
+	 * set/clear-bit alias, which is a different operation from the masked
+	 * write downstream's pmucal issues here.  (Whether bit 3 latches at all
+	 * is a separate question -- it reads back clear on both kernels, so it
+	 * appears to be hardware-gated rather than stored.)
+	 */
+	regmap_read(pmu_context->pmureg, cl0_int_en, &reg);
+	regmap_write(pmu_context->pmureg, cl0_int_en, reg | BIT(3));
+}
+
+static void zumapro_sys_sleep_disarm(void)
+{
+	unsigned int cl0_int_en =
+		GS101_CLUSTER_CPU_INT_EN(GS101_CLUSTER0_OFFSET, 0);
+	unsigned int reg;
+
+	if (!pmu_context->pmuintrgen)
+		return;
+
+	regmap_update_bits(pmu_context->pmuintrgen,
+			   GS101_GRP2_INTR_BID_ENABLE, BIT(0), 0);
+	regmap_read(pmu_context->pmuintrgen, GS101_GRP2_INTR_BID_UPEND, &reg);
+	regmap_write(pmu_context->pmuintrgen, GS101_GRP2_INTR_BID_CLEAR,
+		     reg & BIT(0));
+
+	regmap_read(pmu_context->pmureg, cl0_int_en, &reg);
+	regmap_write(pmu_context->pmureg, cl0_int_en, reg & ~BIT(3));
+	regmap_write(pmu_context->pmureg, GS101_CPU_INFORM(0), CPU_INFORM_CLEAR);
+}
+
+/*
+ * syscore callbacks run on the boot core after the secondaries are down and
+ * immediately before (and after) the PSCI SYSTEM_SUSPEND call -- the same
+ * position downstream's exynos-pm uses.  They are reached for every system
+ * sleep state, so check which one is in flight.
+ *
+ * This undoes only what the enter sequence did.  Downstream's full exit also
+ * re-enables bus clock gating across sixteen fabric blocks and walks the PMU
+ * state machine, which matters only once the SoC is coming back far enough to
+ * need them; that is the next step, not this one.
+ */
+static int zumapro_sys_sleep_suspend(void *data)
+{
+	if (pm_suspend_target_state != PM_SUSPEND_MEM)
+		return 0;
+
+	zumapro_sys_sleep_arm();
+	return 0;
+}
+
+static void zumapro_sys_sleep_resume(void *data)
+{
+	if (pm_suspend_target_state != PM_SUSPEND_MEM)
+		return;
+
+	zumapro_sys_sleep_disarm();
+}
+
+static const struct syscore_ops zumapro_sys_sleep_syscore_ops = {
+	.suspend	= zumapro_sys_sleep_suspend,
+	.resume		= zumapro_sys_sleep_resume,
+};
+
+static struct syscore zumapro_sys_sleep_syscore = {
+	.ops = &zumapro_sys_sleep_syscore_ops,
+};
+
+/*
+ * Publish a dying core's idle hint before its PSCI CPU_OFF, which is where
+ * downstream's cpu-hotplug teardown puts it.  Without it the firmware takes
+ * the core down while its hint still reads "running", and the recorded state
+ * of the machine at SYSTEM_SUSPEND does not match what downstream produces.
+ *
+ * CPD when this is the last online core of its cluster, C2 otherwise.  Scoped
+ * to a suspend-to-RAM in flight so that runtime hotplug and s2idle keep the
+ * behaviour they have today.
+ *
+ * Note the resulting register signature differs from the downstream capture,
+ * and legitimately so: freeze_secondary_cpus() here takes the cores down in
+ * descending order where the vendor kernel goes up, so the core that ends up
+ * last in cluster1 is cpu4 rather than cpu6.  Expect 4,1,1,1,2,1,1,2 across
+ * CPU_INFORM[0..7], not the vendor's 4,1,1,1,1,1,2,2.
+ */
+static int zumapro_cpuhp_sleep_hint_set(unsigned int cpu)
+{
+	bool cluster_last = true;
+	int c;
+
+	if (!zumapro_in_sys_sleep || cpu >= ARRAY_SIZE(zumapro_cpu_cluster))
+		return 0;
+
+	for_each_online_cpu(c) {
+		if (c != cpu && c < ARRAY_SIZE(zumapro_cpu_cluster) &&
+		    zumapro_cpu_cluster[c] == zumapro_cpu_cluster[cpu]) {
+			cluster_last = false;
+			break;
+		}
+	}
+
+	regmap_write(pmu_context->pmureg, GS101_CPU_INFORM(cpu),
+		     cluster_last ? CPU_INFORM_CPD : CPU_INFORM_C2);
+	return 0;
+}
+
+static int zumapro_cpuhp_sleep_hint_clear(unsigned int cpu)
+{
+	if (zumapro_in_sys_sleep && cpu < ARRAY_SIZE(zumapro_cpu_cluster))
+		regmap_write(pmu_context->pmureg, GS101_CPU_INFORM(cpu),
+			     CPU_INFORM_CLEAR);
+	return 0;
+}
+
+/*
+ * How long the PMU's power-up sequencer waits for each external regulator and
+ * for the TCXO to settle when it brings the SoC back.  Downstream programs
+ * these once at boot from pmucal_lpm_init[]; mainline has no pmucal, so they
+ * sit at their reset values, and a sequencer that does not wait long enough
+ * for a rail cannot complete the wake.
+ *
+ * PMU_ALIVE is write-protected: the writes go out as EL3 calls, which can be
+ * refused, so each one is read back.  The read side is an ordinary MMIO read
+ * through the kernel's own mapping (only userspace mappings of this block
+ * fault), so a readback that differs from what was written means EL3 declined
+ * it.  Values from flexpmu_cal_system_zuma.h.
+ */
+static const struct {
+	unsigned int reg;
+	u32 mask;
+	u32 val;
+	const char *name;
+} zumapro_lpm_durations[] = {
+	{ 0x3cb0, ~0u,      0x244, "MIF" },
+	{ 0x3cb4, ~0u,      0x0a0, "TOP" },
+	{ 0x3cb8, ~0u,      0x0a0, "CPUCL2" },
+	{ 0x3cbc, ~0u,      0x0a0, "CPUCL1" },
+	{ 0x3cc0, ~0u,      0x0be, "G3D" },
+	{ 0x3cc4, ~0u,      0x0a0, "TPU" },
+	/* TCXO is the one entry downstream masks: bits 20-31 are left alone. */
+	{ 0x3cc8, 0xfffff,  0x66c, "TCXO" },
+};
+
+static void zumapro_program_lpm_durations(struct device *dev)
+{
+	int i, ret;
+
+	for (i = 0; i < ARRAY_SIZE(zumapro_lpm_durations); i++) {
+		u32 mask = zumapro_lpm_durations[i].mask;
+		u32 val = zumapro_lpm_durations[i].val;
+		unsigned int rb = 0;
+
+		/*
+		 * A masked entry is a read-modify-write of those bits and a
+		 * full write of the rest, which is what pmucal_rae_write()
+		 * does.  Not regmap_update_bits(): for PMU_ALIVE offsets the
+		 * secure regmap turns that into the hardware set/clear-bit
+		 * alias, which is a different operation.
+		 */
+		if (mask != ~0u) {
+			ret = regmap_read(pmu_context->pmureg,
+					  zumapro_lpm_durations[i].reg, &rb);
+			if (ret)
+				continue;
+			val = (rb & ~mask) | (val & mask);
+		}
+
+		ret = regmap_write(pmu_context->pmureg,
+				   zumapro_lpm_durations[i].reg, val);
+		rb = 0;
+		regmap_read(pmu_context->pmureg,
+			    zumapro_lpm_durations[i].reg, &rb);
+		if (ret || rb != val)
+			dev_warn(dev, "%s settle duration: wrote 0x%x ret=%d readback=0x%x\n",
+				 zumapro_lpm_durations[i].name, val, ret, rb);
+		else
+			dev_info(dev, "%s settle duration=0x%x\n",
+				 zumapro_lpm_durations[i].name, val);
+	}
 }
 
 static int exynos_pmu_probe(struct platform_device *pdev)
@@ -694,6 +1007,26 @@ static int exynos_pmu_probe(struct platform_device *pdev)
 
 		cpu_pm_register_notifier(&zumapro_cpu_pm_notifier);
 		zumapro_enable_dsu_drcg(dev);
+
+		/*
+		 * Suspend-to-RAM: the interrupt generator carries the enter
+		 * sequence's wake routing, the hotplug teardown publishes each
+		 * dying core's hint, and the syscore callbacks bracket the
+		 * PSCI SYSTEM_SUSPEND call.
+		 */
+		ret = setup_pmu_intr_gen(dev);
+		if (ret)
+			return ret;
+
+		zumapro_program_lpm_durations(dev);
+		register_syscore(&zumapro_sys_sleep_syscore);
+
+		ret = cpuhp_setup_state(CPUHP_AP_ONLINE_DYN,
+					"soc/exynos-pmu:sleep-hint",
+					zumapro_cpuhp_sleep_hint_clear,
+					zumapro_cpuhp_sleep_hint_set);
+		if (ret < 0)
+			return ret;
 	}
 
 	if (pmu_context->pmu_data && pmu_context->pmu_data->pmu_init)
@@ -723,13 +1056,15 @@ static int exynos_cpupm_suspend_noirq(struct device *dev)
 	zumapro_dbg_c2 = zumapro_dbg_sicd = zumapro_dbg_fail = 0;
 	raw_spin_unlock(&pmu_context->cpupm_lock);
 
-	if (pmu_context->pmu_data && pmu_context->pmu_data->pmu_sicd_wakeup) {
-		unsigned int v = 0xdead;
+	/*
+	 * Set before the secondaries are taken offline, which happens after
+	 * this phase, so their hotplug teardown can tell a suspend-to-RAM from
+	 * a runtime hotplug.
+	 */
+	zumapro_in_sys_sleep = pm_suspend_target_state == PM_SUSPEND_MEM;
 
+	if (pmu_context->pmu_data && pmu_context->pmu_data->pmu_sicd_wakeup) {
 		zumapro_set_wakeup_mask(true);
-		regmap_read(pmu_context->pmureg, GS101_TOP_INT_EN, &v);
-		pr_info("zumapro: suspend: wakeup mask armed, TOP_INT_EN(0x3944)=0x%x\n",
-			v);
 	}
 
 	return 0;
@@ -739,13 +1074,16 @@ static int exynos_cpupm_resume_noirq(struct device *dev)
 {
 	if (pmu_context->pmu_data && pmu_context->pmu_data->pmu_sicd_wakeup) {
 		zumapro_set_wakeup_mask(false);
-		pr_info("zumapro: resume: CPU_INFORM hints c2=%u sicd=%u fails=%u\n",
+		pr_debug("zumapro: resume: CPU_INFORM hints c2=%u sicd=%u fails=%u\n",
 			zumapro_dbg_c2, zumapro_dbg_sicd, zumapro_dbg_fail);
 	}
 
 	raw_spin_lock(&pmu_context->cpupm_lock);
 	pmu_context->sys_insuspend = false;
 	raw_spin_unlock(&pmu_context->cpupm_lock);
+
+	/* Cleared last: the secondaries came back online before this phase. */
+	zumapro_in_sys_sleep = false;
 	return 0;
 }
 
