@@ -334,8 +334,10 @@ const struct exynos_pmu_data gs101_pmu_data = {
  * through the same TENSOR_SMC_PMU_SEC_REG SMC interface, so pmu_secure reuses
  * the regmap_smccfg ops above. No access tables yet - EL3 enforces its own
  * write allowlist and rejected accesses simply return -EINVAL - and no
- * pmu_cpuhp, as zumapro has no pmu-intr-gen node and uses standard PSCI for
- * CPU hotplug/idle. This is enough for the UFS and USB PHY isolation writes.
+ * pmu_cpuhp, as zumapro uses standard PSCI for CPU hotplug/idle. (It does
+ * describe a pmu-intr-gen node, which the suspend-to-RAM enter sequence in
+ * exynos-pmu.c programs, but not the gs101 per-core hotplug hints.) This is
+ * enough for the UFS and USB PHY isolation writes.
  *
  * pmu_sicd_wakeup is set because plain PSCI does not keep zumapro's cores
  * powered down during system idle; the firmware needs each idling CPU to
