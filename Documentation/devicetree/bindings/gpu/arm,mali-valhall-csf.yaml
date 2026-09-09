@@ -97,6 +97,13 @@ properties:
 
   dma-coherent: true
 
+  access-controllers:
+    maxItems: 1
+    description:
+      The stage-2 memory protection unit in front of the GPU's DMA, which
+      loses its state with the GPU's power domain and has to be reopened
+      before the GPU is used.
+
 required:
   - compatible
   - reg
@@ -123,6 +130,15 @@ allOf:
         power-domain-names: false
       required:
         - mali-supply
+  - if:
+      not:
+        properties:
+          compatible:
+            contains:
+              const: google,zumapro-mali
+    then:
+      properties:
+        access-controllers: false
   - if:
       properties:
         compatible:
