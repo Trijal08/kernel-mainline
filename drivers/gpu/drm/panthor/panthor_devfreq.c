@@ -6,6 +6,7 @@
 #include <linux/devfreq_cooling.h>
 #include <linux/platform_device.h>
 #include <linux/pm_opp.h>
+#include <linux/pm_runtime.h>
 
 #include <drm/drm_managed.h>
 #include <drm/drm_print.h>
@@ -43,6 +44,13 @@ struct panthor_devfreq {
 	 * and panthor_devfreq_record_{busy,idle}().
 	 */
 	spinlock_t lock;
+
+	/**
+	 * @pending_freq: Rate requested while the GPU was not active, or 0.
+	 *
+	 * Applied by panthor_devfreq_resume(). Protected by @lock.
+	 */
+	unsigned long pending_freq;
 };
 
 static void panthor_devfreq_update_utilization(struct panthor_devfreq *pdevfreq)
@@ -60,16 +68,10 @@ static void panthor_devfreq_update_utilization(struct panthor_devfreq *pdevfreq)
 	pdevfreq->time_last_update = now;
 }
 
-static int panthor_devfreq_target(struct device *dev, unsigned long *freq,
-				  u32 flags)
+static int panthor_devfreq_apply(struct panthor_device *ptdev,
+				 struct dev_pm_opp *opp, unsigned long freq)
 {
-	struct panthor_device *ptdev = dev_get_drvdata(dev);
-	struct dev_pm_opp *opp;
-	int err;
-
-	opp = devfreq_recommended_opp(dev, freq, flags);
-	if (IS_ERR(opp))
-		return PTR_ERR(opp);
+	struct device *dev = ptdev->base.dev;
 
 	/*
 	 * dev_pm_opp_set_rate() only ever drives clock #0. When the OPP table
@@ -77,10 +79,52 @@ static int panthor_devfreq_target(struct device *dev, unsigned long *freq,
 	 * of them move together.
 	 */
 	if (ptdev->soc_data && ptdev->soc_data->opp_clk_names)
-		err = dev_pm_opp_set_opp(dev, opp);
-	else
-		err = dev_pm_opp_set_rate(dev, *freq);
+		return dev_pm_opp_set_opp(dev, opp);
 
+	return dev_pm_opp_set_rate(dev, freq);
+}
+
+static int panthor_devfreq_target(struct device *dev, unsigned long *freq,
+				  u32 flags)
+{
+	struct panthor_device *ptdev = dev_get_drvdata(dev);
+	struct panthor_devfreq *pdevfreq = ptdev->devfreq;
+	struct dev_pm_opp *opp;
+	unsigned long irqflags;
+	int err;
+
+	opp = devfreq_recommended_opp(dev, freq, flags);
+	if (IS_ERR(opp))
+		return PTR_ERR(opp);
+
+	/*
+	 * The governor's timer stops with the GPU, but a request can still
+	 * arrive at any time through PM QoS: the thermal cooling device and
+	 * the user's min/max limits. The GPU's clocks may sit in its power
+	 * domain, or be driven by firmware that programs them there, so a rate
+	 * must not be applied while the domain may be off. Hold the device
+	 * active for the duration, and if it is not active keep the request
+	 * for panthor_devfreq_resume(). A request that lands while the device
+	 * is resuming, after the resume has applied the held one, waits for
+	 * the next resume; the governor re-evaluates on its first poll anyway,
+	 * and a request applied here clears it.
+	 */
+	if (IS_ENABLED(CONFIG_PM) && pm_runtime_get_if_active(dev) <= 0) {
+		spin_lock_irqsave(&pdevfreq->lock, irqflags);
+		pdevfreq->pending_freq = *freq;
+		spin_unlock_irqrestore(&pdevfreq->lock, irqflags);
+		dev_pm_opp_put(opp);
+		return 0;
+	}
+
+	/* This request supersedes anything still held. */
+	spin_lock_irqsave(&pdevfreq->lock, irqflags);
+	pdevfreq->pending_freq = 0;
+	spin_unlock_irqrestore(&pdevfreq->lock, irqflags);
+
+	err = panthor_devfreq_apply(ptdev, opp, *freq);
+	if (IS_ENABLED(CONFIG_PM))
+		pm_runtime_put(dev);
 	dev_pm_opp_put(opp);
 
 	return err;
@@ -220,6 +264,15 @@ int panthor_devfreq_init(struct panthor_device *ptdev)
 
 	panthor_devfreq_reset(pdevfreq);
 
+	/*
+	 * The initial OPP below is applied before runtime PM is enabled, with
+	 * the power domains possibly off (they are attached without
+	 * DL_FLAG_RPM_ACTIVE and genpd queues a power-off after the attach).
+	 * It only stays off the clock provider because the boot rate is an
+	 * OPP rate and the clock framework skips an unchanged rate; a
+	 * bootloader leaving the GPU at a rate outside the table would send
+	 * the request panthor_devfreq_target() guards against.
+	 */
 	cur_freq = clk_get_rate(ptdev->clks.core);
 
 	/* Regulator coupling only takes care of synchronizing/balancing voltage
@@ -311,11 +364,35 @@ int panthor_devfreq_init(struct panthor_device *ptdev)
 void panthor_devfreq_resume(struct panthor_device *ptdev)
 {
 	struct panthor_devfreq *pdevfreq = ptdev->devfreq;
+	struct device *dev = ptdev->base.dev;
+	unsigned long irqflags, freq;
 
 	if (!pdevfreq->devfreq)
 		return;
 
 	panthor_devfreq_reset(pdevfreq);
+
+	/* The domain is on again: apply what was requested while it was not. */
+	spin_lock_irqsave(&pdevfreq->lock, irqflags);
+	freq = pdevfreq->pending_freq;
+	pdevfreq->pending_freq = 0;
+	spin_unlock_irqrestore(&pdevfreq->lock, irqflags);
+
+	if (freq) {
+		/* Indexed: the table may carry more than one clock. */
+		struct dev_pm_opp *opp =
+			dev_pm_opp_find_freq_exact_indexed(dev, freq, 0, true);
+
+		if (!IS_ERR(opp)) {
+			int err = panthor_devfreq_apply(ptdev, opp, freq);
+
+			dev_pm_opp_put(opp);
+			if (err)
+				drm_warn(&ptdev->base,
+					 "Couldn't apply the held %lu Hz (%d)\n",
+					 freq, err);
+		}
+	}
 
 	drm_WARN_ON(&ptdev->base, devfreq_resume_device(pdevfreq->devfreq));
 }
