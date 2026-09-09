@@ -140,6 +140,11 @@ static struct devfreq_dev_profile panthor_devfreq_profile = {
 	.get_cur_freq = panthor_devfreq_get_cur_freq,
 };
 
+static void panthor_devfreq_cooling_unregister(void *cooling)
+{
+	devfreq_cooling_unregister(cooling);
+}
+
 int panthor_devfreq_init(struct panthor_device *ptdev)
 {
 	/* There's actually 2 regulators (mali and sram), but the OPP core only
@@ -290,10 +295,17 @@ int panthor_devfreq_init(struct panthor_device *ptdev)
 	}
 
 	cooling = devfreq_cooling_em_register(pdevfreq->devfreq, NULL);
-	if (IS_ERR(cooling))
+	if (IS_ERR(cooling)) {
 		DRM_DEV_INFO(dev, "Failed to register cooling device\n");
+		return 0;
+	}
 
-	return 0;
+	/*
+	 * The devfreq device above is devm-managed and goes away with the
+	 * driver; the cooling device refers to it, so it has to go first.
+	 */
+	return devm_add_action_or_reset(dev, panthor_devfreq_cooling_unregister,
+					cooling);
 }
 
 void panthor_devfreq_resume(struct panthor_device *ptdev)
