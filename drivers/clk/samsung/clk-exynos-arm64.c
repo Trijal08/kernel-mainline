@@ -9,9 +9,11 @@
  * such as Exynos7885 or Exynos850 to register and init CMUs.
  */
 #include <linux/clk.h>
+#include <linux/notifier.h>
 #include <linux/of_address.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
+#include <linux/pm_domain.h>
 #include <linux/pm_runtime.h>
 #include <linux/slab.h>
 
@@ -55,7 +57,15 @@ struct exynos_arm64_cmu_data {
 	int nr_pclks;
 
 	struct samsung_clk_provider *ctx;
+
+	struct device *dev;
+	struct notifier_block genpd_nb;
+	/* Registers were restored by the power-domain notifier, not by us */
+	bool genpd_restored;
 };
+
+static int exynos_arm64_cmu_genpd_notify(struct notifier_block *nb,
+					 unsigned long action, void *unused);
 
 /* Check if the register offset is a GATE register */
 static bool is_gate_reg(unsigned long off)
@@ -328,7 +338,40 @@ int __init exynos_arm64_register_cmu_pm(struct platform_device *pdev,
 	samsung_en_dyn_root_clk_gating(np, data->ctx, cmu, true);
 	pm_runtime_put_sync(dev);
 
+	/*
+	 * The notifier writes CMU registers with no clock enabled, which is
+	 * only sound where the feeds are hardware gated, i.e. in global
+	 * automatic mode; a CMU outside a power domain has no domain to be
+	 * notified by.
+	 */
+	if (!data->ctx->auto_clock_gate)
+		return 0;
+
+	data->dev = dev;
+	data->genpd_nb.notifier_call = exynos_arm64_cmu_genpd_notify;
+	ret = dev_pm_genpd_add_notifier(dev, &data->genpd_nb);
+	if (ret && ret != -ENODEV)
+		dev_warn(dev, "could not add power-domain notifier: %d\n", ret);
+
 	return 0;
+}
+
+/* For power-down some registers have to be set to certain values */
+static void exynos_arm64_cmu_prepare_off(struct exynos_arm64_cmu_data *data)
+{
+	samsung_clk_restore(data->ctx->reg_base, NULL, data->clk_suspend,
+			    data->nr_clk_suspend);
+}
+
+static void exynos_arm64_cmu_restore_regs(struct exynos_arm64_cmu_data *data)
+{
+	samsung_clk_restore(data->ctx->reg_base, NULL, data->clk_save,
+			    data->nr_clk_save);
+
+	if (data->ctx->sysreg)
+		samsung_clk_restore(NULL, data->ctx->sysreg,
+				    data->clk_sysreg_save,
+				    data->nr_clk_sysreg);
 }
 
 int exynos_arm64_cmu_suspend(struct device *dev)
@@ -345,9 +388,7 @@ int exynos_arm64_cmu_suspend(struct device *dev)
 	for (i = 0; i < data->nr_pclks; i++)
 		clk_prepare_enable(data->pclks[i]);
 
-	/* For suspend some registers have to be set to certain values */
-	samsung_clk_restore(data->ctx->reg_base, NULL, data->clk_suspend,
-			    data->nr_clk_suspend);
+	exynos_arm64_cmu_prepare_off(data);
 
 	for (i = 0; i < data->nr_pclks; i++)
 		clk_disable_unprepare(data->pclks[i]);
@@ -367,16 +408,55 @@ int exynos_arm64_cmu_resume(struct device *dev)
 	for (i = 0; i < data->nr_pclks; i++)
 		clk_prepare_enable(data->pclks[i]);
 
-	samsung_clk_restore(data->ctx->reg_base, NULL, data->clk_save,
-			    data->nr_clk_save);
-
-	if (data->ctx->sysreg)
-		samsung_clk_restore(NULL, data->ctx->sysreg,
-				    data->clk_sysreg_save,
-				    data->nr_clk_sysreg);
+	exynos_arm64_cmu_restore_regs(data);
+	data->genpd_restored = false;
 
 	for (i = 0; i < data->nr_pclks; i++)
 		clk_disable_unprepare(data->pclks[i]);
 
 	return 0;
+}
+
+/*
+ * genpd powers a domain on at every system resume and off again once the
+ * last device in it has completed, whether or not any of those devices was
+ * runtime-active when the system went to sleep.  For a provider that was
+ * runtime-suspended, neither its runtime callbacks nor pm_runtime_force_*()
+ * run around that cycle, so the domain would come up with the CMU at reset
+ * defaults and be powered down without the power-down preparation above.
+ * On Zumapro that power-down handshake never completes, ACPM stops answering
+ * and the APM watchdog resets the SoC; the vendor stack avoids it by
+ * restoring the CMU on every domain power-on and clearing the controller
+ * option's power-down bit on every power-off, inside its power-domain code.
+ *
+ * Do the same from the domain's notifier when we know the driver did not.
+ * No clock is enabled here: the CMU_TOP feeds are hardware Q-channel gated,
+ * and taking the prepare lock under the genpd lock would invert the order
+ * used by every consumer's clk_prepare() -> runtime resume path.
+ */
+static int exynos_arm64_cmu_genpd_notify(struct notifier_block *nb,
+					 unsigned long action, void *unused)
+{
+	struct exynos_arm64_cmu_data *data =
+		container_of(nb, struct exynos_arm64_cmu_data, genpd_nb);
+
+	switch (action) {
+	case GENPD_NOTIFY_ON:
+		if (data->genpd_restored ||
+		    !pm_runtime_status_suspended(data->dev))
+			break;
+		exynos_arm64_cmu_restore_regs(data);
+		data->genpd_restored = true;
+		break;
+	case GENPD_NOTIFY_PRE_OFF:
+		if (!data->genpd_restored)
+			break;
+		exynos_arm64_cmu_prepare_off(data);
+		data->genpd_restored = false;
+		break;
+	default:
+		break;
+	}
+
+	return NOTIFY_OK;
 }
