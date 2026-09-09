@@ -6,6 +6,8 @@
 
 #include <linux/clk.h>
 #include <linux/mm.h>
+#include <linux/of.h>
+#include <linux/of_platform.h>
 #include <linux/platform_device.h>
 #include <linux/pm_domain.h>
 #include <linux/pm_runtime.h>
@@ -59,6 +61,46 @@ static int panthor_init_power(struct device *dev)
 		return 0;
 
 	return devm_pm_domain_attach_list(dev, NULL, &pd_list);
+}
+
+/*
+ * A stage-2 memory protection unit in front of the GPU loses its state with
+ * the GPU's power domain and blocks every access, page-table walks included,
+ * until its driver reopens it at runtime resume.  A runtime-PM link makes
+ * that resume precede ours, whether or not the firmware links carry PM.
+ */
+static int panthor_link_access_controller(struct device *dev)
+{
+	struct of_phandle_args args;
+	struct platform_device *supplier;
+	struct device_link *link;
+	int ret;
+
+	if (!of_property_present(dev->of_node, "access-controllers"))
+		return 0;
+
+	ret = of_parse_phandle_with_args(dev->of_node, "access-controllers",
+					 "#access-controller-cells", 0, &args);
+	if (ret)
+		return ret;
+
+	supplier = of_find_device_by_node(args.np);
+	of_node_put(args.np);
+	if (!supplier)
+		return -EPROBE_DEFER;
+
+	device_lock(&supplier->dev);
+	if (!device_is_bound(&supplier->dev)) {
+		device_unlock(&supplier->dev);
+		platform_device_put(supplier);
+		return -EPROBE_DEFER;
+	}
+
+	link = device_link_add(dev, &supplier->dev,
+			       DL_FLAG_PM_RUNTIME | DL_FLAG_AUTOREMOVE_CONSUMER);
+	device_unlock(&supplier->dev);
+	platform_device_put(supplier);
+	return link ? 0 : -EINVAL;
 }
 
 void panthor_device_unplug(struct panthor_device *ptdev)
@@ -222,6 +264,11 @@ int panthor_device_init(struct panthor_device *ptdev)
 	ret = panthor_clk_init(ptdev);
 	if (ret)
 		return ret;
+
+	ret = panthor_link_access_controller(ptdev->base.dev);
+	if (ret)
+		return dev_err_probe(ptdev->base.dev, ret,
+				     "linking the access controller failed");
 
 	ret = panthor_init_power(ptdev->base.dev);
 	if (ret < 0) {
