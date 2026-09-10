@@ -928,11 +928,34 @@ static void zumapro_program_lpm_durations(struct device *dev)
  *
  * This is the subset that targets blocks which are always powered and are
  * involved in the transition itself: the three CPU clusters, the four MIF
- * blocks, the five NoCs and CMU_TOP.  The ~40 remaining entries are a
- * BUS_COMPONENT_DRCG_EN sweep across peripheral and camera blocks whose
- * domains this kernel powers off; writing to a gated block stalls the
- * interconnect, so they are deliberately left for a later step that can
- * sequence them against their domains.
+ * blocks, the five NoCs, CMU_TOP, CMU_ALIVE and CMU_MISC.  Thirty entries
+ * remain unported -- twenty-six of the BUS_COMPONENT_DRCG_EN sweep across
+ * peripheral, display and camera blocks whose domains this kernel powers off,
+ * plus the G3D, AUR and TPU SHORTSTOP rows and TPU's HCHGEN clock mux.  Writing
+ * to a gated block stalls the interconnect, so those are deliberately left for
+ * a later step that can sequence them against their domains.
+ *
+ * The eleven DRCG entries on always-on blocks belong here rather than with the
+ * deferred ones.  A trace of the downstream kernel that does complete this
+ * sleep shows seventeen of exit_sleep[]'s thirty-four steps rewriting
+ * BUS_COMPONENT_DRCG_EN on every resume -- ALIVE, CPUCL0 and its _INT
+ * companion, G3D, the four MIF, MISC, the five NoCs, HSI2 and the two PERICs.
+ * Nothing read the register back, so that is an inference and not a
+ * measurement, but a kernel does not usually rewrite a register that kept its
+ * value.
+ *
+ * PERIC0, PERIC1, HSI1, HSI2 and MFC are not listed below because the clock
+ * driver already writes the same register at the same offset with the same
+ * value for those five, through samsung_en_dyn_root_clk_gating().  The NoC,
+ * MIF and ALIVE CMUs have no clock-controller node here at all, and CMU_MISC
+ * has one without a samsung,sysreg phandle or a drcg_offset, so none of the
+ * eleven has clock-driver coverage and this table is their only route.
+ * Describing them to the clock driver instead would be the better shape -- it
+ * carries the resume half too, through samsung_clk_extended_sleep_init() --
+ * and is the follow-up if this turns out to matter.
+ *
+ * CPUCL0's two rows are also written by zumapro_enable_dsu_drcg() a few lines
+ * earlier in probe.  Same value, so the duplicate is harmless.
  *
  * Downstream issues every one of these unconditionally, ignoring the condition
  * tuple the table carries, because at its boot everything is still on.  We
@@ -999,8 +1022,19 @@ static const struct zumapro_lpm_init_step zumapro_lpm_init[] = {
 	{ 0x27d40000, 0xf240, 0x80000000, 0x00000000, 0, 0x0, 0x0, "PWRMGMT_BUNDLE_PwrMgmtMode2" },
 	{ 0x27e40000, 0xf240, 0x80000000, 0x00000000, 0, 0x0, 0x0, "PWRMGMT_BUNDLE_PwrMgmtMode2" },
 	{ 0x27f40000, 0xf240, 0x80000000, 0x00000000, 0, 0x0, 0x0, "PWRMGMT_BUNDLE_PwrMgmtMode2" },
-	{ 0x29c20000, 0x0104, 0xffffffff, 0xffffffff, 0, 0x0, 0x0, "BUS_COMPONENT_DRCG_EN" },
-	{ 0x29c20000, 0x010c, 0xffffffff, 0xffffffff, 0, 0x0, 0x0, "BUS_COMPONENT_DRCG_EN_INT" },
+	{ 0x29c20000, 0x0104, 0xffffffff, 0xffffffff, 0, 0x0, 0x0, "CPUCL0_BUS_COMPONENT_DRCG_EN" },
+	{ 0x29c20000, 0x010c, 0xffffffff, 0xffffffff, 0, 0x0, 0x0, "CPUCL0_BUS_COMPONENT_DRCG_EN_INT" },
+	{ 0x26020000, 0x0104, 0xffffffff, 0xffffffff, 0, 0x0, 0x0, "NOCL0_BUS_COMPONENT0_DRCG_EN" },
+	{ 0x26420000, 0x0104, 0xffffffff, 0xffffffff, 0, 0x0, 0x0, "NOCL1A_BUS_COMPONENT_DRCG_EN" },
+	{ 0x26820000, 0x0104, 0xffffffff, 0xffffffff, 0, 0x0, 0x0, "NOCL1B_BUS_COMPONENT_DRCG_EN" },
+	{ 0x26c20000, 0x0104, 0xffffffff, 0xffffffff, 0, 0x0, 0x0, "NOCL2AA_BUS_COMPONENT_DRCG_EN" },
+	{ 0x27020000, 0x0104, 0xffffffff, 0xffffffff, 0, 0x0, 0x0, "NOCL2AB_BUS_COMPONENT_DRCG_EN" },
+	{ 0x27c20000, 0x0104, 0xffffffff, 0xffffffff, 0, 0x0, 0x0, "MIF0_BUS_COMPONENT_DRCG_EN" },
+	{ 0x27d20000, 0x0104, 0xffffffff, 0xffffffff, 0, 0x0, 0x0, "MIF1_BUS_COMPONENT_DRCG_EN" },
+	{ 0x27e20000, 0x0104, 0xffffffff, 0xffffffff, 0, 0x0, 0x0, "MIF2_BUS_COMPONENT_DRCG_EN" },
+	{ 0x27f20000, 0x0104, 0xffffffff, 0xffffffff, 0, 0x0, 0x0, "MIF3_BUS_COMPONENT_DRCG_EN" },
+	{ 0x15420000, 0x0104, 0xffffffff, 0xffffffff, 0, 0x0, 0x0, "ALIVE_BUS_COMPONENT_DRCG_EN" },
+	{ 0x10030000, 0x0104, 0xffffffff, 0xffffffff, 0, 0x0, 0x0, "MISC_BUS_COMPONENT_DRCG_EN" },
 	{ 0x26040000, 0x0880, 0x00000001, 0x00000001, 0, 0x0, 0x0, "EARLY_WAKEUP_DPU_CTRL" },
 	{ 0x26040000, 0x0898, 0xffffffff, 0x000000fe, 0, 0x0, 0x0, "EARLY_WAKEUP_DPU_DEST" },
 	{ 0x26040000, 0x0884, 0x00000001, 0x00000001, 0, 0x0, 0x0, "EARLY_WAKEUP_ISPFE_CTRL" },
