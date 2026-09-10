@@ -600,6 +600,7 @@ struct exynos5_usbdrd_phy_drvdata {
  * @regulators: regulators for phy
  * @sw: TypeC orientation switch handle
  * @mux: TypeC mode switch handle, driving the TCA lane mux
+ * @tca_mux: tcpc_mux_control value the mode switch last asked for
  * @orientation: TypeC connector orientation - normal or flipped
  */
 struct exynos5_usbdrd_phy {
@@ -627,6 +628,8 @@ struct exynos5_usbdrd_phy {
 
 	struct typec_switch_dev *sw;
 	struct typec_mux_dev *mux;
+	/* last tcpc_mux_control the mode switch asked for, reapplied at init */
+	u8 tca_mux;
 	enum typec_orientation orientation;
 };
 
@@ -2068,12 +2071,23 @@ static int exynos5_usbdrd_mode_sw_set(struct typec_mux_dev *mux,
 		return ret;
 	}
 
-	scoped_guard(mutex, &phy_drd->phy_mutex)
-		ret = zuma_ss_tca_ctrl_sync(phy_drd, tca_mux, 0);
+	scoped_guard(mutex, &phy_drd->phy_mutex) {
+		phy_drd->tca_mux = tca_mux;
+		zuma_ss_tca_ctrl_sync(phy_drd, tca_mux, 0);
+	}
 
 	clk_bulk_disable_unprepare(phy_drd->drv_data->n_clks, phy_drd->clks);
 
-	return ret;
+	/*
+	 * A timeout here is not the port's problem to solve. The handshake is
+	 * controller-synced, so the ack comes from the DWC3 side and simply is
+	 * not there while the controller is down -- which is exactly when TCPM
+	 * drives SAFE at detach and USB at attach. ->tca_mux carries the request
+	 * to the next zuma_usbdrd_pipe3_init(), which applies it once the
+	 * controller is back. Failing the mux set instead would only make TCPM
+	 * tear down a mode that the hardware is about to end up in anyway.
+	 */
+	return 0;
 }
 
 static void exynos5_usbdrd_mode_switch_unregister(void *data)
@@ -3629,8 +3643,12 @@ static void zuma_usbdrd_pipe3_init(struct exynos5_usbdrd_phy *phy_drd)
 
 	zuma_ss_tx_gen2_deemp_set(phy_drd);
 
-	/* Switch the TCA from NC to USB (controller-synced) */
-	zuma_ss_tca_ctrl_sync(phy_drd, ZUMA_TCA_MUX_USB31, 0);
+	/*
+	 * Switch the TCA away from NC (controller-synced). USB unless the mode
+	 * switch asked for something else while the controller was down and
+	 * nothing could ack the handshake.
+	 */
+	zuma_ss_tca_ctrl_sync(phy_drd, phy_drd->tca_mux, 0);
 }
 
 /*
@@ -3738,6 +3756,8 @@ static int exynos5_usbdrd_phy_probe(struct platform_device *pdev)
 
 	dev_set_drvdata(dev, phy_drd);
 	phy_drd->dev = dev;
+	/* zuma: where the TCA lands at init until a mode switch says otherwise */
+	phy_drd->tca_mux = ZUMA_TCA_MUX_USB31;
 
 	drv_data = of_device_get_match_data(dev);
 	if (!drv_data)
