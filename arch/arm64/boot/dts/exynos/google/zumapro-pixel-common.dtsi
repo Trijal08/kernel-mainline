@@ -466,19 +466,22 @@
 				#address-cells = <1>;
 				#size-cells = <0>;
 
+				/* High speed: the DWC3 data role. */
 				port@0 {
 					reg = <0>;
 
-					usbc0_orien_sw: endpoint {
-						remote-endpoint = <&usbdrd31_phy_orien_switch>;
+					usbc0_role_sw: endpoint {
+						remote-endpoint = <&usbdrd31_dwc3_role_switch>;
 					};
 				};
 
+				/* Super speed: the USB31DRD combo PHY, which */
+				/* takes the connector orientation.           */
 				port@1 {
 					reg = <1>;
 
-					usbc0_role_sw: endpoint {
-						remote-endpoint = <&usbdrd31_dwc3_role_switch>;
+					usbc0_orien_sw: endpoint {
+						remote-endpoint = <&usbdrd31_phy_orien_switch>;
 					};
 				};
 			};
