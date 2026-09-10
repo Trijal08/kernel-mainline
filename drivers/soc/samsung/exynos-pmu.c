@@ -916,6 +916,152 @@ static void zumapro_program_lpm_durations(struct device *dev)
 	}
 }
 
+/*
+ * The rest of downstream's pmucal_lpm_init[], which runs once at boot and which
+ * mainline has never made.  The table has 99 entries; the seven settle
+ * durations above were the only ones ported, on the reading that what remained
+ * was bus clock-gating policy.  It is not: it also carries the SHORTSTOP
+ * controls, the hardware-change clock muxes and the four PWRMGMT_BUNDLE
+ * PwrMgmtMode2 clears on the MIF blocks -- and exit_sleep[] clears those same
+ * four bits on the way back, so they are live in the sleep path rather than
+ * boot-time tuning.
+ *
+ * This is the subset that targets blocks which are always powered and are
+ * involved in the transition itself: the three CPU clusters, the four MIF
+ * blocks, the five NoCs and CMU_TOP.  The ~40 remaining entries are a
+ * BUS_COMPONENT_DRCG_EN sweep across peripheral and camera blocks whose
+ * domains this kernel powers off; writing to a gated block stalls the
+ * interconnect, so they are deliberately left for a later step that can
+ * sequence them against their domains.
+ *
+ * Downstream issues every one of these unconditionally, ignoring the condition
+ * tuple the table carries, because at its boot everything is still on.  We
+ * honour the tuple instead -- it names the PMU status bit for the block, so a
+ * cluster that is not up is skipped rather than poked.  That can only skip a
+ * write downstream would have made to a block that was up anyway.
+ *
+ * Semantics are pmucal_rae_write(): a full-width mask is a plain write, and
+ * anything narrower is a read-modify-write of those bits.  None of these are
+ * PMU_ALIVE, so they are ordinary MMIO rather than EL3 calls.
+ */
+struct zumapro_lpm_init_step {
+	u32 base;
+	u32 offset;
+	u32 mask;
+	u32 val;
+	u32 cond_offset;	/* PMU offset, or 0 for unconditional */
+	u32 cond_mask;
+	u32 cond_val;
+	const char *name;
+};
+
+static const struct zumapro_lpm_init_step zumapro_lpm_init[] = {
+	{ 0x29c00000, 0x085c, 0x0000007f, 0x00000121, 0, 0x0, 0x0, "CPUCL0_HCHGEN_CLKMUX_CPU" },
+	{ 0x29c00000, 0x0854, 0x0000007f, 0x00000101, 0, 0x0, 0x0, "CPUCL0_HCHGEN_CLKMUX_DSU" },
+	{ 0x29c00000, 0x0864, 0x0000007f, 0x00000101, 0, 0x0, 0x0, "CPUCL0_HCHGEN_CLKMUX_BCI" },
+	{ 0x29d00000, 0x0854, 0x0000007f, 0x00000121, 0x1504, 0x1, 0x1, "CPUCL1_HCHGEN_CLKMUX_CPU" },
+	{ 0x29d80000, 0x0854, 0x0000007f, 0x00000121, 0x1704, 0x1, 0x1, "CPUCL2_HCHGEN_CLKMUX_CPU" },
+	{ 0x29c00000, 0x0834, 0xffffffff, 0x8000ffff, 0, 0x0, 0x0, "CPUCL0_CLKDIVSTEP_SMPL_FLT" },
+	{ 0x29c00000, 0x0838, 0xffffffff, 0x00f041c3, 0, 0x0, 0x0, "CPUCL0_CLKDIVSTEP_CON" },
+	{ 0x29c00000, 0x0830, 0xffffffff, 0x00210047, 0, 0x0, 0x0, "CPUCL0_CLKDIVSTEP" },
+	{ 0x29d00000, 0x083c, 0xffffffff, 0x8000ffff, 0x1504, 0x1, 0x1, "CPUCL1_CLKDIVSTEP_SMPL_FLT" },
+	{ 0x29d00000, 0x0834, 0xffffffff, 0xc007f8ff, 0x1504, 0x1, 0x1, "CPUCL1_CLKDIVSTEP_OCP_FLT" },
+	{ 0x29d00000, 0x0838, 0xffffffff, 0xc007f8ff, 0x1504, 0x1, 0x1, "CPUCL1_CLKDIVSTEP_VDROOP_FLT" },
+	{ 0x29d00000, 0x0840, 0xffffffff, 0xfff041c0, 0x1504, 0x1, 0x1, "CPUCL1_CLKDIVSTEP_CON_HEAVY" },
+	{ 0x29d00000, 0x0844, 0xffffffff, 0x00f041c3, 0x1504, 0x1, 0x1, "CPUCL1_CLKDIVSTEP_CON_LIGHT" },
+	{ 0x29d00000, 0x0830, 0xffffffff, 0x00210447, 0x1504, 0x1, 0x1, "CPUCL1_CLKDIVSTEP" },
+	{ 0x29d80000, 0x083c, 0xffffffff, 0x8000ffff, 0x1704, 0x1, 0x1, "CPUCL2_CLKDIVSTEP_SMPL_FLT" },
+	{ 0x29d80000, 0x0834, 0xffffffff, 0xc007f8ff, 0x1704, 0x1, 0x1, "CPUCL2_CLKDIVSTEP_OCP_FLT" },
+	{ 0x29d80000, 0x0838, 0xffffffff, 0xc007f8ff, 0x1704, 0x1, 0x1, "CPUCL2_CLKDIVSTEP_VDROOP_FLT" },
+	{ 0x29d80000, 0x0840, 0xffffffff, 0xfff041c0, 0x1704, 0x1, 0x1, "CPUCL2_CLKDIVSTEP_CON_HEAVY" },
+	{ 0x29d80000, 0x0844, 0xffffffff, 0x00f041c3, 0x1704, 0x1, 0x1, "CPUCL2_CLKDIVSTEP_CON_LIGHT" },
+	{ 0x29d80000, 0x0830, 0xffffffff, 0x00210447, 0x1704, 0x1, 0x1, "CPUCL2_CLKDIVSTEP" },
+	{ 0x26040000, 0x0850, 0x00000001, 0x00000001, 0, 0x0, 0x0, "CMU_HCHGEN_CLKMUX" },
+	{ 0x27c00000, 0x0850, 0x00000001, 0x00000001, 0, 0x0, 0x0, "MIF_HCHGEN_CLKMUX_CMUREF" },
+	{ 0x27d00000, 0x0850, 0x00000001, 0x00000001, 0, 0x0, 0x0, "MIF_HCHGEN_CLKMUX_CMUREF" },
+	{ 0x27e00000, 0x0850, 0x00000001, 0x00000001, 0, 0x0, 0x0, "MIF_HCHGEN_CLKMUX_CMUREF" },
+	{ 0x27f00000, 0x0850, 0x00000001, 0x00000001, 0, 0x0, 0x0, "MIF_HCHGEN_CLKMUX_CMUREF" },
+	{ 0x26000000, 0x0840, 0x0000003f, 0x00000001, 0, 0x0, 0x0, "NOCL0_HCHGEN_CLKMUX_CMUREF" },
+	{ 0x26400000, 0x0840, 0x00000001, 0x00000001, 0, 0x0, 0x0, "NOCL1A_HCHGEN_CLKMUX_CMUREF" },
+	{ 0x26800000, 0x0840, 0x0000003f, 0x00000001, 0, 0x0, 0x0, "NOCL1B_HCHGEN_CLKMUX_CMUREF" },
+	{ 0x26c00000, 0x0840, 0x00000001, 0x00000001, 0, 0x0, 0x0, "NOCL2AA_HCHGEN_CLKMUX_CMUREF" },
+	{ 0x27000000, 0x0840, 0x00000001, 0x00000001, 0, 0x0, 0x0, "NOCL2AB_HCHGEN_CLKMUX_CMUREF" },
+	{ 0x29c00000, 0x0824, 0x00000001, 0x00000001, 0, 0x0, 0x0, "CPUCL0_SHORTSTOP_DBG" },
+	{ 0x29c00000, 0x0820, 0x00000001, 0x00000001, 0, 0x0, 0x0, "CPUCL0_SHORTSTOP" },
+	{ 0x29d00000, 0x0820, 0x00000001, 0x00000001, 0x1504, 0x1, 0x1, "CPUCL1_SHORTSTOP" },
+	{ 0x29d80000, 0x0820, 0x00000001, 0x00000001, 0x1704, 0x1, 0x1, "CPUCL2_SHORTSTOP" },
+	{ 0x27c00000, 0x0820, 0x00000001, 0x00000001, 0, 0x0, 0x0, "MIF_SHORTSTOP" },
+	{ 0x27d00000, 0x0820, 0x00000001, 0x00000001, 0, 0x0, 0x0, "MIF_SHORTSTOP" },
+	{ 0x27e00000, 0x0820, 0x00000001, 0x00000001, 0, 0x0, 0x0, "MIF_SHORTSTOP" },
+	{ 0x27f00000, 0x0820, 0x00000001, 0x00000001, 0, 0x0, 0x0, "MIF_SHORTSTOP" },
+	{ 0x26000000, 0x0820, 0x00000001, 0x00000001, 0, 0x0, 0x0, "NOCL0_SHORTSTOP" },
+	{ 0x27c40000, 0xf240, 0x80000000, 0x00000000, 0, 0x0, 0x0, "PWRMGMT_BUNDLE_PwrMgmtMode2" },
+	{ 0x27d40000, 0xf240, 0x80000000, 0x00000000, 0, 0x0, 0x0, "PWRMGMT_BUNDLE_PwrMgmtMode2" },
+	{ 0x27e40000, 0xf240, 0x80000000, 0x00000000, 0, 0x0, 0x0, "PWRMGMT_BUNDLE_PwrMgmtMode2" },
+	{ 0x27f40000, 0xf240, 0x80000000, 0x00000000, 0, 0x0, 0x0, "PWRMGMT_BUNDLE_PwrMgmtMode2" },
+	{ 0x29c20000, 0x0104, 0xffffffff, 0xffffffff, 0, 0x0, 0x0, "BUS_COMPONENT_DRCG_EN" },
+	{ 0x29c20000, 0x010c, 0xffffffff, 0xffffffff, 0, 0x0, 0x0, "BUS_COMPONENT_DRCG_EN_INT" },
+	{ 0x26040000, 0x0880, 0x00000001, 0x00000001, 0, 0x0, 0x0, "EARLY_WAKEUP_DPU_CTRL" },
+	{ 0x26040000, 0x0898, 0xffffffff, 0x000000fe, 0, 0x0, 0x0, "EARLY_WAKEUP_DPU_DEST" },
+	{ 0x26040000, 0x0884, 0x00000001, 0x00000001, 0, 0x0, 0x0, "EARLY_WAKEUP_ISPFE_CTRL" },
+	{ 0x26040000, 0x089c, 0xffffffff, 0x000000fe, 0, 0x0, 0x0, "EARLY_WAKEUP_ISPFE_DEST" },
+	{ 0x26040000, 0x0888, 0x00000001, 0x00000001, 0, 0x0, 0x0, "EARLY_WAKEUP_GSE_CTRL" },
+	{ 0x26040000, 0x08a0, 0xffffffff, 0x000004fc, 0, 0x0, 0x0, "EARLY_WAKEUP_GSE_DEST" },
+};
+
+static void zumapro_program_lpm_init(struct device *dev)
+{
+	unsigned int i, applied = 0, skipped = 0;
+	void __iomem *va = NULL;
+	u32 mapped = 0;
+
+	for (i = 0; i < ARRAY_SIZE(zumapro_lpm_init); i++) {
+		const struct zumapro_lpm_init_step *st = &zumapro_lpm_init[i];
+		u32 reg;
+
+		if (st->cond_offset) {
+			unsigned int cond = 0;
+
+			if (regmap_read(pmu_context->pmureg, st->cond_offset,
+					&cond) ||
+			    (cond & st->cond_mask) != st->cond_val) {
+				skipped++;
+				continue;
+			}
+		}
+
+		if (st->base != mapped) {
+			if (va)
+				iounmap(va);
+			/* PWRMGMT_BUNDLE sits at 0xf240, so a whole 64K window */
+			va = ioremap(st->base, 0x10000);
+			if (!va) {
+				dev_warn(dev, "lpm-init: cannot map %#x\n",
+					 st->base);
+				mapped = 0;
+				skipped++;
+				continue;
+			}
+			mapped = st->base;
+		}
+
+		if (st->mask == ~0u) {
+			writel(st->val, va + st->offset);
+		} else {
+			reg = readl(va + st->offset);
+			reg = (reg & ~st->mask) | (st->val & st->mask);
+			writel(reg, va + st->offset);
+		}
+		applied++;
+	}
+
+	if (va)
+		iounmap(va);
+
+	dev_dbg(dev, "lpm-init: %u of %u boot-time writes applied, %u skipped\n",
+		 applied, (unsigned int)ARRAY_SIZE(zumapro_lpm_init), skipped);
+}
+
 static int exynos_pmu_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -1019,6 +1165,7 @@ static int exynos_pmu_probe(struct platform_device *pdev)
 			return ret;
 
 		zumapro_program_lpm_durations(dev);
+		zumapro_program_lpm_init(dev);
 		register_syscore(&zumapro_sys_sleep_syscore);
 
 		ret = cpuhp_setup_state(CPUHP_AP_ONLINE_DYN,
