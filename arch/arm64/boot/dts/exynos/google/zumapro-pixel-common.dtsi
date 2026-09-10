@@ -484,6 +484,19 @@
 						remote-endpoint = <&usbdrd31_phy_orien_switch>;
 					};
 				};
+
+				/*
+				 * SBU: no AUX switch is described here yet, so
+				 * this port carries only the alternate mode
+				 * lane routing, which the combo PHY's TCA does.
+				 */
+				port@2 {
+					reg = <2>;
+
+					usbc0_mode_sw: endpoint {
+						remote-endpoint = <&usbdrd31_phy_mode_switch>;
+					};
+				};
 			};
 		};
 	};
@@ -695,6 +708,7 @@
 
 &usbdrd31_phy {
 	orientation-switch;
+	mode-switch;
 	/* TODO: Update these once PMIC is implemented */
 	pll-supply = <&reg_placeholder>;
 	dvdd-usb20-supply = <&reg_placeholder>;
@@ -706,8 +720,17 @@
 	status = "okay";
 
 	port {
-		usbdrd31_phy_orien_switch: endpoint {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		usbdrd31_phy_orien_switch: endpoint@0 {
+			reg = <0>;
 			remote-endpoint = <&usbc0_orien_sw>;
+		};
+
+		usbdrd31_phy_mode_switch: endpoint@1 {
+			reg = <1>;
+			remote-endpoint = <&usbc0_mode_sw>;
 		};
 	};
 };
