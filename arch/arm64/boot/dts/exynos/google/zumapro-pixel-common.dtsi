@@ -457,6 +457,21 @@
 					VDO_PRODUCT(0x4ee1, 0x0)>;
 			typec-power-opmode = "default";
 
+			/*
+			 * dp_altmode_probe() intersects this against the
+			 * partner's pin assignments and refuses the mode if
+			 * nothing overlaps, so the port has to name its own:
+			 * DFP_D, HBR3, receptacle, assignments C (four DP
+			 * lanes) and D (two, USB3 alongside) -- the two the
+			 * combo PHY's TCA mux can route.
+			 */
+			altmodes {
+				displayport {
+					svid = /bits/ 16 <0xff01>;
+					vdo = <0x00000c46>;
+				};
+			};
+
 			ports {
 				#address-cells = <1>;
 				#size-cells = <0>;
