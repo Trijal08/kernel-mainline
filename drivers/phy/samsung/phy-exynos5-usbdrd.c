@@ -26,6 +26,7 @@
 #include <linux/regulator/consumer.h>
 #include <linux/soc/samsung/exynos-regs-pmu.h>
 #include <linux/usb/typec.h>
+#include <linux/usb/typec_dp.h>
 #include <linux/usb/typec_mux.h>
 
 /* Exynos USB PHY registers */
@@ -367,7 +368,10 @@
 #define ZUMA_USBDP_TCA_GEN_STATUS		0x34
 
 /* tcpc_mux_control values */
+#define ZUMA_TCA_MUX_NC				0
 #define ZUMA_TCA_MUX_USB31			1
+#define ZUMA_TCA_MUX_DP				2
+#define ZUMA_TCA_MUX_USB31_DP			3
 
 /* Link LCSR Gen2 Tx de-emphasis registers - offsets into reg_link (0x11210000) */
 #define ZUMA_USB31DRD_LINK_LCSR_TX_DEEMPH	0xd060
@@ -595,6 +599,7 @@ struct exynos5_usbdrd_phy_drvdata {
  *	       reference clocks' for SS and HS operations
  * @regulators: regulators for phy
  * @sw: TypeC orientation switch handle
+ * @mux: TypeC mode switch handle, driving the TCA lane mux
  * @orientation: TypeC connector orientation - normal or flipped
  */
 struct exynos5_usbdrd_phy {
@@ -621,6 +626,7 @@ struct exynos5_usbdrd_phy {
 	struct regulator_bulk_data *regulators;
 
 	struct typec_switch_dev *sw;
+	struct typec_mux_dev *mux;
 	enum typec_orientation orientation;
 };
 
@@ -2011,6 +2017,72 @@ static void exynos5_usbdrd_orien_switch_unregister(void *data)
 	typec_switch_unregister(phy_drd->sw);
 }
 
+static int zuma_ss_tca_ctrl_sync(struct exynos5_usbdrd_phy *phy_drd, int mux,
+				 int low_power_en);
+
+/*
+ * Route the four SS lanes for the alternate mode TCPM negotiated. Pin
+ * assignments C and E give DP all four lanes; D and F split them two and two,
+ * leaving USB3 up alongside.
+ *
+ * The cable flip is not applied here: zuma_ss_phy_initiate() sets the PHY's
+ * FLIP_INVERT from ->orientation at init, and the TCA's own
+ * CONNECTOR_ORIENTATION bit is left clear so the USB path keeps the bit pattern
+ * it boots and runs with today.
+ * ponytail: revisit once a DP sink can actually be trained -- a flipped cable
+ * is the case that will show which of the two the DP lanes follow.
+ */
+static int exynos5_usbdrd_mode_sw_set(struct typec_mux_dev *mux,
+				      struct typec_mux_state *state)
+{
+	struct exynos5_usbdrd_phy *phy_drd = typec_mux_get_drvdata(mux);
+	int tca_mux, ret;
+
+	/* Only the zuma combo PHY has a TCA block to switch. */
+	if (!phy_drd->reg_tca)
+		return -EOPNOTSUPP;
+
+	switch (state->mode) {
+	case TYPEC_STATE_SAFE:
+		tca_mux = ZUMA_TCA_MUX_NC;
+		break;
+	case TYPEC_STATE_USB:
+		tca_mux = ZUMA_TCA_MUX_USB31;
+		break;
+	case TYPEC_DP_STATE_C:
+	case TYPEC_DP_STATE_E:
+		tca_mux = ZUMA_TCA_MUX_DP;
+		break;
+	case TYPEC_DP_STATE_D:
+	case TYPEC_DP_STATE_F:
+		tca_mux = ZUMA_TCA_MUX_USB31_DP;
+		break;
+	default:
+		/* Accessory and other alternate modes: not ours to route. */
+		return 0;
+	}
+
+	ret = clk_bulk_prepare_enable(phy_drd->drv_data->n_clks, phy_drd->clks);
+	if (ret) {
+		dev_err(phy_drd->dev, "Failed to enable PHY clocks(s)\n");
+		return ret;
+	}
+
+	scoped_guard(mutex, &phy_drd->phy_mutex)
+		ret = zuma_ss_tca_ctrl_sync(phy_drd, tca_mux, 0);
+
+	clk_bulk_disable_unprepare(phy_drd->drv_data->n_clks, phy_drd->clks);
+
+	return ret;
+}
+
+static void exynos5_usbdrd_mode_switch_unregister(void *data)
+{
+	struct exynos5_usbdrd_phy *phy_drd = data;
+
+	typec_mux_unregister(phy_drd->mux);
+}
+
 static int exynos5_usbdrd_setup_notifiers(struct exynos5_usbdrd_phy *phy_drd)
 {
 	int ret;
@@ -2037,6 +2109,27 @@ static int exynos5_usbdrd_setup_notifiers(struct exynos5_usbdrd_phy *phy_drd)
 		if (ret)
 			return dev_err_probe(phy_drd->dev, ret,
 					     "Failed to register TypeC orientation devm action\n");
+	}
+
+	if (device_property_present(phy_drd->dev, "mode-switch")) {
+		struct typec_mux_desc mux_desc = { };
+
+		mux_desc.drvdata = phy_drd;
+		mux_desc.fwnode = dev_fwnode(phy_drd->dev);
+		mux_desc.set = exynos5_usbdrd_mode_sw_set;
+
+		phy_drd->mux = typec_mux_register(phy_drd->dev, &mux_desc);
+		if (IS_ERR(phy_drd->mux))
+			return dev_err_probe(phy_drd->dev,
+					     PTR_ERR(phy_drd->mux),
+					     "Failed to register TypeC mode switch\n");
+
+		ret = devm_add_action_or_reset(phy_drd->dev,
+					       exynos5_usbdrd_mode_switch_unregister,
+					       phy_drd);
+		if (ret)
+			return dev_err_probe(phy_drd->dev, ret,
+					     "Failed to register TypeC mode devm action\n");
 	}
 
 	return 0;
