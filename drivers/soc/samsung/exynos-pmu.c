@@ -564,6 +564,16 @@ static void zumapro_set_wakeup_mask(bool arm)
 static struct cpumask zumapro_idle_cpus;
 /* cpu currently asserting system idle (SICD), or -1 if none */
 static int zumapro_sicd_holder = -1;
+
+/*
+ * Cores whose CPU_INFORM register currently holds a published hint.  A hint
+ * left behind is not inert: the firmware keeps honouring it for the rest of
+ * the boot, so an abandoned SICD request turns every later awake idle into a
+ * SoC-down.  That corrupts whatever is still in flight in a peripheral -- the
+ * debug UART's 256-byte TX FIFO drains for ~22 ms after printk returns, and
+ * the characters leave the SoC mis-framed.
+ */
+static struct cpumask zumapro_hinted_cpus;
 /* debug counters, printed once per resume */
 static u32 zumapro_dbg_c2, zumapro_dbg_sicd, zumapro_dbg_fail;
 
@@ -593,6 +603,33 @@ static int zumapro_cpu_pm_notify(struct notifier_block *self,
 
 	raw_spin_lock(&pmu_context->cpupm_lock);
 
+	/*
+	 * Withdraw this core's hint before consulting the gate, on the failed
+	 * enter too: cpu_pm_enter() is a robust chain and re-runs the
+	 * notifiers that already succeeded, this one first.  Resume drops
+	 * sys_insuspend while cores are still coming out of idle, so an exit
+	 * that took the early return used to leave its hint published forever
+	 * -- measured as CPU_INFORM = { 1, 1, 0, 3, 1, 1, 1, 1 } after a single
+	 * s2idle, one core still asking for SICD.  Only cores that published
+	 * write, so ordinary awake idle costs nothing, and suspend-to-RAM's
+	 * SLEEP hint is never touched because its enter was gated.
+	 */
+	if (action == CPU_PM_EXIT || action == CPU_PM_ENTER_FAILED) {
+		cpumask_clear_cpu(cpu, &zumapro_idle_cpus);
+		if (zumapro_sicd_holder == cpu)
+			zumapro_sicd_holder = -1;
+		if (cpumask_test_cpu(cpu, &zumapro_hinted_cpus)) {
+			if (regmap_write(pmu_context->pmureg,
+					 GS101_CPU_INFORM(cpu),
+					 CPU_INFORM_CLEAR))
+				zumapro_dbg_fail++;
+			else
+				cpumask_clear_cpu(cpu, &zumapro_hinted_cpus);
+		}
+		raw_spin_unlock(&pmu_context->cpupm_lock);
+		return NOTIFY_OK;
+	}
+
 	if (!pmu_context->sys_insuspend ||
 	    pm_suspend_target_state != PM_SUSPEND_TO_IDLE) {
 		raw_spin_unlock(&pmu_context->cpupm_lock);
@@ -619,13 +656,8 @@ static int zumapro_cpu_pm_notify(struct notifier_block *self,
 		}
 		if (regmap_write(pmu_context->pmureg, GS101_CPU_INFORM(cpu), hint))
 			zumapro_dbg_fail++;
-		break;
-	case CPU_PM_EXIT:
-		cpumask_clear_cpu(cpu, &zumapro_idle_cpus);
-		if (zumapro_sicd_holder == cpu)
-			zumapro_sicd_holder = -1;
-		regmap_write(pmu_context->pmureg, GS101_CPU_INFORM(cpu),
-			     CPU_INFORM_CLEAR);
+		else
+			cpumask_set_cpu(cpu, &zumapro_hinted_cpus);
 		break;
 	}
 
@@ -1233,6 +1265,7 @@ static int exynos_cpupm_suspend_noirq(struct device *dev)
 	pmu_context->sys_insuspend = true;
 	/* start the idle-hint tracking clean for this suspend */
 	cpumask_clear(&zumapro_idle_cpus);
+	cpumask_clear(&zumapro_hinted_cpus);
 	zumapro_sicd_holder = -1;
 	zumapro_dbg_c2 = zumapro_dbg_sicd = zumapro_dbg_fail = 0;
 	raw_spin_unlock(&pmu_context->cpupm_lock);
@@ -1253,6 +1286,8 @@ static int exynos_cpupm_suspend_noirq(struct device *dev)
 
 static int exynos_cpupm_resume_noirq(struct device *dev)
 {
+	unsigned int cpu;
+
 	if (pmu_context->pmu_data && pmu_context->pmu_data->pmu_sicd_wakeup) {
 		zumapro_set_wakeup_mask(false);
 		pr_debug("zumapro: resume: CPU_INFORM hints c2=%u sicd=%u fails=%u\n",
@@ -1261,6 +1296,25 @@ static int exynos_cpupm_resume_noirq(struct device *dev)
 
 	raw_spin_lock(&pmu_context->cpupm_lock);
 	pmu_context->sys_insuspend = false;
+	/*
+	 * Leave every CPU_INFORM as a never-slept boot has it.  The exit path
+	 * above withdraws each hint as its core wakes, but a core hotplugged
+	 * out before it ever runs one would keep its hint, so sweep rather
+	 * than trust the bookkeeping.  This is the resume side, after the
+	 * firmware is done with the word -- unlike zumapro_sys_sleep_arm(),
+	 * which must not disturb the power-down acknowledgements.
+	 *
+	 * Zumapro only.  gs101 publishes CPU_INFORM on every awake C2 entry,
+	 * so sweeping there would pull the hint out from under a core the
+	 * firmware is holding down, and on the 32-bit Exynos parts this
+	 * offset is not CPU_INFORM at all.
+	 */
+	if (pmu_context->pmu_data && pmu_context->pmu_data->pmu_sicd_wakeup) {
+		for (cpu = 0; cpu < ARRAY_SIZE(zumapro_cpu_cluster); cpu++)
+			regmap_write(pmu_context->pmureg,
+				     GS101_CPU_INFORM(cpu), CPU_INFORM_CLEAR);
+		cpumask_clear(&zumapro_hinted_cpus);
+	}
 	raw_spin_unlock(&pmu_context->cpupm_lock);
 
 	/* Cleared last: the secondaries came back online before this phase. */
