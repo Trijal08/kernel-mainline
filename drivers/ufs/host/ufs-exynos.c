@@ -1143,6 +1143,15 @@ static int exynos_ufs_phy_init(struct exynos_ufs *ufs)
 	if (ret)
 		goto out_exit_phy;
 
+	/* Zumapro must not calibrate during the earlier resume power-on. */
+	if (ufs->opts & EXYNOS_UFS_OPT_EXPLICIT_PHY_CAL) {
+		ret = phy_calibrate(generic_phy);
+		if (ret) {
+			phy_power_off(generic_phy);
+			goto out_exit_phy;
+		}
+	}
+
 	return 0;
 
 out_exit_phy:
@@ -1241,6 +1250,7 @@ static int exynos_ufs_setup_clocks(struct ufs_hba *hba, bool on,
 static int exynos_ufs_pre_link(struct ufs_hba *hba)
 {
 	struct exynos_ufs *ufs = ufshcd_get_variant(hba);
+	int ret;
 
 	/* hci */
 	exynos_ufs_config_intr(ufs, DFES_DEF_L2_ERRS, UNIPRO_L2);
@@ -1256,11 +1266,16 @@ static int exynos_ufs_pre_link(struct ufs_hba *hba)
 	if (ufs->opts & EXYNOS_UFS_OPT_PRE_LINK_GET_LANES)
 		exynos_ufs_get_available_lanes(ufs);
 
-	if (ufs->drv_data->pre_link)
-		ufs->drv_data->pre_link(ufs);
+	if (ufs->drv_data->pre_link) {
+		ret = ufs->drv_data->pre_link(ufs);
+		if (ret)
+			return ret;
+	}
 
 	/* m-phy */
-	exynos_ufs_phy_init(ufs);
+	ret = exynos_ufs_phy_init(ufs);
+	if (ret)
+		return ret;
 	if (!(ufs->opts & EXYNOS_UFS_OPT_SKIP_CONFIG_PHY_ATTR)) {
 		exynos_ufs_config_phy_time_attr(ufs);
 		exynos_ufs_config_phy_cap_attr(ufs);
@@ -1968,9 +1983,13 @@ static int exynos_ufs_suspend(struct ufs_hba *hba, enum ufs_pm_op pm_op,
 static int exynos_ufs_resume(struct ufs_hba *hba, enum ufs_pm_op pm_op)
 {
 	struct exynos_ufs *ufs = ufshcd_get_variant(hba);
+	int ret;
 
-	if (!ufshcd_is_link_active(hba))
-		phy_power_on(ufs->phy);
+	if (!ufshcd_is_link_active(hba)) {
+		ret = phy_power_on(ufs->phy);
+		if (ret)
+			return ret;
+	}
 
 	exynos_ufs_config_smu(ufs);
 	exynos_ufs_fmp_resume(hba);
@@ -2535,7 +2554,8 @@ static const struct exynos_ufs_drv_data zumapro_ufs_drvs = {
 				  EXYNOS_UFS_OPT_EARLY_HCI_SETUP |
 				  EXYNOS_UFS_OPT_PRE_LINK_GET_LANES |
 				  EXYNOS_UFS_OPT_TIMER_TICK_USES_MCLK |
-				  EXYNOS_UFS_OPT_RESTORE_MPHY_APBCLK,
+				  EXYNOS_UFS_OPT_RESTORE_MPHY_APBCLK |
+				  EXYNOS_UFS_OPT_EXPLICIT_PHY_CAL,
 	.iocc_mask		= UFS_GS101_SHARABLE,
 	.drv_init		= zumapro_ufs_drv_init,
 	.pre_link		= zumapro_ufs_pre_link,

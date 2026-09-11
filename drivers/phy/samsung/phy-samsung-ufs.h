@@ -118,6 +118,8 @@ struct samsung_ufs_phy_drvdata {
 	const char * const *clk_list;
 	int num_clks;
 	u32 cdr_lock_status_offset;
+	/* The host calls phy_calibrate() after restoring the PCS registers. */
+	bool explicit_calibration;
 	/* SoC's specific operations */
 	int (*wait_for_cal)(struct phy *phy, u8 lane);
 	int (*wait_for_cdr)(struct phy *phy, u8 lane);
