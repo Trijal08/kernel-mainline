@@ -743,9 +743,13 @@ static int max_tcpci_probe(struct i2c_client *client)
 		return ret;
 
 	/*
-	 * Optional: boards that route SBU to DP AUX gate the pair behind a
+	 * Optional: boards that route SBU to DP AUX may gate the pair behind a
 	 * pull-up rail. Without one the switch still closes, which is all a
 	 * board with an always-on rail needs.
+	 *
+	 * A pullup-supply naming a regulator its provider never registers
+	 * defers this port forever, taking PD and charging with it -- describe
+	 * the rail only once the PMIC driver actually has a descriptor for it.
 	 */
 	chip->sbu_reg = devm_regulator_get_optional(chip->dev, "pullup");
 	if (IS_ERR(chip->sbu_reg)) {
