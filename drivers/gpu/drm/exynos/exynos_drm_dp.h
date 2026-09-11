@@ -816,12 +816,10 @@ void exynos_drm_dp_dpcd_status_dump(struct exynos_dp_subdev *dp);
 
 uint32_t exynos_drm_dp_find_possible_crtc(struct exynos_drm_dp *dp, int sst_idx);
 dp_sst_idx_t exynos_drm_dp_get_sst_idx(struct drm_encoder *encoder);
-int exynos_drm_dp_add_timings(struct exynos_drm_dp *dp,
-			struct drm_connector *connector);
 struct drm_connector *exynos_drm_dp_find_connector
 				(struct drm_encoder *encoder);
 void exynos_drm_dp_to_videoinfo(struct drm_encoder *encoder,
-		struct drm_display_mode *mode,
+		const struct drm_display_mode *mode,
 		struct exynos_dp_video_info *vi);
 bool exynos_drm_dp_dsc_enable(struct drm_encoder *encoder,
 		struct exynos_dp_video_info *vi,
@@ -868,18 +866,13 @@ static inline dp_sst_idx_t exynos_drm_dp_get_sst_idx(struct drm_encoder *encoder
 {
 	return DP_SST_UNKNOWN;
 }
-static inline int exynos_drm_dp_add_timings(struct exynos_drm_dp *dp,
-			struct drm_connector *connector)
-{
-	return 0;
-}
 static inline struct drm_connector *exynos_drm_dp_find_connector
 				(struct drm_encoder *encoder)
 {
 	return NULL;
 }
 static inline void exynos_drm_dp_to_videoinfo(struct drm_encoder *encoder,
-		struct drm_display_mode *mode,
+		const struct drm_display_mode *mode,
 		struct exynos_dp_video_info *vi)
 {
 }
