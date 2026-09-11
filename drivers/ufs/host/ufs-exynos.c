@@ -2246,14 +2246,15 @@ static int zumapro_ufs_pre_link(struct exynos_ufs *ufs)
 
 	unipro_writel(ufs, get_mclk_period_unipro_18(ufs), COMP_CLK_PERIOD);
 
+	ufshcd_dme_set(hba, UIC_ARG_MIB(0x200), 0x40);
+
 	/*
 	 * Zumapro M-PHY OSC = 38.4 MHz; downstream init_cfg_evt1 sets
-	 * PCS_COMN 0x202 = 0x22. GS101 does not write 0x202 because
-	 * its OSC is 24.5 MHz.
+	 * PCS_COMN 0x202 = 0x22 with the PCS configuration gate open.
+	 * Restore it after power loss as well as at boot. GS101 does not
+	 * write 0x202 because its OSC is 24.5 MHz.
 	 */
 	ufshcd_dme_set(hba, UIC_ARG_MIB(0x202), 0x22);
-
-	ufshcd_dme_set(hba, UIC_ARG_MIB(0x200), 0x40);
 
 	for_each_ufs_rx_lane(ufs, i) {
 		ufshcd_dme_set(hba, UIC_ARG_MIB_SEL(VND_RX_CLK_PRD, i),
