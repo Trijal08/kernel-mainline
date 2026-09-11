@@ -747,15 +747,24 @@ static int zuma_decon_init(struct decon_context *ctx,
 	if (id >= ZD_MAX_DECON)
 		return -EINVAL;
 
+	/*
+	 * Mapped without claiming the regions: DECON instances share the
+	 * window and sub blocks (decon0 and decon1 both describe 0x19480000
+	 * and 0x19490000), so an exclusive request would leave whichever
+	 * probes second with -EBUSY.
+	 */
 	for (i = 0; i < ARRAY_SIZE(blocks); i++) {
 		struct resource *res;
 		void __iomem *base;
 
 		res = platform_get_resource_byname(pdev, IORESOURCE_MEM,
 						   blocks[i].name);
-		base = devm_ioremap_resource(ctx->dev, res);
-		if (IS_ERR(base))
-			return PTR_ERR(base);
+		if (!res)
+			return -EINVAL;
+
+		base = devm_ioremap(ctx->dev, res->start, resource_size(res));
+		if (!base)
+			return -ENOMEM;
 		blocks[i].base[id] = base;
 	}
 
