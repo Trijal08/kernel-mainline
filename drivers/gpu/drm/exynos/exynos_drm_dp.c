@@ -3416,16 +3416,21 @@ static int exynos_drm_dp_init_resources(struct exynos_dp_subdev *dp, struct plat
 		return PTR_ERR(dp->regs.link_addr);
 	}
 
+	/*
+	 * Optional. The dp_phy_* register layer here is the Samsung DP PHY
+	 * (CMN_REG/TRSV_REG); zuma pairs this link with a Synopsys combo PHY
+	 * whose registers look nothing like it and which phy-exynos5-usbdrd
+	 * owns. Left unmapped there, which makes every dp_phy_* access a
+	 * no-op, and the PHY is driven through phy_power_on() instead.
+	 */
 	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "phy_base");
-	if (res == NULL) {
-		dp_log_err(dev, "failed to find dp phy memory resource for dp\n");
-		return -EINVAL;
-	}
-	dp->regs.phy_addr = devm_ioremap_resource(dp->dev, res);
+	if (res) {
+		dp->regs.phy_addr = devm_ioremap_resource(dp->dev, res);
 
-	if (IS_ERR(dp->regs.phy_addr)) {
-		dp_log_err(dev, "failed to remap io region\n");
-		return PTR_ERR(dp->regs.phy_addr);
+		if (IS_ERR(dp->regs.phy_addr)) {
+			dp_log_err(dev, "failed to remap io region\n");
+			return PTR_ERR(dp->regs.phy_addr);
+		}
 	}
 
 	dp_regs_desc_init(dp->id, &dp->regs);
@@ -4604,6 +4609,28 @@ static int exynos_drm_dp_bind(struct device *dev,
 	if (ret < 0)
 		goto err_encoder_init;
 
+	/*
+	 * DPOSC has to run before the first link register access, and pd_hsi0
+	 * has to be up before DPOSC: the CMU stalls on the DP_LINK Q-channel
+	 * otherwise, which the SoC answers with a reset. Component bind is
+	 * past both.
+	 */
+	ret = clk_prepare_enable(dp->dposc);
+	if (ret < 0) {
+		dp_log_err(dp->dev, "cannot enable dposc, %d\n", ret);
+		goto err_encoder_init;
+	}
+	ret = clk_prepare_enable(dp->pclk);
+	if (ret < 0) {
+		dp_log_err(dp->dev, "cannot enable pclk, %d\n", ret);
+		clk_disable_unprepare(dp->dposc);
+		goto err_encoder_init;
+	}
+	if (clk_get_rate(dp->dposc) != 40000000)
+		dp_log_err(dp->dev, "dposc is %lu Hz, not 40 MHz\n",
+			   clk_get_rate(dp->dposc));
+	usleep_range(10000, 10030);
+
 	ret = exynos_drm_dp_start(dp->subdev);
 	if (ret < 0)
 		dp_log_err(dp->dev, "cannot start DP[%d], %d\n", dp->id, ret);
@@ -4641,6 +4668,8 @@ static void exynos_drm_dp_unbind(struct device *dev, struct device *master,
 
 	disable_irq(subdev->irq);
 
+	clk_disable_unprepare(dp->pclk);
+	clk_disable_unprepare(dp->dposc);
 
 	dp_log_exit(dev);
 	return;
@@ -4656,7 +4685,6 @@ static int exynos_drm_dp_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct exynos_drm_dp *dp;
 
-	struct clk *aclk, *pclk;
 	int ret = 0;
 
 	dp = devm_drm_bridge_alloc(dev, struct exynos_drm_dp, bridge,
@@ -4677,13 +4705,20 @@ static int exynos_drm_dp_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, dp);
 
-	aclk = devm_clk_get_enabled(dp->dev, "aclk");
-	if (IS_ERR(aclk))
-		return dev_err_probe(dp->dev, PTR_ERR(aclk),
-				     "Could not get aclk clock\n");
-	pclk = devm_clk_get_enabled(dp->dev, "pclk");
-	if (IS_ERR(pclk))
-		return dev_err_probe(dp->dev, PTR_ERR(pclk),
+	/*
+	 * Taken but not enabled: ungating at probe resets the SoC. Both are
+	 * needed before the first register access -- DPOSC for the link and
+	 * PCLK for its APB. The vendor DT names only DPOSC because their CAL
+	 * layer drives PCLK off the Q-channel; under CCF an unclaimed PCLK
+	 * just stays gated.
+	 */
+	dp->dposc = devm_clk_get(dp->dev, "dposc");
+	if (IS_ERR(dp->dposc))
+		return dev_err_probe(dp->dev, PTR_ERR(dp->dposc),
+				     "Could not get dposc clock\n");
+	dp->pclk = devm_clk_get(dp->dev, "pclk");
+	if (IS_ERR(dp->pclk))
+		return dev_err_probe(dp->dev, PTR_ERR(dp->pclk),
 				     "Could not get pclk clock\n");
 
 	dp_log_info(dev, "is successfully\n");
