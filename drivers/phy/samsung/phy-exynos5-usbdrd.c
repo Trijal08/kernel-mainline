@@ -3448,7 +3448,7 @@ static int zuma_ss_tca_ctrl_sync(struct exynos5_usbdrd_phy *phy_drd, int mux,
 {
 	void __iomem *tca = phy_drd->reg_tca;
 	u32 reg;
-	int time_out;
+	int err;
 
 	/* Controller-synced mode: clear auto safe state */
 	reg = readl(tca + ZUMA_USBDP_TCA_CTRLSYNCMODE_CFG0);
@@ -3473,16 +3473,25 @@ static int zuma_ss_tca_ctrl_sync(struct exynos5_usbdrd_phy *phy_drd, int mux,
 	reg |= TCA_TCPC_VALID;
 	writel(reg, tca + ZUMA_USBDP_TCA_TCPC);
 
-	/* wait for the ack event (bounded) */
-	for (time_out = 1000; time_out > 0; --time_out) {
-		reg = readl(tca + ZUMA_USBDP_TCA_INTR_STS);
-		if (reg & TCA_INTR_STS_XA_ACK_EVT)
-			break;
-		udelay(1);
-	}
-
-	dev_info(phy_drd->dev, "TCA switch %s, mux %d low_power %d\n",
-		 time_out > 0 ? "ok" : "timeout", mux, low_power_en);
+	/*
+	 * Wait for the ack. Called from pipe3_init() the controller is not
+	 * running yet and this lands in microseconds, but a switch requested
+	 * once it is up has to walk the controller through the handshake first
+	 * and takes far longer -- the vendor DP driver allows 2.5s for the same
+	 * USB->DP transition. A microsecond-scale bound here made every runtime
+	 * switch look like a refusal while the request sat in TCPC.VALID.
+	 */
+	err = readl_poll_timeout(tca + ZUMA_USBDP_TCA_INTR_STS, reg,
+				 reg & TCA_INTR_STS_XA_ACK_EVT,
+				 1000, 2500 * 1000);
+	if (err)
+		dev_warn(phy_drd->dev,
+			 "TCA switch timeout, mux %d low_power %d (tcpc %#.8x sts %#.8x)\n",
+			 mux, low_power_en,
+			 readl(tca + ZUMA_USBDP_TCA_TCPC), reg);
+	else
+		dev_dbg(phy_drd->dev, "TCA switch ok, mux %d low_power %d\n",
+			mux, low_power_en);
 
 	/* clear pending status, disable interrupts */
 	writel(readl(tca + ZUMA_USBDP_TCA_INTR_STS), tca + ZUMA_USBDP_TCA_INTR_STS);
@@ -3490,7 +3499,7 @@ static int zuma_ss_tca_ctrl_sync(struct exynos5_usbdrd_phy *phy_drd, int mux,
 	reg &= ~(TCA_INTR_EN_XA_ACK_EVT_EN | TCA_INTR_EN_XA_TIMEOUT_EVT_EN);
 	writel(reg, tca + ZUMA_USBDP_TCA_INTR_EN);
 
-	return time_out > 0 ? 0 : -ETIMEDOUT;
+	return err;
 }
 
 static void zuma_ss_tx_gen2_deemp_set(struct exynos5_usbdrd_phy *phy_drd)
