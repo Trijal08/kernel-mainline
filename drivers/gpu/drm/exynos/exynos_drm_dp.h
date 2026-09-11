@@ -694,8 +694,6 @@ struct exynos_dp_subdev {
 
 	u32 id;
 	int irq;
-	int hpd_gpio;
-	int hpd_gpio_irq;
 
 	struct phy *phy;
 	spinlock_t slock;
