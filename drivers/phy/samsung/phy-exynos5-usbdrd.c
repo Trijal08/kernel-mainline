@@ -3447,7 +3447,7 @@ static int zuma_ss_tca_ctrl_sync(struct exynos5_usbdrd_phy *phy_drd, int mux,
 				 int low_power_en)
 {
 	void __iomem *tca = phy_drd->reg_tca;
-	u32 reg;
+	u32 reg, sts;
 	int err;
 
 	/* Controller-synced mode: clear auto safe state */
@@ -3474,24 +3474,27 @@ static int zuma_ss_tca_ctrl_sync(struct exynos5_usbdrd_phy *phy_drd, int mux,
 	writel(reg, tca + ZUMA_USBDP_TCA_TCPC);
 
 	/*
-	 * Wait for the ack. Called from pipe3_init() the controller is not
-	 * running yet and this lands in microseconds, but a switch requested
-	 * once it is up has to walk the controller through the handshake first
-	 * and takes far longer -- the vendor DP driver allows 2.5s for the same
-	 * USB->DP transition. A microsecond-scale bound here made every runtime
-	 * switch look like a refusal while the request sat in TCPC.VALID.
+	 * Wait for the hardware to consume the request, which it signals by
+	 * clearing VALID.
+	 *
+	 * Not XA_ACK_EVT: that ack comes from the controller, and dwc3 has no
+	 * TCA support, so on this integration it never arrives. The TCA's own
+	 * arbiter times out instead (XA_TIMEOUT_EVT), applies the mux and drops
+	 * VALID -- which is the transition that matters. Waiting on the ack
+	 * only stalled every switch for the full timeout before proceeding
+	 * exactly as it would have anyway.
 	 */
-	err = readl_poll_timeout(tca + ZUMA_USBDP_TCA_INTR_STS, reg,
-				 reg & TCA_INTR_STS_XA_ACK_EVT,
-				 1000, 2500 * 1000);
+	err = readl_poll_timeout(tca + ZUMA_USBDP_TCA_TCPC, reg,
+				 !(reg & TCA_TCPC_VALID), 1000, 2500 * 1000);
+
+	sts = readl(tca + ZUMA_USBDP_TCA_INTR_STS);
 	if (err)
 		dev_warn(phy_drd->dev,
 			 "TCA switch timeout, mux %d low_power %d (tcpc %#.8x sts %#.8x)\n",
-			 mux, low_power_en,
-			 readl(tca + ZUMA_USBDP_TCA_TCPC), reg);
+			 mux, low_power_en, reg, sts);
 	else
-		dev_dbg(phy_drd->dev, "TCA switch ok, mux %d low_power %d\n",
-			mux, low_power_en);
+		dev_dbg(phy_drd->dev, "TCA switch ok, mux %d low_power %d (sts %#.8x)\n",
+			mux, low_power_en, sts);
 
 	/* clear pending status, disable interrupts */
 	writel(readl(tca + ZUMA_USBDP_TCA_INTR_STS), tca + ZUMA_USBDP_TCA_INTR_STS);
