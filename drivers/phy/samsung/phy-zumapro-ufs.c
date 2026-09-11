@@ -101,5 +101,6 @@ const struct samsung_ufs_phy_drvdata tensor_zumapro_ufs_phy = {
 	},
 	.clk_list = tensor_zumapro_ufs_phy_clks,
 	.num_clks = ARRAY_SIZE(tensor_zumapro_ufs_phy_clks),
+	.explicit_calibration = true,
 	.wait_for_cal = zumapro_phy_wait_for_calibration,
 };
