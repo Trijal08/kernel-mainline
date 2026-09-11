@@ -231,10 +231,19 @@ static inline u32 get_comp_dsc_width(const struct exynos_dsc *dsc, u32 bpc)
 	})
 
 /* SFR read/write */
+/*
+ * An unmapped block reads as zero and swallows writes: on zuma the DP PHY
+ * block is not this driver's to touch. Guarded here rather than at the call
+ * sites so no dp_phy_* path can fault.
+ */
 static inline uint32_t cal_read(struct cal_regs_desc *regs_desc,
 				uint32_t offset)
 {
 	uint32_t val = 0;
+
+	if (!regs_desc->regs)
+		return 0;
+
 	val = readl(regs_desc->regs + offset);
 	return val;
 }
@@ -242,6 +251,9 @@ static inline uint32_t cal_read(struct cal_regs_desc *regs_desc,
 static inline void cal_write(struct cal_regs_desc *regs_desc, uint32_t offset,
 			     uint32_t val)
 {
+	if (!regs_desc->regs)
+		return;
+
 	writel(val, regs_desc->regs + offset);
 }
 
@@ -799,6 +811,9 @@ struct exynos_drm_dp {
 
 	/* vmst */
 	struct drm_bridge		bridge;
+	/* Held at probe, enabled at bring-up: ungating earlier resets the SoC. */
+	struct clk			*dposc;
+	struct clk			*pclk;
 	struct drm_remote		remote[DP_SST_MAX];
 };
 
