@@ -33,6 +33,7 @@ config DRM_EXYNOS9_DP
 	select DRM_PANEL
 	select DRM_DISPLAY_HELPER
 	select DRM_DISPLAY_DP_HELPER
+	select DRM_BRIDGE_CONNECTOR
 	default DRM_EXYNOS
 	help
 	  This enables support for Exynos DisplayPort device.

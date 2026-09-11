@@ -24,6 +24,8 @@
 #include <drm/display/drm_dsc_helper.h>
 
 #include <drm/drm_of.h>
+#include <drm/drm_atomic_state_helper.h>
+#include <drm/drm_bridge_connector.h>
 #include <drm/drm_probe_helper.h>
 
 #include "exynos_drm_crtc.h"
@@ -4247,7 +4249,7 @@ static void exynos_drm_dp_disable(struct drm_encoder *encoder)
 }
 
 void exynos_drm_dp_to_videoinfo(struct drm_encoder *encoder,
-		struct drm_display_mode *mode,
+		const struct drm_display_mode *mode,
 		struct exynos_dp_video_info *vi)
 {
 	struct exynos_drm_dp *dp = encoder_to_dp(encoder);
@@ -4290,8 +4292,8 @@ void exynos_drm_dp_to_videoinfo(struct drm_encoder *encoder,
 }
 
 static void exynos_drm_dp_mode_set(struct drm_encoder *encoder,
-		struct drm_display_mode *mode,
-		struct drm_display_mode *adjusted_mode)
+		const struct drm_display_mode *mode,
+		const struct drm_display_mode *adjusted_mode)
 {
 	struct exynos_drm_dp *dp = encoder_to_dp(encoder);
 	struct exynos_dp_subdev *subdev = dp->subdev;
@@ -4311,225 +4313,10 @@ static void exynos_drm_dp_mode_set(struct drm_encoder *encoder,
 			vi.dsc.enable ? "compression" : "bypass");
 }
 
-static bool exynos_drm_dp_connector_set_link_status(struct drm_device *dev,
-		struct exynos_drm_dp *dp)
-{
-	struct drm_connector *connector;
-	struct drm_connector_list_iter conn_iter;
-	struct exynos_dp_subdev *subdev = dp->subdev;
-	struct exynos_drm_dp *drm_dp;
-	struct dp_connector *dp_connector;
-	enum drm_link_status set_link_status = DRM_LINK_STATUS_GOOD;
-	enum drm_link_status old_link_status;
-	int max_link_rate = 0;
-	int root_id = dp->connector->base.id;
-	bool changed = false;
-
-	if (subdev->dpcd[DP_MAX_LINK_RATE])
-		max_link_rate =	subdev->dpcd[DP_MAX_LINK_RATE];
-
-	if ((subdev->hpd_state) &&
-		((max_link_rate != subdev->lt_info.link_rate) || !subdev->training_state))
-		set_link_status = DRM_LINK_STATUS_BAD;
-
-	drm_connector_list_iter_begin(dev, &conn_iter);
-
-	drm_for_each_connector_iter(connector, &conn_iter) {
-		if (connector->connector_type != DRM_MODE_CONNECTOR_DisplayPort)
-			continue;
-
-		if (IS_ERR_OR_NULL(connector->state))
-			continue;
-
-		drm_dp = connector_to_dp(connector);
-		if (drm_dp->output_type != dp->output_type)
-			continue;
-
-		/* This is case of DP UNPLUG */
-		if (set_link_status == DRM_LINK_STATUS_GOOD)
-			goto CHECK_LINK_STATUS;
-
-		/* pdt = peer-device-type
-		 * link_status is controled sink device in mst mode.
-		 * pdt = 0 (no device connected
-		 * ptd = 1 (Source device or SST branch device to UFP)
-		 * pdt = 2 (Device with MST branch or SST branch device to DFP)
-		 * pdt = 3 (SST Sink device or stream sink in MST)
-		 * pdt = 4 (DP-to-Legacy converter)
-		 */
-		dp_connector = to_connector(connector);
-		if (dp->is_mst && (!dp_connector->port ||
-					(dp_connector->port->pdt < DP_PEER_DEVICE_SST_SINK)))
-			continue;
-
-		if (!dp->is_mst && (connector->base.id != root_id))
-			continue;
-
-CHECK_LINK_STATUS:
-		old_link_status = connector->state->link_status;
-
-		if (set_link_status != old_link_status) {
-			dp_log_kms(dp->dev, "[CONNECTOR:%d:%s] link_status changed(%d) -> (%d)\n",
-					connector->base.id, connector->name,
-					old_link_status, set_link_status);
-			connector->state->link_status = set_link_status;
-			changed = true;
-		}
-	}
-
-	drm_connector_list_iter_end(&conn_iter);
-
-	return changed;
-}
 
 /*** connector functions ***/
-static enum drm_connector_status
-exynos_drm_dp_connector_detect(struct drm_connector *connector, bool force)
-{
-	enum drm_connector_status status = connector_status_disconnected;
-	enum drm_connector_status old_status = connector->status;
-	struct exynos_drm_dp *dp = connector_to_dp(connector);
-	struct drm_device *drm_dev = dp->drm_dev;
-	struct device *dev = dp->dev;
-	bool link_status_changed = false;
 
-	dp_log_kms(dev, "\n");
 
-	if (exynos_drm_dp_is_hpd_connected(dp->subdev))
-		status = connector_status_connected;
-
-	/* In case of MST, SST connector should be disconnected */
-	if (dp->is_mst)
-		status = connector_status_disconnected;
-
-	link_status_changed =
-		exynos_drm_dp_connector_set_link_status(drm_dev, dp);
-
-	if ((status == old_status) && link_status_changed)
-		drm_kms_helper_hotplug_event(dp->drm_dev);
-
-	dp_log_kms(dev, "status is %s\n",
-			status == connector_status_connected ? \
-			"connected" : "disconnected");
-	return status;
-};
-
-/* If native only is true, only native mode is used */
-#define for_each_dt_timings(num_timings, native_only, native_mode, __i) \
-	for ((__i) = (native_only) ? (native_mode) : 0; 		\
-	     (__i) < (num_timings) && 					\
-		     (!(native_only) || (__i) == (native_mode));	\
-	     (__i)++)	\
-
-static int exynos_drm_dp_add_mode_from_dt(struct drm_connector *connector,
-					  struct display_timings *timings)
-{
-	struct dp_connector *dp_connector = to_connector(connector);
-	struct drm_device *drm_dev = connector->dev;
-	struct videomode vm;
-	struct drm_display_mode *mode;
-	int native_mode;
-	bool native_only;
-	int mode_num = 0;
-	int index;
-
-	if (!timings)
-		return mode_num;
-
-	/* Check a out of timings->num_timings */
-	native_mode = dp_connector->native_mode;
-	if (native_mode < 0 || native_mode >= timings->num_timings)
-		native_mode = timings->native_mode;
-
-	native_only = dp_connector->native_only;
-
-	for_each_dt_timings(timings->num_timings, native_only, native_mode, index) {
-		if (videomode_from_timings(timings, &vm, index)) {
-			dp_log_err(drm_dev->dev, "index(%d) is invalid\n",
-					index);
-			continue;
-		}
-
-		mode = drm_mode_create(drm_dev);
-		if (!mode) {
-			dp_log_err(drm_dev->dev, "failed to add mode %ux%u\n",
-					vm.hactive, vm.vactive);
-			continue;
-		}
-
-		drm_display_mode_from_videomode(&vm, mode);
-
-		mode->type = DRM_MODE_TYPE_DRIVER;
-
-		if (index == native_mode)
-			mode->type |= DRM_MODE_TYPE_PREFERRED;
-
-		dp_log_dbg(drm_dev->dev, "%s, vrefresh(%d), pclock(%d khz)\n",
-				mode->name, drm_mode_vrefresh(mode), mode->clock);
-
-		drm_mode_probed_add(connector, mode);
-		mode_num++;
-	}
-
-	return mode_num;
-}
-
-int exynos_drm_dp_add_timings(struct exynos_drm_dp *dp,
-		struct drm_connector *connector)
-{
-	struct display_timings *timings = dp->timings;
-	struct device *dev = dp->dev;
-	int num_modes;
-
-	num_modes = exynos_drm_dp_add_mode_from_dt(connector, timings);
-	if (!num_modes)
-		dp_log_dbg(dev, "failed to get modes from device tree");
-
-	return num_modes;
-}
-
-static int exynos_drm_dp_get_modes(struct drm_connector *connector)
-{
-	struct exynos_drm_dp *dp = connector_to_dp(connector);
-	struct exynos_dp_subdev *subdev = dp->subdev;
-	struct device *dev = dp->dev;
-	struct edid *edid = NULL;
-	int num_modes = 0;
-	u8 support_edid;
-
-	num_modes = exynos_drm_dp_add_timings(dp, connector);
-	if (num_modes)
-		goto ret;
-
-	drm_dp_dpcd_readb(&subdev->aux, DP_RECEIVE_PORT_0_CAP_0, &support_edid);
-
-	if (support_edid & DP_LOCAL_EDID_PRESENT)
-		edid = drm_get_edid(connector, &subdev->aux.ddc);
-
-	if (edid) {
-		drm_connector_update_edid_property(connector, edid);
-		num_modes = drm_add_edid_modes(connector, edid);
-		kfree(edid);
-	}
-
-ret:
-	dp_log_kms(dev, "num_modes %d\n", num_modes);
-	return num_modes;
-}
-static enum drm_mode_status exynos_drm_dp_mode_valid(struct drm_connector *connector,
-			const struct drm_display_mode *mode)
-{
-	struct exynos_drm_dp *dp = connector_to_dp(connector);
-	struct device *dev = dp->dev;
-
-	dp_log_kms(dev, "hdisplay=%d, vdisplay=%d, vrefresh=%d, clock=%d\n",
-		mode->hdisplay, mode->vdisplay, drm_mode_vrefresh(mode),
-		mode->clock * 1000);
-
-	/* TODO: return MODE_BAD if exynos_dp_drv can't support it */
-
-	return MODE_OK;
-}
 
 static void exynos_drm_dp_destroy_encoder(struct drm_encoder *encoder)
 {
@@ -4543,43 +4330,105 @@ static void exynos_drm_dp_destroy_encoder(struct drm_encoder *encoder)
 	kfree(dp_encoder);
 }
 
-static void exynos_drm_dp_destroy_connector(struct drm_connector *connector)
-{
-	struct dp_connector *dp_connector = to_connector(connector);
-	struct exynos_drm_dp *dp = connector_to_dp(connector);
-	struct device *dev = dp->dev;
-
-	dp_log_kms(dev, "connector %d\n", connector->base.id);
-	drm_connector_cleanup(connector);
-	kfree(dp_connector);
-}
 
 static const struct drm_encoder_funcs exynos_drm_dp_encoder_funcs = {
 	.destroy = exynos_drm_dp_destroy_encoder,
 };
 
+/* enable/disable/mode_set live on the bridge; the encoder is just the pipe. */
 static const struct drm_encoder_helper_funcs
 exynos_drm_dp_encoder_helper_funcs = {
-	.enable = exynos_drm_dp_enable,
-	.disable = exynos_drm_dp_disable,
-	.mode_fixup = NULL,
-	.mode_set = exynos_drm_dp_mode_set,
 };
 
-static const struct drm_connector_funcs exynos_drm_dp_connector_funcs = {
-	.atomic_create_state = drm_atomic_helper_connector_create_state,
-	.atomic_duplicate_state = drm_atomic_helper_connector_duplicate_state,
-	.atomic_destroy_state = drm_atomic_helper_connector_destroy_state,
-	.detect = exynos_drm_dp_connector_detect,
-	.destroy = exynos_drm_dp_destroy_connector,
-	.dpms = drm_helper_connector_dpms,
-	.fill_modes = drm_helper_probe_single_connector_modes,
-};
 
-static const struct drm_connector_helper_funcs
-exynos_drm_dp_connector_helper_funcs = {
-	.get_modes = exynos_drm_dp_get_modes,
-	.mode_valid = exynos_drm_dp_mode_valid,
+
+static inline struct exynos_drm_dp *bridge_to_dp(struct drm_bridge *bridge)
+{
+	return container_of(bridge, struct exynos_drm_dp, bridge);
+}
+
+/*
+ * The connector is built by drm_bridge_connector_init() on the DRM side, which
+ * is also what routes the Type-C alt mode's HPD here: the DP alt mode driver
+ * resolves the connector's "displayport" phandle and raises an out-of-band
+ * hotplug event, which drm_bridge_connector turns into drm_bridge_hpd_notify().
+ * A bridge that built its own connector would never see any of it.
+ */
+static int exynos_drm_dp_bridge_attach(struct drm_bridge *bridge,
+				       struct drm_encoder *encoder,
+				       enum drm_bridge_attach_flags flags)
+{
+	if (!(flags & DRM_BRIDGE_ATTACH_NO_CONNECTOR))
+		return -EINVAL;
+
+	return 0;
+}
+
+static enum drm_connector_status
+exynos_drm_dp_bridge_detect(struct drm_bridge *bridge,
+			    struct drm_connector *connector)
+{
+	struct exynos_drm_dp *dp = bridge_to_dp(bridge);
+
+	return exynos_drm_dp_is_hpd_connected(dp->subdev) ?
+		connector_status_connected : connector_status_disconnected;
+}
+
+static const struct drm_edid *
+exynos_drm_dp_bridge_edid_read(struct drm_bridge *bridge,
+			       struct drm_connector *connector)
+{
+	struct exynos_drm_dp *dp = bridge_to_dp(bridge);
+	struct exynos_dp_subdev *subdev = dp->subdev;
+	u8 support_edid;
+
+	drm_dp_dpcd_readb(&subdev->aux, DP_RECEIVE_PORT_0_CAP_0, &support_edid);
+	if (!(support_edid & DP_LOCAL_EDID_PRESENT))
+		return NULL;
+
+	return drm_edid_read_ddc(connector, &subdev->aux.ddc);
+}
+
+static enum drm_mode_status
+exynos_drm_dp_bridge_mode_valid(struct drm_bridge *bridge,
+				const struct drm_display_info *info,
+				const struct drm_display_mode *mode)
+{
+	/* TODO: reject what the trained link cannot carry */
+	return MODE_OK;
+}
+
+static void exynos_drm_dp_bridge_mode_set(struct drm_bridge *bridge,
+					  const struct drm_display_mode *mode,
+					  const struct drm_display_mode *adjusted_mode)
+{
+	exynos_drm_dp_mode_set(bridge->encoder, mode, adjusted_mode);
+}
+
+static void exynos_drm_dp_bridge_atomic_enable(struct drm_bridge *bridge,
+					       struct drm_atomic_commit *state)
+{
+	exynos_drm_dp_enable(bridge->encoder);
+}
+
+static void exynos_drm_dp_bridge_atomic_disable(struct drm_bridge *bridge,
+						struct drm_atomic_commit *state)
+{
+	exynos_drm_dp_disable(bridge->encoder);
+}
+
+static const struct drm_bridge_funcs exynos_drm_dp_bridge_funcs = {
+	.attach = exynos_drm_dp_bridge_attach,
+	.detect = exynos_drm_dp_bridge_detect,
+	.edid_read = exynos_drm_dp_bridge_edid_read,
+	.mode_valid = exynos_drm_dp_bridge_mode_valid,
+	.mode_set = exynos_drm_dp_bridge_mode_set,
+	.atomic_enable = exynos_drm_dp_bridge_atomic_enable,
+	.atomic_disable = exynos_drm_dp_bridge_atomic_disable,
+	.atomic_create_state = drm_atomic_helper_bridge_create_state,
+	.atomic_duplicate_state = drm_atomic_helper_bridge_duplicate_state,
+	.atomic_destroy_state = drm_atomic_helper_bridge_destroy_state,
+	.atomic_get_input_bus_fmts = drm_atomic_helper_bridge_propagate_bus_fmt,
 };
 
 static struct dp_encoder *dp_encoder_alloc(struct exynos_drm_dp *dp)
@@ -4597,21 +4446,6 @@ static struct dp_encoder *dp_encoder_alloc(struct exynos_drm_dp *dp)
 	return dp_encoder;
 }
 
-static struct dp_connector *dp_connector_alloc(struct exynos_drm_dp *dp,
-					       struct dp_encoder *dp_encoder)
-{
-	struct dp_connector *dp_connector;
-
-	dp_connector = kzalloc(sizeof(*dp_connector), GFP_KERNEL);
-	if (!dp_connector)
-		return NULL;
-
-	dp_connector->dp = dp;
-	dp_connector->dp_encoder = dp_encoder;
-	dp_encoder->dp_connector = dp_connector;
-
-	return dp_connector;
-}
 
 static int exynos_drm_dp_init_encoder(struct dp_encoder *dp_encoder)
 {
@@ -4632,75 +4466,6 @@ static int exynos_drm_dp_init_encoder(struct dp_encoder *dp_encoder)
 		    encoder->name, encoder->possible_crtcs);
 
 	return 0;
-}
-
-static int exynos_drm_dp_init_connector(struct dp_connector *dp_connector)
-{
-	struct exynos_drm_dp *dp = dp_connector->dp;
-	struct drm_connector *connector = &dp_connector->base;
-	struct drm_encoder *encoder = &dp_connector->dp_encoder->base;
-	struct device *dev = dp->dev;
-	int ret = 0;
-
-	connector->polled = DRM_CONNECTOR_POLL_HPD;
-
-	ret = drm_connector_init(dp->drm_dev, connector,
-				 &exynos_drm_dp_connector_funcs,
-				 DRM_MODE_CONNECTOR_DisplayPort);
-	if (ret) {
-		dp_log_err(dev, "Failed to create connector %d\n", ret);
-		drm_connector_cleanup(connector);
-		return ret;
-	}
-
-	drm_connector_helper_add(connector,
-				 &exynos_drm_dp_connector_helper_funcs);
-	drm_connector_attach_encoder(connector, encoder);
-
-	dp_log_info(dev, "Success to create connector %s\n", connector->name);
-
-	return 0;
-}
-
-static int exynos_drm_dp_get_timings(struct device *dev)
-{
-	struct exynos_drm_dp *dp = dev_get_drvdata(dev);
-	struct device_node *np = dev->of_node;
-	struct device_node *timing_np;
-
-	timing_np = of_parse_phandle(np, "samsung,display-timings", 0);
-	if (!timing_np) {
-		dp_log_info(dev, "could not get display timings\n");
-		return 0;
-	}
-
-	dp->timings = of_get_display_timings(timing_np);
-	if (IS_ERR_OR_NULL(dp->timings)) {
-		dp_log_err(dev, "could not get native display timing\n");
-		of_node_put(timing_np);
-		return -EINVAL;
-	}
-	of_node_put(timing_np);
-
-	return 0;
-}
-
-static void exynos_drm_dp_get_native_mode(struct device *dev,
-					  struct dp_connector *dp_connector)
-{
-	struct device_node *np = dev->of_node;
-	int idx;
-
-	if (of_property_read_s32(np, "samsung,native-mode,idx", &idx) < 0)
-		dp_connector->native_mode = -1;
-	else
-		dp_connector->native_mode = idx;
-
-	dp_connector->native_only =
-		of_property_read_bool(np, "samsung,native-only");
-
-	of_property_read_u32(np, "samsung,native-mode,bpc",
-				&dp_connector->base.display_info.bpc);
 }
 
 static ssize_t exynos_drm_dp_aux_transfer(struct drm_dp_aux *aux,
@@ -4797,7 +4562,7 @@ static int exynos_drm_dp_bind(struct device *dev,
 {
 	struct exynos_drm_dp *dp = dev_get_drvdata(dev);
 	struct dp_encoder *dp_encoder;
-	struct dp_connector *dp_connector;
+	struct drm_connector *connector;
 	struct drm_device *drm_dev = data;
 	int ret = 0;
 
@@ -4811,28 +4576,33 @@ static int exynos_drm_dp_bind(struct device *dev,
 	if (ret < 0)
 		goto err_encoder_init;
 
-	dp_connector = dp_connector_alloc(dp, dp_encoder);
-	if (IS_ERR_OR_NULL(dp_connector))
-		goto err_connector_init;
-	ret = exynos_drm_dp_init_connector(dp_connector);
-	if (ret < 0)
-		goto err_connector_init;
-
-	/* Set base encoder/connector */
 	dp->encoder = &dp_encoder->base;
-	dp->connector = &dp_connector->base;
 
-	ret = exynos_drm_dp_get_timings(dev);
+	/*
+	 * The bridge owns the connector, so the mode and EDID come from its
+	 * callbacks rather than this driver's own drm_connector, and HPD from
+	 * the alt mode reaches it through drm_bridge_connector.
+	 */
+	ret = drm_bridge_attach(dp->encoder, &dp->bridge, NULL,
+				DRM_BRIDGE_ATTACH_NO_CONNECTOR);
 	if (ret < 0)
-		goto err_connector_init;
+		goto err_encoder_init;
 
-	exynos_drm_dp_get_native_mode(dev, dp_connector);
+	connector = drm_bridge_connector_init(drm_dev, dp->encoder);
+	if (IS_ERR(connector)) {
+		ret = PTR_ERR(connector);
+		goto err_encoder_init;
+	}
+
+	ret = drm_connector_attach_encoder(connector, dp->encoder);
+	if (ret < 0)
+		goto err_encoder_init;
+
+	dp->connector = connector;
 
 	ret = exynos_drm_dp_subdev_bind(dev, dp);
 	if (ret < 0)
-		goto err_connector_init;
-
-	exynos_drm_dp_mst_init(dp_connector);
+		goto err_encoder_init;
 
 	ret = exynos_drm_dp_start(dp->subdev);
 	if (ret < 0)
@@ -4844,13 +4614,10 @@ static int exynos_drm_dp_bind(struct device *dev,
 
 	return 0;
 
-err_connector_init:
-	if (dp_connector)
-		exynos_drm_dp_destroy_connector(&dp_connector->base);
 err_encoder_init:
 	if (dp_encoder)
 		exynos_drm_dp_destroy_encoder(&dp_encoder->base);
-	dp_log_err(dev, "failed: drm_encoder/connector_init() : %d\n", ret);
+	dp_log_err(dev, "failed: drm_encoder/bridge attach: %d\n", ret);
 	return ret;
 }
 
@@ -4869,8 +4636,6 @@ static void exynos_drm_dp_unbind(struct device *dev, struct device *master,
 	mutex_destroy(&subdev->pwlock);
 
 	drm_dp_aux_unregister(&subdev->aux);
-
-	display_timings_release(dp->timings);
 
 	flush_delayed_work(&subdev->hpd_irq_work);
 
@@ -4894,14 +4659,16 @@ static int exynos_drm_dp_probe(struct platform_device *pdev)
 	struct clk *aclk, *pclk;
 	int ret = 0;
 
-	dp = devm_kzalloc(dev, sizeof(struct exynos_drm_dp),
-			  GFP_KERNEL);
-	if (!dp)
-		return -ENOMEM;
+	dp = devm_drm_bridge_alloc(dev, struct exynos_drm_dp, bridge,
+				   &exynos_drm_dp_bridge_funcs);
+	if (IS_ERR(dp))
+		return PTR_ERR(dp);
 
 	dp->dev = dev;
 	dp->bridge.of_node = dev->of_node;
-	dp->bridge.driver_private = dp;
+	dp->bridge.type = DRM_MODE_CONNECTOR_DisplayPort;
+	dp->bridge.ops = DRM_BRIDGE_OP_DETECT | DRM_BRIDGE_OP_EDID |
+			 DRM_BRIDGE_OP_HPD;
 	drm_bridge_add(&dp->bridge);
 
 	dp->id = 0;
