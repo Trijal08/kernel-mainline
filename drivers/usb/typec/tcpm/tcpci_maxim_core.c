@@ -15,6 +15,9 @@
 #include <linux/usb/tcpci.h>
 #include <linux/usb/tcpm.h>
 #include <linux/usb/typec.h>
+#include <linux/usb/typec_altmode.h>
+#include <linux/usb/typec_dp.h>
+#include <linux/usb/typec_mux.h>
 
 #include "tcpci_maxim.h"
 
@@ -331,6 +334,97 @@ static void max_tcpci_set_partner_usb_comm_capable(struct tcpci *tcpci, struct t
 		dev_err(chip->dev, "Failed to enable USB switches");
 }
 
+/*
+ * The same USB switches as a connector state, for ports that never learn the
+ * partner's USB_COMM bit.  That bit only arrives with a PD contract, so on a
+ * pd-disable port the switches would be turned off at port reset and never
+ * turned back on.  TCPM drives TYPEC_STATE_USB from tcpm_set_roles() on every
+ * attach and TYPEC_STATE_SAFE from tcpm_reset_port() on every detach,
+ * independently of PD, which is the signal a non-PD port does get.
+ */
+/*
+ * Route the connector's SBU pair to the SoC's DP AUX lines, and raise the
+ * pull-up rail to the 3.3V AUX wants while they are routed. The max77759 path
+ * is already corrected for the plug orientation, so there is no polarity to
+ * choose here.
+ *
+ * Without this AUX never reaches the sink, and a DP partner that is otherwise
+ * fully negotiated -- mode entered, lanes muxed, HPD asserted -- can never be
+ * link trained.
+ */
+static int max_tcpci_sbu_switch(struct max_tcpci_chip *chip, bool dp)
+{
+	int ret;
+
+	if (chip->sbu_reg && dp != chip->sbu_reg_enabled) {
+		if (dp) {
+			regulator_set_voltage(chip->sbu_reg, SBU_PULLUP_UV,
+					      SBU_PULLUP_UV);
+			ret = regulator_enable(chip->sbu_reg);
+		} else {
+			ret = regulator_disable(chip->sbu_reg);
+		}
+
+		if (ret < 0)
+			dev_err(chip->dev, "Failed to %s the SBU pull-up: %d\n",
+				dp ? "enable" : "disable", ret);
+		else
+			chip->sbu_reg_enabled = dp;
+	}
+
+	ret = max_tcpci_write8(chip, TCPC_VENDOR_SBUSW_CTRL,
+			       dp ? SBUSW_PATH_1 : SBUSW_OFF);
+	if (ret < 0)
+		dev_err(chip->dev, "Failed to %s the SBU switch: %d\n",
+			dp ? "close" : "open", ret);
+
+	return ret;
+}
+
+static int max_tcpci_mux_set(struct typec_mux_dev *mux,
+			     struct typec_mux_state *state)
+{
+	struct max_tcpci_chip *chip = typec_mux_get_drvdata(mux);
+	int ret;
+
+	switch (state->mode) {
+	case TYPEC_DP_STATE_A:
+	case TYPEC_DP_STATE_B:
+	case TYPEC_DP_STATE_C:
+	case TYPEC_DP_STATE_D:
+	case TYPEC_DP_STATE_E:
+	case TYPEC_DP_STATE_F:
+		/*
+		 * Every DP pin assignment needs AUX, and the ones that keep USB
+		 * alongside leave the D+/D- switches to the USB_COMM path.
+		 */
+		return max_tcpci_sbu_switch(chip, true);
+	default:
+		break;
+	}
+
+	/*
+	 * Leave the remaining alternate and accessory modes alone: they arrive
+	 * only through PD, where set_partner_usb_comm_capable() above already
+	 * owns the switches.
+	 */
+	if (state->mode != TYPEC_STATE_USB && state->mode != TYPEC_STATE_SAFE)
+		return 0;
+
+	/* Back off DP: unroute SBU and drop the rail again. */
+	max_tcpci_sbu_switch(chip, false);
+
+	ret = max_tcpci_write8(chip, TCPC_VENDOR_USBSW_CTRL,
+			       state->mode == TYPEC_STATE_USB ?
+			       TCPC_VENDOR_USBSW_CTRL_ENABLE_USB_DATA :
+			       TCPC_VENDOR_USBSW_CTRL_DISABLE_USB_DATA);
+	if (ret < 0)
+		dev_err(chip->dev, "Failed to set USB switches for mode %lu\n",
+			state->mode);
+
+	return ret;
+}
+
 static irqreturn_t _max_tcpci_irq(struct max_tcpci_chip *chip, u16 status)
 {
 	u16 mask;
@@ -569,6 +663,40 @@ static int max_tcpci_gpio_init(struct max_tcpci_chip *chip)
 	return devm_gpiochip_add_data(chip->dev, &chip->gpio, chip);
 }
 
+static void max_tcpci_unregister_mux(void *mux)
+{
+	typec_mux_unregister(mux);
+}
+
+static int max_tcpci_register_mux(struct max_tcpci_chip *chip)
+{
+	struct typec_mux_desc mux_desc;
+
+	/*
+	 * Only boards that link the connector back to this device expect the
+	 * switches to follow the connector state; leave the rest on the
+	 * USB_COMM path alone.  Register before the port, or its mode-switch
+	 * lookup defers on a mux this same probe has not created yet.
+	 */
+	if (!device_property_present(chip->dev, "mode-switch"))
+		return 0;
+
+	mux_desc = (struct typec_mux_desc){
+		.fwnode = dev_fwnode(chip->dev),
+		.set = max_tcpci_mux_set,
+		.drvdata = chip,
+		.name = dev_name(chip->dev),
+	};
+
+	chip->mux = typec_mux_register(chip->dev, &mux_desc);
+	if (IS_ERR(chip->mux))
+		return dev_err_probe(chip->dev, PTR_ERR(chip->mux),
+				     "USB switch mode-switch registration failed\n");
+
+	return devm_add_action_or_reset(chip->dev, max_tcpci_unregister_mux,
+					chip->mux);
+}
+
 static int max_tcpci_probe(struct i2c_client *client)
 {
 	int ret;
@@ -609,6 +737,23 @@ static int max_tcpci_probe(struct i2c_client *client)
 	INIT_WORK(&chip->sourcing_vbus_work, max_tcpci_sourcing_vbus_work);
 
 	max_tcpci_init_regs(chip);
+
+	ret = max_tcpci_register_mux(chip);
+	if (ret)
+		return ret;
+
+	/*
+	 * Optional: boards that route SBU to DP AUX gate the pair behind a
+	 * pull-up rail. Without one the switch still closes, which is all a
+	 * board with an always-on rail needs.
+	 */
+	chip->sbu_reg = devm_regulator_get_optional(chip->dev, "pullup");
+	if (IS_ERR(chip->sbu_reg)) {
+		if (PTR_ERR(chip->sbu_reg) == -EPROBE_DEFER)
+			return -EPROBE_DEFER;
+		chip->sbu_reg = NULL;
+	}
+
 	chip->tcpci = tcpci_register_port(chip->dev, &chip->data);
 	if (IS_ERR(chip->tcpci))
 		return dev_err_probe(&client->dev, PTR_ERR(chip->tcpci),
