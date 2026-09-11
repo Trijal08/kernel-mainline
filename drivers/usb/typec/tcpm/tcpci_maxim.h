@@ -48,6 +48,18 @@
 #define TCPC_VENDOR_EXTBST_CTRL                 0x92
 #define EXT_BST_EN                              BIT(0)
 
+/*
+ * SBU crossbar switch: routes the connector's SBU1/SBU2 to the SoC's DP AUX
+ * pair. max77759 has a single orientation-corrected path; the max77779
+ * crossbar takes an explicit polarity instead.
+ */
+#define TCPC_VENDOR_SBUSW_CTRL                  0x94
+#define SBUSW_OFF                               0x0
+#define SBUSW_PATH_1                            0x9
+
+/* What DP AUX wants on the SBU pull-up rail while the switch is closed. */
+#define SBU_PULLUP_UV                           3300000
+
 enum contamiant_state {
 	NOT_DETECTED,
 	DETECTED,
@@ -68,6 +80,10 @@ struct max_tcpci_chip {
 	enum contamiant_state contaminant_state;
 	bool veto_vconn_swap;
 	struct regulator *vbus_reg;
+	/* SBU/AUX pull-up rail, raised to 3.3V while DP alt mode is up */
+	struct regulator *sbu_reg;
+	bool sbu_reg_enabled;
+	struct typec_mux_dev *mux;
 	struct gpio_chip gpio;
 	struct work_struct sourcing_vbus_work;
 };
