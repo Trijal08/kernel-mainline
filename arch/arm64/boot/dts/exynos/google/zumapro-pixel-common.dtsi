@@ -177,6 +177,13 @@
 				regulator-max-microvolt = <3300000>;
 			};
 
+			m_ldo19_reg: ldo19m {
+				/* L19M: SBU pull-up, 3.3V while DP AUX is routed */
+				regulator-name = "vdd_sbu_pullup";
+				regulator-min-microvolt = <2500000>;
+				regulator-max-microvolt = <3300000>;
+			};
+
 			m_ldo25_reg: ldo25m {
 				/* L25M_TSP_DVDD: touchscreen digital 1.8V */
 				regulator-name = "vdd_ts_dvdd";
@@ -406,8 +413,23 @@
 		gpio-controller;
 		#gpio-cells = <2>;
 
+		/*
+		 * The SBU switch that routes DP AUX to the connector lives in
+		 * this TCPC, so the connector links its mode switch back here.
+		 */
+		mode-switch;
+
+		/* L19M gates the SBU pair; DP AUX wants it at 3.3V. */
+		pullup-supply = <&m_ldo19_reg>;
+
 		/* VBUS sourcing (host mode) via the max77779 external boost */
 		vbus-supply = <&max77779_otg>;
+
+		port {
+			usbc0_sbu_sw_in: endpoint {
+				remote-endpoint = <&usbc0_sbu_sw>;
+			};
+		};
 
 		connector {
 			compatible = "usb-c-connector";
@@ -476,12 +498,23 @@
 				#address-cells = <1>;
 				#size-cells = <0>;
 
-				/* High speed: the DWC3 data role. */
+				/*
+				 * High speed: the DWC3 data role, and the
+				 * TCPC's own switches.
+				 */
 				port@0 {
 					reg = <0>;
+					#address-cells = <1>;
+					#size-cells = <0>;
 
-					usbc0_role_sw: endpoint {
+					usbc0_role_sw: endpoint@0 {
+						reg = <0>;
 						remote-endpoint = <&usbdrd31_dwc3_role_switch>;
+					};
+
+					usbc0_sbu_sw: endpoint@1 {
+						reg = <1>;
+						remote-endpoint = <&usbc0_sbu_sw_in>;
 					};
 				};
 
