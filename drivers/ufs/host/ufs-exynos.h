@@ -251,6 +251,7 @@ struct exynos_ufs {
 #define EXYNOS_UFS_OPT_PRE_LINK_GET_LANES	BIT(10)
 #define EXYNOS_UFS_OPT_TIMER_TICK_USES_MCLK	BIT(11)
 #define EXYNOS_UFS_OPT_RESTORE_MPHY_APBCLK	BIT(12)
+#define EXYNOS_UFS_OPT_EXPLICIT_PHY_CAL	BIT(13)
 };
 
 #define for_each_ufs_rx_lane(ufs, i) \
