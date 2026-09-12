@@ -1,0 +1,20 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * R36S Game Console (r36s) Device Tree
+ *
+ * Copyright 2026 Trijal Saha - <trijalsaha2012@gmail.com>
+ */
+
+/dts-v1/;
+#include "rk3326-r36s.dtsi"
+
+/ {
+	model = "R36S Game Console";
+	compatible = "rockchip,rk3326-r36s", "rockchip,rk3326";
+};
+
+&internal_display {
+	compatible = "rockchip,r36s-panel";
+	iovcc-supply = <&vcc_lcd>;
+	vdd-supply = <&vcc_lcd>;
+};
