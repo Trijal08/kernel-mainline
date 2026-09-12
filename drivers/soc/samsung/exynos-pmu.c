@@ -39,6 +39,7 @@ struct exynos_pmu_context {
 	 */
 	raw_spinlock_t cpupm_lock;
 	unsigned long *in_cpuhp;
+	void __iomem **zumapro_sleep_exit_drcg;
 	bool sys_insuspend;
 	bool sys_inreboot;
 };
@@ -675,8 +676,89 @@ static struct notifier_block zumapro_cpu_pm_notifier = {
  * registers for the boot cluster's DynamIQ Shared Unit.
  */
 #define ZUMAPRO_CPUCL0_SYSREG		0x29c20000
-#define CPUCL0_DSU_DRCG_EN		0x0104
+#define ZUMAPRO_DRCG_EN_OFFSET		0x0104
+#define CPUCL0_DSU_DRCG_EN		ZUMAPRO_DRCG_EN_OFFSET
 #define CPUCL0_DSU_DRCG_EN_INT		0x010c
+
+/*
+ * SYSREG blocks whose dynamic root clock-gating enables are initialized once
+ * by zumapro_program_lpm_init(), but have no clock provider to save and
+ * restore them.  A fresh-boot versus SYS_SLEEP comparison on Tegu showed that
+ * every register below changes from its valid enabled mask to zero.  ALIVE,
+ * HSI1/2 and PERIC0/1 retained their values or were already restored, so they
+ * deliberately are not duplicated here.
+ *
+ * Keep the order used by downstream's exit_sleep sequence: CPUCL0, the four
+ * MIFs, MISC, then the five NoCs.  Mappings are prepared at probe because the
+ * syscore callback cannot allocate or sleep.  The NoC writes retain
+ * downstream's PMU power-domain conditions so an inactive block is not
+ * accessed.
+ */
+struct zumapro_sleep_exit_drcg {
+	phys_addr_t base;
+	u32 cond_offset;
+};
+
+static const struct zumapro_sleep_exit_drcg zumapro_sleep_exit_drcg[] = {
+	{ ZUMAPRO_CPUCL0_SYSREG },
+	{ 0x27c20000 },
+	{ 0x27d20000 },
+	{ 0x27e20000 },
+	{ 0x27f20000 },
+	{ 0x10030000 },
+	{ 0x26020000, 0x2804 },
+	{ 0x26420000, 0x2884 },
+	{ 0x26820000, 0x2904 },
+	{ 0x26c20000, 0x2984 },
+	{ 0x27020000, 0x2a04 },
+};
+
+static int zumapro_prepare_sleep_exit_drcg(struct device *dev)
+{
+	unsigned int i;
+
+	pmu_context->zumapro_sleep_exit_drcg =
+		devm_kcalloc(dev, ARRAY_SIZE(zumapro_sleep_exit_drcg),
+			     sizeof(*pmu_context->zumapro_sleep_exit_drcg),
+			     GFP_KERNEL);
+	if (!pmu_context->zumapro_sleep_exit_drcg)
+		return -ENOMEM;
+
+	for (i = 0; i < ARRAY_SIZE(zumapro_sleep_exit_drcg); i++) {
+		phys_addr_t base = zumapro_sleep_exit_drcg[i].base;
+
+		pmu_context->zumapro_sleep_exit_drcg[i] =
+			devm_ioremap(dev, base, 0x1000);
+		if (!pmu_context->zumapro_sleep_exit_drcg[i])
+			return dev_err_probe(dev, -ENOMEM,
+					     "cannot map sleep-exit DRCG block %pa\n",
+					     &base);
+	}
+
+	return 0;
+}
+
+static void zumapro_restore_sleep_exit_drcg(void)
+{
+	unsigned int i;
+	u32 status;
+
+	writel(~0u, pmu_context->zumapro_sleep_exit_drcg[0] +
+		       ZUMAPRO_DRCG_EN_OFFSET);
+	writel(~0u, pmu_context->zumapro_sleep_exit_drcg[0] +
+		       CPUCL0_DSU_DRCG_EN_INT);
+
+	for (i = 1; i < ARRAY_SIZE(zumapro_sleep_exit_drcg); i++) {
+		if (zumapro_sleep_exit_drcg[i].cond_offset &&
+		    (regmap_read(pmu_context->pmureg,
+				 zumapro_sleep_exit_drcg[i].cond_offset,
+				 &status) || !(status & BIT(0))))
+			continue;
+
+		writel(~0u, pmu_context->zumapro_sleep_exit_drcg[i] +
+			       ZUMAPRO_DRCG_EN_OFFSET);
+	}
+}
 
 /*
  * Enable dynamic root clock gating of the CPUCL0 DynamIQ Shared Unit. The DSU
@@ -805,10 +887,8 @@ static void zumapro_sys_sleep_disarm(void)
  * position downstream's exynos-pm uses.  They are reached for every system
  * sleep state, so check which one is in flight.
  *
- * This undoes only what the enter sequence did.  Downstream's full exit also
- * re-enables bus clock gating across sixteen fabric blocks and walks the PMU
- * state machine, which matters only once the SoC is coming back far enough to
- * need them; that is the next step, not this one.
+ * The exit path first undoes the enter sequence, then restores fabric state
+ * that SYS_SLEEP loses before ordinary device resume begins.
  */
 static int zumapro_sys_sleep_suspend(void *data)
 {
@@ -825,6 +905,7 @@ static void zumapro_sys_sleep_resume(void *data)
 		return;
 
 	zumapro_sys_sleep_disarm();
+	zumapro_restore_sleep_exit_drcg();
 }
 
 static const struct syscore_ops zumapro_sys_sleep_syscore_ops = {
@@ -967,14 +1048,12 @@ static void zumapro_program_lpm_durations(struct device *dev)
  * to a gated block stalls the interconnect, so those are deliberately left for
  * a later step that can sequence them against their domains.
  *
- * The eleven DRCG entries on always-on blocks belong here rather than with the
- * deferred ones.  A trace of the downstream kernel that does complete this
- * sleep shows seventeen of exit_sleep[]'s thirty-four steps rewriting
+ * A trace of the downstream kernel that does complete this sleep shows
+ * seventeen of exit_sleep[]'s thirty-four steps rewriting
  * BUS_COMPONENT_DRCG_EN on every resume -- ALIVE, CPUCL0 and its _INT
  * companion, G3D, the four MIF, MISC, the five NoCs, HSI2 and the two PERICs.
- * Nothing read the register back, so that is an inference and not a
- * measurement, but a kernel does not usually rewrite a register that kept its
- * value.
+ * The live Tegu comparison described above now establishes which values
+ * mainline actually loses; zumapro_restore_sleep_exit_drcg() covers those.
  *
  * PERIC0, PERIC1, HSI1, HSI2 and MFC are not listed below because the clock
  * driver already writes the same register at the same offset with the same
@@ -1232,6 +1311,9 @@ static int exynos_pmu_probe(struct platform_device *pdev)
 
 		zumapro_program_lpm_durations(dev);
 		zumapro_program_lpm_init(dev);
+		ret = zumapro_prepare_sleep_exit_drcg(dev);
+		if (ret)
+			return ret;
 		register_syscore(&zumapro_sys_sleep_syscore);
 
 		ret = cpuhp_setup_state(CPUHP_AP_ONLINE_DYN,
