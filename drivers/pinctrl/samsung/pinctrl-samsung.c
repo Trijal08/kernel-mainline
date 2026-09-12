@@ -27,12 +27,15 @@
 #include <linux/seq_file.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
+#include <linux/syscore_ops.h>
 
 #include "../core.h"
 #include "pinctrl-samsung.h"
 
 /* maximum number of the memory resources */
 #define	SAMSUNG_PINCTRL_NUM_RESOURCES	2
+
+static LIST_HEAD(samsung_pinctrl_syscore_list);
 
 /* list of all possible config options supported */
 static struct pin_config {
@@ -1321,6 +1324,14 @@ static int samsung_pinctrl_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, drvdata);
 
+	/*
+	 * Zumapro firmware resets the non-alive pin banks in SYS_SLEEP.  Their
+	 * consumers start resuming at noirq, so restore all Zumapro banks from
+	 * syscore, as the downstream driver does, rather than at resume_early.
+	 */
+	if (of_device_is_compatible(dev->of_node, "google,zumapro-pinctrl"))
+		list_add_tail(&drvdata->node, &samsung_pinctrl_syscore_list);
+
 	return 0;
 
 err_unregister:
@@ -1330,23 +1341,10 @@ err_put_banks:
 	return ret;
 }
 
-/*
- * samsung_pinctrl_suspend - save pinctrl state for suspend
- *
- * Save data for all banks handled by this device.
- */
-static int __maybe_unused samsung_pinctrl_suspend(struct device *dev)
+static void samsung_pinctrl_save_state(struct samsung_pinctrl_drv_data *drvdata)
 {
-	struct samsung_pinctrl_drv_data *drvdata = dev_get_drvdata(dev);
 	struct samsung_pin_bank *bank;
 	int i;
-
-	i = clk_enable(drvdata->pclk);
-	if (i) {
-		dev_err(drvdata->dev,
-			"failed to enable clock for saving state\n");
-		return i;
-	}
 
 	for (i = 0; i < drvdata->nr_banks; i++) {
 		bank = &drvdata->pin_banks[i];
@@ -1376,6 +1374,29 @@ static int __maybe_unused samsung_pinctrl_suspend(struct device *dev)
 				 reg, bank->pm_save[PINCFG_TYPE_FUNC]);
 		}
 	}
+}
+
+/*
+ * samsung_pinctrl_suspend - save pinctrl state for suspend
+ *
+ * Save data for all banks handled by this device.
+ */
+static int __maybe_unused samsung_pinctrl_suspend(struct device *dev)
+{
+	struct samsung_pinctrl_drv_data *drvdata = dev_get_drvdata(dev);
+	struct samsung_pin_bank *bank;
+	int i;
+
+	drvdata->syscore_resumed = false;
+
+	i = clk_enable(drvdata->pclk);
+	if (i) {
+		dev_err(drvdata->dev,
+			"failed to enable clock for saving state\n");
+		return i;
+	}
+
+	samsung_pinctrl_save_state(drvdata);
 
 	for (i = 0; i < drvdata->nr_banks; i++) {
 		bank = &drvdata->pin_banks[i];
@@ -1399,9 +1420,8 @@ static int __maybe_unused samsung_pinctrl_suspend(struct device *dev)
  * We don't bother doing anything complicated to avoid glitching lines since
  * we're called before pad retention is turned off.
  */
-static int __maybe_unused samsung_pinctrl_resume(struct device *dev)
+static int samsung_pinctrl_resume_dev(struct samsung_pinctrl_drv_data *drvdata)
 {
-	struct samsung_pinctrl_drv_data *drvdata = dev_get_drvdata(dev);
 	struct samsung_pin_bank *bank;
 	int ret;
 	int i;
@@ -1461,6 +1481,83 @@ static int __maybe_unused samsung_pinctrl_resume(struct device *dev)
 
 	return 0;
 }
+
+static int __maybe_unused samsung_pinctrl_resume(struct device *dev)
+{
+	struct samsung_pinctrl_drv_data *drvdata = dev_get_drvdata(dev);
+
+	if (drvdata->syscore_resumed) {
+		drvdata->syscore_resumed = false;
+		return 0;
+	}
+
+	return samsung_pinctrl_resume_dev(drvdata);
+}
+
+/*
+ * Device suspend_late precedes consumer suspend_noirq, so its first snapshot
+ * cannot include GPIO changes made by a noirq callback.  Zumapro restores
+ * these banks from syscore; take the final snapshot there too, after all
+ * device noirq callbacks, matching downstream's save/restore phase.  Keep the
+ * ordinary snapshot above for s2idle (which does not enter syscore) and as the
+ * aborted-suspend fallback.
+ */
+static int samsung_pinctrl_syscore_suspend(void *unused)
+{
+	struct samsung_pinctrl_drv_data *drvdata;
+	int ret;
+
+	/*
+	 * Acquire every controller clock before replacing the suspend_late
+	 * snapshots.  If one clock cannot be enabled, leave all saved state as
+	 * the abort fallback rather than mixing early and final snapshots.
+	 */
+	list_for_each_entry(drvdata, &samsung_pinctrl_syscore_list, node) {
+		ret = clk_enable(drvdata->pclk);
+		if (ret) {
+			dev_err(drvdata->dev,
+				"failed to enable clock for saving state\n");
+			goto err_disable_clocks;
+		}
+	}
+
+	list_for_each_entry(drvdata, &samsung_pinctrl_syscore_list, node)
+		samsung_pinctrl_save_state(drvdata);
+
+	list_for_each_entry_reverse(drvdata, &samsung_pinctrl_syscore_list,
+				    node)
+		clk_disable(drvdata->pclk);
+
+	return 0;
+
+err_disable_clocks:
+	list_for_each_entry_continue_reverse(drvdata,
+					     &samsung_pinctrl_syscore_list,
+					     node)
+		clk_disable(drvdata->pclk);
+
+	return ret;
+}
+
+static void samsung_pinctrl_syscore_resume(void *unused)
+{
+	struct samsung_pinctrl_drv_data *drvdata;
+
+	list_for_each_entry_reverse(drvdata, &samsung_pinctrl_syscore_list,
+				    node) {
+		if (!samsung_pinctrl_resume_dev(drvdata))
+			drvdata->syscore_resumed = true;
+	}
+}
+
+static const struct syscore_ops samsung_pinctrl_syscore_ops = {
+	.suspend = samsung_pinctrl_syscore_suspend,
+	.resume = samsung_pinctrl_syscore_resume,
+};
+
+static struct syscore samsung_pinctrl_syscore = {
+	.ops = &samsung_pinctrl_syscore_ops,
+};
 
 static const struct of_device_id samsung_pinctrl_dt_match[] = {
 #ifdef CONFIG_PINCTRL_EXYNOS_ARM
@@ -1545,6 +1642,14 @@ static struct platform_driver samsung_pinctrl_driver = {
 
 static int __init samsung_pinctrl_drv_register(void)
 {
-	return platform_driver_register(&samsung_pinctrl_driver);
+	int ret;
+
+	/* Register before later postcore users which consume restored GPIOs. */
+	register_syscore(&samsung_pinctrl_syscore);
+	ret = platform_driver_register(&samsung_pinctrl_driver);
+	if (ret)
+		unregister_syscore(&samsung_pinctrl_syscore);
+
+	return ret;
 }
 postcore_initcall(samsung_pinctrl_drv_register);

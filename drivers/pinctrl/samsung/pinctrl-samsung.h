@@ -303,6 +303,7 @@ struct samsung_pin_ctrl {
  * @dev: device instance representing the controller.
  * @irq: interrpt number used by the controller to notify gpio interrupts.
  * @pclk: optional bus clock if required for accessing registers
+ * @syscore_resumed: true when syscore already restored this controller
  * @ctrl: pin controller instance managed by the driver.
  * @pctl: pin controller descriptor registered with the pinctrl subsystem.
  * @pctl_dev: cookie representing pinctrl device instance.
@@ -319,6 +320,7 @@ struct samsung_pin_ctrl {
  */
 struct samsung_pinctrl_drv_data {
 	struct list_head		node;
+	bool				syscore_resumed;
 	void __iomem			*virt_base;
 	struct device			*dev;
 	int				irq;
