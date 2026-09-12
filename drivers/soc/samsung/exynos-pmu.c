@@ -760,6 +760,20 @@ static void zumapro_restore_sleep_exit_drcg(void)
 	}
 }
 
+#define ZUMAPRO_SLEEP_EXIT_TOP_OUT_MASK	(GENMASK(14, 11) | BIT(9) | BIT(7))
+
+/*
+ * Firmware clears these TOP_OUT signals during SYS_SLEEP.  Downstream restores
+ * each one with PMUCAL_SET_BIT_ATOMIC; update_bits on the secure PMU regmap
+ * expands PMU_ALIVE registers into the same per-bit set operations.
+ */
+static void zumapro_restore_sleep_exit_top_out(void)
+{
+	regmap_update_bits(pmu_context->pmureg, GS101_TOP_OUT,
+			   ZUMAPRO_SLEEP_EXIT_TOP_OUT_MASK,
+			   ZUMAPRO_SLEEP_EXIT_TOP_OUT_MASK);
+}
+
 /*
  * Enable dynamic root clock gating of the CPUCL0 DynamIQ Shared Unit. The DSU
  * clock is shared by the whole boot cluster; until DRCG is enabled it never
@@ -906,6 +920,7 @@ static void zumapro_sys_sleep_resume(void *data)
 
 	zumapro_sys_sleep_disarm();
 	zumapro_restore_sleep_exit_drcg();
+	zumapro_restore_sleep_exit_top_out();
 }
 
 static const struct syscore_ops zumapro_sys_sleep_syscore_ops = {
