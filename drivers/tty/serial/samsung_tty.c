@@ -131,6 +131,7 @@ struct s3c24xx_uart_dma {
 struct s3c24xx_uart_port {
 	unsigned char			rx_enabled;
 	unsigned char			tx_enabled;
+	bool				has_usi_v2;
 	unsigned int			pm_level;
 	unsigned long			baudclk_rate;
 	unsigned int			min_dma_size;
@@ -1749,6 +1750,30 @@ static void s3c24xx_serial_init_port_default(int index)
 	port->line = index;
 }
 
+/* Embedded USIv2 wrapper registers following the UART register bank. */
+#define USI_V2_CON			0xc4
+#define USI_V2_OPTION			0xc8
+#define USI_V2_CON_RESET		BIT(0)
+#define USI_V2_OPTION_CLKREQ_ON		BIT(1)
+
+static void s3c24xx_serial_enable_usi_v2(struct uart_port *port)
+{
+	struct s3c24xx_uart_port *ourport = to_ourport(port);
+	u32 val;
+
+	if (!ourport->has_usi_v2)
+		return;
+
+	/* USI reset is asserted again when the SoC exits deep sleep. */
+	val = rd_regl(port, USI_V2_CON);
+	val &= ~USI_V2_CON_RESET;
+	wr_regl(port, USI_V2_CON, val);
+	udelay(1);
+
+	/* UART RX needs the USI clock-request signal kept asserted. */
+	wr_regl(port, USI_V2_OPTION, USI_V2_OPTION_CLKREQ_ON);
+}
+
 /* s3c24xx_serial_resetport
  *
  * reset the fifos and other the settings.
@@ -1842,6 +1867,11 @@ static int s3c24xx_serial_init_port(struct s3c24xx_uart_port *ourport,
 		dev_err(port->dev, "failed to find memory resource for uart\n");
 		return -EINVAL;
 	}
+	if (ourport->has_usi_v2 &&
+	    resource_size(res) < USI_V2_OPTION + sizeof(u32)) {
+		dev_err(port->dev, "register window does not contain USIv2 wrapper\n");
+		return -EINVAL;
+	}
 
 	dev_dbg(port->dev, "resource %pR)\n", res);
 
@@ -1890,6 +1920,8 @@ static int s3c24xx_serial_init_port(struct s3c24xx_uart_port *ourport,
 		clk_put(ourport->clk);
 		goto err;
 	}
+
+	s3c24xx_serial_enable_usi_v2(port);
 
 	ret = s3c24xx_serial_enable_baudclk(ourport);
 	if (ret)
@@ -1989,6 +2021,8 @@ static int s3c24xx_serial_probe(struct platform_device *pdev)
 	}
 
 	ourport->port.iotype = ourport->info->iotype;
+	ourport->has_usi_v2 = np &&
+		of_property_read_bool(np, "samsung,usi-serial-v2");
 
 	if (np) {
 		ourport->no_auto_flow_control =
@@ -2092,6 +2126,7 @@ static int s3c24xx_serial_resume(struct device *dev)
 		clk_prepare_enable(ourport->clk);
 		if (!IS_ERR(ourport->baudclk))
 			clk_prepare_enable(ourport->baudclk);
+		s3c24xx_serial_enable_usi_v2(port);
 		s3c24xx_serial_resetport(port, s3c24xx_port_to_cfg(port));
 		if (!IS_ERR(ourport->baudclk))
 			clk_disable_unprepare(ourport->baudclk);
@@ -2121,6 +2156,7 @@ static int s3c24xx_serial_resume_noirq(struct device *dev)
 			clk_prepare_enable(ourport->clk);
 			if (!IS_ERR(ourport->baudclk))
 				clk_prepare_enable(ourport->baudclk);
+			s3c24xx_serial_enable_usi_v2(port);
 			wr_regl(port, S3C64XX_UINTM, uintm);
 			if (!IS_ERR(ourport->baudclk))
 				clk_disable_unprepare(ourport->baudclk);
