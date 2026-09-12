@@ -1273,6 +1273,7 @@ static int exynos_pmu_probe(struct platform_device *pdev)
 	struct exynos_pmu_context *ctx;
 	struct regmap *regmap;
 	struct resource *res;
+	int cpuhp_state;
 	int ret;
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
@@ -1363,7 +1364,6 @@ static int exynos_pmu_probe(struct platform_device *pdev)
 		dev_info(dev, "PMU_INFORM0 C2-allow: ret=%d readback=0x%x\n",
 			 ret, inform0);
 
-		cpu_pm_register_notifier(&zumapro_cpu_pm_notifier);
 		zumapro_enable_dsu_drcg(dev);
 
 		/*
@@ -1381,14 +1381,6 @@ static int exynos_pmu_probe(struct platform_device *pdev)
 		ret = zumapro_prepare_sleep_exit_drcg(dev);
 		if (ret)
 			return ret;
-		register_syscore(&zumapro_sys_sleep_syscore);
-
-		ret = cpuhp_setup_state(CPUHP_AP_ONLINE_DYN,
-					"soc/exynos-pmu:sleep-hint",
-					zumapro_cpuhp_sleep_hint_clear,
-					zumapro_cpuhp_sleep_hint_set);
-		if (ret < 0)
-			return ret;
 	}
 
 	if (pmu_context->pmu_data && pmu_context->pmu_data->pmu_init)
@@ -1403,6 +1395,24 @@ static int exynos_pmu_probe(struct platform_device *pdev)
 			destroy_cpuhp_and_cpuidle();
 
 		return ret;
+	}
+
+	if (pmu_context->pmu_data &&
+	    pmu_context->pmu_data->pmu_sicd_wakeup) {
+		cpuhp_state = cpuhp_setup_state(CPUHP_AP_ONLINE_DYN,
+						"soc/exynos-pmu:sleep-hint",
+						zumapro_cpuhp_sleep_hint_clear,
+						zumapro_cpuhp_sleep_hint_set);
+		if (cpuhp_state < 0)
+			return cpuhp_state;
+
+		/* Nothing below these global registrations can fail probe. */
+		ret = cpu_pm_register_notifier(&zumapro_cpu_pm_notifier);
+		if (ret) {
+			cpuhp_remove_state(cpuhp_state);
+			return ret;
+		}
+		register_syscore(&zumapro_sys_sleep_syscore);
 	}
 
 	if (devm_of_platform_populate(dev))
