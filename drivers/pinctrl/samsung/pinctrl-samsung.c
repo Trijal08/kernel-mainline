@@ -1371,6 +1371,17 @@ static void samsung_pinctrl_save_state(struct samsung_pinctrl_drv_data *drvdata)
 	}
 }
 
+static void samsung_pinctrl_suspend_banks(struct samsung_pinctrl_drv_data *drvdata)
+{
+	int i;
+
+	if (!drvdata->suspend)
+		return;
+
+	for (i = 0; i < drvdata->nr_banks; i++)
+		drvdata->suspend(&drvdata->pin_banks[i]);
+}
+
 /*
  * samsung_pinctrl_suspend - save pinctrl state for suspend
  *
@@ -1379,7 +1390,6 @@ static void samsung_pinctrl_save_state(struct samsung_pinctrl_drv_data *drvdata)
 static int __maybe_unused samsung_pinctrl_suspend(struct device *dev)
 {
 	struct samsung_pinctrl_drv_data *drvdata = dev_get_drvdata(dev);
-	struct samsung_pin_bank *bank;
 	int i;
 
 	drvdata->syscore_resumed = false;
@@ -1392,12 +1402,7 @@ static int __maybe_unused samsung_pinctrl_suspend(struct device *dev)
 	}
 
 	samsung_pinctrl_save_state(drvdata);
-
-	for (i = 0; i < drvdata->nr_banks; i++) {
-		bank = &drvdata->pin_banks[i];
-		if (drvdata->suspend)
-			drvdata->suspend(bank);
-	}
+	samsung_pinctrl_suspend_banks(drvdata);
 
 	clk_disable(drvdata->pclk);
 
@@ -1493,9 +1498,11 @@ static int __maybe_unused samsung_pinctrl_resume(struct device *dev)
  * Device suspend_late precedes consumer suspend_noirq, so its first snapshot
  * cannot include GPIO changes made by a noirq callback.  Zumapro restores
  * these banks from syscore; take the final snapshot there too, after all
- * device noirq callbacks, matching downstream's save/restore phase.  Keep the
- * ordinary snapshot above for s2idle (which does not enter syscore) and as the
- * aborted-suspend fallback.
+ * device noirq callbacks, matching downstream's save/restore phase.  Re-run
+ * the SoC bank callback as well: besides GPIO EINT state it programs the PMU
+ * EINT wake masks, which must include dedicated wake IRQs armed at the start
+ * of dpm_suspend_noirq().  Keep the ordinary snapshot above for s2idle (which
+ * does not enter syscore) and as the aborted-suspend fallback.
  */
 static int samsung_pinctrl_syscore_suspend(void *unused)
 {
@@ -1516,8 +1523,10 @@ static int samsung_pinctrl_syscore_suspend(void *unused)
 		}
 	}
 
-	list_for_each_entry(drvdata, &samsung_pinctrl_syscore_list, node)
+	list_for_each_entry(drvdata, &samsung_pinctrl_syscore_list, node) {
 		samsung_pinctrl_save_state(drvdata);
+		samsung_pinctrl_suspend_banks(drvdata);
+	}
 
 	list_for_each_entry_reverse(drvdata, &samsung_pinctrl_syscore_list,
 				    node)
