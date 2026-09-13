@@ -14,6 +14,7 @@
 / {
 	aliases {
 		mmc0 = &sdmmc;
+		mmc1 = &sdio;
 	};
 
 	chosen {
@@ -289,6 +290,21 @@
 		regulator-state-mem {
 			regulator-off-in-suspend;
 		};
+	};
+
+	vcc_host: regulator-vcc-host {
+		compatible = "regulator-fixed";
+		regulator-name = "vcc_host";
+		regulator-min-microvolt = <5000000>;
+		regulator-max-microvolt = <5000000>;
+
+		gpio = <&gpio3 RK_PA4 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		pinctrl-names = "default";
+		pinctrl-0 = <&vcc5_usb>;
+		regulator-always-on;
+		regulator-boot-on;
+		vin-supply = <&usb_midu>;
 	};
 
 	vccsys: regulator-vccsys {
@@ -627,6 +643,17 @@
 	status = "okay";
 };
 
+&sdio {
+	bus-width = <4>;
+	cap-sd-highspeed;
+	card-detect-delay = <800>;
+	cd-gpios = <&gpio0 RK_PA2 GPIO_ACTIVE_LOW>;
+	max-frequency = <50000000>;
+	vmmc-supply = <&vcc3v0_dvp>;
+	vqmmc-supply = <&vcc2v8_dvp>;
+	status = "okay";
+};
+
 &sdmmc {
 	cap-sd-highspeed;
 	card-detect-delay = <200>;
@@ -648,7 +675,7 @@
 	status = "okay";
 
 	u2phy_otg: otg-port {
-		status = "disabled";
+		status = "okay";
 	};
 };
 
@@ -667,7 +694,7 @@
 };
 
 &uart2 {
-	pinctrl-0 = <&uart2m1_xfer>;
+	pinctrl-0 = <&uart2m0_xfer>;
 	pinctrl-names = "default";
 	status = "okay";
 };
@@ -733,6 +760,12 @@
 	spk-amp {
 		spk_amp_enable_h: spk-amp-enable-h {
 			rockchip,pins = <3 RK_PA7 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+	};
+
+	vcc5-usb {
+		vcc5_usb: vcc5-usb {
+			rockchip,pins = <3 RK_PA4 RK_FUNC_GPIO &pcfg_pull_none_smt>;
 		};
 	};
 
