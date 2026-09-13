@@ -18,10 +18,6 @@
 		mmc1 = &sdio;
 	};
 
-	chosen {
-		stdout-path = "serial2:115200n8";
-	};
-
 	/*
 	 * Persistent store for the kernel log across a reset. A hard hang
 	 * leaves nothing on the console and the panel is the only output on
@@ -757,12 +753,6 @@
 	role-switch-default-mode = "peripheral";
 	status = "okay";
 	usb-role-switch;
-};
-
-&uart2 {
-	pinctrl-0 = <&uart2m0_xfer>;
-	pinctrl-names = "default";
-	status = "okay";
 };
 
 &vopb {
