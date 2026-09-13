@@ -41,6 +41,10 @@
 
 #define BRCMF_SCAN_IE_LEN_MAX		2048
 
+#define BRCMF_WOWL_ANY_FILTER_ID	100
+#define BRCMF_PKT_FILTER_TYPE_PATTERN_MATCH	0
+#define BRCMF_PKT_FILTER_MODE_FORWARD_ON_MATCH	1
+
 #define WPA_OUI				"\x00\x50\xF2"	/* WPA OUI */
 #define WPA_OUI_TYPE			1
 #define RSN_OUI				"\x00\x0F\xAC"	/* RSN OUI */
@@ -4045,18 +4049,49 @@ static s32 brcmf_cfg80211_resume(struct wiphy *wiphy)
 	struct brcmf_cfg80211_info *cfg = wiphy_to_cfg(wiphy);
 	struct net_device *ndev = cfg_to_ndev(cfg);
 	struct brcmf_if *ifp = netdev_priv(ndev);
+	s32 err = 0;
 
 	brcmf_dbg(TRACE, "Enter\n");
 
 	if (cfg->wowl.active) {
-		brcmf_report_wowl_wakeind(wiphy, ifp);
-		brcmf_fil_iovar_int_set(ifp, "wowl_clear", 0);
-		brcmf_config_wowl_pattern(ifp, "clr", NULL, 0, NULL, 0);
-		if (!brcmf_feat_is_enabled(ifp, BRCMF_FEAT_WOWL_ARP_ND))
-			brcmf_configure_arp_nd_offload(ifp, true);
-		brcmf_fil_cmd_int_set(ifp, BRCMF_C_SET_PM,
-				      cfg->wowl.pre_pmmode);
-		cfg->wowl.active = false;
+		struct brcmf_pkt_filter_enable_le filter = {
+			.id = cpu_to_le32(BRCMF_WOWL_ANY_FILTER_ID),
+			.enable = cpu_to_le32(0),
+		};
+		s32 pm_err;
+
+		if (!cfg->wowl.any) {
+			brcmf_report_wowl_wakeind(wiphy, ifp);
+			brcmf_fil_iovar_int_set(ifp, "wowl_clear", 0);
+			brcmf_config_wowl_pattern(ifp, "clr", NULL, 0,
+						 NULL, 0);
+			if (!brcmf_feat_is_enabled(ifp,
+						   BRCMF_FEAT_WOWL_ARP_ND))
+				brcmf_configure_arp_nd_offload(ifp, true);
+			brcmf_fil_cmd_int_set(ifp, BRCMF_C_SET_PM,
+					      cfg->wowl.pre_pmmode);
+			cfg->wowl.active = false;
+		} else {
+			err = brcmf_fil_iovar_data_set(ifp, "pkt_filter_enable",
+						       &filter, sizeof(filter));
+			if (err)
+				bphy_err(cfg->pub, "failed to disable wake-on-any packet filter: %d\n",
+					 err);
+
+			pm_err = brcmf_fil_cmd_int_set(ifp, BRCMF_C_SET_PM,
+						    cfg->wowl.pre_pmmode);
+			if (pm_err) {
+				bphy_err(cfg->pub, "failed to restore power-save mode: %d\n",
+					 pm_err);
+				if (!err)
+					err = pm_err;
+			}
+
+			if (!err) {
+				cfg->wowl.active = false;
+				cfg->wowl.any = false;
+			}
+		}
 		if (cfg->wowl.nd_enabled) {
 			brcmf_cfg80211_sched_scan_stop(cfg->wiphy, ifp->ndev, 0);
 			brcmf_fweh_unregister(cfg->pub, BRCMF_E_PFN_NET_FOUND);
@@ -4065,7 +4100,7 @@ static s32 brcmf_cfg80211_resume(struct wiphy *wiphy)
 			cfg->wowl.nd_enabled = false;
 		}
 	}
-	return 0;
+	return err;
 }
 
 static void brcmf_configure_wowl(struct brcmf_cfg80211_info *cfg,
@@ -4124,6 +4159,92 @@ static void brcmf_configure_wowl(struct brcmf_cfg80211_info *cfg,
 	cfg->wowl.active = true;
 }
 
+static int brcmf_configure_wowl_any(struct brcmf_cfg80211_info *cfg,
+				    struct brcmf_if *ifp)
+{
+	union {
+		struct brcmf_pkt_filter_le filter;
+		u8 data[offsetof(struct brcmf_pkt_filter_le,
+				 u.pattern.mask_and_pattern) + 2];
+	} filter_buf = {};
+	struct brcmf_pkt_filter_enable_le enable = {
+		.id = cpu_to_le32(BRCMF_WOWL_ANY_FILTER_ID),
+		.enable = cpu_to_le32(1),
+	};
+	int err;
+
+	brcmf_dbg(TRACE, "Suspend, wake on any traffic.\n");
+
+	/* The unicast-only filter would break AP and P2P-GO service. */
+	if (brcmf_is_apmode_operating(cfg->wiphy)) {
+		brcmf_dbg(INFO, "refusing wake-on-any while AP mode is active\n");
+		return 1;
+	}
+
+	if (!cfg->wowl.any_filter_set) {
+		filter_buf.filter.id = cpu_to_le32(BRCMF_WOWL_ANY_FILTER_ID);
+		filter_buf.filter.type =
+			cpu_to_le32(BRCMF_PKT_FILTER_TYPE_PATTERN_MATCH);
+		filter_buf.filter.u.pattern.size_bytes = cpu_to_le32(1);
+		/* Match unicast Ethernet destinations (bit 0 of the first octet). */
+		filter_buf.filter.u.pattern.mask_and_pattern[0] = 0x01;
+		filter_buf.filter.u.pattern.mask_and_pattern[1] = 0x00;
+
+		err = brcmf_fil_iovar_data_set(ifp, "pkt_filter_add",
+					       filter_buf.data,
+					       sizeof(filter_buf.data));
+		if (err) {
+			bphy_err(cfg->pub, "failed to install wake-on-any packet filter: %d\n",
+				 err);
+			return err;
+		}
+		cfg->wowl.any_filter_set = true;
+	}
+
+	err = brcmf_fil_iovar_data_set(ifp, "pkt_filter_enable", &enable,
+				       sizeof(enable));
+	if (err) {
+		bphy_err(cfg->pub, "failed to enable wake-on-any packet filter: %d\n",
+			 err);
+		return err;
+	}
+	err = brcmf_fil_iovar_int_set(ifp, "pkt_filter_mode",
+				      BRCMF_PKT_FILTER_MODE_FORWARD_ON_MATCH);
+	if (err) {
+		bphy_err(cfg->pub, "failed to set wake-on-any packet filter mode: %d\n",
+			 err);
+		enable.enable = cpu_to_le32(0);
+		brcmf_fil_iovar_data_set(ifp, "pkt_filter_enable", &enable,
+					  sizeof(enable));
+		return err;
+	}
+
+	err = brcmf_fil_cmd_int_get(ifp, BRCMF_C_GET_PM,
+				    &cfg->wowl.pre_pmmode);
+	if (err) {
+		bphy_err(cfg->pub, "failed to read power-save mode: %d\n", err);
+		goto disable_filter;
+	}
+	err = brcmf_fil_cmd_int_set(ifp, BRCMF_C_SET_PM, PM_MAX);
+	if (err) {
+		bphy_err(cfg->pub, "failed to enter maximum power save: %d\n",
+			 err);
+		goto disable_filter;
+	}
+	brcmf_configure_arp_nd_offload(ifp, true);
+	brcmf_bus_wowl_config(cfg->pub->bus_if, true);
+	cfg->wowl.active = true;
+	cfg->wowl.any = true;
+
+	return 0;
+
+disable_filter:
+	enable.enable = cpu_to_le32(0);
+	brcmf_fil_iovar_data_set(ifp, "pkt_filter_enable", &enable,
+				  sizeof(enable));
+	return err;
+}
+
 static int brcmf_keepalive_start(struct brcmf_if *ifp, unsigned int interval)
 {
 	struct brcmf_mkeep_alive_pkt_le kalive = {0};
@@ -4149,6 +4270,7 @@ static s32 brcmf_cfg80211_suspend(struct wiphy *wiphy,
 	struct net_device *ndev = cfg_to_ndev(cfg);
 	struct brcmf_if *ifp = netdev_priv(ndev);
 	struct brcmf_cfg80211_vif *vif;
+	int err;
 
 	brcmf_dbg(TRACE, "Enter\n");
 
@@ -4186,8 +4308,18 @@ static s32 brcmf_cfg80211_suspend(struct wiphy *wiphy,
 		brcmf_set_mpc(ifp, 1);
 
 	} else {
-		/* Configure WOWL parameters */
-		brcmf_configure_wowl(cfg, ifp, wowl);
+		if (wowl->any &&
+		    brcmf_feat_is_enabled(ifp, BRCMF_FEAT_WOWL_ANY)) {
+			err = brcmf_configure_wowl_any(cfg, ifp);
+			if (err)
+				return err;
+		} else if (brcmf_feat_is_enabled(ifp, BRCMF_FEAT_WOWL)) {
+			/* Configure selective WOWL parameters. */
+			brcmf_configure_wowl(cfg, ifp, wowl);
+		} else {
+			brcmf_dbg(INFO, "refusing unsupported WoWLAN configuration\n");
+			return 1;
+		}
 
 		/* Prevent disassociation due to inactivity with keep-alive */
 		brcmf_keepalive_start(ifp, 30);
@@ -7823,11 +7955,13 @@ static const struct wiphy_wowlan_support brcmf_wowlan_support = {
 	.pattern_min_len = 1,
 	.max_pkt_offset = 1500,
 };
-#endif
+
+static const struct wiphy_wowlan_support brcmf_wowlan_any_support = {
+	.flags = WIPHY_WOWLAN_ANY,
+};
 
 static void brcmf_wiphy_wowl_params(struct wiphy *wiphy, struct brcmf_if *ifp)
 {
-#ifdef CONFIG_PM
 	struct brcmf_cfg80211_info *cfg = wiphy_to_cfg(wiphy);
 	struct brcmf_pub *drvr = cfg->pub;
 	struct wiphy_wowlan_support *wowl;
@@ -7853,8 +7987,8 @@ static void brcmf_wiphy_wowl_params(struct wiphy *wiphy, struct brcmf_if *ifp)
 	}
 
 	wiphy->wowlan = wowl;
-#endif
 }
+#endif
 
 static int brcmf_setup_wiphy(struct wiphy *wiphy, struct brcmf_if *ifp)
 {
@@ -7948,8 +8082,12 @@ static int brcmf_setup_wiphy(struct wiphy *wiphy, struct brcmf_if *ifp)
 	wiphy->vendor_commands = brcmf_vendor_cmds;
 	wiphy->n_vendor_commands = BRCMF_VNDR_CMDS_LAST - 1;
 
+#ifdef CONFIG_PM
 	if (brcmf_feat_is_enabled(ifp, BRCMF_FEAT_WOWL))
 		brcmf_wiphy_wowl_params(wiphy, ifp);
+	else if (brcmf_feat_is_enabled(ifp, BRCMF_FEAT_WOWL_ANY))
+		wiphy->wowlan = &brcmf_wowlan_any_support;
+#endif
 	err = brcmf_fil_cmd_data_get(ifp, BRCMF_C_GET_BANDLIST, &bandlist,
 				     sizeof(bandlist));
 	if (err) {
@@ -8569,7 +8707,8 @@ static void brcmf_free_wiphy(struct wiphy *wiphy)
 		kfree(wiphy->bands[NL80211_BAND_6GHZ]);
 	}
 #if IS_ENABLED(CONFIG_PM)
-	if (wiphy->wowlan != &brcmf_wowlan_support)
+	if (wiphy->wowlan != &brcmf_wowlan_support &&
+	    wiphy->wowlan != &brcmf_wowlan_any_support)
 		kfree(wiphy->wowlan);
 #endif
 }

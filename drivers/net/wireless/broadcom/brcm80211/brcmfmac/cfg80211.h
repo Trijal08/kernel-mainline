@@ -317,6 +317,8 @@ struct brcmf_cfg80211_vif_event {
  * struct brcmf_cfg80211_wowl - wowl related information.
  *
  * @active: set on suspend, cleared on resume.
+ * @any: wake-on-any host-sleep mode is active.
+ * @any_filter_set: unicast host-wake filter is installed in firmware.
  * @pre_pmmode: firmware PM mode at entering suspend.
  * @nd: net dectect data.
  * @nd_info: helper struct to pass to cfg80211.
@@ -326,6 +328,8 @@ struct brcmf_cfg80211_vif_event {
  */
 struct brcmf_cfg80211_wowl {
 	bool active;
+	bool any;
+	bool any_filter_set;
 	u32 pre_pmmode;
 	struct cfg80211_wowlan_nd_match *nd;
 	struct cfg80211_wowlan_nd_info *nd_info;
