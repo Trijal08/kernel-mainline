@@ -20,6 +20,75 @@
 		stdout-path = "serial2:115200n8";
 	};
 
+	joystick_mux_controller: mux-controller {
+		compatible = "gpio-mux";
+		pinctrl-names = "default";
+		pinctrl-0 = <&mux_en_pins>;
+		#mux-control-cells = <0>;
+
+		mux-gpios = <&gpio2 RK_PC0 GPIO_ACTIVE_LOW>,
+			    <&gpio2 RK_PB7 GPIO_ACTIVE_LOW>;
+	};
+
+	joystick_mux: adc-mux {
+		compatible = "io-channel-mux";
+		io-channels = <&saradc 1>;
+		io-channel-names = "parent";
+		#io-channel-cells = <1>;
+
+		mux-controls = <&joystick_mux_controller>;
+		channels = "0", "1", "2", "3";
+	};
+
+	analog_sticks: adc-joystick {
+		compatible = "adc-joystick";
+		io-channels = <&joystick_mux 0>,
+			      <&joystick_mux 1>,
+			      <&joystick_mux 2>,
+			      <&joystick_mux 3>;
+		poll-interval = <10>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		/*
+		 * Measured on the hardware: mux channel 0 is the RIGHT stick's
+		 * X and channel 3 is the LEFT stick's X - the opposite of what
+		 * the vendor driver's channel_mapping implies - and both read
+		 * backwards. The Y channels (1 and 2) are correct as-is.
+		 */
+		axis@0 {
+			reg = <0>;
+			abs-flat = <32>;
+			abs-fuzz = <32>;
+			abs-range = <180 800>;
+			linux,code = <ABS_RX>;
+		};
+
+		axis@1 {
+			reg = <1>;
+			abs-flat = <32>;
+			abs-fuzz = <32>;
+			abs-range = <800 180>;
+			linux,code = <ABS_Y>;
+		};
+
+		axis@2 {
+			reg = <2>;
+			abs-flat = <32>;
+			abs-fuzz = <32>;
+			abs-range = <800 180>;
+			linux,code = <ABS_RY>;
+		};
+
+		axis@3 {
+			reg = <3>;
+			abs-flat = <32>;
+			abs-fuzz = <32>;
+			abs-range = <800 180>;
+			linux,code = <ABS_X>;
+		};
+	};
+
 	adc_keys: adc-keys {
 		compatible = "adc-keys";
 		io-channels = <&saradc 2>;
@@ -601,6 +670,21 @@
 };
 
 &pinctrl {
+	joy-mux {
+		mux_en_pins: mux-en-pins {
+			/*
+			 * PB4 enables the analog mux and is held low here. PC0 and
+			 * PB7 are its two select lines, requested by the gpio-mux
+			 * node; they need muxing to GPIO too, or writes to them do
+			 * nothing and only the channels matching the stuck level
+			 * are ever selected.
+			 */
+			rockchip,pins = <2 RK_PB4 RK_FUNC_GPIO &pcfg_output_low>,
+					<2 RK_PC0 RK_FUNC_GPIO &pcfg_pull_none>,
+					<2 RK_PB7 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+	};
+
 	btns {
 		btn_pins: btn-pins {
 			rockchip,pins = <2 RK_PB5 RK_FUNC_GPIO &pcfg_pull_up>,
