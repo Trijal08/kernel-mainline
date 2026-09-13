@@ -486,6 +486,45 @@ static const struct drm_display_mode nv3051d_rk2023_modes[] = {
 	},
 };
 
+/*
+ * The R36S panel is not the RG351V panel. The vendor device tree carries its
+ * own timing in the panel_description string:
+ *
+ *   "M clock=30000 horizontal=640,150,50,150 vertical=480,20,6,12 default=1"
+ *
+ * i.e. 640 active + 150 front + 50 sync + 150 back (htotal 990)
+ *      480 active +  20 front +  6 sync +  12 back (vtotal 518)
+ *
+ * Driving it with the RG351V timing (vertical back porch 28 rather than 12)
+ * places the active area too far down the panel: the top line never gets
+ * drawn and the bottom of the image is clipped off the edge.
+ */
+static const struct drm_display_mode nv3051d_r36s_modes[] = {
+	{
+		.clock		= 30000,
+		.hdisplay	= 640,
+		.hsync_start	= 640 + 150,
+		.hsync_end	= 640 + 150 + 50,
+		.htotal		= 640 + 150 + 50 + 150,
+		.vdisplay	= 480,
+		.vsync_start	= 480 + 20,
+		.vsync_end	= 480 + 20 + 6,
+		.vtotal		= 480 + 20 + 6 + 12,
+		.flags		= DRM_MODE_FLAG_NHSYNC | DRM_MODE_FLAG_NVSYNC,
+	},
+};
+
+static const struct nv3051d_panel_info nv3051d_r36s_info = {
+	.display_modes = nv3051d_r36s_modes,
+	.num_modes = ARRAY_SIZE(nv3051d_r36s_modes),
+	.width_mm = 70,
+	.height_mm = 52,
+	.bus_flags = DRM_BUS_FLAG_DE_LOW | DRM_BUS_FLAG_PIXDATA_DRIVE_NEGEDGE,
+	.mode_flags = MIPI_DSI_MODE_VIDEO | MIPI_DSI_MODE_VIDEO_BURST |
+		      MIPI_DSI_MODE_LPM | MIPI_DSI_MODE_NO_EOT_PACKET |
+		      MIPI_DSI_CLOCK_NON_CONTINUOUS,
+};
+
 static const struct nv3051d_panel_info nv3051d_rg351v_info = {
 	.display_modes = nv3051d_rgxx3_modes,
 	.num_modes = ARRAY_SIZE(nv3051d_rgxx3_modes),
@@ -521,6 +560,7 @@ static const struct of_device_id newvision_nv3051d_of_match[] = {
 	{ .compatible = "anbernic,rg351v-panel", .data = &nv3051d_rg351v_info },
 	{ .compatible = "anbernic,rg353p-panel", .data = &nv3051d_rg353p_info },
 	{ .compatible = "powkiddy,rk2023-panel", .data = &nv3051d_rk2023_info },
+	{ .compatible = "rockchip,r36s-panel", .data = &nv3051d_r36s_info },
 	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(of, newvision_nv3051d_of_match);
