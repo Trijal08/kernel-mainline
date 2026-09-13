@@ -486,7 +486,7 @@
 				regulator-always-on;
 				regulator-boot-on;
 				regulator-max-microvolt = <1150000>;
-				regulator-min-microvolt = <850000>;
+				regulator-min-microvolt = <950000>;
 				regulator-name = "vdd_logic";
 				regulator-ramp-delay = <6001>;
 
