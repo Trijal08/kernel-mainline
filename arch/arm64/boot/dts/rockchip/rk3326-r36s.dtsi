@@ -8,7 +8,6 @@
 /dts-v1/;
 #include <dt-bindings/gpio/gpio.h>
 #include <dt-bindings/input/input.h>
-#include <dt-bindings/leds/common.h>
 #include <dt-bindings/pinctrl/rockchip.h>
 #include "rk3326.dtsi"
 
@@ -43,24 +42,6 @@
 					<3610000 40>, <3570000 35>, <3540000 30>, <3500000 25>,
 					<3460000 20>, <3420000 15>, <3380000 10>, <3340000 5>,
 					<3300000 0>;
-	};
-
-	/*
-	 * LED is a tri-state. Driven high it is red, driven low it is
-	 * green, and not driven at all (pin set to input) it is amber.
-	 * Additionally, there is a 2nd LED that is not controllable
-	 * that is on (red) when plugged in to power.
-	 */
-	gpio_led: gpio-leds {
-		compatible = "gpio-leds";
-		pinctrl-names = "default";
-		pinctrl-0 = <&led_pin>;
-
-		red_green_led: led-0 {
-			color = <LED_COLOR_ID_RED>;
-			gpios = <&gpio2 RK_PB5 GPIO_ACTIVE_HIGH>;
-			function = LED_FUNCTION_CHARGING;
-		};
 	};
 
 	rk817-sound {
@@ -110,11 +91,6 @@
 		regulator-max-microvolt = <3800000>;
 	};
 
-	vibrator {
-		compatible = "pwm-vibrator";
-		pwms = <&pwm0 0 1000000 0>;
-		pwm-names = "enable";
-	};
 };
 
 &cpu0 {
@@ -434,10 +410,6 @@
 	status = "okay";
 };
 
-&pwm0 {
-	status = "okay";
-};
-
 &pwm1 {
 	status = "okay";
 };
@@ -458,22 +430,6 @@
 	vmmc-supply = <&vcc_sd>;
 	vqmmc-supply = <&vccio_sd>;
 	status = "okay";
-};
-
-&sfc {
-	#address-cells = <1>;
-	pinctrl-0 = <&sfc_clk &sfc_cs0 &sfc_bus2>;
-	pinctrl-names = "default";
-	#size-cells = <0>;
-	status = "okay";
-
-	flash@0 {
-		compatible = "jedec,spi-nor";
-		reg = <0>;
-		spi-max-frequency = <108000000>;
-		spi-rx-bus-width = <2>;
-		spi-tx-bus-width = <1>;
-	};
 };
 
 &tsadc {
@@ -526,12 +482,6 @@
 	headphone {
 		hp_det: hp-det {
 			rockchip,pins = <2 RK_PC6 RK_FUNC_GPIO &pcfg_pull_down>;
-		};
-	};
-
-	leds {
-		led_pin: led-pin {
-			rockchip,pins = <2 RK_PB5 RK_FUNC_GPIO &pcfg_pull_none>;
 		};
 	};
 
