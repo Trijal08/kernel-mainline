@@ -1202,6 +1202,11 @@ properties:
           - const: rockchip,rk3308-evb
           - const: rockchip,rk3308
 
+      - description: Rockchip RK3326 R36S handheld game console
+        items:
+          - const: rockchip,rk3326-r36s
+          - const: rockchip,rk3326
+
       - description: Rockchip RK3328 Evaluation board
         items:
           - const: rockchip,rk3328-evb
