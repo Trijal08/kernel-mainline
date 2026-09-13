@@ -15,6 +15,6 @@
 
 &internal_display {
 	compatible = "rockchip,r36s-panel";
-	iovcc-supply = <&vcc_lcd>;
-	vdd-supply = <&vcc_lcd>;
+	iovcc-supply = <&vcc18_lcd0>;
+	vcc-supply = <&vcc18_lcd0>;
 };
