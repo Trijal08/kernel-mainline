@@ -21,6 +21,31 @@
 		stdout-path = "serial2:115200n8";
 	};
 
+	/*
+	 * Persistent store for the kernel log across a reset. A hard hang
+	 * leaves nothing on the console and the panel is the only output on
+	 * this device, so ramoops is the only way to recover the tail of
+	 * dmesg. The region must be at a fixed address so it lands in the
+	 * same place on the following boot. 0x110000 is the layout Rockchip
+	 * boards conventionally use and sits clear of everything the
+	 * bootloader touches - extlinux loads at 0x00100000 and is only a
+	 * couple of KB, the fdt at 0x08000000 and the kernel at 0x09000000.
+	 */
+	reserved-memory {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
+		ramoops: ramoops@110000 {
+			compatible = "ramoops";
+			reg = <0x0 0x110000 0x0 0xf0000>;
+			console-size = <0x80000>;
+			ftrace-size = <0x0>;
+			pmsg-size = <0x50000>;
+			record-size = <0x20000>;
+		};
+	};
+
 	joystick_mux_controller: mux-controller {
 		compatible = "gpio-mux";
 		pinctrl-names = "default";
@@ -109,6 +134,7 @@
 			press-threshold-microvolt = <300000>;
 		};
 	};
+
 
 	spk_amp: audio-amplifier {
 		compatible = "simple-audio-amplifier";
@@ -704,6 +730,15 @@
 };
 
 &vopb_mmu {
+	status = "okay";
+};
+
+/*
+ * A hard kernel hang has to end in a WARM reset, otherwise DRAM loses the
+ * ramoops region and there is nothing to read back. Requires dropping
+ * "nowatchdog" from the kernel command line.
+ */
+&wdt {
 	status = "okay";
 };
 
