@@ -22,6 +22,7 @@ properties:
           - anbernic,rg351v-panel
           - anbernic,rg353p-panel
           - powkiddy,rk2023-panel
+          - rockchip,r36s-panel
       - const: newvision,nv3051d
 
   reg:
