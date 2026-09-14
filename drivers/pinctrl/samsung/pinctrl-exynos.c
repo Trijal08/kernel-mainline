@@ -484,6 +484,21 @@ static int gs101_wkup_irq_set_wake(struct irq_data *irqd, unsigned int on)
 	wakeup_reg = bit / BITS_PER_U32;
 	shift = bit - (wakeup_reg * BITS_PER_U32);
 
+	/*
+	 * Banks may be numbered past the last wakeup mask register: zumapro's
+	 * custom-alive gpn banks start at EINT 192, which lands at index six
+	 * of a three element array. Those EINTs have no mask bit, so there is
+	 * nothing to clear and nothing to restore. Do not fail the request -
+	 * an absent mask bit does not prevent the wake, it only means the
+	 * kernel cannot gate it. Downstream takes the same decision.
+	 */
+	if (wakeup_reg >= ARRAY_SIZE(eint_wake_mask_values)) {
+		dev_warn_once(d->dev,
+			      "%s: EINT %u is past the wakeup mask registers, wake left ungated\n",
+			      bank->name, bit);
+		return 0;
+	}
+
 	if (!on)
 		eint_wake_mask_values[wakeup_reg] |= BIT_U32(shift);
 	else
