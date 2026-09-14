@@ -75,13 +75,9 @@ void dpp_update(struct exynos_dpp_context *dpp, unsigned int channel,
 	pm_runtime_put_sync(dpp->dev);
 }
 
+/* Nothing to do: each DECON picks its own DPP out of DT. */
 static int dpp_bind(struct device *dev, struct device *master, void *data)
 {
-	struct drm_device *drm_dev = data;
-	struct exynos_drm_private *devpriv = drm_dev->dev_private;
-
-	devpriv->dpp_dev = dev;
-
 	return 0;
 }
 
