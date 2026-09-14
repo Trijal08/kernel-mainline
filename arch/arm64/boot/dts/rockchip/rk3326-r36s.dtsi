@@ -450,6 +450,29 @@
 	status = "okay";
 };
 
+/*
+ * vdd_logic is the shared SoC logic rail, not a dedicated GPU one, so the GPU
+ * operating points set the voltage for the whole logic domain. This board is
+ * not stable at the 950mV the stock px30 table asks for at the low points -
+ * the core takes an undefined-instruction fault as the shader powers on - so
+ * floor them at the 1100mV it does run at. The vendor kernel avoids this by
+ * applying per-chip leakage margin from the OTP fuses, which mainline has no
+ * equivalent for.
+ */
+&gpu_opp_table {
+	opp-200000000 {
+		opp-microvolt = <1100000>;
+	};
+
+	opp-300000000 {
+		opp-microvolt = <1100000>;
+	};
+
+	opp-400000000 {
+		opp-microvolt = <1100000>;
+	};
+};
+
 &i2c0 {
 	clock-frequency = <400000>;
 	i2c-scl-falling-time-ns = <16>;
