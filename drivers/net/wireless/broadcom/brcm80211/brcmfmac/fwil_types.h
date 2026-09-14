@@ -203,6 +203,7 @@
 #define DL_END				0x0004
 
 #define DL_TYPE_CLM			2
+#define DL_TYPE_DRRBLOB			3
 
 /* join preference types for join_pref iovar */
 enum brcmf_join_pref_types {
@@ -302,6 +303,14 @@ struct brcmf_pkt_filter_pattern_le {
 	u8 mask_and_pattern[1];
 };
 
+/* APF bytecode stored in a type-4 packet filter. */
+struct brcmf_apf_program_le {
+	__le16 version;
+	__le16 instr_len;
+	__le32 inst_ts;
+	u8 instrs[];
+};
+
 /* IOVAR "pkt_filter_add" parameter. Used to install packet filters. */
 struct brcmf_pkt_filter_le {
 	__le32 id;		/* Unique filter id, specified by app. */
@@ -309,6 +318,7 @@ struct brcmf_pkt_filter_le {
 	__le32 negate_match;	/* Negate the result of filter matches */
 	union {			/* Filter definitions */
 		struct brcmf_pkt_filter_pattern_le pattern; /* Filter pattern */
+		struct brcmf_apf_program_le apf_program; /* APF program */
 	} u;
 };
 
