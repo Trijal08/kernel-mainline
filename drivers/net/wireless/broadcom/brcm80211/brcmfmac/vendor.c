@@ -16,6 +16,16 @@
 #include "vendor.h"
 #include "fwil.h"
 
+static const struct netlink_range_validation brcmf_apf_program_range = {
+	.max = U16_MAX,
+};
+
+static const struct nla_policy brcmf_apf_policy[BRCMF_APF_ATTR_MAX + 1] = {
+	[BRCMF_APF_ATTR_PROGRAM] =
+		NLA_POLICY_FULL_RANGE(NLA_BINARY, &brcmf_apf_program_range),
+	[BRCMF_APF_ATTR_PROGRAM_LEN] = { .type = NLA_U32 },
+};
+
 static int brcmf_cfg80211_vndr_cmds_dcmd_handler(struct wiphy *wiphy,
 						 struct wireless_dev *wdev,
 						 const void *data, int len)
@@ -104,6 +114,54 @@ exit:
 	return ret;
 }
 
+static int brcmf_vndr_cmd_apf_set_filter(struct wiphy *wiphy,
+					 struct wireless_dev *wdev,
+					 const void *data, int len)
+{
+	struct nlattr *attrs[BRCMF_APF_ATTR_MAX + 1];
+	struct brcmf_cfg80211_vif *vif = wdev_to_vif(wdev);
+	const u8 *program = NULL;
+	u32 program_len;
+	int clear_err;
+	int ret;
+
+	if (wdev->iftype != NL80211_IFTYPE_STATION || vif->ifp->bsscfgidx != 0)
+		return -EOPNOTSUPP;
+
+	if (!data || len <= 0) {
+		ret = -EINVAL;
+		goto clear;
+	}
+
+	ret = nla_parse(attrs, BRCMF_APF_ATTR_MAX, data, len,
+			brcmf_apf_policy, NULL);
+	if (ret)
+		goto clear;
+
+	if (!attrs[BRCMF_APF_ATTR_PROGRAM_LEN] ||
+	    attrs[BRCMF_APF_ATTR_VERSION] || attrs[BRCMF_APF_ATTR_MAX_LEN]) {
+		ret = -EINVAL;
+		goto clear;
+	}
+
+	program_len = nla_get_u32(attrs[BRCMF_APF_ATTR_PROGRAM_LEN]);
+	if (attrs[BRCMF_APF_ATTR_PROGRAM])
+		program = nla_data(attrs[BRCMF_APF_ATTR_PROGRAM]);
+	if ((!program_len && program &&
+	     nla_len(attrs[BRCMF_APF_ATTR_PROGRAM])) ||
+	    (program_len && (!program ||
+	     program_len != nla_len(attrs[BRCMF_APF_ATTR_PROGRAM])))) {
+		ret = -EINVAL;
+		goto clear;
+	}
+
+	return brcmf_set_apf_program(vif->ifp, program, program_len);
+
+clear:
+	clear_err = brcmf_set_apf_program(vif->ifp, NULL, 0);
+	return clear_err ? clear_err : ret;
+}
+
 const struct wiphy_vendor_command brcmf_vendor_cmds[] = {
 	{
 		{
@@ -115,4 +173,18 @@ const struct wiphy_vendor_command brcmf_vendor_cmds[] = {
 		.policy = VENDOR_CMD_RAW_DATA,
 		.doit = brcmf_cfg80211_vndr_cmds_dcmd_handler
 	},
+	{
+		{
+			.vendor_id = GOOGLE_OUI,
+			.subcmd = BRCMF_APF_SUBCMD_SET_FILTER
+		},
+		.flags = WIPHY_VENDOR_CMD_NEED_WDEV |
+			 WIPHY_VENDOR_CMD_NEED_NETDEV |
+			 WIPHY_VENDOR_CMD_NEED_RUNNING,
+		.policy = brcmf_apf_policy,
+		.maxattr = BRCMF_APF_ATTR_MAX,
+		.doit = brcmf_vndr_cmd_apf_set_filter
+	},
 };
+
+const unsigned int brcmf_vendor_cmds_count = ARRAY_SIZE(brcmf_vendor_cmds);

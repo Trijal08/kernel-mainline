@@ -243,6 +243,11 @@ struct vif_saved_ie {
  * @cqm_rssi_low: Lower RSSI limit for CQM monitoring
  * @cqm_rssi_high: Upper RSSI limit for CQM monitoring
  * @cqm_rssi_last: Last RSSI reading for CQM monitoring
+ * @apf_mutex: Serializes APF host and firmware state.
+ * @apf_program: Opaque APF bytecode supplied for this association.
+ * @apf_program_len: Length of @apf_program.
+ * @apf_filter_installed: Filter 200 may be present in firmware.
+ * @apf_filter_enabled: Filter 200 may be enabled in firmware.
  */
 struct brcmf_cfg80211_vif {
 	struct brcmf_if *ifp;
@@ -260,6 +265,11 @@ struct brcmf_cfg80211_vif {
 	s32 cqm_rssi_low;
 	s32 cqm_rssi_high;
 	s32 cqm_rssi_last;
+	struct mutex apf_mutex; /* protects APF host and firmware state */
+	u8 *apf_program;
+	u16 apf_program_len;
+	bool apf_filter_installed;
+	bool apf_filter_enabled;
 };
 
 /* association inform */
@@ -523,6 +533,8 @@ void brcmf_abort_scanning(struct brcmf_cfg80211_info *cfg);
 void brcmf_cfg80211_free_vif(struct net_device *ndev);
 
 int brcmf_set_wsec(struct brcmf_if *ifp, const u8 *key, u16 key_len, u16 flags);
+int brcmf_set_apf_program(struct brcmf_if *ifp, const u8 *program,
+			  u32 program_len);
 int brcmf_cfg80211_mgmt_tx(struct wiphy *wiphy, struct wireless_dev *wdev,
 			   struct cfg80211_mgmt_tx_params *params, u64 cookie);
 

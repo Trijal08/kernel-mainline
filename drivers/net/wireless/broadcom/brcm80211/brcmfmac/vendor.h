@@ -7,6 +7,9 @@
 #define _vendor_h_
 
 #define BROADCOM_OUI	0x001018
+#define GOOGLE_OUI	0x001a11
+
+#define BRCMF_APF_SUBCMD_SET_FILTER	0x1801
 
 enum brcmf_vndr_cmds {
 	BRCMF_VNDR_CMDS_UNSPEC,
@@ -30,6 +33,17 @@ enum brcmf_nlattrs {
 	BRCMF_NLATTR_MAX = __BRCMF_NLATTR_AFTER_LAST - 1
 };
 
+/* Android APF vendor attributes. */
+enum brcmf_apf_attrs {
+	BRCMF_APF_ATTR_VERSION,
+	BRCMF_APF_ATTR_MAX_LEN,
+	BRCMF_APF_ATTR_PROGRAM,
+	BRCMF_APF_ATTR_PROGRAM_LEN,
+
+	__BRCMF_APF_ATTR_AFTER_LAST,
+	BRCMF_APF_ATTR_MAX = __BRCMF_APF_ATTR_AFTER_LAST - 1
+};
+
 /**
  * struct brcmf_vndr_dcmd_hdr - message header for cfg80211 vendor command dcmd
  *				support
@@ -49,5 +63,6 @@ struct brcmf_vndr_dcmd_hdr {
 };
 
 extern const struct wiphy_vendor_command brcmf_vendor_cmds[];
+extern const unsigned int brcmf_vendor_cmds_count;
 
 #endif /* _vendor_h_ */
