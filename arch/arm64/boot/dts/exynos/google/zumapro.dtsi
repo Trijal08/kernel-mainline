@@ -4290,6 +4290,7 @@
 
 			wakeup-interrupt-controller {
 				compatible = "google,zuma-wakeup-eint",
+					     "google,zumapro-wakeup-eint",
 					     "google,gs101-wakeup-eint",
 					     "samsung,exynos850-wakeup-eint",
 					     "samsung,exynos7-wakeup-eint";
@@ -4304,6 +4305,7 @@
 
 			wakeup-interrupt-controller {
 				compatible = "google,zuma-wakeup-eint",
+					     "google,zumapro-wakeup-eint",
 					     "google,gs101-wakeup-eint",
 					     "samsung,exynos850-wakeup-eint",
 					     "samsung,exynos7-wakeup-eint";
