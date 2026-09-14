@@ -97,6 +97,7 @@ struct rockchip_pm_domain {
 	int num_qos;
 	struct regmap **qos_regmap;
 	u32 *qos_save_regs[MAX_QOS_REGS_NUM];
+	bool qos_saved;
 	int num_clks;
 	struct clk_bulk_data *clks;
 	struct device_node *node;
@@ -474,12 +475,22 @@ static int rockchip_pmu_save_qos(struct rockchip_pm_domain *pd)
 			    QOS_EXTCONTROL,
 			    &pd->qos_save_regs[4][i]);
 	}
+	pd->qos_saved = true;
+
 	return 0;
 }
 
 static int rockchip_pmu_restore_qos(struct rockchip_pm_domain *pd)
 {
 	int i;
+
+	/*
+	 * Nothing has been captured yet if the domain has not been powered
+	 * down since probe. Writing the zeroed buffer over live QoS settings
+	 * would misconfigure the interconnect.
+	 */
+	if (!pd->qos_saved)
+		return 0;
 
 	for (i = 0; i < pd->num_qos; i++) {
 		regmap_write(pd->qos_regmap[i],
@@ -647,11 +658,24 @@ static int rockchip_do_pmu_set_power_domain(struct rockchip_pm_domain *pd,
 static int rockchip_pd_power(struct rockchip_pm_domain *pd, bool power_on)
 {
 	struct rockchip_pmu *pmu = pd->pmu;
+	bool in_state;
 	int ret;
 
 	guard(mutex)(&pmu->mutex);
 
-	if (rockchip_pmu_domain_is_on(pd) == power_on)
+	in_state = rockchip_pmu_domain_is_on(pd) == power_on;
+
+	/*
+	 * A domain that is already off needs nothing further: the
+	 * interconnect was idled on the way down. Powering one up, however,
+	 * cannot be skipped just because the power switch is already closed.
+	 * An earlier attempt may have switched the domain on and then failed
+	 * to take the interconnect out of idle, and it leaves the domain
+	 * powered when it reports that error. Returning early here would skip
+	 * the handshake for good, and the first register access from the
+	 * consumer's resume callback would abort.
+	 */
+	if (in_state && !power_on)
 		return 0;
 
 	ret = clk_bulk_enable(pd->num_clks, pd->clks);
@@ -671,9 +695,11 @@ static int rockchip_pd_power(struct rockchip_pm_domain *pd, bool power_on)
 			goto out;
 	}
 
-	ret = rockchip_do_pmu_set_power_domain(pd, power_on);
-	if (ret < 0)
-		goto out;
+	if (!in_state) {
+		ret = rockchip_do_pmu_set_power_domain(pd, power_on);
+		if (ret < 0)
+			goto out;
+	}
 
 	if (power_on) {
 		/* if powering up, leave idle mode */
