@@ -308,7 +308,7 @@
 			default-state = "on";
 			function = LED_FUNCTION_POWER;
 			gpios = <&gpio0 RK_PA0 GPIO_ACTIVE_HIGH>;
-			linux,default-trigger = "default-on";
+			linux,default-trigger = "heartbeat";
 		};
 	};
 
