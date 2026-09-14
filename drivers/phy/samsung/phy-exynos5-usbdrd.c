@@ -3396,6 +3396,26 @@ static void zuma_ss_dptx_reset(struct exynos5_usbdrd_phy *phy_drd, int val)
 	writel(reg, base + ZUMA_USBDP_PHY_DP_CONFIG13);
 }
 
+/*
+ * Answer the TCA's DPALT_DISABLE request. The TCA asks the DP side to let go of
+ * the lanes and will not complete a mux switch until something acknowledges;
+ * the controller does not, so the ack is ours to drive. Asserted whenever the
+ * DP lanes are parked, released once DP has taken them.
+ */
+static void zuma_ss_dpalt_disable_ack(struct exynos5_usbdrd_phy *phy_drd,
+				      bool assert)
+{
+	void __iomem *base = phy_drd->reg_pma;
+	u32 reg;
+
+	reg = readl(base + ZUMA_USBDP_PHY_DP_CONFIG19);
+	if (assert)
+		reg |= ZUMA_USBDP_PHY_DP_CONFIG19_DPALT_DIS_ACK;
+	else
+		reg &= ~ZUMA_USBDP_PHY_DP_CONFIG19_DPALT_DIS_ACK;
+	writel(reg, base + ZUMA_USBDP_PHY_DP_CONFIG19);
+}
+
 static void zuma_ss_phy_initiate(struct exynos5_usbdrd_phy *phy_drd)
 {
 	void __iomem *base = phy_drd->reg_pma;
@@ -3712,6 +3732,13 @@ static void zuma_usbdrd_pipe3_init(struct exynos5_usbdrd_phy *phy_drd)
 	zuma_ss_tx_gen2_deemp_set(phy_drd);
 
 	/*
+	 * USB owns the lanes out of reset, so ack DPALT_DISABLE before the
+	 * first mux switch. Without this the TCA sits with DPALT_DISABLE set
+	 * and DPALT_DISABLE_ACK clear, and every switch times out on VALID.
+	 */
+	zuma_ss_dpalt_disable_ack(phy_drd, true);
+
+	/*
 	 * Switch the TCA away from NC (controller-synced). USB unless the mode
 	 * switch asked for something else while the controller was down and
 	 * nothing could ack the handshake.
@@ -3803,14 +3830,6 @@ static void zuma_dp_update(struct exynos5_usbdrd_phy *phy_drd, u32 offset,
 	writel(reg, base + offset);
 }
 
-static void zuma_dp_dpalt_disable_ack(struct exynos5_usbdrd_phy *phy_drd,
-				      bool assert)
-{
-	zuma_dp_update(phy_drd, ZUMA_USBDP_PHY_DP_CONFIG19,
-		       ZUMA_USBDP_PHY_DP_CONFIG19_DPALT_DIS_ACK,
-		       assert ? ZUMA_USBDP_PHY_DP_CONFIG19_DPALT_DIS_ACK : 0);
-}
-
 static void zuma_dp_set_pstate(struct exynos5_usbdrd_phy *phy_drd,
 			       unsigned int lanes)
 {
@@ -3891,7 +3910,7 @@ static int zuma_dp_set_rate(struct exynos5_usbdrd_phy *phy_drd,
 	zuma_dp_update(phy_drd, ZUMA_USBDP_PHY_DP_CONFIG13,
 		       ZUMA_USBDP_PHY_DP_CONFIG13_TX_DISABLE,
 		       ZUMA_USBDP_PHY_DP_CONFIG13_TX_DISABLE);
-	zuma_dp_dpalt_disable_ack(phy_drd, true);
+	zuma_ss_dpalt_disable_ack(phy_drd, true);
 
 	writel(FIELD_PREP(ZUMA_USBDP_PHY_DP_CONFIG1_CP_INT, 0x0e) |
 	       FIELD_PREP(ZUMA_USBDP_PHY_DP_CONFIG1_CP_INT_GS, cfg->cp_int_gs) |
@@ -3953,7 +3972,7 @@ static int zuma_dp_set_lanes(struct exynos5_usbdrd_phy *phy_drd,
 		       FIELD_PREP(ZUMA_USBDP_PHY_DP_CONFIG13_TX_DISABLE, ~mask));
 
 	/* Lanes are ours now: let the TCA know the DP side has taken them. */
-	zuma_dp_dpalt_disable_ack(phy_drd, false);
+	zuma_ss_dpalt_disable_ack(phy_drd, false);
 
 	/* Two bits per lane, 0b11 selecting the 20-bit DP TX width. */
 	for (i = 0; i < 4; i++)
