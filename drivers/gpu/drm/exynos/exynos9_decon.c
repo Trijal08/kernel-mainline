@@ -10,6 +10,7 @@
 #include <linux/of_address.h>
 #include <linux/of_device.h>
 #include <linux/of_graph.h>
+#include <linux/of_platform.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
 #include <linux/irq.h>
@@ -1795,12 +1796,33 @@ static const u32 dpp_gf_formats[] = {
 	DRM_FORMAT_BGR565,
 };
 
+/*
+ * Each DECON fetches through its own DPP. Taking whichever DPP bound last
+ * would back this DECON's planes with the channel already feeding another
+ * one, so disabling an unused plane here would stop that DECON's scanout.
+ */
+static struct exynos_dpp_context *decon_find_dpp(struct device *dev)
+{
+	struct device_node *np;
+	struct platform_device *pdev;
+
+	np = of_parse_phandle(dev->of_node, "dpps", 0);
+	if (!np)
+		return NULL;
+
+	pdev = of_find_device_by_node(np);
+	of_node_put(np);
+	if (!pdev)
+		return NULL;
+
+	return dev_get_drvdata(&pdev->dev);
+}
+
 static int decon_bind(struct device *dev, struct device *master, void *data)
 {
 	struct decon_context *ctx = dev_get_drvdata(dev);
 	struct drm_device *drm_dev = data;
 	struct drm_plane *primary_plane = NULL;
-	struct exynos_drm_private *priv = drm_dev->dev_private;
 
 	int i, ret = 0;
 
@@ -1813,11 +1835,13 @@ static int decon_bind(struct device *dev, struct device *master, void *data)
 	 * decon_reg_stop/SRESET).
 	 */
 
+	struct exynos_dpp_context *dpp = decon_find_dpp(dev);
+
 	ctx->drm_dev = drm_dev;
 
 	for (i = 0; i < ctx->win_cnt; i++) {
 		struct decon_win *win = &ctx->win[i];
-		struct exynos_dpp_context *dpp = dev_get_drvdata(priv->dpp_dev);
+
 		ctx->win[i].dpp = dpp;
 
 		if (!dpp)
