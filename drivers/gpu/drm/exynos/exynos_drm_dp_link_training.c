@@ -6,8 +6,47 @@
  */
 
 #include <linux/err.h>
+#include <linux/phy/phy.h>
 
 #include "exynos_drm_dp.h"
+
+/*
+ * On zuma the DP link drives no PHY of its own: the lanes belong to the
+ * Synopsys USB-DP combo PHY that phy-exynos5-usbdrd owns, so the link rate,
+ * the lane count and the per-lane drive levels are handed to it through the
+ * phy framework. The dp_reg_phy_* writes alongside these calls target the
+ * Samsung DP PHY this register layer was written for, which zuma does not
+ * have; with no phy_base mapped they land nowhere.
+ *
+ * SSC is left off. Enabling it source-side means also writing
+ * DP_DOWNSPREAD_CTRL to the sink, which this driver never does.
+ */
+static void exynos_dp_phy_configure(struct exynos_dp_subdev *dp,
+				    const struct exynos_dp_lt_info *lt,
+				    bool set_rate, bool set_lanes,
+				    bool set_voltages)
+{
+	union phy_configure_opts opts = { };
+	int i, ret;
+
+	if (!dp->phy)
+		return;
+
+	opts.dp.link_rate = drm_dp_bw_code_to_link_rate(lt->link_rate) / 100;
+	opts.dp.lanes = lt->lane_cnt;
+	opts.dp.set_rate = set_rate;
+	opts.dp.set_lanes = set_lanes;
+	opts.dp.set_voltages = set_voltages;
+
+	for (i = 0; i < lt->lane_cnt && i < MAX_LANE_CNT; i++) {
+		opts.dp.voltage[i] = lt->voltage_swing[i];
+		opts.dp.pre[i] = lt->pre_emphasis[i] >> DP_TRAIN_PRE_EMPHASIS_SHIFT;
+	}
+
+	ret = phy_configure(dp->phy, &opts);
+	if (ret)
+		dp_log_err(dp->dev, "failed to configure DP phy: %d\n", ret);
+}
 
 static void exynos_dp_dump_symbol_error(struct exynos_dp_subdev *dp)
 {
@@ -23,9 +62,10 @@ static void exynos_dp_dump_symbol_error(struct exynos_dp_subdev *dp)
 			    offset, info[i], info[i + 1]);
 };
 
-static void exynos_dp_set_phy_training_lane_set(u32 id,
+static void exynos_dp_set_phy_training_lane_set(struct exynos_dp_subdev *dp,
 		u8 *dpcd_buf, struct exynos_dp_lt_info *lt_info)
 {
+	u32 id = dp->id;
 	int i;
 	u8 *drive_current = lt_info->voltage_swing;
 	u8 *pre_emphasis = lt_info->pre_emphasis;
@@ -48,6 +88,8 @@ static void exynos_dp_set_phy_training_lane_set(u32 id,
 
 		dpcd_buf[i] = drive_current[i] | pre_emphasis[i] | max_reach_value;
 	}
+
+	exynos_dp_phy_configure(dp, lt_info, false, false, true);
 }
 
 static void exynos_dp_dsc_prepare(struct exynos_dp_subdev *dp, bool enable)
@@ -109,6 +151,9 @@ static void exynos_dp_phy_init(struct exynos_dp_subdev *dp)
 	dp_reg_phy_mode_setting(id);
 
 	dp_reg_set_lane_count(id, dpcd_val[1]);
+
+	/* Retune the combo PHY's MPLLB, then hand it the lanes. */
+	exynos_dp_phy_configure(dp, &dp->lt_info, true, true, false);
 
 	dp_log_info(dev, "link_rate = %d Mbps, lane_cnt = %x\n",
 			drm_dp_bw_code_to_link_rate(dpcd_val[0])/100, dpcd_val[1]);
@@ -201,7 +246,6 @@ exynos_drm_dp_lt_clock_recovery(struct exynos_dp_subdev *dp)
 {
 	struct device *dev = dp->dev;
 	struct exynos_dp_lt_info lt_info;
-	u32 id = dp->id;
 
 	u8 link_status[DP_LINK_STATUS_SIZE];
 	u8 lane_cnt = dp->lt_info.lane_cnt;
@@ -222,7 +266,7 @@ exynos_drm_dp_lt_clock_recovery(struct exynos_dp_subdev *dp)
 	for (cr_retry_no = 0;
 			cr_retry_no < LT_CR_RETRY_CNT; cr_retry_no++) {
 
-		exynos_dp_set_phy_training_lane_set(id, dpcd_buf, &lt_info);
+		exynos_dp_set_phy_training_lane_set(dp, dpcd_buf, &lt_info);
 
 		dp_log_dbg(dev, "(CR) Try TRAINING_LANEx_SET: %02x %02x %02x %02x\n",
 				dpcd_buf[0], dpcd_buf[1], dpcd_buf[2], dpcd_buf[3]);
@@ -315,7 +359,6 @@ exynos_drm_dp_lt_equalization(struct exynos_dp_subdev *dp)
 {
 	struct device *dev = dp->dev;
 	struct exynos_dp_lt_info *lt_info = &dp->lt_info;
-	u32 id = dp->id;
 
 	u8 link_status[DP_LINK_STATUS_SIZE];
 	u8 lane_cnt = dp->lt_info.lane_cnt;
@@ -338,7 +381,7 @@ exynos_drm_dp_lt_equalization(struct exynos_dp_subdev *dp)
 
 	for (eq_retry_no = 0; eq_retry_no < EQ_RETRY_CNT; eq_retry_no++) {
 
-		exynos_dp_set_phy_training_lane_set(id, dpcd_buf, lt_info);
+		exynos_dp_set_phy_training_lane_set(dp, dpcd_buf, lt_info);
 
 		dp_log_dbg(dev, "(EQ) Try TRAINING_LANEx_SET: %02x %02x %02x %02x\n",
 				dpcd_buf[0], dpcd_buf[1], dpcd_buf[2], dpcd_buf[3]);
