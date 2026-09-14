@@ -688,8 +688,47 @@ static const struct exynos_irq_chip gs101_wkup_irq_chip __initconst = {
 	.set_eint_wakeup_mask = gs101_pinctrl_set_eint_wakeup_mask,
 };
 
+/*
+ * Zumapro has the same three EINT_WAKEUP_MASK registers as gs101, but only the
+ * first two are worth programming.
+ *
+ * EL3 refuses the write to the third with -EINVAL - presumably a secure
+ * register allowlist - so it keeps reading 0, meaning every EINT it covers
+ * stays armed. Downstream issues the identical write through the identical
+ * SMC and takes the identical rejection, then sleeps and wakes anyway, so
+ * that masking is absent on both kernels. Attempting it only costs a warning
+ * on every suspend.
+ *
+ * Nothing is lost by dropping it, because no zumapro wakeup EINT resolves
+ * into that word: the alive banks end at EINT 49 and far-alive gpa5 at EINT
+ * 57. eint_wake_mask_values[2] therefore never leaves
+ * EXYNOS_EINT_WAKEUP_MASK_DISABLED, which is why the refused write always
+ * carried 0xffffffff. (The custom-alive gpn banks are numbered from EINT 192,
+ * past the end of the mask array altogether.)
+ */
+static const struct exynos_irq_chip zumapro_wkup_irq_chip __initconst = {
+	.chip = {
+		.name = "zumapro_wkup_irq_chip",
+		.irq_unmask = exynos_irq_unmask,
+		.irq_mask = exynos_irq_mask,
+		.irq_ack = exynos_irq_ack,
+		.irq_set_type = exynos_irq_set_type,
+		.irq_set_wake = gs101_wkup_irq_set_wake,
+		.irq_request_resources = exynos_irq_request_resources,
+		.irq_release_resources = exynos_irq_release_resources,
+	},
+	.eint_con = EXYNOS7_WKUP_ECON_OFFSET,
+	.eint_mask = EXYNOS7_WKUP_EMASK_OFFSET,
+	.eint_pend = EXYNOS7_WKUP_EPEND_OFFSET,
+	.eint_num_wakeup_reg = 2,
+	.eint_wake_mask_reg = GS101_EINT_WAKEUP_MASK,
+	.set_eint_wakeup_mask = gs101_pinctrl_set_eint_wakeup_mask,
+};
+
 /* list of external wakeup controllers supported */
 static const struct of_device_id exynos_wkup_irq_ids[] = {
+	{ .compatible = "google,zumapro-wakeup-eint",
+			.data = &zumapro_wkup_irq_chip },
 	{ .compatible = "google,gs101-wakeup-eint",
 			.data = &gs101_wkup_irq_chip },
 	{ .compatible = "samsung,s5pv210-wakeup-eint",
