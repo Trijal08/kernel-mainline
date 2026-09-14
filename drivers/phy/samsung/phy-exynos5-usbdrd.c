@@ -340,12 +340,68 @@
 #define ZUMA_USBDP_PHY_TCA_CONFIG		0x16c
 #define ZUMA_USBDP_PHY_TCA_CONFIG_FLIP_INVERT	BIT(2)
 
+#define ZUMA_USBDP_PHY_DP_AUX_CONFIG0		0x200
+#define ZUMA_USBDP_PHY_DP_AUX_CONFIG0_PWDNB	BIT(9)
+
+#define ZUMA_USBDP_PHY_DP_CONFIG1		0x208
+#define ZUMA_USBDP_PHY_DP_CONFIG1_CP_PROP_GS	GENMASK(30, 24)
+#define ZUMA_USBDP_PHY_DP_CONFIG1_CP_PROP	GENMASK(22, 16)
+#define ZUMA_USBDP_PHY_DP_CONFIG1_CP_INT_GS	GENMASK(14, 8)
+#define ZUMA_USBDP_PHY_DP_CONFIG1_CP_INT	GENMASK(6, 0)
+
+#define ZUMA_USBDP_PHY_DP_CONFIG2		0x20c
+#define ZUMA_USBDP_PHY_DP_CONFIG2_FRACN_DEN	GENMASK(31, 16)
+#define ZUMA_USBDP_PHY_DP_CONFIG2_FRACN_EN	BIT(15)
+#define ZUMA_USBDP_PHY_DP_CONFIG2_FRACN_CFG_UPD	BIT(14)
+#define ZUMA_USBDP_PHY_DP_CONFIG2_DIV5_CLK_EN	BIT(0)
+
+#define ZUMA_USBDP_PHY_DP_CONFIG3		0x210
+#define ZUMA_USBDP_PHY_DP_CONFIG3_FRACN_REM	GENMASK(31, 16)
+#define ZUMA_USBDP_PHY_DP_CONFIG3_FRACN_QUOT	GENMASK(15, 0)
+
+#define ZUMA_USBDP_PHY_DP_CONFIG4		0x214
+#define ZUMA_USBDP_PHY_DP_CONFIG4_SSC_EN	BIT(17)
+#define ZUMA_USBDP_PHY_DP_CONFIG4_PMIX_EN	BIT(16)
+#define ZUMA_USBDP_PHY_DP_CONFIG4_MULTIPLIER	GENMASK(15, 4)
+#define ZUMA_USBDP_PHY_DP_CONFIG4_FREQ_VCO	GENMASK(1, 0)
+
+#define ZUMA_USBDP_PHY_DP_CONFIG5		0x218
+#define ZUMA_USBDP_PHY_DP_CONFIG5_SSC_PEAK	GENMASK(19, 0)
+
+#define ZUMA_USBDP_PHY_DP_CONFIG6		0x21c
+#define ZUMA_USBDP_PHY_DP_CONFIG6_SSC_STEPSIZE	GENMASK(20, 0)
+
+#define ZUMA_USBDP_PHY_DP_CONFIG7		0x220
+#define ZUMA_USBDP_PHY_DP_CONFIG7_REF_CLK_EN	BIT(8)
+#define ZUMA_USBDP_PHY_DP_CONFIG7_WORD_DIV2_EN	BIT(6)
+#define ZUMA_USBDP_PHY_DP_CONFIG7_V2I		GENMASK(5, 4)
+#define ZUMA_USBDP_PHY_DP_CONFIG7_TX_CLK_DIV	GENMASK(3, 1)
+#define ZUMA_USBDP_PHY_DP_CONFIG7_SSC_UP_SPREAD	BIT(0)
+
+/* Per-lane equaliser taps: 6 bits per lane, one byte apart. */
+#define ZUMA_USBDP_PHY_DP_CONFIG8		0x224	/* EQ_MAIN */
+#define ZUMA_USBDP_PHY_DP_CONFIG9		0x228	/* EQ_POST */
+#define ZUMA_USBDP_PHY_DP_CONFIG10		0x22c	/* EQ_PRE  */
+#define ZUMA_USBDP_PHY_DP_EQ_LANE		GENMASK(5, 0)
+
+#define ZUMA_USBDP_PHY_DP_CONFIG11		0x230
+#define ZUMA_USBDP_PHY_DP_CONFIG11_TX_PSTATE	GENMASK(11, 4)
+
 #define ZUMA_USBDP_PHY_DP_CONFIG12		0x234
+#define ZUMA_USBDP_PHY_DP_CONFIG12_TX_ACK	GENMASK(19, 16)
+#define ZUMA_USBDP_PHY_DP_CONFIG12_TX_REQ	GENMASK(15, 12)
 #define ZUMA_USBDP_PHY_DP_CONFIG12_TX_MPLL_EN	GENMASK(11, 8)
+#define ZUMA_USBDP_PHY_DP_CONFIG12_TX_WIDTH	GENMASK(7, 0)
 
 #define ZUMA_USBDP_PHY_DP_CONFIG13		0x238
 #define ZUMA_USBDP_PHY_DP_CONFIG13_TX_RESET	GENMASK(7, 4)
 #define ZUMA_USBDP_PHY_DP_CONFIG13_TX_DISABLE	GENMASK(3, 0)
+
+#define ZUMA_USBDP_PHY_DP_CONFIG17		0x248
+#define ZUMA_USBDP_PHY_DP_CONFIG17_DCC_BYP_AC	GENMASK(3, 0)
+
+#define ZUMA_USBDP_PHY_DP_CONFIG19		0x250
+#define ZUMA_USBDP_PHY_DP_CONFIG19_DPALT_DIS_ACK BIT(1)
 
 /* TCA (Type-C Aggregator) block - second SS reg region (reg_tca, 0x11140000) */
 #define ZUMA_USBDP_TCA_INTR_EN			0x04
@@ -3664,6 +3720,378 @@ static void zuma_usbdrd_pipe3_init(struct exynos5_usbdrd_phy *phy_drd)
 }
 
 /*
+ * DisplayPort alt mode on the combo PHY.
+ *
+ * The DP transmitter at 0x110f0000 drives the link layer, but the lanes it
+ * feeds belong to this PHY, so the MPLLB, the per-lane power state and the
+ * equaliser taps are programmed here and reached through phy_configure() with
+ * phy_configure_opts_dp. Ported from the vendor dpphy_reg_* in
+ * display/samsung/cal_9865/dp_reg.c; the MPLLB coefficients are that table
+ * verbatim, since they are PLL solutions for a 38.4MHz reference and there is
+ * nothing to derive them from.
+ *
+ * Only the DP-facing half lives here. Entering alt mode (the TCA mux switch)
+ * is already driven by the TypeC mode switch, and DPALT_DISABLE_ACK -- the
+ * handshake that tells the TCA the DP side has let go of the lanes -- is
+ * asserted while the lanes are down and released in set_lanes.
+ */
+struct zuma_dp_mpllb_cfg {
+	unsigned int	link_rate;	/* Mb/s, as phy_configure_opts_dp gives it */
+	u8		cp_int_gs;
+	u8		cp_prop;
+	u16		fracn_quot;
+	u8		freq_vco;
+	u16		multiplier;
+	u8		tx_clk_div;
+	u8		v2i;
+	u32		ssc_peak;
+	u32		ssc_stepsize;
+};
+
+/* SSC values are max down-spread (-0.5%) at each rate. */
+static const struct zuma_dp_mpllb_cfg zuma_dp_mpllb_cfgs[] = {
+	{ 1620, 0x41, 0x1c, 0xc000, 0x3, 0x130, 0x2, 0x2, 0xd800,  0x16ae1 },
+	{ 2700, 0x43, 0x14, 0xa000, 0x3, 0x0f8, 0x1, 0x3, 0xb400,  0x12e66 },
+	{ 5400, 0x43, 0x14, 0xa000, 0x3, 0x0f8, 0x0, 0x3, 0xb400,  0x12e66 },
+	{ 8100, 0x43, 0x19, 0xf000, 0x2, 0x184, 0x0, 0x3, 0x10e00, 0x1c59a },
+};
+
+/*
+ * Equaliser taps indexed [voltage swing][pre-emphasis]: main, post, and the
+ * RBOOST written over CR-para. Entries the spec does not allow (swing plus
+ * pre-emphasis beyond level 3) are left zero and rejected by ->validate.
+ * EQ_PRE is zero throughout the vendor table, so it is not carried here.
+ */
+struct zuma_dp_eq {
+	u8	main;
+	u8	post;
+};
+
+static const struct zuma_dp_eq zuma_dp_eq_lbr[4][4] = {
+	{ { 21, 0 }, { 26,  5 }, { 31, 10 }, { 41, 20 } },
+	{ { 31, 0 }, { 38,  7 }, { 46, 15 } },
+	{ { 43, 0 }, { 52,  9 } },
+	{ { 62, 0 } },
+};
+
+static const struct zuma_dp_eq zuma_dp_eq_hbr23[4][4] = {
+	{ { 21, 0 }, { 25,  4 }, { 29,  8 }, { 35, 14 } },
+	{ { 31, 0 }, { 37,  6 }, { 42, 11 } },
+	{ { 43, 0 }, { 51,  8 } },
+	{ { 62, 0 } },
+};
+
+/*
+ * Lane counts map onto per-lane nibbles/byte-fields: 4 lanes is all bits, 2
+ * lanes is the low half. The PSTATE and DISABLE fields are active-low in the
+ * sense that the "off" encoding is all-ones.
+ */
+static u32 zuma_dp_lane_mask(unsigned int lanes)
+{
+	return lanes >= 4 ? 0xf : (lanes >= 2 ? 0x3 : 0x0);
+}
+
+static void zuma_dp_update(struct exynos5_usbdrd_phy *phy_drd, u32 offset,
+			   u32 mask, u32 val)
+{
+	void __iomem *base = phy_drd->reg_pma;
+	u32 reg;
+
+	reg = readl(base + offset);
+	reg &= ~mask;
+	reg |= val & mask;
+	writel(reg, base + offset);
+}
+
+static void zuma_dp_dpalt_disable_ack(struct exynos5_usbdrd_phy *phy_drd,
+				      bool assert)
+{
+	zuma_dp_update(phy_drd, ZUMA_USBDP_PHY_DP_CONFIG19,
+		       ZUMA_USBDP_PHY_DP_CONFIG19_DPALT_DIS_ACK,
+		       assert ? ZUMA_USBDP_PHY_DP_CONFIG19_DPALT_DIS_ACK : 0);
+}
+
+static void zuma_dp_set_pstate(struct exynos5_usbdrd_phy *phy_drd,
+			       unsigned int lanes)
+{
+	/* Two bits per lane; 0b11 is P2, powered down. */
+	u32 mask = zuma_dp_lane_mask(lanes);
+	u32 pstate = 0;
+	int i;
+
+	for (i = 0; i < 4; i++)
+		if (!(mask & BIT(i)))
+			pstate |= 0x3 << (i * 2);
+
+	zuma_dp_update(phy_drd, ZUMA_USBDP_PHY_DP_CONFIG11,
+		       ZUMA_USBDP_PHY_DP_CONFIG11_TX_PSTATE,
+		       FIELD_PREP(ZUMA_USBDP_PHY_DP_CONFIG11_TX_PSTATE, pstate));
+}
+
+/*
+ * Ask the PHY to latch the TX config and wait for it to say it has. Both the
+ * request and the acknowledge are per-lane bits; the request self-clears.
+ * Bounded and non-fatal, like the rest of the zuma SS path -- a PHY that never
+ * answers must not wedge a modeset.
+ */
+static void zuma_dp_status_update(struct exynos5_usbdrd_phy *phy_drd,
+				  unsigned int lanes)
+{
+	void __iomem *base = phy_drd->reg_pma;
+	u32 req = zuma_dp_lane_mask(lanes);
+	u32 reg;
+
+	zuma_dp_update(phy_drd, ZUMA_USBDP_PHY_DP_CONFIG12,
+		       ZUMA_USBDP_PHY_DP_CONFIG12_TX_REQ,
+		       FIELD_PREP(ZUMA_USBDP_PHY_DP_CONFIG12_TX_REQ, req));
+
+	if (readl_poll_timeout_atomic(base + ZUMA_USBDP_PHY_DP_CONFIG12, reg,
+			!(FIELD_GET(ZUMA_USBDP_PHY_DP_CONFIG12_TX_REQ, reg) & req),
+			10, 2000))
+		dev_warn(phy_drd->dev, "DP TX request never cleared (0x%08x)\n",
+			 readl(base + ZUMA_USBDP_PHY_DP_CONFIG12));
+
+	if (readl_poll_timeout_atomic(base + ZUMA_USBDP_PHY_DP_CONFIG12, reg,
+			(FIELD_GET(ZUMA_USBDP_PHY_DP_CONFIG12_TX_ACK, reg) & req) == req,
+			10, 2000))
+		dev_warn(phy_drd->dev, "DP TX never acked (0x%08x)\n",
+			 readl(base + ZUMA_USBDP_PHY_DP_CONFIG12));
+}
+
+static int zuma_dp_set_rate(struct exynos5_usbdrd_phy *phy_drd,
+			    const struct phy_configure_opts_dp *dp)
+{
+	const struct zuma_dp_mpllb_cfg *cfg = NULL;
+	u32 ssc_en = dp->ssc ? ZUMA_USBDP_PHY_DP_CONFIG4_SSC_EN : 0;
+	void __iomem *base = phy_drd->reg_pma;
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(zuma_dp_mpllb_cfgs); i++)
+		if (zuma_dp_mpllb_cfgs[i].link_rate == dp->link_rate)
+			cfg = &zuma_dp_mpllb_cfgs[i];
+	if (!cfg)
+		return -EINVAL;
+
+	/* AUX has to be alive before the sink can be talked to at all. */
+	zuma_dp_update(phy_drd, ZUMA_USBDP_PHY_DP_AUX_CONFIG0,
+		       ZUMA_USBDP_PHY_DP_AUX_CONFIG0_PWDNB,
+		       ZUMA_USBDP_PHY_DP_AUX_CONFIG0_PWDNB);
+
+	/*
+	 * Park every lane before retuning the PLL underneath them: reset
+	 * asserted, powered down, then disabled and released. The DPALT ack
+	 * goes up here and comes back down in set_lanes.
+	 */
+	zuma_dp_update(phy_drd, ZUMA_USBDP_PHY_DP_CONFIG13,
+		       ZUMA_USBDP_PHY_DP_CONFIG13_TX_RESET,
+		       ZUMA_USBDP_PHY_DP_CONFIG13_TX_RESET);
+	zuma_dp_set_pstate(phy_drd, 0);
+	zuma_dp_update(phy_drd, ZUMA_USBDP_PHY_DP_CONFIG13,
+		       ZUMA_USBDP_PHY_DP_CONFIG13_TX_RESET, 0);
+	zuma_dp_update(phy_drd, ZUMA_USBDP_PHY_DP_CONFIG13,
+		       ZUMA_USBDP_PHY_DP_CONFIG13_TX_DISABLE,
+		       ZUMA_USBDP_PHY_DP_CONFIG13_TX_DISABLE);
+	zuma_dp_dpalt_disable_ack(phy_drd, true);
+
+	writel(FIELD_PREP(ZUMA_USBDP_PHY_DP_CONFIG1_CP_INT, 0x0e) |
+	       FIELD_PREP(ZUMA_USBDP_PHY_DP_CONFIG1_CP_INT_GS, cfg->cp_int_gs) |
+	       FIELD_PREP(ZUMA_USBDP_PHY_DP_CONFIG1_CP_PROP, cfg->cp_prop) |
+	       FIELD_PREP(ZUMA_USBDP_PHY_DP_CONFIG1_CP_PROP_GS, 0x7f),
+	       base + ZUMA_USBDP_PHY_DP_CONFIG1);
+
+	writel(ZUMA_USBDP_PHY_DP_CONFIG2_DIV5_CLK_EN |
+	       ZUMA_USBDP_PHY_DP_CONFIG2_FRACN_CFG_UPD |
+	       ZUMA_USBDP_PHY_DP_CONFIG2_FRACN_EN |
+	       FIELD_PREP(ZUMA_USBDP_PHY_DP_CONFIG2_FRACN_DEN, 1),
+	       base + ZUMA_USBDP_PHY_DP_CONFIG2);
+
+	writel(FIELD_PREP(ZUMA_USBDP_PHY_DP_CONFIG3_FRACN_QUOT, cfg->fracn_quot),
+	       base + ZUMA_USBDP_PHY_DP_CONFIG3);
+
+	writel(FIELD_PREP(ZUMA_USBDP_PHY_DP_CONFIG4_FREQ_VCO, cfg->freq_vco) |
+	       FIELD_PREP(ZUMA_USBDP_PHY_DP_CONFIG4_MULTIPLIER, cfg->multiplier) |
+	       ZUMA_USBDP_PHY_DP_CONFIG4_PMIX_EN | ssc_en,
+	       base + ZUMA_USBDP_PHY_DP_CONFIG4);
+
+	zuma_dp_update(phy_drd, ZUMA_USBDP_PHY_DP_CONFIG5,
+		       ZUMA_USBDP_PHY_DP_CONFIG5_SSC_PEAK,
+		       FIELD_PREP(ZUMA_USBDP_PHY_DP_CONFIG5_SSC_PEAK,
+				  dp->ssc ? cfg->ssc_peak : 0));
+	zuma_dp_update(phy_drd, ZUMA_USBDP_PHY_DP_CONFIG6,
+		       ZUMA_USBDP_PHY_DP_CONFIG6_SSC_STEPSIZE,
+		       FIELD_PREP(ZUMA_USBDP_PHY_DP_CONFIG6_SSC_STEPSIZE,
+				  dp->ssc ? cfg->ssc_stepsize : 0));
+
+	zuma_dp_update(phy_drd, ZUMA_USBDP_PHY_DP_CONFIG7,
+		       ZUMA_USBDP_PHY_DP_CONFIG7_SSC_UP_SPREAD |
+		       ZUMA_USBDP_PHY_DP_CONFIG7_TX_CLK_DIV |
+		       ZUMA_USBDP_PHY_DP_CONFIG7_V2I |
+		       ZUMA_USBDP_PHY_DP_CONFIG7_WORD_DIV2_EN |
+		       ZUMA_USBDP_PHY_DP_CONFIG7_REF_CLK_EN,
+		       FIELD_PREP(ZUMA_USBDP_PHY_DP_CONFIG7_TX_CLK_DIV, cfg->tx_clk_div) |
+		       FIELD_PREP(ZUMA_USBDP_PHY_DP_CONFIG7_V2I, cfg->v2i) |
+		       ZUMA_USBDP_PHY_DP_CONFIG7_REF_CLK_EN);
+
+	/* Bypass the AC coupling capacitor on every lane, as the vendor does. */
+	zuma_dp_update(phy_drd, ZUMA_USBDP_PHY_DP_CONFIG17,
+		       ZUMA_USBDP_PHY_DP_CONFIG17_DCC_BYP_AC,
+		       ZUMA_USBDP_PHY_DP_CONFIG17_DCC_BYP_AC);
+
+	return 0;
+}
+
+static int zuma_dp_set_lanes(struct exynos5_usbdrd_phy *phy_drd,
+			     const struct phy_configure_opts_dp *dp)
+{
+	u32 mask = zuma_dp_lane_mask(dp->lanes);
+	u32 width = 0;
+	int i;
+
+	/* DISABLE is active high, so enabling a lane means clearing its bit. */
+	zuma_dp_update(phy_drd, ZUMA_USBDP_PHY_DP_CONFIG13,
+		       ZUMA_USBDP_PHY_DP_CONFIG13_TX_DISABLE,
+		       FIELD_PREP(ZUMA_USBDP_PHY_DP_CONFIG13_TX_DISABLE, ~mask));
+
+	/* Lanes are ours now: let the TCA know the DP side has taken them. */
+	zuma_dp_dpalt_disable_ack(phy_drd, false);
+
+	/* Two bits per lane, 0b11 selecting the 20-bit DP TX width. */
+	for (i = 0; i < 4; i++)
+		if (mask & BIT(i))
+			width |= 0x3 << (i * 2);
+
+	zuma_dp_update(phy_drd, ZUMA_USBDP_PHY_DP_CONFIG12,
+		       ZUMA_USBDP_PHY_DP_CONFIG12_TX_WIDTH |
+		       ZUMA_USBDP_PHY_DP_CONFIG12_TX_MPLL_EN,
+		       FIELD_PREP(ZUMA_USBDP_PHY_DP_CONFIG12_TX_WIDTH, width) |
+		       FIELD_PREP(ZUMA_USBDP_PHY_DP_CONFIG12_TX_MPLL_EN, mask));
+
+	zuma_dp_set_pstate(phy_drd, dp->lanes);
+	zuma_dp_status_update(phy_drd, dp->lanes);
+
+	return 0;
+}
+
+static int zuma_dp_set_voltages(struct exynos5_usbdrd_phy *phy_drd,
+				const struct phy_configure_opts_dp *dp)
+{
+	bool hbr23 = dp->link_rate > 2700;
+	unsigned int i;
+
+	for (i = 0; i < dp->lanes; i++) {
+		const struct zuma_dp_eq *eq;
+		unsigned int shift = i * 8;
+
+		if (dp->voltage[i] > 3 || dp->pre[i] > 3)
+			return -EINVAL;
+
+		eq = hbr23 ? &zuma_dp_eq_hbr23[dp->voltage[i]][dp->pre[i]]
+			   : &zuma_dp_eq_lbr[dp->voltage[i]][dp->pre[i]];
+		if (!eq->main)
+			return -EINVAL;
+
+		zuma_dp_update(phy_drd, ZUMA_USBDP_PHY_DP_CONFIG8,
+			       ZUMA_USBDP_PHY_DP_EQ_LANE << shift,
+			       eq->main << shift);
+		zuma_dp_update(phy_drd, ZUMA_USBDP_PHY_DP_CONFIG9,
+			       ZUMA_USBDP_PHY_DP_EQ_LANE << shift,
+			       eq->post << shift);
+		zuma_dp_update(phy_drd, ZUMA_USBDP_PHY_DP_CONFIG10,
+			       ZUMA_USBDP_PHY_DP_EQ_LANE << shift, 0);
+
+		/*
+		 * Swing level and receiver boost live behind CR-para, not in
+		 * the memory-mapped block. RBOOST is rate-dependent; the vendor
+		 * writes the same vswing code at every level.
+		 */
+		zuma_ss_cr_write(phy_drd, 0x22, 0xd0, false);
+		zuma_ss_cr_write(phy_drd, 0x1005 + 0x100 * i,
+				 hbr23 ? 0x70 : 0x40, false);
+	}
+
+	/* Lane control, written once after the per-lane taps. */
+	zuma_ss_cr_write(phy_drd, 0x1002, 0x180, false);
+	zuma_ss_cr_write(phy_drd, 0x10eb, 0x0, false);
+
+	zuma_dp_status_update(phy_drd, dp->lanes);
+
+	return 0;
+}
+
+static int zuma_usbdrd_phy_dp_configure(struct phy *phy,
+					union phy_configure_opts *opts)
+{
+	struct phy_usb_instance *inst = phy_get_drvdata(phy);
+	struct exynos5_usbdrd_phy *phy_drd = to_usbdrd_phy(inst);
+	const struct phy_configure_opts_dp *dp = &opts->dp;
+	int ret;
+
+	/* DP rides the SuperSpeed lanes; the UTMI instance has nothing to do. */
+	if (inst->phy_cfg->id != EXYNOS5_DRDPHY_PIPE3)
+		return 0;
+
+	if (!phy_drd->reg_pma)
+		return -ENODEV;
+
+	if (dp->set_rate) {
+		ret = zuma_dp_set_rate(phy_drd, dp);
+		if (ret)
+			return ret;
+	}
+
+	if (dp->set_lanes) {
+		ret = zuma_dp_set_lanes(phy_drd, dp);
+		if (ret)
+			return ret;
+	}
+
+	if (dp->set_voltages) {
+		ret = zuma_dp_set_voltages(phy_drd, dp);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+
+static int zuma_usbdrd_phy_dp_validate(struct phy *phy, enum phy_mode mode,
+				       int submode, union phy_configure_opts *opts)
+{
+	const struct phy_configure_opts_dp *dp = &opts->dp;
+	int i;
+
+	if (mode != PHY_MODE_DP)
+		return -EINVAL;
+
+	if (dp->set_lanes && dp->lanes != 0 && dp->lanes != 2 && dp->lanes != 4)
+		return -EINVAL;
+
+	if (dp->set_rate) {
+		for (i = 0; i < ARRAY_SIZE(zuma_dp_mpllb_cfgs); i++)
+			if (zuma_dp_mpllb_cfgs[i].link_rate == dp->link_rate)
+				break;
+		if (i == ARRAY_SIZE(zuma_dp_mpllb_cfgs))
+			return -EINVAL;
+	}
+
+	if (dp->set_voltages)
+		for (i = 0; i < dp->lanes; i++)
+			if (dp->voltage[i] > 3 || dp->pre[i] > 3 ||
+			    dp->voltage[i] + dp->pre[i] > 3)
+				return -EINVAL;
+
+	return 0;
+}
+
+static const struct phy_ops zuma_usbdrd_phy_ops = {
+	.init		= exynos2200_usbdrd_phy_init,
+	.exit		= exynos2200_usbdrd_phy_exit,
+	.configure	= zuma_usbdrd_phy_dp_configure,
+	.validate	= zuma_usbdrd_phy_dp_validate,
+	.owner		= THIS_MODULE,
+};
+
+/*
  * Google Tensor zuma/zumapro USB3.1 DRD combo PHY. Like exynos2200, the
  * high-speed side is an external Synopsys eUSB2 PHY (the "hs" sub-PHY) reached
  * through the same link/UTMI sequence; the SuperSpeed side is the Synopsys
@@ -3687,7 +4115,7 @@ static const struct exynos5_usbdrd_phy_config phy_cfg_zuma[] = {
 
 static const struct exynos5_usbdrd_phy_drvdata zuma_usb31drd_phy = {
 	.phy_cfg			= phy_cfg_zuma,
-	.phy_ops			= &exynos2200_usbdrd_phy_ops,
+	.phy_ops			= &zuma_usbdrd_phy_ops,
 	.pmu_offset_usbdrd0_phy		= GS101_PHY_CTRL_USB20,
 	.pmu_offset_usbdrd0_phy_ss	= GS101_PHY_CTRL_USBDP,
 	.clk_names			= zuma_clk_names,
