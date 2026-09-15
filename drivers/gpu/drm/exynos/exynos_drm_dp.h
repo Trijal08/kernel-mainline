@@ -721,6 +721,12 @@ struct exynos_dp_subdev {
 	struct exynos_dp_lt_info lt_info;
 
 	int hpd_state;
+	/*
+	 * What the Type-C side last told us. This, not SYSTEM_HPD_CONTROL, is
+	 * the authority on whether a sink is attached: there is no HPD wire on
+	 * USB-C, and the register only reads back what we force into it.
+	 */
+	bool oob_plugged;
 	bool training_state;
 	u32 bist_use;
 	enum test_pattern bist_type;
