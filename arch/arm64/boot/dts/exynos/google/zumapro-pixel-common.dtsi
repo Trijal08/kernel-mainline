@@ -542,7 +542,7 @@
 		pinctrl-names = "default";
 		interrupts-extended = <&gpa7 7 IRQ_TYPE_LEVEL_LOW>;
 
-		shunt-resistor-micro-ohms = <10000>;
+		shunt-resistor-micro-ohms = <2000>;
 	};
 
 	pmic@66 {
