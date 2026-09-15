@@ -11,6 +11,7 @@
 #include <linux/of_device.h>
 #include <linux/of_graph.h>
 #include <linux/platform_device.h>
+#include <linux/pm_runtime.h>
 #include <linux/irq.h>
 #include <linux/iopoll.h>
 #include <linux/timer.h>
@@ -1648,9 +1649,22 @@ static void decon_set_mode(struct exynos_drm_crtc *crtc)
 static void decon_enable(struct exynos_drm_crtc *crtc)
 {
 	struct decon_context *ctx = crtc->ctx;
+	struct exynos_drm_private *priv = ctx->drm_dev->dev_private;
+	int ret;
 
 	if (ctx->enabled)
 		return;
+
+	/*
+	 * Powers pd-dpuf0/pd-dpub and, through the "iommus" device link, the
+	 * SysMMU the DPP fetches through. Must precede cal_ops->enable(): the
+	 * DECON must not start fetching before its translation is up.
+	 */
+	ret = pm_runtime_resume_and_get(priv->dma_dev);
+	if (ret < 0) {
+		drm_err(ctx->drm_dev, "cannot resume DPU DMA: %d\n", ret);
+		return;
+	}
 
 	drm_display_mode_to_videomode(&crtc->base.mode, &ctx->v_mode);
 
@@ -1676,6 +1690,7 @@ static void decon_enable(struct exynos_drm_crtc *crtc)
 static void decon_disable(struct exynos_drm_crtc *crtc)
 {
 	struct decon_context *ctx = crtc->ctx;
+	struct exynos_drm_private *priv = ctx->drm_dev->dev_private;
 
 	/*
 	 * A CRTC can be disabled twice without an enable in between, so this has
@@ -1694,6 +1709,8 @@ static void decon_disable(struct exynos_drm_crtc *crtc)
 	 * boundary that one frame per commit no longer guarantees. Stop it here.
 	 */
 	ctx->cal_ops->disable(ctx);
+
+	pm_runtime_put_sync(priv->dma_dev);
 }
 
 static irqreturn_t decon_te_irq_handler(int irq, void *dev_id)
