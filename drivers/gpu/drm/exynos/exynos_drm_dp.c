@@ -3245,6 +3245,8 @@ void exynos_drm_dp_set_normal_data(struct exynos_dp_subdev *dp)
 	dp_reg_scrambling_enable(dp->id, 1);
 }
 
+static int exynos_drm_dp_start(struct exynos_dp_subdev *dp);
+
 static void exynos_drm_dp_hpd_changed(struct exynos_dp_subdev *dp, int state)
 {
 	struct device *dev = dp->dev;
@@ -3265,6 +3267,17 @@ static void exynos_drm_dp_hpd_changed(struct exynos_dp_subdev *dp, int state)
 	if (state) {
 		dp->hpd_state = HPD_CHECK;
 		if (!dp->training_state) {
+			/*
+			 * Nothing has touched the link block yet: the bind-time
+			 * start() returns early while no sink is attached, so
+			 * the soft reset, the common function enables and the
+			 * PHY's AUX power all still have to happen -- before
+			 * the first DPCD read, which is what AUX carries.
+			 */
+			ret = exynos_drm_dp_start(dp);
+			if (ret < 0)
+				goto HPD_FAIL;
+
 			ret = exynos_drm_dp_link_training(dp);
 			if (ret < 0)
 				goto HPD_FAIL;
@@ -3277,6 +3290,8 @@ static void exynos_drm_dp_hpd_changed(struct exynos_dp_subdev *dp, int state)
 	} else {
 		dp->hpd_state = HPD_UNPLUG;
 		dp->training_state = false;
+		/* so the next plug runs start() again rather than skipping it */
+		dp->state = DP_STATE_OFF;
 
 		if (dp->detect)
 			dp->detect(dev);
@@ -3984,6 +3999,9 @@ static int exynos_drm_dp_start(struct exynos_dp_subdev *dp)
 	}
 	mutex_lock(&dp->pwlock);
 
+	ret = phy_set_mode(dp->phy, PHY_MODE_DP);
+	if (ret < 0)
+		dp_log_err(dev, "cannot put the phy in DP mode, %d\n", ret);
 	ret = phy_power_on(dp->phy);
 	if (ret < 0) {
 		dp_log_err(dev, "cannot enable DP_PHY[%d], %d\n", dp->id, ret);
