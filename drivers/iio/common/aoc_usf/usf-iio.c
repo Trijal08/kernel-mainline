@@ -123,6 +123,15 @@ struct usf_sensor {
 	 */
 	u64 res_q;
 	u64 scale_nano;		/* IIO_CHAN_INFO_SCALE in nano units */
+
+	/*
+	 * Most recent sample, for IIO_CHAN_INFO_RAW. The AoC pushes on change
+	 * rather than at samp_freq -- the ALS can go seconds between samples --
+	 * so a one-shot read has nothing to wait for. Cache what the stream
+	 * last gave us instead. Written under sample_lock.
+	 */
+	s32 last[3];
+	bool have_last;
 };
 
 /* Fixed-point fraction bits for the resolution divisor (res_q). */
@@ -171,6 +180,7 @@ static const struct iio_chan_spec usf_magn_channels[] = {
 
 #define USF_SCALAR_CHANNEL(_type) {				\
 	.type = _type,						\
+	.info_mask_separate = BIT(IIO_CHAN_INFO_RAW),		\
 	.info_mask_shared_by_type = BIT(IIO_CHAN_INFO_SCALE),	\
 	.info_mask_shared_by_all = BIT(IIO_CHAN_INFO_SAMP_FREQ),	\
 	.scan_index = 0,					\
@@ -225,6 +235,8 @@ static const struct usf_type_map {
 	  ARRAY_SIZE(usf_pressure_channels), 1, usf_scan_masks_scalar, 100000000ULL },
 };
 
+static int usf_start_sampling(struct usf_sensor *s);
+
 static int usf_read_raw(struct iio_dev *indio_dev,
 			struct iio_chan_spec const *chan,
 			int *val, int *val2, long mask)
@@ -232,6 +244,31 @@ static int usf_read_raw(struct iio_dev *indio_dev,
 	struct usf_sensor *s = iio_priv(indio_dev);
 
 	switch (mask) {
+	case IIO_CHAN_INFO_RAW: {
+		int idx = chan->scan_index;
+		int ret;
+
+		if (idx < 0 || idx >= ARRAY_SIZE(s->last))
+			return -EINVAL;
+
+		/*
+		 * Nothing streams until someone asks. Start on the first read
+		 * and leave it running: these are on-change sensors, so the
+		 * traffic is negligible and stopping between polls would mean
+		 * never having a value to return.
+		 */
+		if (!READ_ONCE(s->sampling_id)) {
+			ret = usf_start_sampling(s);
+			if (ret)
+				return ret;
+		}
+
+		if (!READ_ONCE(s->have_last))
+			return -EAGAIN;
+
+		*val = READ_ONCE(s->last[idx]);
+		return IIO_VAL_INT;
+	}
 	case IIO_CHAN_INFO_SCALE:
 		/* SCALE = resolution * unit factor, discovered per sensor. */
 		*val = s->scale_nano / USF_NANO;
@@ -467,6 +504,9 @@ static void usf_handle_sample(struct usf_iio *usf, const u8 *pay, u32 plen)
 		for (d = 0; d < (u32)n; d++)
 			scan.chan[d] = usf_scale_sample(match,
 				get_unaligned_le32(pay + off + 8 + d * 4));
+
+		memcpy(match->last, scan.chan, sizeof(match->last));
+		match->have_last = true;
 
 		iio_push_to_buffers_with_ts(indio, &scan, sizeof(scan), ts);
 	}
