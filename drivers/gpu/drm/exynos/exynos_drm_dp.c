@@ -61,8 +61,9 @@
 #define TXCLK_SEL_MODE				(0x01 << 4)
 #define OSC_CLK_SEL				(0x01 << 0)
 
-#define SYSTEM_MAIN_LINK_BANDWIDTH		(0x000C)
-#define LINK_BW_SET			        (0x1F << 0)
+/* 0x000C is the link bandwidth on older DP links, the OSC Q-channel here */
+#define SYSTEM_OSCLK_QCH_FUNCTION_ENABLE	(0x000C)
+#define OSCCLK_QCH_FUNC_EN			(0x01 << 0)
 
 #define SYSTEM_MAIN_LINK_LANE_COUNT		(0x0010)
 #define LANE_COUNT_SET			        (0x07 << 0)
@@ -109,6 +110,31 @@
 #define PLL_LOCK_STATUS				(0x01 << 4)
 #define PLL_LOCK_FORCE				(0x01 << 3)
 #define PLL_LOCK_FORCE_EN			(0x01 << 2)
+
+/* OSC clock dividers. _v is the DPOSC rate in MHz. */
+#define OSC_CLK_DIV_HPD				(0x0050)
+#define HPD_EVENT_CLK_COUNT			(0x7FFFF << 0)
+#define HPD_EVENT_CLK_COUNT_VAL(_v)		(((_v) * 2000) & 0x7FFFF)
+
+#define OSC_CLK_DIV_HDCP_10US			(0x0054)
+#define I2C_GEN10US_TIMER			(0xFFF << 0)
+#define I2C_GEN10US_TIMER_VAL(_v)		(((_v) * 10 - 1) & 0xFFF)
+
+#define OSC_CLK_DIV_GTC_1MS			(0x0058)
+#define GTC_1MS_OSC_CLK_COUNT			(0x3FFFF << 0)
+#define GTC_1MS_OSC_CLK_COUNT_VAL(_v)		(((_v) * 1000 - 1) & 0x3FFFF)
+
+#define OSC_CLK_DIV_AUX_1US			(0x005C)
+#define AUX_1US_OSC_CLK_COUNT			(0xFF << 0)
+#define AUX_1US_OSC_CLK_COUNT_VAL(_v)		(((_v) - 1) & 0xFF)
+
+#define OSC_CLK_DIV_AUX_MAN_UI			(0x0060)
+#define AUX_MAN_UI_OSC_CLK_COUNT		(0xFF << 0)
+#define AUX_MAN_UI_OSC_CLK_COUNT_VAL(_v)	((((_v) * 5 / 10) - 1) & 0xFF)
+
+#define OSC_CLK_DIV_AUX_10US			(0x0064)
+#define AUX_10US_OSC_CLK_COUNT			(0xFFF << 0)
+#define AUX_10US_OSC_CLK_COUNT_VAL(_v)		(((_v) * 10) & 0xFFF)
 
 #define SYSTEM_INTERRUPT_CONTROL		(0x0100)
 #define SW_INTR_CTRL				(0x01 << 1)
@@ -1616,19 +1642,46 @@ int dp_regs_desc_init(u32 dp_id, struct dp_regs *regs)
 }
 void dp_reg_sw_reset(u32 id)
 {
-	u32 cnt = 10;
+	u32 cnt = 200;
 	u32 state;
 
 	dp_link_write_mask(id, SYSTEM_SW_RESET_CONTROL, ~0, SW_RESET);
+	udelay(1);
+	/* the bit does not self-clear; the CPU has to release it */
+	dp_link_write_mask(id, SYSTEM_SW_RESET_CONTROL, 0, SW_RESET);
 
 	do {
 		state = dp_link_read(id, SYSTEM_SW_RESET_CONTROL) & SW_RESET;
 		cnt--;
-		udelay(1);
+		udelay(10);
 	} while (state && cnt);
 
 	if (!cnt)
 		cal_log_err(id, "%s is timeout.\n", __func__);
+}
+
+static void dp_reg_set_oscclk_qch_func_en(u32 id, u32 en)
+{
+	dp_link_write_mask(id, SYSTEM_OSCLK_QCH_FUNCTION_ENABLE, en ? ~0 : 0,
+			   OSCCLK_QCH_FUNC_EN);
+}
+
+static void dp_reg_set_osc_clk_div(u32 id, u32 mhz)
+{
+	dp_link_write_mask(id, OSC_CLK_DIV_HPD, HPD_EVENT_CLK_COUNT_VAL(mhz),
+			   HPD_EVENT_CLK_COUNT);
+	dp_link_write_mask(id, OSC_CLK_DIV_HDCP_10US,
+			   I2C_GEN10US_TIMER_VAL(mhz), I2C_GEN10US_TIMER);
+	dp_link_write_mask(id, OSC_CLK_DIV_GTC_1MS,
+			   GTC_1MS_OSC_CLK_COUNT_VAL(mhz), GTC_1MS_OSC_CLK_COUNT);
+	dp_link_write_mask(id, OSC_CLK_DIV_AUX_1US,
+			   AUX_1US_OSC_CLK_COUNT_VAL(mhz), AUX_1US_OSC_CLK_COUNT);
+	dp_link_write_mask(id, OSC_CLK_DIV_AUX_MAN_UI,
+			   AUX_MAN_UI_OSC_CLK_COUNT_VAL(mhz),
+			   AUX_MAN_UI_OSC_CLK_COUNT);
+	dp_link_write_mask(id, OSC_CLK_DIV_AUX_10US,
+			   AUX_10US_OSC_CLK_COUNT_VAL(mhz),
+			   AUX_10US_OSC_CLK_COUNT);
 }
 void dp_reg_phy_reset(u32 id, u32 en)
 {
@@ -4011,6 +4064,8 @@ static int exynos_drm_dp_start(struct exynos_dp_subdev *dp)
 	}
 
 	dp_reg_sw_reset(dp->id);
+	dp_reg_set_oscclk_qch_func_en(dp->id, 1);
+	dp_reg_set_osc_clk_div(dp->id, dp->osc_mhz);
 	dp_reg_init(dp->id);
 	/* the soft reset wipes SYSTEM_HPD_CONTROL, so re-assert the force */
 	dp_reg_set_hpd_force(dp->id, dp->oob_plugged);
@@ -4691,6 +4746,9 @@ static int exynos_drm_dp_bind(struct device *dev,
 	if (clk_get_rate(dp->dposc) != 40000000)
 		dp_log_err(dp->dev, "dposc is %lu Hz, not 40 MHz\n",
 			   clk_get_rate(dp->dposc));
+	/* the OSC dividers are in MHz, so they follow whatever DPOSC runs at */
+	dp->subdev->osc_mhz = DIV_ROUND_CLOSEST(clk_get_rate(dp->dposc),
+						1000000);
 	usleep_range(10000, 10030);
 
 	ret = exynos_drm_dp_start(dp->subdev);
