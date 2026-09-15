@@ -581,6 +581,8 @@ void dp_reg_phy_disable(u32 id);
 void dp_reg_set_lane_count(u32 id, u8 lane_cnt);
 u32 dp_reg_get_lane_count(u32 id);
 void dp_reg_set_enhanced_mode(u32 id, u32 en);
+void dp_reg_set_snps_tx_clk(u32 id, u8 lane_cnt);
+void dp_reg_set_snps_tx_data_en(u32 id, u8 lane_cnt);
 void dp_reg_set_training_pattern(u32 id, dp_training_pattern pattern);
 void dp_reg_scrambling_enable(u32 id, bool status);
 void dp_reg_set_voltage_and_pre_emphasis(u32 id, u8 *voltage, u8 *pre_emphasis);
