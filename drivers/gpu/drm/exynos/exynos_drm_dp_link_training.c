@@ -175,7 +175,11 @@ static void exynos_dp_phy_init(struct exynos_dp_subdev *dp)
 
 	dp_reg_wait_phy_pll_lock(id);
 
+	/* The PCS has to run off the PHY's TX clock, not the OSC. */
+	dp_reg_set_txclk(id, true);
 	dp_reg_set_snps_tx_data_en(id, dp->lt_info.lane_cnt);
+
+	dp_log_info(dev, "GFMUX status %#x\n", dp_reg_get_gfmux_status(id));
 
 	/* SCRAMBLING_DISABLE, TRAINING_PATTERN_1 */
 	dp_reg_set_training_pattern(id, TRAINING_PATTERN_1);
@@ -407,6 +411,10 @@ exynos_drm_dp_lt_equalization(struct exynos_dp_subdev *dp)
 
 		if (cr_done && eq_done)
 			goto LT_EQ_DONE;
+
+		dp_log_info(dev, "(EQ) LINK_STATUS: %02x %02x %02x %02x %02x %02x\n",
+			    link_status[0], link_status[1], link_status[2],
+			    link_status[3], link_status[4], link_status[5]);
 
 		exynos_dp_dump_symbol_error(dp);
 
