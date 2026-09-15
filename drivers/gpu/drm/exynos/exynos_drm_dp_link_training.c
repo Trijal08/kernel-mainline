@@ -152,6 +152,9 @@ static void exynos_dp_phy_init(struct exynos_dp_subdev *dp)
 
 	dp_reg_set_lane_count(id, dpcd_val[1]);
 
+	/* The PCS drives nothing until the Synopsys TX clocks are acked. */
+	dp_reg_set_snps_tx_clk(id, dp->lt_info.lane_cnt);
+
 	/* Retune the combo PHY's MPLLB, then hand it the lanes. */
 	exynos_dp_phy_configure(dp, &dp->lt_info, true, true, false);
 
@@ -171,6 +174,8 @@ static void exynos_dp_phy_init(struct exynos_dp_subdev *dp)
 	drm_dp_dpcd_write(&dp->aux, DP_LINK_BW_SET, dpcd_val, 2);
 
 	dp_reg_wait_phy_pll_lock(id);
+
+	dp_reg_set_snps_tx_data_en(id, dp->lt_info.lane_cnt);
 
 	/* SCRAMBLING_DISABLE, TRAINING_PATTERN_1 */
 	dp_reg_set_training_pattern(id, TRAINING_PATTERN_1);
