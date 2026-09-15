@@ -2004,6 +2004,21 @@ void dp_reg_set_plug_interrupt(u32 id, u32 en)
 #define FIN_MHZ 24
 #define DEGLITCH_UDELAY 10
 
+/*
+ * There is no HPD wire on a USB-C connector: the sink's HPD arrives over VDMs
+ * and reaches us as a bridge notification. Drive the link's HPD input from
+ * that instead, which is what HPD_FORCE and host-controlled events are for.
+ * Without this SYSTEM_HPD_CONTROL.HPD_STATUS never asserts and every path
+ * that gates on it decides nothing is plugged in.
+ */
+static void dp_reg_set_hpd_force(u32 id, bool plugged)
+{
+	u32 val = HPD_FORCE_EN | HPD_EVENT_CTRL_EN | (plugged ? HPD_FORCE : 0);
+	u32 mask = HPD_FORCE_EN | HPD_EVENT_CTRL_EN | HPD_FORCE;
+
+	dp_link_write_mask(id, SYSTEM_HPD_CONTROL, val, mask);
+}
+
 u32 dp_reg_get_hpd_status(u32 id)
 {
 	u32 val, cnt = 2; /* minimum retry count of double */
@@ -4422,7 +4437,30 @@ static void exynos_drm_dp_bridge_atomic_disable(struct drm_bridge *bridge,
 	exynos_drm_dp_disable(bridge->encoder);
 }
 
+/*
+ * Called by drm_bridge_connector when typec_displayport reports the sink's
+ * HPD through drm_connector_oob_hotplug_event().
+ */
+static void exynos_drm_dp_bridge_hpd_notify(struct drm_bridge *bridge,
+					    struct drm_connector *connector,
+					    enum drm_connector_status status)
+{
+	struct exynos_drm_dp *dp = bridge_to_dp(bridge);
+	struct exynos_dp_subdev *subdev = dp->subdev;
+	bool plugged = status == connector_status_connected;
+
+	dp_log_info(dp->dev, "HPD notify: %s\n", plugged ? "plug" : "unplug");
+
+	dp_reg_set_hpd_force(subdev->id, plugged);
+
+	if (plugged)
+		queue_delayed_work(subdev->dp_wq, &subdev->hpd_plug_work, 0);
+	else
+		queue_delayed_work(subdev->dp_wq, &subdev->hpd_unplug_work, 0);
+}
+
 static const struct drm_bridge_funcs exynos_drm_dp_bridge_funcs = {
+	.hpd_notify = exynos_drm_dp_bridge_hpd_notify,
 	.attach = exynos_drm_dp_bridge_attach,
 	.detect = exynos_drm_dp_bridge_detect,
 	.edid_read = exynos_drm_dp_bridge_edid_read,
