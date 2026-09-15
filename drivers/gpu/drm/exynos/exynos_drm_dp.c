@@ -465,6 +465,12 @@
 #define PCS_TEST_PATTERN_SET2			(0x3014)
 #define TEST_80BIT_PATTERN_SET2			(0xFFFF << 0)
 
+/* The handshake with the Synopsys PHY. Samsung-PHY parts have no such block. */
+#define PCS_SNPS_PHY_DATAPATH_CONTROL		(0x3200)
+#define SNPS_TX_DATA_EN				(0x0F << 16)
+#define SNPS_TX_CLK_RDY				(0x0F << 8)
+#define SNPS_TX_CLK_EN				(0x0F << 0)
+
 #define PCS_DEBUG_CONTROL			(0x3018)
 #define FEC_FLIP_CDADJ_CODES_CASE4		(0x01 << 6)
 #define FEC_FLIP_CDADJ_CODES_CASE2		(0x01 << 5)
@@ -2690,6 +2696,24 @@ static void dp_reg_set_lane_map(u32 id, u32 lane0, u32 lane1, u32 lane2,
 static void dp_reg_set_lane_map_config(u32 id)
 {
 	dp_reg_set_lane_map(id, 0, 1, 2, 3);
+}
+
+void dp_reg_set_snps_tx_clk(u32 id, u8 lane_cnt)
+{
+	u32 mask = GENMASK(lane_cnt - 1, 0);
+
+	dp_link_write_mask(id, PCS_SNPS_PHY_DATAPATH_CONTROL, mask << 8,
+			   SNPS_TX_CLK_RDY);
+	dp_link_write_mask(id, PCS_SNPS_PHY_DATAPATH_CONTROL, mask,
+			   SNPS_TX_CLK_EN);
+}
+
+void dp_reg_set_snps_tx_data_en(u32 id, u8 lane_cnt)
+{
+	u32 mask = GENMASK(lane_cnt - 1, 0);
+
+	dp_link_write_mask(id, PCS_SNPS_PHY_DATAPATH_CONTROL, mask << 16,
+			   SNPS_TX_DATA_EN);
 }
 
 static void dp_reg_lh_p_ch_power(u32 id, u32 sst_id, u32 en)
