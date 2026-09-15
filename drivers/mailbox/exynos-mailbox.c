@@ -16,6 +16,7 @@
 #include <linux/platform_device.h>
 #include <linux/slab.h>
 
+#define EXYNOS_MBOX_INTCR0		0x24	/* Interrupt Clear Register 0 */
 #define EXYNOS_MBOX_INTMR0		0x28	/* Interrupt Mask Register 0 */
 #define EXYNOS_MBOX_INTGR1		0x40	/* Interrupt Generation Register 1 */
 
@@ -79,6 +80,40 @@ static const struct exynos_mbox_driver_data exynos_gs101_mbox_data = {
 	.intmr_mask = EXYNOS_MBOX_INTMR0_MASK,
 	.num_chans = EXYNOS_MBOX_CHAN_COUNT,
 };
+
+/**
+ * exynos_mbox_clear_chan_irq() - acknowledge one incoming mailbox channel
+ * @chan: mailbox channel whose controller owns the hardware channel
+ * @chan_id: hardware mailbox channel number
+ *
+ * The firmware asserts the incoming status bit for every message it appends.
+ * Every channel's interrupt is masked here, so nothing ever acknowledges one
+ * and the bit stays asserted for the rest of the boot.  Let the consumer of a
+ * channel clear its own bit once it has drained the channel, the way the
+ * vendor driver does after every receive.
+ *
+ * Return: 0 on success, -errno otherwise.
+ */
+int exynos_mbox_clear_chan_irq(struct mbox_chan *chan, unsigned int chan_id)
+{
+	struct exynos_mbox *exynos_mbox;
+
+	if (!chan || !chan->mbox || chan_id >= EXYNOS_MBOX_CHAN_COUNT)
+		return -EINVAL;
+
+	exynos_mbox = dev_get_drvdata(chan->mbox->dev);
+	if (!exynos_mbox)
+		return -ENODEV;
+
+	/*
+	 * Write one to clear, so this needs neither a read-modify-write nor a
+	 * lock: the write cannot disturb another channel's bit.
+	 */
+	writel(BIT(chan_id), exynos_mbox->regs + EXYNOS_MBOX_INTCR0);
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(exynos_mbox_clear_chan_irq);
 
 static int exynos_mbox_send_data(struct mbox_chan *chan, void *data)
 {
