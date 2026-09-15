@@ -354,7 +354,12 @@ static inline void cal_dump_regs(struct cal_regs_desc *desc)
 
 
 #define MAX_DP_CNT 2
-#define MAX_SST_CNT 4
+/*
+ * SSTs are 0x1000 apart from SST1_* at 0x5000, and the link mapping is
+ * 0x6000 long: anything past SST1 faults. The vendor CAL maps each SST
+ * separately and only ever brings up SST1 here.
+ */
+#define MAX_SST_CNT 1
 #define MAX_VC_PAYLOAD_TIMESLOT 63
 #define NUM_VC_PAYLOAD_SLOT 8
 
