@@ -581,6 +581,8 @@ void dp_reg_phy_disable(u32 id);
 void dp_reg_set_lane_count(u32 id, u8 lane_cnt);
 u32 dp_reg_get_lane_count(u32 id);
 void dp_reg_set_enhanced_mode(u32 id, u32 en);
+void dp_reg_set_txclk(u32 id, bool from_phy);
+u32 dp_reg_get_gfmux_status(u32 id);
 void dp_reg_set_snps_tx_clk(u32 id, u8 lane_cnt);
 void dp_reg_set_snps_tx_data_en(u32 id, u8 lane_cnt);
 void dp_reg_set_training_pattern(u32 id, dp_training_pattern pattern);
