@@ -5,6 +5,7 @@
 #include <linux/platform_device.h>
 #include <linux/component.h>
 #include <linux/irq.h>
+#include <linux/pm_runtime.h>
 
 #include <drm/drm_atomic.h>
 #include <drm/drm_fourcc.h>
@@ -44,6 +45,9 @@ void dpp_update(struct exynos_dpp_context *dpp, unsigned int channel,
 	const struct drm_framebuffer *fb = state->base.fb;
 	u32 fmt;
 
+	if (pm_runtime_resume_and_get(dpp->dev) < 0)
+		return;
+
 	/*
 	 * DPP block: the pixel format lives in DPP_COM_IO_CON and the image size
 	 * in DPP_COM_IMG_SIZE (the vendor dpp_reg_set_format()/set_img_size()).
@@ -67,6 +71,8 @@ void dpp_update(struct exynos_dpp_context *dpp, unsigned int channel,
 	writel(DPP_IMG_FORMAT(fmt), dpp->regs + 0x1000 + DPP_COM_IO_CON);
 	writel(DPP_IMG_HEIGHT(state->src.h) | DPP_IMG_WIDTH(state->src.w),
 	       dpp->regs + 0x1000 + DPP_COM_IMG_SIZE);
+
+	pm_runtime_put_sync(dpp->dev);
 }
 
 static int dpp_bind(struct device *dev, struct device *master, void *data)
@@ -116,6 +122,9 @@ static int dpp_probe(struct platform_device *pdev)
 	dpp->regs = devm_ioremap_resource(dev, res);
 
 	platform_set_drvdata(pdev, dpp);
+
+	/* Taken around the register writes in dpp_update(). */
+	pm_runtime_enable(dev);
 
 	return component_add(dev, &dpp_component_ops);
 }
