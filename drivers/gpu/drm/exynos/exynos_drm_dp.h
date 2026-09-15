@@ -728,6 +728,8 @@ struct exynos_dp_subdev {
 	 */
 	bool oob_plugged;
 	bool training_state;
+	/* DPOSC rate in MHz, for the OSC clock dividers */
+	u32 osc_mhz;
 	u32 bist_use;
 	enum test_pattern bist_type;
 	struct exynos_dp_video_info vi[DP_SST_MAX];
