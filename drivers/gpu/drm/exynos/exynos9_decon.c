@@ -1666,6 +1666,13 @@ static void decon_enable(struct exynos_drm_crtc *crtc)
 		return;
 	}
 
+	ret = pm_runtime_resume_and_get(ctx->dev);
+	if (ret < 0) {
+		drm_err(ctx->drm_dev, "cannot resume DECON: %d\n", ret);
+		pm_runtime_put_sync(priv->dma_dev);
+		return;
+	}
+
 	drm_display_mode_to_videomode(&crtc->base.mode, &ctx->v_mode);
 
 	ctx->config.image_width = ctx->v_mode.hactive;
@@ -1710,6 +1717,7 @@ static void decon_disable(struct exynos_drm_crtc *crtc)
 	 */
 	ctx->cal_ops->disable(ctx);
 
+	pm_runtime_put_sync(ctx->dev);
 	pm_runtime_put_sync(priv->dma_dev);
 }
 
@@ -1968,6 +1976,9 @@ static int decon_probe(struct platform_device *pdev)
 		return ret;
 
 	platform_set_drvdata(pdev, ctx);
+
+	/* Taken in decon_enable(), dropped in decon_disable(). */
+	pm_runtime_enable(dev);
 
 	return component_add(dev, &decon_component_ops);
 }
