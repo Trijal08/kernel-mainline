@@ -516,13 +516,13 @@ static int dpu_dma_probe(struct platform_device *pdev)
 	if (!ctx->regs)
 		return -ENOMEM;
 
+	/*
+	 * No reference is taken here. The SysMMU is a supplier of this device,
+	 * so a resume pulls it up with us -- and holding one from probe pinned
+	 * pd-dpuf0, and through it pd-dpub, for the lifetime of the driver. The
+	 * CRTC takes the reference across its enable window instead.
+	 */
 	pm_runtime_enable(dev);
-	/* For turn on attached SYSMMU */
-	ret = pm_runtime_resume_and_get(dev);
-	if (ret < 0) {
-		pm_runtime_disable(dev);
-		return ret;
-	}
 
 	component_add(dev, &dma_component_ops);
 
