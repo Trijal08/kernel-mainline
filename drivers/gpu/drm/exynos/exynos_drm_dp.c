@@ -57,8 +57,13 @@
 #define SYSTEM_CLK_CONTROL			(0x0008)
 #define GFMUX_STATUS_TXCLK			(0x03 << 8)
 #define GFMUX_STATUS_TXCLK_ON			(0x02)
-#define TXCLK_SEL				(0x01 << 5)
-#define TXCLK_SEL_MODE				(0x01 << 4)
+/*
+ * Both halves of the glitch-free mux, 0 selecting OSC and 1 the PHY's TX
+ * clock. Older DP links spelled these TXCLK_SEL and TXCLK_SEL_MODE.
+ */
+#define GFCLKMUX_SEL_10				(0x01 << 5)
+#define GFCLKMUX_SEL_20				(0x01 << 4)
+#define GFCLKMUX_SEL				(GFCLKMUX_SEL_10 | GFCLKMUX_SEL_20)
 #define OSC_CLK_SEL				(0x01 << 0)
 
 /* 0x000C is the link bandwidth on older DP links, the OSC Q-channel here */
@@ -2698,6 +2703,17 @@ static void dp_reg_set_lane_map_config(u32 id)
 	dp_reg_set_lane_map(id, 0, 1, 2, 3);
 }
 
+void dp_reg_set_txclk(u32 id, bool from_phy)
+{
+	dp_link_write_mask(id, SYSTEM_CLK_CONTROL, from_phy ? ~0 : 0,
+			   GFCLKMUX_SEL);
+}
+
+u32 dp_reg_get_gfmux_status(u32 id)
+{
+	return dp_link_read_mask(id, SYSTEM_CLK_CONTROL, GFMUX_STATUS_TXCLK) >> 8;
+}
+
 void dp_reg_set_snps_tx_clk(u32 id, u8 lane_cnt)
 {
 	u32 mask = GENMASK(lane_cnt - 1, 0);
@@ -4090,6 +4106,7 @@ static int exynos_drm_dp_start(struct exynos_dp_subdev *dp)
 	dp_reg_sw_reset(dp->id);
 	dp_reg_set_oscclk_qch_func_en(dp->id, 1);
 	dp_reg_set_osc_clk_div(dp->id, dp->osc_mhz);
+	dp_reg_set_txclk(dp->id, false);
 	dp_reg_init(dp->id);
 	/* the soft reset wipes SYSTEM_HPD_CONTROL, so re-assert the force */
 	dp_reg_set_hpd_force(dp->id, dp->oob_plugged);
