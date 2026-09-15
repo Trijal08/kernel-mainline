@@ -753,7 +753,18 @@ static int zuma_dsim_bridge_attach(struct drm_bridge *bridge,
 static void zuma_dsim_bridge_pre_enable(struct drm_bridge *bridge,
 					struct drm_atomic_commit *state)
 {
-	zuma_dsim_configure(bridge_to_dsim(bridge));
+	struct zuma_dsim *dsim = bridge_to_dsim(bridge);
+
+	if (pm_runtime_resume_and_get(dsim->dev) < 0)
+		return;
+
+	zuma_dsim_configure(dsim);
+}
+
+static void zuma_dsim_bridge_post_disable(struct drm_bridge *bridge,
+					  struct drm_atomic_commit *state)
+{
+	pm_runtime_put_sync(bridge_to_dsim(bridge)->dev);
 }
 
 static void zuma_dsim_bridge_mode_set(struct drm_bridge *bridge,
@@ -771,6 +782,7 @@ static const struct drm_bridge_funcs zuma_dsim_bridge_funcs = {
 	.attach = zuma_dsim_bridge_attach,
 	.mode_set = zuma_dsim_bridge_mode_set,
 	.atomic_pre_enable = zuma_dsim_bridge_pre_enable,
+	.atomic_post_disable = zuma_dsim_bridge_post_disable,
 	.atomic_duplicate_state = drm_atomic_helper_bridge_duplicate_state,
 	.atomic_destroy_state = drm_atomic_helper_bridge_destroy_state,
 	.atomic_create_state = drm_atomic_helper_bridge_create_state,
@@ -881,6 +893,11 @@ static ssize_t zuma_dsim_host_transfer(struct mipi_dsi_host *host,
 	if (ret < 0)
 		return ret;
 
+	/* The panel sends DCS outside the bridge's enable window, e.g. at probe. */
+	ret = pm_runtime_resume_and_get(dsim->dev);
+	if (ret < 0)
+		return ret;
+
 	/* long-packet payload first, packed little-endian 4 bytes per word */
 	pl = packet.payload;
 	for (i = 0; i < packet.payload_length; i += 4) {
@@ -934,10 +951,14 @@ static ssize_t zuma_dsim_host_transfer(struct mipi_dsi_host *host,
 			 readl(dsim->regs + DSIM_CMD_CONFIG),
 			 readl(dsim->regs + DSIM_OPTION_SUITE),
 			 readl(dsim->regs + DSIM_INTSRC));
-		return ret;
+		goto out;
 	}
 
-	return msg->tx_len;
+	ret = msg->tx_len;
+out:
+	pm_runtime_put_sync(dsim->dev);
+
+	return ret;
 }
 
 static const struct mipi_dsi_host_ops zuma_dsim_host_ops = {
@@ -1033,16 +1054,15 @@ static int zuma_dsim_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, dsim);
 
+	/*
+	 * As in dpu_dma: no reference from probe, or pd-dpub never gates. The
+	 * bridge holds one across its enable window, and host_transfer takes
+	 * its own for the DCS that runs outside it.
+	 */
 	pm_runtime_enable(dev);
-	ret = pm_runtime_resume_and_get(dev);
-	if (ret < 0) {
-		pm_runtime_disable(dev);
-		return ret;
-	}
 
 	ret = component_add(dev, &zuma_dsim_component_ops);
 	if (ret) {
-		pm_runtime_put(dev);
 		pm_runtime_disable(dev);
 		return ret;
 	}
@@ -1055,7 +1075,6 @@ static void zuma_dsim_remove(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 
 	component_del(dev, &zuma_dsim_component_ops);
-	pm_runtime_put(dev);
 	pm_runtime_disable(dev);
 }
 
