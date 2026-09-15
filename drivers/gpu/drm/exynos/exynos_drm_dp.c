@@ -2716,7 +2716,7 @@ u32 dp_reg_get_gfmux_status(u32 id)
 
 void dp_reg_set_snps_tx_clk(u32 id, u8 lane_cnt)
 {
-	u32 mask = GENMASK(lane_cnt - 1, 0);
+	u32 mask = lane_cnt ? GENMASK(lane_cnt - 1, 0) : 0;
 
 	dp_link_write_mask(id, PCS_SNPS_PHY_DATAPATH_CONTROL, mask << 8,
 			   SNPS_TX_CLK_RDY);
@@ -2726,7 +2726,7 @@ void dp_reg_set_snps_tx_clk(u32 id, u8 lane_cnt)
 
 void dp_reg_set_snps_tx_data_en(u32 id, u8 lane_cnt)
 {
-	u32 mask = GENMASK(lane_cnt - 1, 0);
+	u32 mask = lane_cnt ? GENMASK(lane_cnt - 1, 0) : 0;
 
 	dp_link_write_mask(id, PCS_SNPS_PHY_DATAPATH_CONTROL, mask << 16,
 			   SNPS_TX_DATA_EN);
@@ -3339,6 +3339,7 @@ void exynos_drm_dp_set_normal_data(struct exynos_dp_subdev *dp)
 }
 
 static int exynos_drm_dp_start(struct exynos_dp_subdev *dp);
+static void exynos_drm_dp_stop(struct exynos_dp_subdev *dp);
 
 static void exynos_drm_dp_hpd_changed(struct exynos_dp_subdev *dp, int state)
 {
@@ -3382,6 +3383,7 @@ static void exynos_drm_dp_hpd_changed(struct exynos_dp_subdev *dp, int state)
 			dp->detect(dev);
 	} else {
 		dp->hpd_state = HPD_UNPLUG;
+		exynos_drm_dp_stop(dp);
 		dp->training_state = false;
 		/* so the next plug runs start() again rather than skipping it */
 		dp->state = DP_STATE_OFF;
@@ -3395,6 +3397,7 @@ static void exynos_drm_dp_hpd_changed(struct exynos_dp_subdev *dp, int state)
 
 HPD_FAIL:
 	dp_log_err(dev, "link training is failed\n");
+	exynos_drm_dp_stop(dp);
 	dp->training_state = false;
 	dp->hpd_state = HPD_LT_FAILED;
 
@@ -4130,6 +4133,41 @@ static int exynos_drm_dp_start(struct exynos_dp_subdev *dp)
 	dp_log_info(dev, "-, state: %d\n", dp->state);
 
 	return ret;
+}
+
+/*
+ * Give the lanes back. Without this the link stays on the PHY's TX clock with
+ * the data path enabled and the PHY still holding the lanes, so the TCA never
+ * sees them released and the next Type-C connect cannot be muxed at all.
+ * Mirrors the vendor's dp_hw_deinit().
+ */
+static void exynos_drm_dp_stop(struct exynos_dp_subdev *dp)
+{
+	struct device *dev = dp->dev;
+
+	mutex_lock(&dp->pwlock);
+
+	if (dp->state != DP_STATE_LINKED) {
+		mutex_unlock(&dp->pwlock);
+		return;
+	}
+
+	dp_log_info(dev, "+, state: %d\n", dp->state);
+
+	disable_irq(dp->irq);
+
+	dp_reg_set_snps_tx_data_en(dp->id, 0);
+	dp_reg_set_snps_tx_clk(dp->id, 0);
+	dp_reg_deinit(dp->id);
+	dp_reg_set_txclk(dp->id, false);
+	dp_reg_set_oscclk_qch_func_en(dp->id, 0);
+
+	phy_power_off(dp->phy);
+
+	dp->state = DP_STATE_OFF;
+	dp->training_state = false;
+
+	mutex_unlock(&dp->pwlock);
 }
 
 /*
