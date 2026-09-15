@@ -367,13 +367,15 @@ static int acpm_dequeue_by_polling(struct acpm_chan *achan,
  */
 static int acpm_wait_for_queue_slots(struct acpm_chan *achan, u32 next_tx_front)
 {
+	u32 reserved_front = (next_tx_front + 1) % achan->qlen;
 	u32 val, ret;
 
 	/*
-	 * Wait for RX front to keep up with TX front. Make sure there's at
-	 * least one element between them.
+	 * Wait for RX front to keep up with TX front.  Downstream reserves two
+	 * elements so ACPM can never observe a completely full request queue;
+	 * this limits a three-entry channel to one in-flight transaction.
 	 */
-	ret = readl_poll_timeout(achan->rx.front, val, next_tx_front != val, 0,
+	ret = readl_poll_timeout(achan->rx.front, val, reserved_front != val, 0,
 				 ACPM_TX_TIMEOUT_US);
 	if (ret) {
 		dev_err(achan->acpm->dev, "RX front can not keep up with TX front.\n");
@@ -482,6 +484,8 @@ int acpm_do_xfer(struct acpm_handle *handle, const struct acpm_xfer *xfer)
 		dev_err(achan->acpm->dev, "Interrupt mode not supported\n");
 		return -EOPNOTSUPP;
 	}
+	if (achan->qlen < 3)
+		return -EIO;
 
 	msg.chan_id = xfer->acpm_chan_id;
 	msg.chan_type = EXYNOS_MBOX_CHAN_TYPE_DOORBELL;
