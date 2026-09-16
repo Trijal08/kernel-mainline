@@ -2760,19 +2760,22 @@ static void dp_reg_lh_p_ch_power(u32 id, u32 sst_id, u32 en)
 
 	dp_link_write_mask(id, reg_offset, val, SST1_LH_PWR_ON);
 
+	/*
+	 * cal_read_mask() does not shift, so the status reads back as 0 or
+	 * SST1_LH_PWR_ON_STATUS, never as 1. Comparing it against @en directly
+	 * never matched, so this always ran the full count and then reported
+	 * nothing: the error test below was inverted too, firing only when the
+	 * channel *had* come up on the last iteration. The pixel channel has
+	 * never actually been confirmed powered.
+	 */
 	do {
-		state = dp_link_read_mask(id, reg_offset,
-					  SST1_LH_PWR_ON_STATUS);
+		state = !!dp_link_read_mask(id, reg_offset,
+					    SST1_LH_PWR_ON_STATUS);
 		cnt--;
 		udelay(1);
 	} while ((en ^ state) && cnt);
-	/*
-	 * en xor state
-	 * if (en), do while (!state) = en(1), state(0)
-	 * else, do while(state) = en(0), state(1)
-	 */
 
-	if (!(en ^ state) && !cnt) {
+	if ((en ^ state) && !cnt) {
 		cal_log_err(id, "%s on is timeout[%d].\n", __func__, state);
 		cal_log_err(id, "SYSTEM_CLK_CONTROL[0x%08x]\n",
 			    dp_link_read(id, SYSTEM_CLK_CONTROL));
@@ -2985,9 +2988,14 @@ void dp_reg_start(u32 id, u32 sst_id)
 	dp_reg_set_sst_stream_enable(id, sst_id, 1);
 	dp_reg_set_sst_interrupt_mask(id, sst_id, VIDEO_FIFO_UNDER_FLOW_MASK,
 				      0);
+	/*
+	 * Long-hop pixel channel first, and only then video: the vendor's
+	 * dp_hw_start() powers it up, waits for it, and treats a failure as
+	 * fatal before it sets VIDEO_EN.
+	 */
+	dp_reg_lh_p_ch_power(id, sst_id, 1);
 	dp_link_write_mask(id, SST1_VIDEO_ENABLE + 0x1000 * sst_id, 1,
 			   VIDEO_EN);
-	dp_reg_lh_p_ch_power(id, sst_id, 1);
 }
 
 static void dp_reg_wait_vsync_interrupt_status(u32 id, u32 sst_id)
