@@ -2884,7 +2884,11 @@ static void dp_reg_phy_init(u32 id)
 	dp_reg_phy_mode_setting(id);
 	dp_reg_phy_ssc_enable(id, 0);
 	dp_reg_phy_reset(id, 0);
-	dp_reg_wait_phy_pll_lock(id);
+	/*
+	 * No PLL lock to wait for here: everything above writes the Samsung PHY
+	 * block, which is unmapped on this SoC. The Synopsys MPLLB is programmed
+	 * from link training, and that is where the lock is waited on.
+	 */
 }
 
 void dp_reg_phy_disable(u32 id)
