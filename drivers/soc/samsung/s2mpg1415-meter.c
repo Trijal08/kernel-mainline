@@ -61,6 +61,8 @@
 #define NLDO_POWER_150mA		IQ30(0.000457875457875)
 #define PLDO_POWER_150mA		IQ30(0.000915750915750)
 #define NLDO_POWER_1200mA		IQ30(0.001831501831501)
+#define DVS_NLDO_POWER_800mA_ON		IQ30(0.001221001221001)
+#define DVS_NLDO_POWER_1200mA_ON	IQ30(0.001831501831501)
 
 struct s2mpg1415_rail {
 	const char *name;
@@ -76,9 +78,9 @@ struct s2mpg1415_chip {
 /*
  * Channel assignment is ours to choose -- nothing else programs MUXSEL in
  * mainline. These follow the zumapro schematic names, which reassign four
- * bucks relative to zuma (S2M/S3M swap, S9M, S11S), and spend every
- * channel on an internal buck: the external VSEN rails (modem, WLAN/BT,
- * camera) need shunt-resistance scaling that this driver does not implement.
+ * bucks relative to zuma (S2M/S3M swap, S9M, S11S). The external VSEN rails
+ * (modem, WLAN/BT, camera) need shunt-resistance scaling that this driver does
+ * not implement, so every channel goes to an internal buck or LDO.
  */
 static const struct s2mpg1415_rail s2mpg14_rails[S2MPG1415_METER_CHANNELS] = {
 	{ "VDD_MIF",		0x1, CMS_BUCK_POWER },
@@ -90,7 +92,13 @@ static const struct s2mpg1415_rail s2mpg14_rails[S2MPG1415_METER_CHANNELS] = {
 	{ "VDD_TPU",		0x7, CMT_BUCK_POWER },
 	{ "LLDO2_M",		0x8, CMS_BUCK_POWER },
 	{ "VDD_CPUCL1_M",	0x9, CMS_BUCK_POWER },
-	{ }, { }, { },
+	/*
+	 * The clusters' SRAM supplies. LDOs, so whatever they drop is heat,
+	 * and they are the only CPU rails not on a buck.
+	 */
+	{ "VDD_CPUCL2_HS_M",	0x2b, DVS_NLDO_POWER_1200mA_ON },
+	{ "VDD_CPUCL0_M",	0x2c, DVS_NLDO_POWER_1200mA_ON },
+	{ "VDD_CPUCL2_HD_M",	0x31, DVS_NLDO_POWER_800mA_ON },
 };
 
 static const struct s2mpg1415_rail s2mpg15_rails[S2MPG1415_METER_CHANNELS] = {
