@@ -113,6 +113,13 @@
 		regulator-name = "ufs-vcc";
 		gpio = <&gpp0 1 GPIO_ACTIVE_HIGH>;
 		regulator-boot-on;
+		/*
+		 * Nothing claims this -- ufs-exynos never asks for a vcc
+		 * supply -- so the disable-unused sweep will pull GPP0_1 low
+		 * and cut power to the rootfs.  boot-on does not stop it;
+		 * only always-on does.
+		 */
+		regulator-always-on;
 		enable-active-high;
 	};
 
@@ -306,10 +313,12 @@
 			 */
 			s_ldo5_reg: ldo5s {
 				regulator-name = "L5S_PROX";
+				regulator-always-on;
 			};
 
 			s_ldo7_reg: ldo7s {
 				regulator-name = "L7S_SENSORS";
+				regulator-always-on;
 			};
 		};
 
