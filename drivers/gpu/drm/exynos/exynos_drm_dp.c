@@ -232,6 +232,8 @@
 #define AUX_BUF_DATA_COUNT			(0x7F << 24)
 #define AUX_DETECTED_PERIOD_MON			(0x1FF << 12)
 #define AUX_CMD_STATUS				(0x0F << 8)
+#define AUX_CMD_STATUS_GET(_v)			(((_v) >> 8) & 0x0F)
+#define AUX_CMD_STATUS_TIMEOUT_ERROR		(0x02)
 #define AUX_RX_COMM				(0x0F << 4)
 #define AUX_LAST_MODE				(0x01 << 3)
 #define AUX_BUSY				(0x01 << 2)
@@ -2571,7 +2573,20 @@ static int dp_reg_set_aux_ch_operation_enable(u32 id)
 			dp_link_read(id, AUX_REQUEST_CONTROL),
 			dp_link_read(id, AUX_COMMAND_CONTROL));
 
-		udelay(400);
+		/*
+		 * A sink that did not answer inside the 1.8ms reply window
+		 * needs 1.4ms before it is asked again; the vendor waits that
+		 * long for a timeout and keeps the shorter 400us for every
+		 * other error. Retrying a slow sink every 400us only burns the
+		 * retry count, which is what the XReal glasses hit -- every
+		 * DPCD read failing on a port where a quicker adapter works.
+		 */
+		if (AUX_CMD_STATUS_GET(val0) == AUX_CMD_STATUS_TIMEOUT_ERROR) {
+			usleep_range(1400, 1410);
+			return -ETIME;
+		}
+
+		usleep_range(400, 410);
 		return -EIO;
 	}
 
