@@ -152,11 +152,8 @@ static void exynos_dp_phy_init(struct exynos_dp_subdev *dp)
 
 	dp_reg_set_lane_count(id, dpcd_val[1]);
 
-	/* The PCS drives nothing until the Synopsys TX clocks are acked. */
-	dp_reg_set_snps_tx_clk(id, dp->lt_info.lane_cnt);
-
-	/* Retune the combo PHY's MPLLB, then hand it the lanes. */
-	exynos_dp_phy_configure(dp, &dp->lt_info, true, true, false);
+	/* Retune the combo PHY's MPLLB and enable it; the lanes stay in P2. */
+	exynos_dp_phy_configure(dp, &dp->lt_info, true, false, false);
 
 	dp_log_info(dev, "link_rate = %d Mbps, lane_cnt = %x\n",
 			drm_dp_bw_code_to_link_rate(dpcd_val[0])/100, dpcd_val[1]);
@@ -177,6 +174,13 @@ static void exynos_dp_phy_init(struct exynos_dp_subdev *dp)
 
 	/* The PCS has to run off the PHY's TX clock, not the OSC. */
 	dp_reg_set_txclk(id, true);
+
+	/*
+	 * Only now is there a TX clock to align to, so this is where the vendor
+	 * offers it to the PHY and powers the lanes out of P2.
+	 */
+	dp_reg_set_snps_tx_clk(id, dp->lt_info.lane_cnt);
+	exynos_dp_phy_configure(dp, &dp->lt_info, false, true, false);
 	dp_reg_set_snps_tx_data_en(id, dp->lt_info.lane_cnt);
 
 	dp_log_info(dev, "GFMUX status %#x\n", dp_reg_get_gfmux_status(id));
