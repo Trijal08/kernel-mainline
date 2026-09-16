@@ -35,9 +35,6 @@
  *  0x1000  0x2000  0x3000  0x4000  0x5000  0x6000  0x7000  0x8000
  */
 
-/* Channel order GF0, G0, VG0, G1, GF1, G2, VG1, G3 */
-static unsigned int channel_map[] = { 5, 1, 7, 2, 6, 3, 8, 4 };
-
 #define IDMA_ENABLE 0x0000
 #define IDMA_ASSIGNED_MO(_v) ((_v) << 24)
 #define IDMA_ASSIGNED_MO_MASK (0xffU << 24)
@@ -325,11 +322,11 @@ static u32 idma_img_format(u32 fourcc)
 	}
 }
 
-int dpu_dma_update(struct exynos_dpu_dma_context *ctx, unsigned int channel,
+/* @idma is the physical channel: GF0 is 5, GF1 is 6 (block at idma * 0x1000). */
+int dpu_dma_update(struct exynos_dpu_dma_context *ctx, unsigned int idma,
 		   struct exynos_drm_plane_state *state)
 {
 	struct drm_framebuffer *fb = state->base.fb;
-	unsigned int idma = channel_map[channel];
 	dma_addr_t addr = exynos_drm_fb_dma_addr(fb, 0);
 
 	dma_reg_init(ctx, idma, 0);
