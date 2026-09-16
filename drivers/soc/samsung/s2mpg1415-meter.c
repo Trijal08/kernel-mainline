@@ -19,6 +19,7 @@
  */
 
 #include <linux/debugfs.h>
+#include <linux/iopoll.h>
 #include <linux/math64.h>
 #include <linux/mfd/samsung/s2mpg14.h>
 #include <linux/mfd/samsung/s2mpg15.h>
@@ -128,18 +129,24 @@ static int s2mpg1415_meter_show(struct seq_file *s, void *unused)
 {
 	struct s2mpg1415_meter *meter = s->private;
 	u8 count_buf[ACC_COUNT_BYTES];
-	u32 acc_count;
+	u32 acc_count, ctrl2;
 	int ch, ret;
 
 	guard(mutex)(&meter->lock);
 
 	/*
-	 * Latch the accumulators. The bit is self-clearing once the transfer
-	 * completes; the meter runs at a few hundred Hz, so a failure to clear
-	 * means the transfer did not happen rather than that we read too early.
+	 * Latch the accumulators and wait for the self-clear. The data and the
+	 * sample count are not latched at the same instant, so reading during
+	 * acquisition pairs an accumulator with a count from a different window
+	 * and skews the average by whatever the mismatch happens to be.
 	 */
 	ret = regmap_update_bits(meter->regmap, S2MPG14_METER_CTRL2,
 				 ASYNC_RD, ASYNC_RD);
+	if (ret)
+		return ret;
+
+	ret = regmap_read_poll_timeout(meter->regmap, S2MPG14_METER_CTRL2, ctrl2,
+				       !(ctrl2 & ASYNC_RD), 1000, 200000);
 	if (ret)
 		return ret;
 
