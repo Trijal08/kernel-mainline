@@ -3883,6 +3883,8 @@ static int zuma_dp_set_rate(struct exynos5_usbdrd_phy *phy_drd,
 	const struct zuma_dp_mpllb_cfg *cfg = NULL;
 	u32 ssc_en = dp->ssc ? ZUMA_USBDP_PHY_DP_CONFIG4_SSC_EN : 0;
 	void __iomem *base = phy_drd->reg_pma;
+	u32 mask = zuma_dp_lane_mask(dp->lanes);
+	u32 width = 0;
 	int i;
 
 	for (i = 0; i < ARRAY_SIZE(zuma_dp_mpllb_cfgs); i++)
@@ -3956,16 +3958,6 @@ static int zuma_dp_set_rate(struct exynos5_usbdrd_phy *phy_drd,
 		       ZUMA_USBDP_PHY_DP_CONFIG17_DCC_BYP_AC,
 		       ZUMA_USBDP_PHY_DP_CONFIG17_DCC_BYP_AC);
 
-	return 0;
-}
-
-static int zuma_dp_set_lanes(struct exynos5_usbdrd_phy *phy_drd,
-			     const struct phy_configure_opts_dp *dp)
-{
-	u32 mask = zuma_dp_lane_mask(dp->lanes);
-	u32 width = 0;
-	int i;
-
 	/* DISABLE is active high, so enabling a lane means clearing its bit. */
 	zuma_dp_update(phy_drd, ZUMA_USBDP_PHY_DP_CONFIG13,
 		       ZUMA_USBDP_PHY_DP_CONFIG13_TX_DISABLE,
@@ -3979,14 +3971,37 @@ static int zuma_dp_set_lanes(struct exynos5_usbdrd_phy *phy_drd,
 		if (mask & BIT(i))
 			width |= 0x3 << (i * 2);
 
+	/*
+	 * MPLLB has to be enabled here, before the link waits on PLL lock. The
+	 * lanes stay parked in P2 until set_lanes; the PHY will not align a TX
+	 * clock that is not running yet.
+	 */
 	zuma_dp_update(phy_drd, ZUMA_USBDP_PHY_DP_CONFIG12,
 		       ZUMA_USBDP_PHY_DP_CONFIG12_TX_WIDTH |
 		       ZUMA_USBDP_PHY_DP_CONFIG12_TX_MPLL_EN,
 		       FIELD_PREP(ZUMA_USBDP_PHY_DP_CONFIG12_TX_WIDTH, width) |
 		       FIELD_PREP(ZUMA_USBDP_PHY_DP_CONFIG12_TX_MPLL_EN, mask));
+	zuma_dp_status_update(phy_drd, dp->lanes);
 
+	return 0;
+}
+
+/*
+ * The vendor's dp_hw_set_data_path(): runs only once the link has seen PLL lock
+ * and switched the glitch-free mux to the PHY's TX clock. Powering the lanes to
+ * P0 before that asks the PHY to align to a clock that is not running, and the
+ * TX handshake is never acknowledged.
+ */
+static int zuma_dp_set_lanes(struct exynos5_usbdrd_phy *phy_drd,
+			     const struct phy_configure_opts_dp *dp)
+{
 	zuma_dp_set_pstate(phy_drd, dp->lanes);
 	zuma_dp_status_update(phy_drd, dp->lanes);
+
+	/* RBR keeps the bypass; every higher rate needs the AC cap in circuit. */
+	if (dp->link_rate > 1620)
+		zuma_dp_update(phy_drd, ZUMA_USBDP_PHY_DP_CONFIG17,
+			       ZUMA_USBDP_PHY_DP_CONFIG17_DCC_BYP_AC, 0);
 
 	return 0;
 }
