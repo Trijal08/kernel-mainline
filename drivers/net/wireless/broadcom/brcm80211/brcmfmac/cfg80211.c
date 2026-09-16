@@ -4298,10 +4298,12 @@ static int brcmf_apf_install_locked(struct brcmf_if *ifp)
 	return err;
 }
 
-static int brcmf_apf_arm(struct brcmf_cfg80211_vif *vif)
+static int brcmf_apf_arm(struct brcmf_cfg80211_vif *vif, bool *armed)
 {
 	int cleanup_err;
 	int err;
+
+	*armed = false;
 
 	mutex_lock(&vif->apf_mutex);
 
@@ -4322,8 +4324,10 @@ static int brcmf_apf_arm(struct brcmf_cfg80211_vif *vif)
 	/* Treat an enable error as indeterminate and force cleanup. */
 	vif->apf_filter_enabled = true;
 	err = brcmf_apf_config_filter(vif->ifp, true);
-	if (!err)
+	if (!err) {
+		*armed = true;
 		goto out;
+	}
 
 cleanup:
 	cleanup_err = brcmf_apf_cleanup_locked(vif, true);
@@ -4370,15 +4374,19 @@ static s32 brcmf_cfg80211_resume(struct wiphy *wiphy)
 				err = pm_err;
 			}
 
-			pm_err = brcmf_fil_iovar_data_set(ifp,
-							  "pkt_filter_enable",
-							  &filter,
-							  sizeof(filter));
-			if (pm_err) {
-				bphy_err(cfg->pub, "failed to disable wake-on-any packet filter: %d\n",
-					 pm_err);
-				if (!err)
-					err = pm_err;
+			if (cfg->wowl.any_filter_enabled) {
+				pm_err = brcmf_fil_iovar_data_set(ifp,
+								  "pkt_filter_enable",
+								  &filter,
+								  sizeof(filter));
+				if (pm_err) {
+					bphy_err(cfg->pub, "failed to disable wake-on-any packet filter: %d\n",
+						 pm_err);
+					if (!err)
+						err = pm_err;
+				} else {
+					cfg->wowl.any_filter_enabled = false;
+				}
 			}
 
 			pm_err = brcmf_fil_cmd_int_set(ifp, BRCMF_C_SET_PM,
@@ -4474,6 +4482,7 @@ static int brcmf_configure_wowl_any(struct brcmf_cfg80211_info *cfg,
 		.id = cpu_to_le32(BRCMF_WOWL_ANY_FILTER_ID),
 		.enable = cpu_to_le32(1),
 	};
+	bool apf_armed;
 	int apf_err;
 	int err;
 
@@ -4485,7 +4494,28 @@ static int brcmf_configure_wowl_any(struct brcmf_cfg80211_info *cfg,
 		return 1;
 	}
 
-	if (!cfg->wowl.any_filter_set) {
+	/* A program is expected to answer ARP and ping from firmware, and an
+	 * ARP request for our own address is broadcast, which is a frame the
+	 * unicast-only filter discards before the program can run. The two
+	 * therefore cannot both be enabled. Arming a program hands it the
+	 * group-address drop as well; the bytecode is opaque here, so that is
+	 * a contract on whoever installs it rather than something this driver
+	 * can check. The unicast filter stays the fallback for a suspend with
+	 * no program to arm.
+	 */
+	apf_err = brcmf_apf_arm(ifp->vif, &apf_armed);
+	if (apf_err) {
+		bphy_err(cfg->pub, "failed to arm APF packet filter: %d\n",
+			 apf_err);
+		apf_err = brcmf_apf_disable(ifp->vif);
+		if (apf_err) {
+			bphy_err(cfg->pub, "failed to clean up APF packet filter: %d\n",
+				 apf_err);
+			return apf_err;
+		}
+	}
+
+	if (!apf_armed && !cfg->wowl.any_filter_set) {
 		filter_buf.filter.id = cpu_to_le32(BRCMF_WOWL_ANY_FILTER_ID);
 		filter_buf.filter.type =
 			cpu_to_le32(BRCMF_PKT_FILTER_TYPE_PATTERN_MATCH);
@@ -4500,40 +4530,32 @@ static int brcmf_configure_wowl_any(struct brcmf_cfg80211_info *cfg,
 		if (err) {
 			bphy_err(cfg->pub, "failed to install wake-on-any packet filter: %d\n",
 				 err);
-			return err;
+			goto disable_apf;
 		}
 		cfg->wowl.any_filter_set = true;
 	}
 
-	err = brcmf_fil_iovar_data_set(ifp, "pkt_filter_enable", &enable,
-				       sizeof(enable));
-	if (err) {
-		bphy_err(cfg->pub, "failed to enable wake-on-any packet filter: %d\n",
-			 err);
-		return err;
+	/* Write the intended state whenever the filter exists, so a cycle
+	 * which could not disable it cannot leave it shadowing a program.
+	 */
+	if (cfg->wowl.any_filter_set) {
+		enable.enable = cpu_to_le32(!apf_armed);
+		err = brcmf_fil_iovar_data_set(ifp, "pkt_filter_enable", &enable,
+					       sizeof(enable));
+		if (err) {
+			bphy_err(cfg->pub, "failed to %s wake-on-any packet filter: %d\n",
+				 apf_armed ? "disable" : "enable", err);
+			goto disable_apf;
+		}
+		cfg->wowl.any_filter_enabled = !apf_armed;
 	}
+
 	err = brcmf_fil_iovar_int_set(ifp, "pkt_filter_mode",
 				      BRCMF_PKT_FILTER_MODE_FORWARD_ON_MATCH);
 	if (err) {
 		bphy_err(cfg->pub, "failed to set wake-on-any packet filter mode: %d\n",
 			 err);
-		enable.enable = cpu_to_le32(0);
-		brcmf_fil_iovar_data_set(ifp, "pkt_filter_enable", &enable,
-					  sizeof(enable));
-		return err;
-	}
-
-	apf_err = brcmf_apf_arm(ifp->vif);
-	if (apf_err) {
-		bphy_err(cfg->pub, "failed to arm APF packet filter: %d\n",
-			 apf_err);
-		apf_err = brcmf_apf_disable(ifp->vif);
-		if (apf_err) {
-			bphy_err(cfg->pub, "failed to clean up APF packet filter: %d\n",
-				 apf_err);
-			err = apf_err;
-			goto disable_filter;
-		}
+		goto disable_filter;
 	}
 
 	err = brcmf_fil_cmd_int_get(ifp, BRCMF_C_GET_PM,
@@ -4556,13 +4578,17 @@ static int brcmf_configure_wowl_any(struct brcmf_cfg80211_info *cfg,
 	return 0;
 
 disable_filter:
+	if (cfg->wowl.any_filter_enabled) {
+		enable.enable = cpu_to_le32(0);
+		if (!brcmf_fil_iovar_data_set(ifp, "pkt_filter_enable", &enable,
+					      sizeof(enable)))
+			cfg->wowl.any_filter_enabled = false;
+	}
+disable_apf:
 	apf_err = brcmf_apf_disable(ifp->vif);
 	if (apf_err)
 		bphy_err(cfg->pub, "failed to disable APF packet filter: %d\n",
 			 apf_err);
-	enable.enable = cpu_to_le32(0);
-	brcmf_fil_iovar_data_set(ifp, "pkt_filter_enable", &enable,
-				  sizeof(enable));
 	return err;
 }
 
