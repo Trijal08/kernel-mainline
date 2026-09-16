@@ -571,11 +571,22 @@ static void zuma_reg_set_outfifo_dsc(u32 id, const struct drm_dsc_config *cfg,
 static void zuma_reg_init_trigger(u32 id, const struct decon_mode *mode)
 {
 	u32 mask = ZD_HW_TRIG_EN | ZD_HW_TRIG_SEL_MASK | ZD_HW_TRIG_MASK_DECON;
-	u32 val = (mode->te_mode == DECON_SW_TRIG) ? 0 : ZD_HW_TRIG_EN;
+	u32 val;
 
-	/* default HW TE source; keep the trigger masked until start */
-	val |= ZD_HW_TRIG_SEL_FROM_DDI0;
-	val |= ZD_HW_TRIG_MASK_DECON;
+	/*
+	 * Video mode frames are paced by the output interface, not by a
+	 * trigger. Masking the trigger here strands the DECON, because
+	 * zuma_reg_set_trigger() returns early in video mode and so never
+	 * unmasks it: the block sits in RUN and emits nothing.
+	 */
+	if (mode->op_mode == DECON_VIDEO_MODE) {
+		val = 0;
+	} else {
+		val = (mode->te_mode == DECON_SW_TRIG) ? 0 : ZD_HW_TRIG_EN;
+		/* default HW TE source; keep the trigger masked until start */
+		val |= ZD_HW_TRIG_SEL_FROM_DDI0;
+		val |= ZD_HW_TRIG_MASK_DECON;
+	}
 
 	zd_main_write_mask(id, ZD_TRIG_CON, val, mask);
 }
