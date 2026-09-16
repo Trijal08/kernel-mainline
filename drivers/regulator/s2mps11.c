@@ -1923,9 +1923,11 @@ static const struct regulator_ops s2mpg15_reg_enable_only_ops = {
 }
 
 static const struct regulator_desc s2mpg15_regulators[] = {
+	regulator_desc_s2mpg15_buck(1, "vinb1s", s2mpg15_buck_vranges1),
 	regulator_desc_s2mpg15_buck(2, "vinb2s", s2mpg15_buck_vranges1),
 	regulator_desc_s2mpg15_buck(8, "vinb8s", s2mpg15_buck_vranges1),
 	regulator_desc_s2mpg15_buck(11, "vinb11s", s2mpg15_buck_vranges1),
+	regulator_desc_s2mpg15_buck(12, "vinb12s", s2mpg15_buck_vranges1),
 	/*
 	 * BUCKA is named, and addressed, apart from the numbered bucks, so it
 	 * does not fit the macro above.
