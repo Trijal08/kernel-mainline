@@ -4162,6 +4162,8 @@ static void exynos_drm_dp_stop(struct exynos_dp_subdev *dp)
 	dp_reg_set_txclk(dp->id, false);
 	dp_reg_set_oscclk_qch_func_en(dp->id, 0);
 
+	/* parks the lanes and re-asserts DPALT_DISABLE_ACK for the TCA */
+	phy_set_mode(dp->phy, PHY_MODE_INVALID);
 	phy_power_off(dp->phy);
 
 	dp->state = DP_STATE_OFF;
