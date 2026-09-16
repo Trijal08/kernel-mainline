@@ -18,6 +18,7 @@
  * with IIO or hwmon.
  */
 
+#include <linux/bitfield.h>
 #include <linux/debugfs.h>
 #include <linux/iopoll.h>
 #include <linux/math64.h>
@@ -31,9 +32,13 @@
 #define S2MPG1415_METER_CHANNELS	12
 
 /* METER_CTRL1 */
+#define INT_SAMP_RATE			GENMASK(4, 2)
+#define INT_SAMP_RATE_62P5HZ		3
 #define METER_EN			BIT(0)
 /* METER_CTRL2 */
 #define ASYNC_RD			BIT(7)
+/* METER_CTRL5 and METER_CTRL7 hold the top four channels' mode bits. */
+#define METER_MODE_HI			GENMASK(3, 0)
 
 /* Both registers occupy whole bytes but only the low bits carry the value. */
 #define ACC_DATA_BYTES			6
@@ -210,6 +215,7 @@ static int s2mpg1415_meter_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct s2mpg1415_meter *meter;
+	unsigned int acc_mode, ctrl1;
 	int ch, ret;
 
 	meter = devm_kzalloc(dev, sizeof(*meter), GFP_KERNEL);
@@ -234,8 +240,41 @@ static int s2mpg1415_meter_probe(struct platform_device *pdev)
 					     "cannot set MUXSEL%d\n", ch);
 	}
 
+	ret = regmap_read(meter->regmap, S2MPG14_METER_CTRL4, &acc_mode);
+	if (!ret)
+		ret = regmap_read(meter->regmap, S2MPG14_METER_CTRL1, &ctrl1);
+	if (ret)
+		return dev_err_probe(dev, ret, "cannot read the meter config\n");
+
+	dev_info(dev, "meter left in acc mode %#04x, rate selector %u\n",
+		 acc_mode, (unsigned int)FIELD_GET(INT_SAMP_RATE, ctrl1));
+
+	/*
+	 * One bit per channel selects current rather than power, and the
+	 * resolutions here are the power ones. CTRL4/5 cover the accumulators,
+	 * CTRL6/7 the LPF.
+	 */
+	ret = regmap_write(meter->regmap, S2MPG14_METER_CTRL4, 0);
+	if (!ret)
+		ret = regmap_update_bits(meter->regmap, S2MPG14_METER_CTRL5,
+					 METER_MODE_HI, 0);
+	if (!ret)
+		ret = regmap_write(meter->regmap, S2MPG14_METER_CTRL6, 0);
+	if (!ret)
+		ret = regmap_update_bits(meter->regmap, S2MPG14_METER_CTRL7,
+					 METER_MODE_HI, 0);
+	if (ret)
+		return dev_err_probe(dev, ret, "cannot select power mode\n");
+
+	/*
+	 * The rate is not in the arithmetic -- acc/count is an average however
+	 * often it sampled -- but it has to be a known one: left alone, the two
+	 * chips came up 60x apart and moved between boots.
+	 */
 	ret = regmap_update_bits(meter->regmap, S2MPG14_METER_CTRL1,
-				 METER_EN, METER_EN);
+				 INT_SAMP_RATE | METER_EN,
+				 FIELD_PREP(INT_SAMP_RATE,
+					    INT_SAMP_RATE_62P5HZ) | METER_EN);
 	if (ret)
 		return dev_err_probe(dev, ret, "cannot enable the meter\n");
 
