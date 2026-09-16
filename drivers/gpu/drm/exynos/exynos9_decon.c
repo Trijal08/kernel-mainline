@@ -1540,9 +1540,18 @@ static void decon_vblank_timeout(struct timer_list *t)
 	if (!ctx->crtc)
 		return;
 
+	/*
+	 * win_update_req_get() still set means the shadow -> active latch never
+	 * happened, so the window config the commit programmed is not live and
+	 * the blender has nothing to send.
+	 */
 	dev_warn_ratelimited(ctx->dev,
-			     "DECON%u frame timed out, completing vblank\n",
-			     ctx->idx);
+			     "DECON%u frame timed out, completing vblank (int_pend %#x win%u shd_req %#x live %#x)\n",
+			     ctx->idx,
+			     ctx->cal_ops->int_pend ? ctx->cal_ops->int_pend(ctx) : 0,
+			     ctx->win[0].idx,
+			     ctx->cal_ops->win_update_req_get(ctx, ctx->win[0].idx),
+			     ctx->cal_ops->win_status(ctx, ctx->win[0].idx));
 
 	drm_crtc_handle_vblank(&ctx->crtc->base);
 }
@@ -1841,10 +1850,22 @@ static int decon_bind(struct device *dev, struct device *master, void *data)
 
 	ctx->drm_dev = drm_dev;
 
+	/*
+	 * The window registers are one bank shared by every DECON -- WIN_OFFSET
+	 * indexes by window, not by DECON, and the "win" reg region is the same
+	 * physical block in both DECON nodes. Two DECONs both using window 0
+	 * therefore write the same registers: DECON1 stamped its 1920x1080
+	 * geometry over the panel's 1280x2856 window, blacking out everything
+	 * below line 1080 and leaving neither DECON with a sane window.
+	 *
+	 * Carve the bank up statically, one quarter per DECON. The vendor hands
+	 * windows out dynamically from a driver-wide available_win_mask.
+	 */
 	for (i = 0; i < ctx->win_cnt; i++) {
 		struct decon_win *win = &ctx->win[i];
 
 		ctx->win[i].dpp = dpp;
+		win->idx = ctx->idx * (MAX_WIN_PER_DECON / 2) + i;
 
 		if (!dpp)
 			continue;
