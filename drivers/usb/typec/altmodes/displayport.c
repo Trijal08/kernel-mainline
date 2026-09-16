@@ -203,13 +203,24 @@ static int dp_altmode_status_update(struct dp_altmode *dp)
 
 static int dp_altmode_configured(struct dp_altmode *dp)
 {
+	int ret;
+
 	sysfs_notify(&dp->alt->dev.kobj, "displayport", "configuration");
 	sysfs_notify(&dp->alt->dev.kobj, "displayport", "pin_assignment");
 	/*
 	 * If the DFP_D/UFP_D sends a change in HPD when first notifying the
 	 * DisplayPort driver that it is connected, then we wait until
 	 * configuration is complete to signal HPD.
+	 *
+	 * That has to include the mux: typec_altmode_notify() below is what
+	 * routes SBU and the lanes to the DP block. A display driver that
+	 * reacts to HPD by talking to the sink over AUX cannot be heard before
+	 * it has run, and every DPCD transaction times out.
 	 */
+	ret = dp_altmode_notify(dp);
+	if (ret)
+		return ret;
+
 	if (dp->pending_hpd) {
 		drm_connector_oob_hotplug_event(dp->connector_fwnode,
 						connector_status_connected);
@@ -222,7 +233,7 @@ static int dp_altmode_configured(struct dp_altmode *dp)
 		}
 	}
 
-	return dp_altmode_notify(dp);
+	return 0;
 }
 
 static int dp_altmode_configure_vdm(struct dp_altmode *dp, u32 conf)
