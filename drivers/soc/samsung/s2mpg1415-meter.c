@@ -4,7 +4,7 @@
  *
  * Each PMIC carries twelve power meter channels. A channel is pointed at a
  * rail via its MUXSEL register and then accumulates power samples into a
- * 48-bit accumulator, with a shared 24-bit count of how many samples went in.
+ * 41-bit accumulator, with a shared 20-bit count of how many samples went in.
  * Average power over the window is therefore acc / count, scaled by a
  * per-rail resolution in mW/LSB -- no knowledge of the sampling frequency is
  * needed, which is why this driver does not configure or care about it.
@@ -35,8 +35,13 @@
 /* METER_CTRL2 */
 #define ASYNC_RD			BIT(7)
 
+/* Both registers occupy whole bytes but only the low bits carry the value. */
 #define ACC_DATA_BYTES			6
+#define ACC_DATA_MASK			GENMASK_ULL(40, 0)
 #define ACC_COUNT_BYTES			3
+#define ACC_COUNT_MASK			GENMASK(19, 0)
+#define LPF_DATA_BYTES			3
+#define LPF_DATA_MASK			GENMASK(20, 0)
 
 /*
  * Resolutions are mW per LSB in unsigned Q30, straight from the vendor
@@ -155,18 +160,18 @@ static int s2mpg1415_meter_show(struct seq_file *s, void *unused)
 	if (ret)
 		return ret;
 
-	acc_count = s2mpg1415_read_le(count_buf, ACC_COUNT_BYTES);
+	acc_count = s2mpg1415_read_le(count_buf, ACC_COUNT_BYTES) & ACC_COUNT_MASK;
 	if (!acc_count) {
 		seq_puts(s, "no samples accumulated\n");
 		return 0;
 	}
 
-	seq_printf(s, "%-16s %10s\n", "rail", "uW");
+	seq_printf(s, "%-16s %10s %10s\n", "rail", "uW", "uW_lpf");
 
 	for (ch = 0; ch < S2MPG1415_METER_CHANNELS; ch++) {
 		const struct s2mpg1415_rail *rail = &meter->chip->rails[ch];
-		u8 acc_buf[ACC_DATA_BYTES];
-		u64 acc, mw_iq30;
+		u8 acc_buf[ACC_DATA_BYTES], lpf_buf[LPF_DATA_BYTES];
+		u64 acc, lpf, mw_iq30, lpf_mw_iq30;
 
 		if (!rail->name)
 			continue;
@@ -178,11 +183,20 @@ static int s2mpg1415_meter_show(struct seq_file *s, void *unused)
 		if (ret)
 			return ret;
 
-		acc = s2mpg1415_read_le(acc_buf, ACC_DATA_BYTES);
-		mw_iq30 = mul_u64_u64_div_u64(acc, rail->resolution, acc_count);
+		ret = regmap_bulk_read(meter->regmap,
+				       S2MPG14_METER_LPF_DATA_CH0_1 +
+				       ch * LPF_DATA_BYTES,
+				       lpf_buf, LPF_DATA_BYTES);
+		if (ret)
+			return ret;
 
-		seq_printf(s, "%-16s %10llu\n", rail->name,
-			   (mw_iq30 * 1000) >> 30);
+		acc = s2mpg1415_read_le(acc_buf, ACC_DATA_BYTES) & ACC_DATA_MASK;
+		lpf = s2mpg1415_read_le(lpf_buf, LPF_DATA_BYTES) & LPF_DATA_MASK;
+		mw_iq30 = mul_u64_u64_div_u64(acc, rail->resolution, acc_count);
+		lpf_mw_iq30 = lpf * rail->resolution;
+
+		seq_printf(s, "%-16s %10llu %10llu\n", rail->name,
+			   (mw_iq30 * 1000) >> 30, (lpf_mw_iq30 * 1000) >> 30);
 	}
 
 	seq_printf(s, "\nsamples in window: %u\n", acc_count);
