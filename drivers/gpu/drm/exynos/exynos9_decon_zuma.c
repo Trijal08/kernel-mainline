@@ -959,6 +959,12 @@ static void zuma_decon_win_update_req(struct decon_context *ctx, u32 win)
 			   ZD_SHD_REG_UP_REQ_WIN(win));
 }
 
+static u32 zuma_decon_int_pend(struct decon_context *ctx)
+{
+	return zd_main_read(ctx->idx, ZD_DECON_INT_PEND) |
+	       zd_main_read(ctx->idx, ZD_DECON_INT_PEND_EXTRA) << 16;
+}
+
 static u32 zuma_decon_win_status(struct decon_context *ctx, u32 win)
 {
 	/*
@@ -1013,6 +1019,7 @@ const struct decon_cal_ops zuma_decon_cal_ops = {
 	.enable_window		= zuma_decon_enable_window,
 	.disable_window		= zuma_decon_disable_window,
 	.win_update_req		= zuma_decon_win_update_req,
+	.int_pend		= zuma_decon_int_pend,
 	.win_status		= zuma_decon_win_status,
 	.win_update_req_get	= zuma_decon_win_update_req_get,
 	.update_req_global	= zuma_decon_update_req_global,
