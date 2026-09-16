@@ -23,7 +23,7 @@
 
 	chosen {
 		/* Bootloader expects bootargs specified otherwise it crashes */
-		bootargs = "earlycon=exynos4210,0x10870000 splash plymouth.ignore-serial-consoles plymouth.prefer-fbcon clk_ignore_unused regulator_ignore_unused pmos_boot_uuid=054e6c2a-294c-4542-be46-56ac95c6d2d9 pmos_root_uuid=738b808b-8486-42b8-9520-0cd5fa0e4ac7 pmos_rootfsopts=defaults";
+		bootargs = "earlycon=exynos4210,0x10870000 splash plymouth.ignore-serial-consoles plymouth.prefer-fbcon clk_ignore_unused pmos_boot_uuid=054e6c2a-294c-4542-be46-56ac95c6d2d9 pmos_root_uuid=738b808b-8486-42b8-9520-0cd5fa0e4ac7 pmos_rootfsopts=defaults";
 		stdout-path = &serial_0;
 
 		/* Use display framebuffer as setup by bootloader */
@@ -159,7 +159,6 @@
 				regulator-min-microvolt = <450000>;
 				regulator-max-microvolt = <1300000>;
 				regulator-ramp-delay = <6250>;
-				regulator-always-on;
 			};
 
 			m_ldo5_reg: ldo5m {
@@ -209,6 +208,22 @@
 		wakeup-source;
 
 		regulators {
+			s_buck1_reg: buck1s {
+				/* Camera. No consumer in mainline. */
+				regulator-name = "vdd_cam";
+				regulator-min-microvolt = <450000>;
+				regulator-max-microvolt = <1300000>;
+				regulator-ramp-delay = <6250>;
+			};
+
+			s_buck12_reg: buck12s {
+				/* Aurora DSP. No consumer in mainline. */
+				regulator-name = "vdd_aur";
+				regulator-min-microvolt = <450000>;
+				regulator-max-microvolt = <1300000>;
+				regulator-ramp-delay = <6250>;
+			};
+
 			s_buck2_reg: buck2s {
 				/* GPU */
 				regulator-name = "vdd_g3d";
