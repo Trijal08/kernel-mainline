@@ -1095,6 +1095,7 @@
 		clocks = <&cru SCLK_GPU>;
 		#cooling-cells = <2>;
 		power-domains = <&power PX30_PD_GPU>;
+		resets = <&cru SRST_GPU>, <&cru SRST_GPU_NIU>;
 		operating-points-v2 = <&gpu_opp_table>;
 		status = "disabled";
 	};
