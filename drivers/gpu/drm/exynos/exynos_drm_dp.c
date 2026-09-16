@@ -2366,7 +2366,14 @@ static void dp_reg_set_video_clock(u32 id, u32 sst_id, u32 pixelclock)
 	stream_clk = pixelclock / 1000;
 	ls_clk = dp_reg_get_ls_clk(id) / 1000;
 
-	mvid_master = stream_clk >> 1;
+	/*
+	 * Halved again for the Synopsys combo PHY this SoC pairs the link with:
+	 * the vendor divides the stream clock by 4 here and notes it is the
+	 * PHY's requirement. The >> 1 this came with is the Samsung-PHY value,
+	 * and it puts MVID out twice too large, so the sink recovers a pixel
+	 * clock at double rate and shows nothing.
+	 */
+	mvid_master = stream_clk / 4;
 	nvid_master = ls_clk;
 
 	dp_link_write(id, SST1_MVID_MASTER_MODE + 0x1000 * sst_id, mvid_master);
