@@ -4431,9 +4431,12 @@ void exynos_drm_dp_to_videoinfo(struct drm_encoder *encoder,
 {
 	struct exynos_drm_dp *dp = encoder_to_dp(encoder);
 	struct device *dev = dp->dev;
-	struct dp_encoder *dp_encoder = to_encoder(encoder);
-	struct drm_display_info *dp_info =
-				&dp_encoder->dp_connector->base.display_info;
+	/*
+	 * The connector is drm_bridge_connector_init()'s, held in dp->connector.
+	 * The vendor's dp_encoder->dp_connector is never populated on this path
+	 * and dereferencing it faults during the first modeset.
+	 */
+	struct drm_display_info *dp_info = &dp->connector->display_info;
 
 	memset(vi, 0x0, sizeof(*vi));
 
