@@ -367,6 +367,61 @@ static const struct regmap_config s2mpg11_regmap_config_meter = {
 	.cache_type = REGCACHE_FLAT,
 };
 
+/*
+ * S2MPG14/S2MPG15 meter block. The layout differs from S2MPG10/11 -- the
+ * accumulators run to 0xaa and the LPF data to 0xd1 -- so these chips cannot
+ * borrow the older configs, whose ranges stop at 0x8a.
+ */
+static const struct regmap_range s2mpg1415_meter_registers[] = {
+	regmap_reg_range(0x00, 0x3c), /* Meter config */
+	regmap_reg_range(0x63, 0xd3), /* ACC data, ACC count, LPF data, VBAT */
+	regmap_reg_range(0xe4, 0xe5), /* External signed data */
+};
+
+static const struct regmap_range s2mpg1415_meter_ro_registers[] = {
+	regmap_reg_range(0x63, 0xd3), /* ACC data, ACC count, LPF data, VBAT */
+	regmap_reg_range(0xe4, 0xe5), /* External signed data */
+};
+
+static const struct regmap_access_table s2mpg1415_meter_wr_table = {
+	.yes_ranges = s2mpg1415_meter_registers,
+	.n_yes_ranges = ARRAY_SIZE(s2mpg1415_meter_registers),
+	.no_ranges = s2mpg1415_meter_ro_registers,
+	.n_no_ranges = ARRAY_SIZE(s2mpg1415_meter_ro_registers),
+};
+
+static const struct regmap_access_table s2mpg1415_meter_rd_table = {
+	.yes_ranges = s2mpg1415_meter_registers,
+	.n_yes_ranges = ARRAY_SIZE(s2mpg1415_meter_registers),
+};
+
+/*
+ * CTRL2 is volatile too: ASYNC_RD is self-clearing, so a cached value would
+ * read back as still-set forever.
+ */
+static const struct regmap_range s2mpg1415_meter_volatile_registers[] = {
+	regmap_reg_range(S2MPG14_METER_CTRL2, S2MPG14_METER_CTRL2),
+	regmap_reg_range(0x63, 0xd3),
+	regmap_reg_range(0xe4, 0xe5),
+};
+
+static const struct regmap_access_table s2mpg1415_meter_volatile_table = {
+	.yes_ranges = s2mpg1415_meter_volatile_registers,
+	.n_yes_ranges = ARRAY_SIZE(s2mpg1415_meter_volatile_registers),
+};
+
+static const struct regmap_config s2mpg1415_regmap_config_meter = {
+	.name = "meter",
+	.reg_bits = ACPM_ADDR_BITS,
+	.val_bits = 8,
+	.max_register = S2MPG14_METER_EXT_SIGNED_DATA_2,
+	.wr_table = &s2mpg1415_meter_wr_table,
+	.rd_table = &s2mpg1415_meter_rd_table,
+	.volatile_table = &s2mpg1415_meter_volatile_table,
+	.num_reg_defaults_raw = S2MPG14_METER_EXT_SIGNED_DATA_2 + 1,
+	.cache_type = REGCACHE_FLAT,
+};
+
 struct sec_pmic_acpm_shared_bus_context {
 	struct acpm_handle *acpm;
 	unsigned int acpm_chan_id;
@@ -568,7 +623,7 @@ static const struct sec_pmic_acpm_platform_data s2mpg14_data = {
 	.regmap_cfg_common = &s2mpg10_regmap_config_common,
 	.regmap_cfg_pmic = &s2mpg10_regmap_config_pmic,
 	.regmap_cfg_rtc = &s2mpg10_regmap_config_rtc,
-	.regmap_cfg_meter = &s2mpg10_regmap_config_meter,
+	.regmap_cfg_meter = &s2mpg1415_regmap_config_meter,
 };
 
 static const struct sec_pmic_acpm_platform_data s2mpg15_data = {
@@ -577,7 +632,7 @@ static const struct sec_pmic_acpm_platform_data s2mpg15_data = {
 	.speedy_channel = 1,
 	.regmap_cfg_common = &s2mpg11_regmap_config_common,
 	.regmap_cfg_pmic = &s2mpg11_regmap_config_pmic,
-	.regmap_cfg_meter = &s2mpg11_regmap_config_meter,
+	.regmap_cfg_meter = &s2mpg1415_regmap_config_meter,
 };
 
 static const struct of_device_id sec_pmic_acpm_of_match[] = {
