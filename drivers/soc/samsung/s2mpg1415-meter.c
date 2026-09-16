@@ -70,20 +70,21 @@ struct s2mpg1415_chip {
 
 /*
  * Channel assignment is ours to choose -- nothing else programs MUXSEL in
- * mainline. These follow the caiman/komodo schematic names, and spend every
+ * mainline. These follow the zumapro schematic names, which reassign four
+ * bucks relative to zuma (S2M/S3M swap, S9M, S11S), and spend every
  * channel on an internal buck: the external VSEN rails (modem, WLAN/BT,
  * camera) need shunt-resistance scaling that this driver does not implement.
  */
 static const struct s2mpg1415_rail s2mpg14_rails[S2MPG1415_METER_CHANNELS] = {
 	{ "VDD_MIF",		0x1, CMS_BUCK_POWER },
-	{ "VDD_CPUCL2",		0x2, CMD_BUCK_POWER },
-	{ "VDD_CPUCL1",		0x3, CMT_BUCK_POWER },
+	{ "VDD_CPUCL1",		0x2, CMD_BUCK_POWER },
+	{ "VDD_CPUCL2",		0x3, CMT_BUCK_POWER },
 	{ "VDD_CPUCL0",		0x4, CMD_BUCK_POWER },
 	{ "VDD_INT",		0x5, CMT_BUCK_POWER },
 	{ "LLDO1_M",		0x6, CMS_BUCK_POWER },
 	{ "VDD_TPU",		0x7, CMT_BUCK_POWER },
 	{ "LLDO2_M",		0x8, CMS_BUCK_POWER },
-	{ "VDD_CPUCL0_M",	0x9, CMS_BUCK_POWER },
+	{ "VDD_CPUCL1_M",	0x9, CMS_BUCK_POWER },
 	{ }, { }, { },
 };
 
@@ -98,7 +99,7 @@ static const struct s2mpg1415_rail s2mpg15_rails[S2MPG1415_METER_CHANNELS] = {
 	{ "VDD_G3D_L2",		0x8, CMS_BUCK_POWER },
 	{ "VDD_AOC",		0x9, CMS_BUCK_POWER },
 	{ "VDD_SLC_M",		0xa, CMS_BUCK_POWER },
-	{ "VDD_G3D_GLB",	0xb, CMS_BUCK_POWER },
+	{ "VDD_INT_M",		0xb, CMS_BUCK_POWER },
 	{ "VDD_AUR",		0xc, CMD_BUCK_POWER },
 };
 
