@@ -173,6 +173,8 @@ struct decon_cal_ops {
 			      struct decon_win_config *config);
 	void (*disable_window)(struct decon_context *ctx, u32 win_idx);
 	void (*win_update_req)(struct decon_context *ctx, u32 win_idx);
+	/* debug: INT_PEND in the low half, INT_PEND_EXTRA in the high half */
+	u32 (*int_pend)(struct decon_context *ctx);
 	u32 (*win_status)(struct decon_context *ctx, u32 win_idx);
 	u32 (*win_update_req_get)(struct decon_context *ctx, u32 win_idx);
 	void (*update_req_global)(struct decon_context *ctx);
