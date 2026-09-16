@@ -216,11 +216,19 @@
 
 		regulators {
 			s_buck1_reg: buck1s {
-				/* Camera. No consumer in mainline. */
+				/*
+				 * Named for the camera, but the display needs
+				 * it: letting the disable-unused sweep take it
+				 * SErrors the next DECON register write in
+				 * zuma_decon_enable_window().  No DPU node
+				 * declares a supply, so nothing holds it up on
+				 * its own.
+				 */
 				regulator-name = "vdd_cam";
 				regulator-min-microvolt = <450000>;
 				regulator-max-microvolt = <1300000>;
 				regulator-ramp-delay = <6250>;
+				regulator-always-on;
 			};
 
 			s_buck12_reg: buck12s {
