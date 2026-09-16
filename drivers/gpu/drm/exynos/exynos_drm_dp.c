@@ -1721,34 +1721,29 @@ void dp_reg_phy_init_setting(u32 id)
 			  ANA_AUX_TX_LVL_CTRL);
 }
 
+/*
+ * The trained link rate, as last handed to dp_reg_phy_set_link_bw().
+ *
+ * It cannot be read back from the PHY here: CMN_REG00A3 is a Samsung DP PHY
+ * register, and this SoC pairs the link with a Synopsys combo PHY whose block
+ * is deliberately not mapped, so the read returns 0 and decodes as 1.62Gbps.
+ * That fed dp_reg_get_ls_clk() a link rate 1.667x too low, so NVID went to the
+ * sink as 162000 for a link actually running at 2.7Gbps and the recovered
+ * pixel clock was nonsense -- a trained link, symbols flowing, and a black
+ * screen.
+ */
+static u8 dp_link_bw[MAX_DP_CNT] = { LINK_RATE_2_7Gbps, LINK_RATE_2_7Gbps };
+
 u32 dp_reg_phy_get_link_bw(u32 id)
 {
-	u32 val = 0;
-
-	val = dp_phy_read_mask(id, CMN_REG00A3, DP_TX_LINK_BW) >> 5;
-
-	switch (val) {
-	case 0x03:
-		val = LINK_RATE_8_1Gbps;
-		break;
-	case 0x02:
-	default:
-		val = LINK_RATE_5_4Gbps;
-		break;
-	case 0x01:
-		val = LINK_RATE_2_7Gbps;
-		break;
-	case 0x00:
-		val = LINK_RATE_1_62Gbps;
-		break;
-	}
-
-	return val;
+	return dp_link_bw[id];
 }
 
 void dp_reg_phy_set_link_bw(u32 id, u8 link_rate)
 {
 	u32 val = 0;
+
+	dp_link_bw[id] = link_rate;
 
 	switch (link_rate) {
 	case LINK_RATE_8_1Gbps:
