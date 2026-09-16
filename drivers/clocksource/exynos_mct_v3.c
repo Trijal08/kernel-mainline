@@ -12,9 +12,11 @@
  * interrupts are actually wired -- the legacy mct@10050000 local-timer IRQs are
  * routed from this block, so the exynos4210-mct driver cannot drive them.
  *
- * The comparators live in the always-on MISC block, so they keep counting and
- * can wake a CPU across the c2 power-down idle state in which the per-CPU ARM
- * architected timer stops (the cpuidle states declare local-timer-stop).  Each
+ * The comparators live in BLK_MISC, which stays powered across the c2 CPU
+ * power-down idle state, so they keep counting and can wake a CPU where the
+ * per-CPU ARM architected timer stops (the cpuidle states declare
+ * local-timer-stop).  MISC is not always on: SYS_SLEEP powers it down, and the
+ * block comes back with its registers reset -- see mct_suspend() below.  Each
  * comparator is registered as a per-CPU one-shot clockevent with a rating
  * *below* the architected timer, so the tick framework keeps the architected
  * timer as the tick and installs the comparator as that CPU's one-shot wakeup
@@ -36,6 +38,7 @@
 #include <linux/of_irq.h>
 #include <linux/of_address.h>
 #include <linux/clocksource.h>
+#include <linux/suspend.h>
 
 #define EXYNOS_MCT_MCT_CFG		0x000
 #define EXYNOS_MCT_MCT_INCR_RTCCLK	0x004
@@ -245,6 +248,50 @@ static irqreturn_t exynos_mct_comp_isr(int irq, void *dev_id)
 
 static DEFINE_PER_CPU(struct mct_clock_event_device, percpu_mct_tick);
 
+/*
+ * Stop the comparator before a suspend-to-RAM.
+ *
+ * The comparator is a per-CPU one-shot wakeup device, and the tick framework
+ * never disarms one: tick_oneshot_wakeup_control()'s TICK_BROADCAST_EXIT arm
+ * only compares the device's state, and tick_suspend_local() shuts down the
+ * tick device -- the architected timer -- not the wakeup device.
+ * clockevents_suspend() is the only hook on the suspend path that reaches a
+ * per-CPU wakeup device at all, and it does nothing without this callback.  So
+ * without it, whatever the last c2 entry programmed is still counting when the
+ * kernel asks the firmware for SYS_SLEEP.
+ *
+ * That matters because MCT_V41 sits in BLK_MISC and SYS_SLEEP powers MISC down.
+ * A comparator that expires while the firmware is taking MISC through its
+ * power-link handshake raises a level interrupt inside the block being powered
+ * off; the link never reports idle, and the APM watchdog resets the SoC.  One
+ * that expires just before the PSCI call is merely wasteful: it leaves an
+ * interrupt pending, so SYSTEM_SUSPEND returns without suspending.
+ *
+ * Nothing is lost by stopping it.  MISC loses power, so the comparator does not
+ * survive the sleep in any case -- the block comes back with its registers
+ * reset -- and the wake comes from the PMU.  The next c2 entry reprograms the
+ * comparator through set_next_event().  A .resume, which downstream has, would
+ * only re-arm a comparator nothing is waiting on.
+ *
+ * Only the boot CPU's device is still registered here: tick_offline_cpu()
+ * detaches and unlinks each per-CPU clockevent as its CPU goes down, and
+ * exynos_mct_dying_cpu() has already stopped those comparators.  The state
+ * check is the whole condition.  s2idle is excluded because it does not power
+ * MISC down -- that is the premise the comparators are used under -- so there
+ * is nothing to disarm, and clockevents_suspend() reaches it from tick_freeze()
+ * with every CPU's device still listed and the other CPUs parked.
+ */
+static void mct_suspend(struct clock_event_device *evt)
+{
+	struct mct_clock_event_device *mevt;
+
+	if (pm_suspend_target_state != PM_SUSPEND_MEM)
+		return;
+
+	mevt = container_of(evt, struct mct_clock_event_device, evt);
+	exynos_mct_comp_stop(mevt);
+}
+
 static int exynos_mct_starting_cpu(unsigned int cpu)
 {
 	struct mct_clock_event_device *mevt = per_cpu_ptr(&percpu_mct_tick, cpu);
@@ -264,13 +311,8 @@ static int exynos_mct_starting_cpu(unsigned int cpu)
 			CLOCK_EVT_FEAT_PERCPU;
 	evt->rating = MCT_CLKEVENTS_RATING;
 
-	/*
-	 * No .suspend/.resume: the comparators are in the always-on MISC block
-	 * and keep their state, and clockevents_suspend() runs from
-	 * timekeeping_suspend() -- i.e. inside tick_freeze(), with interrupts
-	 * off and the other CPUs already in c2.  Stopping all comparators there
-	 * would busy-poll (and can panic) on the s2idle entry path for nothing.
-	 */
+	evt->suspend = mct_suspend;
+
 	if (evt->irq == -1)
 		return -EIO;
 
