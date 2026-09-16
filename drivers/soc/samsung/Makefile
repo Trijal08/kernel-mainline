@@ -11,6 +11,7 @@ exynos_pmu-y			+= exynos-pmu.o gs101-pmu.o
 
 obj-$(CONFIG_EXYNOS_SLC)	+= exynos-slc.o
 obj-$(CONFIG_EXYNOS_S2MPU)	+= exynos-s2mpu.o
+obj-$(CONFIG_S2MPG1415_METER)	+= s2mpg1415-meter.o
 obj-$(CONFIG_EXYNOS_GSA)	+= exynos-gsa.o
 obj-$(CONFIG_EXYNOS_CP_POWER)	+= exynos-cp-power.o
 
