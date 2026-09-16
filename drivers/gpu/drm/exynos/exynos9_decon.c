@@ -1541,7 +1541,7 @@ static void decon_vblank_timeout(struct timer_list *t)
 		return;
 
 	dev_warn_ratelimited(ctx->dev,
-			     "DECON%u TE timed out, completing vblank\n",
+			     "DECON%u frame timed out, completing vblank\n",
 			     ctx->idx);
 
 	drm_crtc_handle_vblank(&ctx->crtc->base);
@@ -1575,11 +1575,13 @@ static void decon_atomic_flush(struct exynos_drm_crtc *crtc)
 
 	/*
 	 * A frame is now expected.  Arm the recovery timer before handing the
-	 * event over, so a TE that never arrives cannot strand this commit.
+	 * event over, so a vblank that never arrives cannot strand this commit.
+	 * Video mode needs this as much as command mode: its vblank is the
+	 * frame-done interrupt, and a DECON that emits no frame freezes every
+	 * later commit for 10 s apiece in wait_for_dependencies().
 	 */
-	if (ctx->config.mode.op_mode == DECON_MIPI_COMMAND_MODE)
-		mod_timer(&ctx->vblank_timer,
-			  jiffies + msecs_to_jiffies(DECON_VBLANK_TIMEOUT_MS));
+	mod_timer(&ctx->vblank_timer,
+		  jiffies + msecs_to_jiffies(DECON_VBLANK_TIMEOUT_MS));
 
 	exynos_crtc_handle_event(crtc);
 }
@@ -1902,6 +1904,7 @@ static irqreturn_t decon_irq_handler(int irq, void *dev_id)
 	 * there is no panel TE, so frame-done is the vblank.
 	 */
 	if (ctx->config.mode.op_mode == DECON_VIDEO_MODE) {
+		timer_delete(&ctx->vblank_timer);
 		drm_crtc_handle_vblank(&ctx->crtc->base);
 		return IRQ_HANDLED;
 	}
