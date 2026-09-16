@@ -10,7 +10,7 @@ struct exynos_dpu_dma_context {
 	void *dma_priv;
 };
 
-int dpu_dma_update(struct exynos_dpu_dma_context *ctx, unsigned int channel,
+int dpu_dma_update(struct exynos_dpu_dma_context *ctx, unsigned int idma,
 		   struct exynos_drm_plane_state *state);
 
 #endif

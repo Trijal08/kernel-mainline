@@ -276,7 +276,7 @@ struct exynos_dpp_context {
 	struct clk *aclk;
 };
 
-void dpp_update(struct exynos_dpp_context *dpp, unsigned int channel,
+void dpp_update(struct exynos_dpp_context *dpp,
 		const struct exynos_drm_plane_state *state);
 
 #endif

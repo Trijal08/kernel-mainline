@@ -1487,8 +1487,8 @@ static void decon_update_plane(struct exynos_drm_crtc *crtc,
 	 */
 	decon_set_win_color_map(window, false);
 
-	dpp_update(window->dpp, 0, state);
-	dpu_dma_update(dma_ctx, 0, state);
+	dpp_update(window->dpp, state);
+	dpu_dma_update(dma_ctx, window->dpp->type, state);
 
 	ctx->cal_ops->enable_window(ctx, window->idx, config);
 
@@ -1936,6 +1936,14 @@ static int decon_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	ctx->dev = dev;
+
+	/*
+	 * Which DECON this is. Indexes every per-instance register array in the
+	 * cal back-ends, so two DECONs without distinct ids would scribble on
+	 * each other's blocks.
+	 */
+	if (of_property_read_u32(dev->of_node, "decon,id", &ctx->idx))
+		ctx->idx = 0;
 
 	drv_data = of_device_get_match_data(dev);
 	if (!drv_data)
