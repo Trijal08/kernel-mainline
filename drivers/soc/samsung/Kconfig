@@ -70,6 +70,17 @@ config EXYNOS_S2MPU
 	  the unit into passthrough so the master (e.g. the GPU) can reach
 	  memory, which is required to bring such masters up on these SoCs.
 
+config S2MPG1415_METER
+	tristate "S2MPG14/S2MPG15 on-device power monitoring"
+	depends on MFD_SEC_ACPM || COMPILE_TEST
+	depends on DEBUG_FS
+	help
+	  Per-rail power measurement from the twelve meter channels in each of
+	  the S2MPG14/S2MPG15 PMICs found on Google gs101-derived SoCs. Reports
+	  average microwatts per rail (CPU clusters, GPU, MIF, INT, TPU, ...)
+	  through debugfs, which is what makes idle power attributable rather
+	  than guessed at from battery current.
+
 config EXYNOS_GSA
 	tristate "Google GSA security-core mailbox driver"
 	depends on ARCH_EXYNOS || ((ARM || ARM64) && COMPILE_TEST)
