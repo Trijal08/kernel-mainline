@@ -187,6 +187,9 @@ static int dp_altmode_status_update(struct dp_altmode *dp)
 				dp->pending_irq_hpd = true;
 		}
 	} else {
+		/* Terminates the post-configure status poll above. */
+		dp->state = DP_STATE_IDLE;
+
 		drm_connector_oob_hotplug_event(dp->connector_fwnode,
 						hpd ? connector_status_connected :
 						      connector_status_disconnected);
@@ -423,6 +426,16 @@ static int dp_altmode_vdm(struct typec_altmode *alt,
 			break;
 		case DP_CMD_CONFIGURE:
 			ret = dp_altmode_configured(dp);
+			/*
+			 * Re-read the partner's status now that DP is actually
+			 * configured. A UFP_D only sends an Attention when HPD
+			 * *changes*, so one whose HPD comes up as a result of
+			 * being configured -- a dock bringing up its DP-to-HDMI
+			 * bridge, with its sink already attached -- has nothing
+			 * to report and stays silent forever if nobody asks.
+			 */
+			if (!ret)
+				dp->state = DP_STATE_UPDATE;
 			break;
 		default:
 			break;
