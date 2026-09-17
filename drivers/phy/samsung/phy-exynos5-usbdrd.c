@@ -4073,6 +4073,29 @@ static int zuma_usbdrd_phy_dp_configure(struct phy *phy,
 	return 0;
 }
 
+/*
+ * DP AUX is a low-speed block independent of the link MPLLB, but it comes up
+ * powered down and nothing else switches it on -- so DPCD reads time out long
+ * before any rate or lane configuration happens. Tie it to the phy mode: the
+ * DP driver sets PHY_MODE_DP when a sink appears, well before it needs AUX.
+ */
+static int zuma_usbdrd_phy_dp_set_mode(struct phy *phy, enum phy_mode mode,
+				       int submode)
+{
+	struct phy_usb_instance *inst = phy_get_drvdata(phy);
+	struct exynos5_usbdrd_phy *phy_drd = to_usbdrd_phy(inst);
+
+	if (inst->phy_cfg->id != EXYNOS5_DRDPHY_PIPE3 || !phy_drd->reg_pma)
+		return 0;
+
+	zuma_dp_update(phy_drd, ZUMA_USBDP_PHY_DP_AUX_CONFIG0,
+		       ZUMA_USBDP_PHY_DP_AUX_CONFIG0_PWDNB,
+		       mode == PHY_MODE_DP ?
+		       ZUMA_USBDP_PHY_DP_AUX_CONFIG0_PWDNB : 0);
+
+	return 0;
+}
+
 static int zuma_usbdrd_phy_dp_validate(struct phy *phy, enum phy_mode mode,
 				       int submode, union phy_configure_opts *opts)
 {
@@ -4105,6 +4128,7 @@ static int zuma_usbdrd_phy_dp_validate(struct phy *phy, enum phy_mode mode,
 static const struct phy_ops zuma_usbdrd_phy_ops = {
 	.init		= exynos2200_usbdrd_phy_init,
 	.exit		= exynos2200_usbdrd_phy_exit,
+	.set_mode	= zuma_usbdrd_phy_dp_set_mode,
 	.configure	= zuma_usbdrd_phy_dp_configure,
 	.validate	= zuma_usbdrd_phy_dp_validate,
 	.owner		= THIS_MODULE,
