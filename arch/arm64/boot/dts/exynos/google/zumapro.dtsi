@@ -3677,6 +3677,96 @@
 			status = "disabled";
 		};
 
+		/*
+		 * DisplayPort transmitter. Only the link registers are mapped
+		 * here: the vendor node also claims 0x11130000 and 0x11140000,
+		 * but those are the combo PHY's PMA and TCA, which usbdrd31_phy
+		 * above already maps and programs.
+		 *
+		 * The lanes reach the connector through that PHY, which TCPM
+		 * switches on DP alt mode entry, and AUX through the SBU switch
+		 * in the TCPC. Neither is this node's to describe.
+		 */
+		dp: displayport@110f0000 {
+			compatible = "samsung,exynos910-dp";
+			reg = <0x110f0000 0x6000>;
+			reg-names = "link_base";
+			interrupts = <GIC_SPI 389 IRQ_TYPE_LEVEL_HIGH 0>;
+			/*
+			 * The SuperSpeed half of the USB-C combo PHY. The lanes
+			 * are shared with USB3, so the link asks for rate, lane
+			 * count and drive levels through the phy framework
+			 * rather than mapping the PHY itself.
+			 */
+			phys = <&usbdrd31_phy 1>;
+			phy-names = "dp_phy";
+			/*
+			 * DPOSC and the APB clock. The vendor node names only
+			 * DPOSC because their CAL layer drives PCLK through the
+			 * Q-channel (QCH_CON_DP_LINK_QCH_PCLK); mainline's CCF
+			 * has no such path, and clk_summary shows
+			 * gout_hsi0_dp_link_i_pclk gated, so an unclaimed PCLK
+			 * means the first register access takes the SoC down.
+			 */
+			clocks = <&cmu_hsi0 CLK_GOUT_HSI0_DP_LINK_I_DP_OSC_CLK>,
+				 <&cmu_hsi0 CLK_GOUT_HSI0_DP_LINK_I_PCLK>;
+			clock-names = "dposc", "pclk";
+			/*
+			 * The link wants DPOSC at 40MHz; the vendor asserts it
+			 * and the AUX bit timers, the HPD deglitch count and
+			 * the GTC counter are all derived from it.
+			 *
+			 * CMU_TOP already has the chain set up and divided down
+			 * to 39.936MHz (shared2_div2 / 10); only this user mux
+			 * sits on oscclk, so the link has been running at
+			 * 24.576MHz. Reparenting it needs the corrected
+			 * CMU_TOP offsets, since the gate feeding it shares
+			 * 0x20b8 with what clk-zuma called HSI1_BUS.
+			 */
+			assigned-clocks = <&cmu_hsi0 CLK_MOUT_HSI0_DPOSC_USER>;
+			assigned-clock-parents = <&cmu_top CLK_DOUT_CMU_HSI0_DPOSC>;
+			/*
+			 * Deliberately NOT reparented onto the CMU_TOP DPOSC
+			 * divider, though that is the 40 MHz the link wants.
+			 * clk-zuma puts mout_cmu_hsi0_usb31drd on TOP 0x1090
+			 * and gout_cmu_hsi1_bus on 0x20b8, which the vendor
+			 * CMU tables say are DPOSC's own mux and gate -- so
+			 * walking up that chain reprograms the register a live
+			 * USB or PCIe clock believes is its own, and the SoC
+			 * resets. Fix those offsets before reparenting.
+			 * Until then DPOSC runs from oscclk at 24.576 MHz.
+			 */
+			power-domains = <&pd_hsi0>;
+
+			status = "disabled";
+
+			/*
+			 * One endpoint per SST stream, and the endpoint's reg
+			 * *is* the stream index: the driver looks the CRTC up
+			 * with of_graph_get_endpoint_by_regs(node, 0, sst) for
+			 * sst in DP_SST_1..DP_SST_4, and reads the id back out
+			 * as the stream in exynos_drm_dp_get_sst_idx(). An
+			 * unnumbered endpoint is stream 0, which is
+			 * DP_SST_UNKNOWN and matches nothing, so the encoder
+			 * ends up with possible_crtcs = 0.
+			 */
+			ports {
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				port@0 {
+					reg = <0>;
+					#address-cells = <1>;
+					#size-cells = <0>;
+
+					dp_in: endpoint@1 {
+						reg = <1>;	/* SST1 */
+						remote-endpoint = <&decon1_out>;
+					};
+				};
+			};
+		};
+
 		usbdrd31: usb@11210000 {
 			compatible = "google,zuma-dwusb3", "google,gs101-dwusb3";
 			ranges = <0x0 0x11210000 0x10000>;
@@ -4330,6 +4420,8 @@
 			clocks = <&cmu_dpu CLK_GOUT_DPU_DECON0_ACLK>;
 			clock-names = "aclk";
 			power-domains = <&pd_dpuf0>;
+			decon,id = <0>;
+			dpps = <&dpp0>;
 			/*
 			 * The DECON is the CRTC/blender/output block; it issues no
 			 * framebuffer DMA of its own. Memory reads are done by the
@@ -4346,6 +4438,47 @@
 					reg = <0>;
 					decon0_out: endpoint {
 						remote-endpoint = <&dsim0_in>;
+					};
+				};
+			};
+		};
+
+		/*
+		 * The DP pipe. caiman puts DP on DECON1 rather than the SoC
+		 * default of DECON2 (vendor zuma-caimito-display.dtsi enables
+		 * drmdecon1 with connector = <0x10> and disables drmdecon2).
+		 * Only "main" and "wincon" differ from decon0; the window and
+		 * sub blocks are shared between the two.
+		 */
+		decon1: decon@19471000 {
+			compatible = "google,zuma-decon";
+			reg = <0x19471000 0x6000>,	/* main   */
+			      <0x19480000 0xe000>,	/* win    */
+			      <0x19490000 0x10000>,	/* sub    */
+			      <0x194b0000 0xe000>;	/* wincon */
+			reg-names = "main", "win", "sub", "wincon";
+			/* index 0 is the frame-done interrupt used by the driver */
+			interrupts = <GIC_SPI 247 IRQ_TYPE_LEVEL_HIGH 0>, /* frame_done */
+				     <GIC_SPI 248 IRQ_TYPE_LEVEL_HIGH 0>, /* frame_start */
+				     <GIC_SPI 246 IRQ_TYPE_LEVEL_HIGH 0>; /* extra */
+			interrupt-names = "frame_done", "frame_start", "extra";
+			/* one ACLK_DECON gate serves the whole DPUB block */
+			clocks = <&cmu_dpu CLK_GOUT_DPU_DECON0_ACLK>;
+			clock-names = "aclk";
+			power-domains = <&pd_dpuf0>;
+			decon,id = <1>;
+			dpps = <&dpp1>;
+
+			status = "disabled";
+
+			ports {
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				port@0 {
+					reg = <0>;
+					decon1_out: endpoint {
+						remote-endpoint = <&dp_in>;
 					};
 				};
 			};
@@ -4377,13 +4510,25 @@
 		};
 
 		/*
-		 * DPP processing block for the GF0 channel. The driver accesses
-		 * regs + 0x1000, so the region base is one channel stride below
-		 * the GF0 DPP block (0x19935000) to land on it.
+		 * DPP processing blocks, one per fetch channel. "dpp,id" is the
+		 * physical DPU channel and indexes all three blocks that make up
+		 * the channel: this DPP (0x19930000 + id * 0x1000), the IDMA in
+		 * dpu_dma (0x19900000 + id * 0x1000), and the DECON's WIN_CHMAP.
 		 */
-		dpp0: dpp@19934000 {
+		dpp0: dpp@19935000 {
 			compatible = "samsung,exynosauto-dpp";
-			reg = <0x19934000 0x2000>;
+			reg = <0x19935000 0x1000>;	/* GF0 */
+			dpp,id = <5>;
+			clocks = <&cmu_dpu CLK_GOUT_DPU_DECON0_ACLK>;
+			clock-names = "aclk";
+			power-domains = <&pd_dpuf0>;
+			status = "disabled";
+		};
+
+		dpp1: dpp@19936000 {
+			compatible = "samsung,exynosauto-dpp";
+			reg = <0x19936000 0x1000>;	/* GF1 */
+			dpp,id = <6>;
 			clocks = <&cmu_dpu CLK_GOUT_DPU_DECON0_ACLK>;
 			clock-names = "aclk";
 			power-domains = <&pd_dpuf0>;
