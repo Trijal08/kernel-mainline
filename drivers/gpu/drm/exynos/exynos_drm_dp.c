@@ -1855,6 +1855,8 @@ void dp_reg_set_training_pattern(u32 id, dp_training_pattern pattern)
 			   LINK_TRAINING_PATTERN_SET_VAL(pattern),
 			   LINK_TRAINING_PATTERN_SET);
 
+	dp_link_write_mask(id, PCS_CONTROL, ~0, BIT_SWAP);
+
 	/* TPS1-3 must not be scrambled; real data and TPS4 must be. */
 	dp_reg_scrambling_enable(id, pattern == NORAMAL_DATA ||
 				     pattern == TRAINING_PATTERN_4);
