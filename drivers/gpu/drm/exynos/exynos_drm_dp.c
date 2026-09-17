@@ -4585,7 +4585,13 @@ exynos_drm_dp_bridge_detect(struct drm_bridge *bridge,
 {
 	struct exynos_drm_dp *dp = bridge_to_dp(bridge);
 
-	return exynos_drm_dp_is_hpd_connected(dp->subdev) ?
+	/*
+	 * The notified state, not the register: there is no HPD wire on USB-C,
+	 * SYSTEM_HPD_CONTROL only reads back what hpd_notify() forces into it,
+	 * and drm_bridge_connector_detect() feeds this straight back into
+	 * hpd_notify(). Reading the register closes that loop on itself.
+	 */
+	return dp->subdev->oob_plugged ?
 		connector_status_connected : connector_status_disconnected;
 }
 
@@ -4645,6 +4651,9 @@ static void exynos_drm_dp_bridge_hpd_notify(struct drm_bridge *bridge,
 	bool plugged = status == connector_status_connected;
 
 	dp_log_info(dp->dev, "HPD notify: %s\n", plugged ? "plug" : "unplug");
+
+	if (subdev->oob_plugged == plugged)
+		return;
 
 	subdev->oob_plugged = plugged;
 	dp_reg_set_hpd_force(subdev->id, plugged);
