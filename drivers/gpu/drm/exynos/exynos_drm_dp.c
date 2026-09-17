@@ -19,6 +19,7 @@
 #include <drm/drm_atomic_helper.h>	/* drm_atomic_helperxxx */
 
 #include <drm/drm_edid.h>
+#include <linux/hdmi.h>
 #include <drm/display/drm_dp_helper.h>
 #include <drm/display/drm_dp_mst_helper.h>
 #include <drm/display/drm_dsc_helper.h>
@@ -2755,6 +2756,60 @@ void dp_reg_set_snps_tx_data_en(u32 id, u8 lane_cnt)
 			   SNPS_TX_DATA_EN);
 }
 
+static void dp_reg_set_infoframe_data(u32 id, u32 offset, const u8 *data,
+				      u32 len)
+{
+	u32 word, i;
+
+	for (i = 0; i < len; i += 4) {
+		word = data[i];
+		if (i + 1 < len)
+			word |= data[i + 1] << 8;
+		if (i + 2 < len)
+			word |= data[i + 2] << 16;
+		if (i + 3 < len)
+			word |= data[i + 3] << 24;
+
+		dp_link_write(id, offset + i, word);
+	}
+}
+
+/*
+ * The vendor sends both of these on every enable, between the video config and
+ * VIDEO_EN. A sink bridging DP to HDMI builds its outgoing AVI InfoFrame from
+ * ours, and will not produce an output without one.
+ */
+static void dp_reg_send_avi_infoframe(u32 id, u32 sst_id, const u8 *data,
+				      u32 len)
+{
+	u32 offset = 0x1000 * sst_id;
+
+	dp_reg_set_infoframe_data(id, SST1_INFOFRAME_AVI_PACKET_DATA_SET0 +
+				  offset, data, len);
+	dp_link_write_mask(id, SST1_INFOFRAME_UPDATE_CONTROL + offset, ~0,
+			   AVI_INFO_UPDATE);
+	dp_link_write_mask(id, SST1_INFOFRAME_SEND_CONTROL + offset, ~0,
+			   AVI_INFO_SEND);
+}
+
+static void dp_reg_send_spd_infoframe(u32 id, u32 sst_id)
+{
+	u32 offset = 0x1000 * sst_id;
+	u8 data[SPD_INFOFRAME_LENGTH] = { 0 };
+
+	memcpy(&data[0], "Google", 6);	/* vendor name, bytes 1-8 */
+	memcpy(&data[8], "Pixel", 5);	/* product description, bytes 9-24 */
+
+	dp_link_write_mask(id, SST1_INFOFRAME_SPD_PACKET_TYPE + offset,
+			   INFOFRAME_PACKET_TYPE_SPD, SPD_TYPE);
+	dp_reg_set_infoframe_data(id, SST1_INFOFRAME_SPD_PACKET_DATA_SET0 +
+				  offset, data, sizeof(data));
+	dp_link_write_mask(id, SST1_INFOFRAME_UPDATE_CONTROL + offset, ~0,
+			   SPD_INFO_UPDATE);
+	dp_link_write_mask(id, SST1_INFOFRAME_SEND_CONTROL + offset, ~0,
+			   SPD_INFO_SEND);
+}
+
 static void dp_reg_lh_p_ch_power(u32 id, u32 sst_id, u32 en)
 {
 	u32 cnt = 20 * 1000; /* wait 1ms */
@@ -4024,6 +4079,11 @@ void exynos_drm_dp_stream_enable(struct exynos_dp_subdev *dp, dp_sst_idx_t sst_i
 	else
 		dp_reg_set_video_config(dp->id, dp_video_info);
 
+	if (vi->avi_len)
+		dp_reg_send_avi_infoframe(dp->id, vi->sst_id, vi->avi_data,
+					  vi->avi_len);
+	dp_reg_send_spd_infoframe(dp->id, vi->sst_id);
+
 	dp_reg_start(dp->id, vi->sst_id);
 
 	exynos_drm_dp_set_normal_data(dp);
@@ -4473,7 +4533,42 @@ void exynos_drm_dp_to_videoinfo(struct drm_encoder *encoder,
 	 */
 	struct drm_display_info *dp_info = &dp->connector->display_info;
 
+	struct hdmi_avi_infoframe frame;
+	u8 buf[HDMI_INFOFRAME_SIZE(AVI)];
+	int ret;
+
 	memset(vi, 0x0, sizeof(*vi));
+
+	/*
+	 * Pack the AVI InfoFrame here, where the mode and the connector are
+	 * both in hand; stream enable only writes it out. A DP-to-HDMI bridge
+	 * needs it to build its downstream output.
+	 */
+	ret = drm_hdmi_avi_infoframe_from_display_mode(&frame, dp->connector,
+						       mode);
+	if (ret < 0) {
+		dp_log_err(dev, "failed to set up AVI infoframe: %d\n", ret);
+	} else {
+		/* Not every mode matches a CEA VIC, and then this comes back
+		 * unset; the sink still wants a sane aspect ratio.
+		 */
+		if (frame.picture_aspect == HDMI_PICTURE_ASPECT_NONE) {
+			if (mode->hdisplay == mode->vdisplay * 16 / 9)
+				frame.picture_aspect = HDMI_PICTURE_ASPECT_16_9;
+			else if (mode->hdisplay == mode->vdisplay * 4 / 3)
+				frame.picture_aspect = HDMI_PICTURE_ASPECT_4_3;
+		}
+
+		ret = hdmi_avi_infoframe_pack(&frame, buf, sizeof(buf));
+		if (ret < 0) {
+			dp_log_err(dev, "failed to pack AVI infoframe: %d\n",
+				   ret);
+		} else {
+			/* buf[3] is the checksum, which the hardware fills in */
+			vi->avi_len = min_t(u8, buf[2], MAX_INFOFRAME_LENGTH);
+			memcpy(vi->avi_data, &buf[4], vi->avi_len);
+		}
+	}
 
 	drm_display_mode_to_videomode(mode, &vi->vm);
 	vi->vrefresh = drm_mode_vrefresh(mode);
