@@ -104,6 +104,23 @@
 	status = "okay";
 };
 
+/*
+ * DP alt mode output: the DECON1 -> DP pipe. DECON1 fetches through its
+ * own GF1 channel (dpp1), so disabling its unused planes no longer stops
+ * the GF0 fetch feeding the panel on DECON0.
+ */
+&decon1 {
+	status = "okay";
+};
+
+&dpp1 {
+	status = "okay";
+};
+
+&dp {
+	status = "okay";
+};
+
 &dpp0 {
 	status = "okay";
 };
