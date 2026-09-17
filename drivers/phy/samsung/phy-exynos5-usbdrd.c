@@ -4093,6 +4093,20 @@ static int zuma_usbdrd_phy_dp_set_mode(struct phy *phy, enum phy_mode mode,
 		       mode == PHY_MODE_DP ?
 		       ZUMA_USBDP_PHY_DP_AUX_CONFIG0_PWDNB : 0);
 
+	/*
+	 * Leaving DP mode means the lanes go back. set_lanes cleared
+	 * DPALT_DISABLE_ACK when it took them; without re-asserting it here the
+	 * TCA believes DP still owns them and every later mux switch sits out
+	 * the full VALID timeout, inside the TCPM port lock.
+	 */
+	if (mode != PHY_MODE_DP) {
+		zuma_dp_update(phy_drd, ZUMA_USBDP_PHY_DP_CONFIG13,
+			       ZUMA_USBDP_PHY_DP_CONFIG13_TX_DISABLE,
+			       ZUMA_USBDP_PHY_DP_CONFIG13_TX_DISABLE);
+		zuma_dp_set_pstate(phy_drd, 0);
+		zuma_ss_dpalt_disable_ack(phy_drd, true);
+	}
+
 	return 0;
 }
 
