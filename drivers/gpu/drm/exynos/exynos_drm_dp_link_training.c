@@ -185,9 +185,7 @@ static void exynos_dp_phy_init(struct exynos_dp_subdev *dp)
 
 	dp_log_info(dev, "GFMUX status %#x\n", dp_reg_get_gfmux_status(id));
 
-	/* SCRAMBLING_DISABLE, TRAINING_PATTERN_1 */
 	dp_reg_set_training_pattern(id, TRAINING_PATTERN_1);
-	dp_reg_scrambling_enable(id, 0);
 
 	dpcd_val[0] = DP_LINK_SCRAMBLING_DISABLE | DP_TRAINING_PATTERN_1;
 	drm_dp_dpcd_writeb(&dp->aux, DP_TRAINING_PATTERN_SET, dpcd_val[0]);
@@ -348,12 +346,9 @@ exynos_drm_dp_lt_training_pattern(struct exynos_dp_subdev *dp)
 
 	if (drm_dp_tps4_supported(dp->dpcd) && link_rate == DP_LINK_BW_8_1) {
 		dp_reg_set_training_pattern(id, TRAINING_PATTERN_4);
-		dp_reg_scrambling_enable(id, 1);
 		dp_log_dbg(dev, "TPS4_supported\n");
 		return DP_TRAINING_PATTERN_4;
 	}
-
-	dp_reg_scrambling_enable(id, 0);
 
 	if (drm_dp_tps3_supported(dp->dpcd) && link_rate >= DP_LINK_BW_5_4) {
 		dp_reg_set_training_pattern(id, TRAINING_PATTERN_3);
@@ -523,6 +518,8 @@ static int exynos_dp_full_link_training(struct exynos_dp_subdev *dp)
 LINK_TRAINING_END:
 	lt_done = cr_done && eq_done && !debug_lt;
 	dp_log_info(dev, "%s Full Link Training -\n", lt_done ? "Finished" : "Failed");
+	/* Stop sending a training pattern before the sink stops expecting one. */
+	dp_reg_set_training_pattern(dp->id, NORAMAL_DATA);
 	drm_dp_dpcd_writeb(&dp->aux, DP_TRAINING_PATTERN_SET, 0);
 
 	return lt_done ? 0 : -EINVAL;
