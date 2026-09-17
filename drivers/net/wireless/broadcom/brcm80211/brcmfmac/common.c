@@ -628,8 +628,13 @@ int brcmf_c_preinit_dcmds(struct brcmf_if *ifp)
 		brcmf_dbg(INFO, "CLM version = %s\n", clmver);
 	}
 
-	/* mpc: default -1 leaves the firmware self-preinit value untouched (vendor
-	 * parity, avoids the idle-5GHz VCO-cal trap); only force it if asked. */
+	/* mpc: default -1 leaves the firmware self-preinit value untouched, which is
+	 * vendor parity -- bcmdhd does not set mpc at bring-up either (its only two
+	 * call sites are in dhd_deepsleep(), under SUPPORT_DEEP_SLEEP, not built).
+	 * It does NOT avoid the idle-5GHz VCO-cal trap: -1 is the value that traps,
+	 * ~85% of runs within 25-43 s of the interface coming up. mpc=1 is what stops
+	 * it (939 s / 2 GB clean, A/B/A'd) at ~25% throughput, so it is a workaround
+	 * and not what the vendor does. Only force it if asked. */
 	if (brcmf_mpc >= 0) {
 		err = brcmf_fil_iovar_int_set(ifp, "mpc", brcmf_mpc);
 		if (err) {
