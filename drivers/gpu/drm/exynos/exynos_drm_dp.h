@@ -665,6 +665,10 @@ typedef enum exynos_dp_debug_lt {
 	DEBUG_LT_BW_NO_STEPDOWN,
 } dp_debug_lt;
 
+#define INFOFRAME_PACKET_TYPE_SPD	0x83
+#define SPD_INFOFRAME_LENGTH		25
+#define MAX_INFOFRAME_LENGTH		27
+
 struct exynos_dp_video_info {
 	struct videomode vm;	/* clock & resolution & porch */
 	bool hsync_pol;		/* polarity */
@@ -674,6 +678,10 @@ struct exynos_dp_video_info {
 
 	u32 sst_id;	/* dp_sst_idx_t - 1 */
 	enum dynamic_range_type dyn_range;
+
+	/* AVI InfoFrame data bytes, packed at mode set, sent at stream enable */
+	u8 avi_data[MAX_INFOFRAME_LENGTH];
+	u8 avi_len;
 
 	/* DSC */
 	struct {
