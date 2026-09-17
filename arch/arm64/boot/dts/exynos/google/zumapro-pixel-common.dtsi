@@ -502,6 +502,16 @@
 			typec-power-opmode = "default";
 
 			/*
+			 * Where the DP alt mode driver sends hotplug: it
+			 * resolves this reference and raises an out-of-band
+			 * event on the DRM connector whose fwnode matches,
+			 * which drm_bridge_connector turns into an HPD notify.
+			 * Undocumented in usb-connector.yaml, but it is what
+			 * dp_altmode_probe() looks for.
+			 */
+			displayport = <&dp>;
+
+			/*
 			 * dp_altmode_probe() intersects this against the
 			 * partner's pin assignments and refuses the mode if
 			 * nothing overlaps, so the port has to name its own:
