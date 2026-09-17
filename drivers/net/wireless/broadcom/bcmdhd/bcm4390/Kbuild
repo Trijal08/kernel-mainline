@@ -174,6 +174,13 @@ endif
 DHDCFLAGS += --std=gnu17
 DHDCFLAGS += -DOEM_ANDROID
 
+# NOTE(mainline): gates dhd_msg_level and dhd_console_ms as module params. Both
+# are perm 0644 but compiled out without this, so the dongle console -- the only
+# channel that names which firmware path raised a trap -- was unreachable, and
+# modprobe rejected the options in wifi.nix with "unknown parameter ignored".
+# Costs nothing at runtime: under OEM_ANDROID the console interval defaults to 0.
+DHDCFLAGS += -DDHD_DEBUG
+
 #################
 # Common feature
 #################
