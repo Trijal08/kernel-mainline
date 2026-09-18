@@ -15,15 +15,48 @@ description: |+
 
 allOf:
   - $ref: power-domain.yaml#
+  - if:
+      properties:
+        compatible:
+          const: google,zumapro-pd
+    then:
+      properties:
+        reg-names:
+          minItems: 1
+    else:
+      properties:
+        reg:
+          maxItems: 1
+        reg-names: false
+        samsung,always-on: false
+        samsung,secure-pd-id: false
 
 properties:
   compatible:
     enum:
+      - google,zumapro-pd
       - samsung,exynos4210-pd
       - samsung,exynos5433-pd
 
   reg:
-    maxItems: 1
+    minItems: 1
+    items:
+      - description: The domain's configuration and status registers in the PMU
+      - description: |
+          The register block of the clock controller (CMU) inside the domain.
+          The power sequence writes its controller option before the domain
+          goes down and, for a domain whose CMU has no clock provider, saves
+          and restores its clock state around the transition.
+      - description: |
+          The register block of the system registers (SYSREG) inside the
+          domain, saved and restored with the CMU.
+
+  reg-names:
+    minItems: 1
+    items:
+      - const: pmu
+      - const: cmu
+      - const: sysreg
 
   clocks:
     deprecated: true
@@ -43,6 +76,18 @@ properties:
 
   power-domains:
     maxItems: 1
+
+  samsung,always-on:
+    type: boolean
+    description:
+      Keep the domain powered while Linux lacks complete save/restore
+      sequencing for the domain.
+
+  samsung,secure-pd-id:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description:
+      Secure monitor power-domain identifier used by Tensor-class Exynos
+      firmware before power-down and after power-up.
 
 required:
   - compatible
@@ -65,4 +110,15 @@ examples:
         reg = <0x10044060 0x20>;
         #power-domain-cells = <0>;
         label = "MFC";
+    };
+
+  - |
+    display_pd: power-domain@15461d00 {
+        compatible = "google,zumapro-pd";
+        reg = <0x15461d00 0x20>, <0x19400000 0x10000>;
+        reg-names = "pmu", "cmu";
+        samsung,secure-pd-id = <0x19410204>;
+        samsung,always-on;
+        #power-domain-cells = <0>;
+        label = "DPUB";
     };
