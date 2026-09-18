@@ -2071,9 +2071,9 @@ static const struct samsung_cmu_info dpu_cmu_info __initconst = {
 #define PLL_LOCKTIME_PLL_USB								0x0
 #define PLL_CON0_PLL_USB								0x0100
 #define PLL_CON1_PLL_USB								0x0104
-#define PLL_CON2_PLL_USB								0x0148
+#define PLL_CON2_PLL_USB								0x0108
 #define PLL_CON3_PLL_USB								0x10c
-#define PLL_CON4_PLL_USB								0x0150
+#define PLL_CON4_PLL_USB								0x0110
 #define PLL_CON0_MUX_CLKCMU_HSI0_ALT_USER						0x600
 #define PLL_CON1_MUX_CLKCMU_HSI0_ALT_USER						0x604
 #define PLL_CON0_MUX_CLKCMU_HSI0_BUS_USER						0x0610
