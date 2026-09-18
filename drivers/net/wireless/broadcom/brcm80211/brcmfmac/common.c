@@ -79,7 +79,32 @@ MODULE_PARM_DESC(fcmode, "Mode of firmware signalled flow control");
  * (legacy behaviour, kept only for A/B bisecting the trap). */
 static int brcmf_mpc = -1;
 module_param_named(mpc, brcmf_mpc, int, 0644);
-MODULE_PARM_DESC(mpc, "Minimize Power Consumption at preinit: -1=leave firmware self-preinit default (default, true vendor parity, avoids the BCM4390 idle-5GHz VCO-cal trap), 0=force off, 1=force on");
+MODULE_PARM_DESC(mpc, "Minimize Power Consumption at preinit: -1=leave firmware self-preinit default (default, true vendor parity), 0=force off, 1=force on. NOTE mpc=1 also suppresses the BCM4390 wl2 VCO-cal trap (0/12 runs vs 8/12 at the default) but costs ~25% throughput; btc_mode is the real fix for that");
+
+/* BT coexistence at preinit. Default -1 leaves the nvram value alone, which is
+ * what the vendor driver does -- bcmdhd never writes this iovar at all, and the
+ * caiman/komodo nvram asks for coex ON (btc_mode=0x1).
+ *
+ * This used to be forced to 0 unconditionally, to stop the coex CPU's TX
+ * overrides faulting txq_hw_fill (NULL deref) under sustained TX. That write is
+ * what caused the idle-5GHz slice (wl2) to take a VCO-cal trap within ~25 s of
+ * associating: 36-run interleaved A/B, 8 traps in 12 runs at btc_mode=0 against
+ * 0 in 12 at btc_mode=1 (Fisher p ~ 0.0009), and the trap takes the whole
+ * datapath with it -- `iw dev ... link` then returns EIO while cfg80211 still
+ * reports the link up.
+ *
+ * The reasoning for the old write does not survive the dongle console: it argued
+ * the coex CPU has no firmware loaded, but the dongle resets, downloads and
+ * starts that CPU itself out of the same firmware package, before any host BT
+ * stack exists ("Coex cpu start", "SR Coex version: 2.0"). On BCM4390 that CPU
+ * arbitrates between the radio slices, not just against Bluetooth.
+ *
+ * The sustained-TX stall is real but is NOT coex-related: it reproduces with
+ * coex off (mpc=1 arm, stalled at ~13 GB) as well as on (~6 GB). Separate bug.
+ */
+static int brcmf_btc_mode = -1;
+module_param_named(btc_mode, brcmf_btc_mode, int, 0644);
+MODULE_PARM_DESC(btc_mode, "BT coexistence at preinit: -1=leave nvram value (default, vendor parity), 0=force off (reintroduces the BCM4390 wl2 VCO-cal trap), 1=force on");
 
 /* Power-save (WLC_SET_PM) at config-dongle. The vendor DHD's optimised (fw
  * self-preinit) path does NOT set PM -- it leaves the firmware default -- while
@@ -733,14 +758,12 @@ int brcmf_c_preinit_dcmds(struct brcmf_if *ifp)
 	 */
 
 
-	/* Disable BT coexistence. The komodo NVRAM enables it (btc_mode=0x1),
-	 * but when the companion Bluetooth core has no firmware loaded the WLAN
-	 * coex CPU spins on failed IPC to it ("BTCX override IPC err") and its
-	 * TX overrides leave the MAC hardware queue half-configured, faulting
-	 * txq_hw_fill (NULL deref) under sustained TX. With no BT to coexist
-	 * with, turn coex off so it stops touching the TX path.
+	/* BT coexistence: default -1 leaves the nvram value alone, which is what
+	 * the vendor driver does. Forcing it off here is what caused the BCM4390
+	 * idle-5GHz (wl2) VCO-cal trap -- see the brcmf_btc_mode comment above.
 	 */
-	(void)brcmf_fil_iovar_int_set(ifp, "btc_mode", 0);
+	if (brcmf_btc_mode >= 0)
+		(void)brcmf_fil_iovar_int_set(ifp, "btc_mode", brcmf_btc_mode);
 
 done:
 	return err;
