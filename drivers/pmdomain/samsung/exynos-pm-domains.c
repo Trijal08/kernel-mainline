@@ -9,7 +9,10 @@
 // conjunction with runtime-pm. Support for both device-tree and non-device-tree
 // based power domain support is included.
 
+#include <linux/arm-smccc.h>
+#include <linux/bits.h>
 #include <linux/io.h>
+#include <linux/iopoll.h>
 #include <linux/err.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
@@ -18,32 +21,15 @@
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/pm_runtime.h>
-#include <linux/regmap.h>
-#include <linux/arm-smccc.h>
-#include <linux/soc/samsung/exynos-pmu.h>
 
-/*
- * Secure PD transition SMC interface used by newer Exynos/Google SoCs.
- * "need_smc" DT property carries the secure transition ID.
- */
-#define EXYNOS_SMC_PREPARE_PD_ONOFF	0x82000410
-#define EXYNOS_GET_IN_PD_DOWN		0
-#define EXYNOS_WAKEUP_PD_DOWN		1
-#define EXYNOS_RUNTIME_PM_TZPC_GROUP	2
-
-/* Offset of the STATUS register relative to the CONFIGURATION register. */
-#define EXYNOS_PD_STATUS_OFFSET		0x4
+#include "exynos-pm-domains.h"
 
 struct exynos_pm_domain_config {
 	/* Value for LOCAL_PWR_CFG and STATUS fields for each domain */
 	u32 local_pwr_cfg;
-	/*
-	 * Tensor (gs101 and derivatives) keep the local-power CONFIGURATION
-	 * registers inside the EL3-protected PMU_ALIVE block: they can be read
-	 * over MMIO but only written through the secure PMU regmap. When set,
-	 * drive the domain via that regmap instead of a raw MMIO write.
-	 */
-	bool pmu_smc;
+	bool secure_pmu;
+	/* The vendor's power sequences, one entry per domain, then a sentinel */
+	const struct exynos_pd_sequences *sequences;
 };
 
 /*
@@ -51,33 +37,267 @@ struct exynos_pm_domain_config {
  */
 struct exynos_pm_domain {
 	void __iomem *base;
+	phys_addr_t base_addr;
 	struct generic_pm_domain pd;
 	u32 local_pwr_cfg;
-	u32 secure_transition_id;
-	bool needs_secure_transition;
-	/* Tensor secure-PMU access (pmu_smc domains). */
-	struct regmap *pmureg;
-	u32 pmu_offset;
-	bool pmu_smc;
+	u32 secure_pwr_id;
+	bool secure_pmu;
+
+	/* Only with vendor power sequences */
+	void __iomem *windows[EXYNOS_PD_NR_WINDOWS];
+	resource_size_t window_size[EXYNOS_PD_NR_WINDOWS];
+	const struct exynos_pd_sequences *seq;
+	/* One slot per step of seq->save; only the save steps are used */
+	u32 *saved;
+	bool have_saved;
 };
 
-static int exynos_pd_secure_prepare(struct exynos_pm_domain *pd, bool power_on)
+#define EXYNOS_PD_SMC_CMD		0x82000410
+#define EXYNOS_PD_SMC_SAVE		0
+#define EXYNOS_PD_SMC_RESTORE		1
+#define EXYNOS_PD_SMC_TZPC_GROUP	2
+#define EXYNOS_PRIV_REG_SMC_CMD		0x82000504
+#define EXYNOS_PRIV_REG_WRITE		1
+
+/*
+ * A PMU_ALIVE register below offset 0x4000 has a set-bit alias at
+ * offset | 0xc000 (and a clear-bit alias at offset | 0x8000), for registers
+ * that several masters share.
+ */
+#define EXYNOS_PMU_ALIVE_OFFSET_MASK	0xffff
+#define EXYNOS_PMU_ALIVE_ATOMIC_LIMIT	0x4000
+#define EXYNOS_PMU_SET_BITS_ALIAS	0xc000
+
+/* The vendor sequences poll a status for up to 5 ms */
+#define EXYNOS_PD_SEQ_TIMEOUT_US	5000
+
+static const char * const exynos_pd_window_names[EXYNOS_PD_NR_WINDOWS] = {
+	[EXYNOS_PD_PMU] = "pmu",
+	[EXYNOS_PD_CMU] = "cmu",
+	[EXYNOS_PD_SYSREG] = "sysreg",
+};
+
+static void exynos_pd_secure_control(struct exynos_pm_domain *pd, bool power_on)
 {
 	struct arm_smccc_res res;
-	unsigned long mode = power_on ? EXYNOS_WAKEUP_PD_DOWN :
-				       EXYNOS_GET_IN_PD_DOWN;
 
-	arm_smccc_smc(EXYNOS_SMC_PREPARE_PD_ONOFF, mode,
-		      pd->secure_transition_id, EXYNOS_RUNTIME_PM_TZPC_GROUP,
+	if (!pd->secure_pwr_id)
+		return;
+
+	arm_smccc_smc(EXYNOS_PD_SMC_CMD,
+		      power_on ? EXYNOS_PD_SMC_RESTORE : EXYNOS_PD_SMC_SAVE,
+		      pd->secure_pwr_id, EXYNOS_PD_SMC_TZPC_GROUP,
 		      0, 0, 0, 0, &res);
 
-	/* PDDBG: expose the raw SMC result so we can tell if EL3 even honoured it */
-	pr_info("PDDBG: %s: SMC(0x%08x, mode=%lu, id=%#x, grp=%u) -> a0=%#lx a1=%#lx\n",
-		pd->pd.name, EXYNOS_SMC_PREPARE_PD_ONOFF, mode,
-		pd->secure_transition_id, EXYNOS_RUNTIME_PM_TZPC_GROUP,
-		res.a0, res.a1);
+	if (res.a0)
+		pr_warn("Power domain %s secure %s returned %lu\n",
+			pd->pd.name, power_on ? "restore" : "save", res.a0);
+}
 
-	return (int)res.a0;
+static int exynos_pd_write_pmu_secure(struct exynos_pm_domain *pd,
+				      phys_addr_t addr, u32 value)
+{
+	struct arm_smccc_res res;
+
+	arm_smccc_smc(EXYNOS_PRIV_REG_SMC_CMD, addr, EXYNOS_PRIV_REG_WRITE,
+		      value, 0, 0, 0, 0, &res);
+
+	if (res.a0) {
+		pr_err("Power domain %s secure PMU write to %pa returned %lu\n",
+		       pd->pd.name, &addr, res.a0);
+		return -EIO;
+	}
+
+	return 0;
+}
+
+static int exynos_pd_write_pmu(struct exynos_pm_domain *pd, u32 offset,
+			       u32 value)
+{
+	if (!pd->secure_pmu) {
+		writel_relaxed(value, pd->base + offset);
+		return 0;
+	}
+
+	return exynos_pd_write_pmu_secure(pd, pd->base_addr + offset, value);
+}
+
+static int exynos_pd_set_bits_pmu(struct exynos_pm_domain *pd, u32 offset,
+				  u32 value)
+{
+	phys_addr_t reg = pd->base_addr + offset;
+	phys_addr_t alias;
+
+	if (!pd->secure_pmu)
+		return -EOPNOTSUPP;
+
+	if ((reg & EXYNOS_PMU_ALIVE_OFFSET_MASK) >= EXYNOS_PMU_ALIVE_ATOMIC_LIMIT)
+		return -EINVAL;
+
+	alias = reg | EXYNOS_PMU_SET_BITS_ALIAS;
+
+	return exynos_pd_write_pmu_secure(pd, alias, value);
+}
+
+static void __iomem *exynos_pd_step_addr(struct exynos_pm_domain *pd,
+					 const struct exynos_pd_step *step)
+{
+	return pd->windows[step->window] + step->offset;
+}
+
+static int exynos_pd_step_write(struct exynos_pm_domain *pd,
+				const struct exynos_pd_step *step, u32 value)
+{
+	void __iomem *addr = exynos_pd_step_addr(pd, step);
+
+	if (step->mask != U32_MAX)
+		value = (readl(addr) & ~step->mask) | (value & step->mask);
+
+	if (step->window == EXYNOS_PD_PMU)
+		return exynos_pd_write_pmu(pd, step->offset, value);
+
+	writel(value, addr);
+	return 0;
+}
+
+static int exynos_pd_step_wait(struct exynos_pm_domain *pd,
+			       const struct exynos_pd_step *step)
+{
+	void __iomem *addr = exynos_pd_step_addr(pd, step);
+	u32 val;
+	int ret;
+
+	ret = readl_poll_timeout(addr, val, (val & step->mask) == step->value,
+				 10, EXYNOS_PD_SEQ_TIMEOUT_US);
+	if (ret)
+		pr_err("Power domain %s: %s +%#x reads %#x, waited for %#x under %#x\n",
+		       pd->pd.name, exynos_pd_window_names[step->window],
+		       step->offset, val, step->value, step->mask);
+
+	return ret;
+}
+
+enum exynos_pd_pass {
+	EXYNOS_PD_PASS_RUN,	/* the on and off sequences */
+	EXYNOS_PD_PASS_SAVE,	/* the save sequence, before power-off */
+	EXYNOS_PD_PASS_RESTORE,	/* the save sequence, after power-on */
+};
+
+/*
+ * The save pass only reads what the save steps name.  The other passes run
+ * the steps in order: a save step then writes back what was read, if
+ * anything was, and a skip-if step decides whether the step after it runs.
+ */
+static int exynos_pd_run_sequence(struct exynos_pm_domain *pd, const char *what,
+				  const struct exynos_pd_step *seq,
+				  unsigned int nr_steps, enum exynos_pd_pass pass)
+{
+	bool skip = false;
+	unsigned int i;
+	int ret = 0;
+
+	for (i = 0; i < nr_steps; i++) {
+		const struct exynos_pd_step *step = &seq[i];
+
+		if (pass == EXYNOS_PD_PASS_SAVE) {
+			if (step->op == EXYNOS_PD_OP_SAVE)
+				pd->saved[i] = readl(exynos_pd_step_addr(pd, step)) &
+					       step->mask;
+			continue;
+		}
+
+		if (skip) {
+			skip = false;
+			continue;
+		}
+
+		switch (step->op) {
+		case EXYNOS_PD_OP_WRITE:
+			ret = exynos_pd_step_write(pd, step, step->value);
+			break;
+		case EXYNOS_PD_OP_WAIT:
+			ret = exynos_pd_step_wait(pd, step);
+			break;
+		case EXYNOS_PD_OP_SAVE:
+			if (pass == EXYNOS_PD_PASS_RESTORE && pd->have_saved)
+				ret = exynos_pd_step_write(pd, step, pd->saved[i]);
+			break;
+		case EXYNOS_PD_OP_SKIP_IF:
+			skip = (readl(exynos_pd_step_addr(pd, step)) & step->mask) ==
+			       step->value;
+			break;
+		case EXYNOS_PD_OP_SET_BITS:
+			ret = exynos_pd_set_bits_pmu(pd, step->offset, step->value);
+			break;
+		case EXYNOS_PD_OP_DELAY:
+			fsleep(step->value);
+			break;
+		}
+
+		if (ret) {
+			pr_err("Power domain %s: %s sequence failed at step %u: %d\n",
+			       pd->pd.name, what, i, ret);
+			return ret;
+		}
+	}
+
+	return 0;
+}
+
+/*
+ * The vendor's order: save the CMU state, let the secure world save its
+ * part, then take the domain down; bring it up, let the secure world
+ * restore, then restore the CMU state.
+ */
+static int exynos_pd_sequence_power_on(struct exynos_pm_domain *pd)
+{
+	const struct exynos_pd_sequences *seq = pd->seq;
+	int ret;
+
+	ret = exynos_pd_run_sequence(pd, "on", seq->on, seq->nr_on,
+				     EXYNOS_PD_PASS_RUN);
+	if (ret)
+		return ret;
+
+	exynos_pd_secure_control(pd, true);
+
+	ret = exynos_pd_run_sequence(pd, "restore", seq->save, seq->nr_save,
+				     EXYNOS_PD_PASS_RESTORE);
+	pd->have_saved = false;
+
+	return ret;
+}
+
+static int exynos_pd_sequence_power_off(struct exynos_pm_domain *pd)
+{
+	const struct exynos_pd_sequences *seq = pd->seq;
+	int ret;
+
+	exynos_pd_run_sequence(pd, "save", seq->save, seq->nr_save,
+			       EXYNOS_PD_PASS_SAVE);
+	pd->have_saved = true;
+
+	exynos_pd_secure_control(pd, false);
+
+	ret = exynos_pd_run_sequence(pd, "off", seq->off, seq->nr_off,
+				     EXYNOS_PD_PASS_RUN);
+	if (!ret)
+		return 0;
+
+	/*
+	 * An off step that fails leaves the domain wherever the sequence got
+	 * to, and genpd keeps a domain whose power-off failed as on without
+	 * ever running the on callback for it again.  Try to make that true
+	 * by bringing it back up; the vendor kernel reboots at this point, so
+	 * there is no better recovery to copy.
+	 */
+	pr_err("Power domain %s: power-off failed, bringing it back up\n",
+	       pd->pd.name);
+	if (exynos_pd_sequence_power_on(pd))
+		pr_err("Power domain %s: could not bring it back up\n",
+		       pd->pd.name);
+
+	return ret;
 }
 
 static int exynos_pd_power(struct generic_pm_domain *domain, bool power_on)
@@ -85,146 +305,30 @@ static int exynos_pd_power(struct generic_pm_domain *domain, bool power_on)
 	struct exynos_pm_domain *pd;
 	void __iomem *base;
 	u32 timeout, pwr;
-	const char *op;
+	char *op;
+	int ret;
 
 	pd = container_of(domain, struct exynos_pm_domain, pd);
 	base = pd->base;
 
-	if (pd->pmu_smc) {
-		u32 val, before, cfg;
-		int polls = 0;
+	if (pd->seq)
+		return power_on ? exynos_pd_sequence_power_on(pd) :
+				  exynos_pd_sequence_power_off(pd);
 
-		/*
-		 * Power-off is a no-op for now. Tensor's PMU power-down is a
-		 * handshake that only completes once the block's clocks are
-		 * gated and its bus master is idle; the coordinated
-		 * clock/bus-idle sequencing the vendor cal framework performs is
-		 * not wired up here yet. Writing the config bit with the block
-		 * still active stalls the sequencer and wedges the APM (which
-		 * also serves the ACPM PMIC channel), so leave the domain in the
-		 * state the bootloader left it (on) instead of half-tearing it
-		 * down.
-		 */
-		if (!power_on)
-			return 0;
-
-		pwr = pd->local_pwr_cfg;
-
-		regmap_read(pd->pmureg, pd->pmu_offset + EXYNOS_PD_STATUS_OFFSET,
-			    &before);
-
-		/*
-		 * The CONFIGURATION register lives in the protected PMU block,
-		 * so the write is routed through the secure PMU regmap (SMC).
-		 * Writing the local-power bit kicks the PMU sequencer; the
-		 * matching STATUS bit reflects the result and is MMIO-readable.
-		 *
-		 * Use an explicit read/modify/plain-write instead of
-		 * regmap_update_bits(): on Tensor the PMU regmap turns
-		 * update_bits into a hardware atomic set/clear that targets an
-		 * aliased offset, which does not drive the local-power
-		 * sequencer. The vendor pmucal writes the full value, so mirror
-		 * that.
-		 */
-		regmap_read(pd->pmureg, pd->pmu_offset, &cfg);
-		cfg = (cfg & ~pd->local_pwr_cfg) | (pwr & pd->local_pwr_cfg);
-		regmap_write(pd->pmureg, pd->pmu_offset, cfg);
-
-		timeout = 10;
-		regmap_read(pd->pmureg, pd->pmu_offset + EXYNOS_PD_STATUS_OFFSET,
-			    &val);
-		while ((val & pd->local_pwr_cfg) != pwr && timeout--) {
-			usleep_range(80, 100);
-			regmap_read(pd->pmureg,
-				    pd->pmu_offset + EXYNOS_PD_STATUS_OFFSET,
-				    &val);
-			polls++;
-		}
-
-		/* PDDBG: did the secure config write actually move the status bit? */
-		pr_info("PDDBG: %s: pmu_smc power %s off=%#x status %#x->%#x polls=%d (%s)\n",
-			domain->name, power_on ? "on" : "off", pd->pmu_offset,
-			before & pd->local_pwr_cfg, val & pd->local_pwr_cfg, polls,
-			(val & pd->local_pwr_cfg) == pwr ? "ok" : "TIMEOUT");
-
-		if ((val & pd->local_pwr_cfg) != pwr) {
-			pr_err("exynos-pd: %s: power %s failed\n",
-			       domain->name, power_on ? "on" : "off");
-			return -ETIMEDOUT;
-		}
-
-		/*
-		 * Powering the block on is not enough: the block's bus master is
-		 * fenced off from DRAM by the DTZPC until the secure world reapplies
-		 * its runtime-PM protection group. The vendor cal path runs this
-		 * DTZPC restore SMC on every domain power-on alongside the PMU
-		 * sequence; without it, a master like the G3D GPU faults on its very
-		 * first DRAM access (its pagetable walk). Mirror that here.
-		 */
-		if (pd->needs_secure_transition) {
-			int sret = exynos_pd_secure_prepare(pd, power_on);
-
-			if (sret)
-				pr_err("exynos-pd: %s: DTZPC restore failed: %d\n",
-				       domain->name, sret);
-		}
-		return 0;
-	}
-
-	if (pd->needs_secure_transition) {
-		u32 raw_before = readl_relaxed(base + 0x4);
-		u32 before = raw_before & pd->local_pwr_cfg;
-		u32 raw_after, after;
-		int polls = 0;
-		int ret;
-
-		/* PDDBG: prove genpd actually asked us to toggle this domain */
-		pr_info("PDDBG: %s: power_%s ENTER, status@%p+4 raw=%#x masked=%#x cfg=%#x\n",
-			domain->name, power_on ? "on" : "off",
-			base, raw_before, before, pd->local_pwr_cfg);
-
-		ret = exynos_pd_secure_prepare(pd, power_on);
-		if (ret) {
-			pr_err("exynos-pd: %s: secure prepare %s failed: %d\n",
-			       domain->name, power_on ? "on" : "off", ret);
-			return ret;
-		}
-
-		/*
-		 * Secure world applies the transition; poll status to confirm
-		 * whether the local power state actually changed.
-		 */
-		timeout = 10;
-		pwr = power_on ? pd->local_pwr_cfg : 0;
-		raw_after = readl_relaxed(base + 0x4);
-		after = raw_after & pd->local_pwr_cfg;
-		while (after != pwr && timeout--) {
-			cpu_relax();
-			usleep_range(80, 100);
-			raw_after = readl_relaxed(base + 0x4);
-			after = raw_after & pd->local_pwr_cfg;
-			polls++;
-		}
-
-		/* PDDBG: did the PMU status register actually move? */
-		pr_info("PDDBG: %s: secure power %s raw %#x->%#x masked %#x->%#x polls=%d (%s)\n",
-			domain->name, power_on ? "on" : "off",
-			raw_before, raw_after, before, after, polls,
-			after == pwr ? "ok" : "TIMEOUT-status-never-changed");
-		return 0;
-	}
-
-	op = power_on ? "on" : "off";
-	pr_info("exynos-pd: %s: power %s\n", domain->name, op);
+	if (!power_on)
+		exynos_pd_secure_control(pd, false);
 
 	pwr = power_on ? pd->local_pwr_cfg : 0;
-	writel_relaxed(pwr, base);
+	ret = exynos_pd_write_pmu(pd, 0, pwr);
+	if (ret)
+		return ret;
 
 	/* Wait max 1ms */
 	timeout = 10;
 
 	while ((readl_relaxed(base + 0x4) & pd->local_pwr_cfg) != pwr) {
 		if (!timeout) {
+			op = (power_on) ? "enable" : "disable";
 			pr_err("Power domain %s %s failed\n", domain->name, op);
 			return -ETIMEDOUT;
 		}
@@ -232,6 +336,9 @@ static int exynos_pd_power(struct generic_pm_domain *domain, bool power_on)
 		cpu_relax();
 		usleep_range(80, 100);
 	}
+
+	if (power_on)
+		exynos_pd_secure_control(pd, true);
 
 	return 0;
 }
@@ -254,15 +361,10 @@ static const struct exynos_pm_domain_config exynos5433_cfg = {
 	.local_pwr_cfg		= 0xf,
 };
 
-/*
- * gs101 and its derivatives (Tensor) gate each local power domain with a
- * single bit in a CONFIGURATION register that only the secure world may write.
- * Reads (the paired STATUS register) go over MMIO, writes over the secure PMU
- * regmap.
- */
-static const struct exynos_pm_domain_config gs101_cfg = {
-	.local_pwr_cfg		= 0x1,
-	.pmu_smc		= true,
+static const struct exynos_pm_domain_config zumapro_cfg = {
+	.local_pwr_cfg		= BIT(0),
+	.secure_pmu		= true,
+	.sequences		= zumapro_pd_sequences,
 };
 
 static const struct of_device_id exynos_pm_domain_of_match[] = {
@@ -273,8 +375,8 @@ static const struct of_device_id exynos_pm_domain_of_match[] = {
 		.compatible = "samsung,exynos5433-pd",
 		.data = &exynos5433_cfg,
 	}, {
-		.compatible = "google,gs101-pd",
-		.data = &gs101_cfg,
+		.compatible = "google,zumapro-pd",
+		.data = &zumapro_cfg,
 	},
 	{ },
 };
@@ -289,16 +391,110 @@ static const char *exynos_get_domain_name(struct device *dev,
 	return devm_kstrdup_const(dev, name, GFP_KERNEL);
 }
 
+static int exynos_pd_check_sequence(struct exynos_pm_domain *pd,
+				    const char *what,
+				    const struct exynos_pd_step *seq,
+				    unsigned int nr_steps)
+{
+	unsigned int i;
+
+	for (i = 0; i < nr_steps; i++) {
+		const struct exynos_pd_step *step = &seq[i];
+
+		if (step->op == EXYNOS_PD_OP_DELAY)
+			continue;
+
+		if (step->window >= EXYNOS_PD_NR_WINDOWS ||
+		    !pd->windows[step->window]) {
+			pr_err("Power domain %s: %s step %u needs a %s window\n",
+			       pd->pd.name, what, i,
+			       step->window < EXYNOS_PD_NR_WINDOWS ?
+			       exynos_pd_window_names[step->window] : "?");
+			return -EINVAL;
+		}
+
+		if (step->offset + sizeof(u32) > pd->window_size[step->window]) {
+			pr_err("Power domain %s: %s step %u is outside the %s window\n",
+			       pd->pd.name, what, i,
+			       exynos_pd_window_names[step->window]);
+			return -EINVAL;
+		}
+	}
+
+	return 0;
+}
+
+/*
+ * The CMU and SYSREG windows are shared with the block's clock provider and
+ * with sibling domains, so they are mapped without being claimed.
+ */
+static int exynos_pd_init_sequences(struct platform_device *pdev,
+				    struct exynos_pm_domain *pd,
+				    const struct exynos_pm_domain_config *cfg)
+{
+	const struct exynos_pd_sequences *seq;
+	struct device *dev = &pdev->dev;
+	struct resource *res;
+	unsigned int i;
+	int ret;
+
+	for (seq = cfg->sequences; seq->pmu; seq++) {
+		if (seq->pmu == pd->base_addr) {
+			pd->seq = seq;
+			break;
+		}
+	}
+
+	if (!pd->seq) {
+		dev_err(dev, "no power sequence for the domain at %pa\n",
+			&pd->base_addr);
+		return -ENODEV;
+	}
+
+	for (i = EXYNOS_PD_CMU; i < EXYNOS_PD_NR_WINDOWS; i++) {
+		res = platform_get_resource_byname(pdev, IORESOURCE_MEM,
+						   exynos_pd_window_names[i]);
+		if (!res)
+			continue;
+
+		pd->windows[i] = devm_ioremap(dev, res->start,
+					      resource_size(res));
+		if (!pd->windows[i])
+			return -ENOMEM;
+		pd->window_size[i] = resource_size(res);
+	}
+
+	ret = exynos_pd_check_sequence(pd, "on", pd->seq->on, pd->seq->nr_on);
+	if (ret)
+		return ret;
+	ret = exynos_pd_check_sequence(pd, "save", pd->seq->save,
+				       pd->seq->nr_save);
+	if (ret)
+		return ret;
+	ret = exynos_pd_check_sequence(pd, "off", pd->seq->off,
+				       pd->seq->nr_off);
+	if (ret)
+		return ret;
+
+	if (pd->seq->nr_save) {
+		pd->saved = devm_kcalloc(dev, pd->seq->nr_save,
+					 sizeof(*pd->saved), GFP_KERNEL);
+		if (!pd->saved)
+			return -ENOMEM;
+	}
+
+	return 0;
+}
+
 static int exynos_pd_probe(struct platform_device *pdev)
 {
 	const struct exynos_pm_domain_config *pm_domain_cfg;
 	struct device *dev = &pdev->dev;
 	struct device_node *np = dev->of_node;
-	struct device_node *parent_np;
+	struct resource *res;
 	struct of_phandle_args child, parent;
 	struct exynos_pm_domain *pd;
 	int on, ret;
-	u32 secure_id;
 
 	pm_domain_cfg = of_device_get_match_data(dev);
 	pd = devm_kzalloc(dev, sizeof(*pd), GFP_KERNEL);
@@ -309,59 +505,31 @@ static int exynos_pd_probe(struct platform_device *pdev)
 	if (!pd->pd.name)
 		return -ENOMEM;
 
-	pd->base = of_iomap(np, 0);
-	if (!pd->base)
-		return -ENODEV;
+	pd->base = devm_platform_ioremap_resource(pdev, 0);
+	if (IS_ERR(pd->base))
+		return PTR_ERR(pd->base);
+
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	if (!res)
+		return -EINVAL;
+	pd->base_addr = res->start;
+	pd->windows[EXYNOS_PD_PMU] = pd->base;
+	pd->window_size[EXYNOS_PD_PMU] = resource_size(res);
+
+	of_property_read_u32(np, "samsung,secure-pd-id", &pd->secure_pwr_id);
 
 	pd->pd.power_off = exynos_pd_power_off;
 	pd->pd.power_on = exynos_pd_power_on;
 	pd->local_pwr_cfg = pm_domain_cfg->local_pwr_cfg;
-	pd->pmu_smc = pm_domain_cfg->pmu_smc;
+	pd->secure_pmu = pm_domain_cfg->secure_pmu;
 
-	if (pd->pmu_smc) {
-		struct resource res;
-
-		/*
-		 * The CONFIGURATION/STATUS registers sit inside the PMU_ALIVE
-		 * block. Grab the SMC-backed PMU regmap for writes; the offset
-		 * within that block is the low bits of the domain's reg address.
-		 */
-		pd->pmureg = exynos_get_pmu_regmap();
-		if (IS_ERR_OR_NULL(pd->pmureg)) {
-			iounmap(pd->base);
-			return dev_err_probe(dev,
-					     pd->pmureg ? PTR_ERR(pd->pmureg) :
-					     -EPROBE_DEFER,
-					     "no PMU regmap\n");
-		}
-		if (of_address_to_resource(np, 0, &res)) {
-			iounmap(pd->base);
-			return -EINVAL;
-		}
-		pd->pmu_offset = res.start & 0xffff;
+	if (pm_domain_cfg->sequences) {
+		ret = exynos_pd_init_sequences(pdev, pd, pm_domain_cfg);
+		if (ret)
+			return ret;
 	}
-
-	ret = of_property_read_u32(np, "need_smc", &secure_id);
-	if (!ret) {
-		/*
-		 * "need_smc" is the DTZPC handle the secure world uses to (re)apply
-		 * the domain's master-access protection on power transitions. This
-		 * is orthogonal to how the block itself is powered: a pmu_smc domain
-		 * (Tensor) still needs the DTZPC restore, so do not gate it on
-		 * !pmu_smc - the vendor cal path runs both.
-		 */
-		pd->needs_secure_transition = true;
-		pd->secure_transition_id = secure_id;
-	}
-	parent_np = of_parse_phandle(np, "power-domains", 0);
-	if (parent_np) {
-		if (!pd->pmu_smc && !pd->needs_secure_transition &&
-		    !of_property_read_u32(parent_np, "need_smc", &secure_id)) {
-			pd->needs_secure_transition = true;
-			pd->secure_transition_id = secure_id;
-		}
-		of_node_put(parent_np);
-	}
+	if (of_property_read_bool(np, "samsung,always-on"))
+		pd->pd.flags |= GENPD_FLAG_ALWAYS_ON;
 
 	/*
 	 * Some Samsung platforms with bootloaders turning on the splash-screen
@@ -374,49 +542,9 @@ static int exynos_pd_probe(struct platform_device *pdev)
 
 	on = readl_relaxed(pd->base + 0x4) & pd->local_pwr_cfg;
 
-	/* PDDBG: what does the PMU actually report before we override it? */
-	pr_info("PDDBG: %s: probe secure=%d raw_status=%#x hw_on=%#x cfg=%#x\n",
-		pd->pd.name, pd->needs_secure_transition,
-		readl_relaxed(pd->base + 0x4), on, pd->local_pwr_cfg);
-
-	if (pd->needs_secure_transition)
-		on = pd->local_pwr_cfg;
-
-	/*
-	 * PDDBG: genpd is told is_off=%d. If we assert "on" for a secure domain
-	 * that HW says is off, genpd will never call power_on and the block stays
-	 * dark while genpd believes it is lit.
-	 */
-	pr_info("PDDBG: %s: pm_genpd_init(is_off=%d)%s\n", pd->pd.name, !on,
-		(pd->needs_secure_transition && !(readl_relaxed(pd->base + 0x4) &
-		 pd->local_pwr_cfg)) ? " [OVERRIDE: HW says OFF!]" : "");
-
-	/*
-	 * A domain flagged samsung,always-on adopts the state the bootloader
-	 * handed over and is never gated by genpd.  The Tensor G3D domains rely
-	 * on this: their secure power-OFF handshake (the CMU sequence the
-	 * downstream pmucal runs around the transition) is not replicated here,
-	 * so letting genpd_power_off_unused or the GPU's runtime PM drive an
-	 * off->on cycle wedges the secure transition and resets the SoC.
-	 */
-	if (of_property_read_bool(np, "samsung,always-on"))
-		pd->pd.flags |= GENPD_FLAG_ALWAYS_ON;
-
-	pm_genpd_init(&pd->pd, NULL, !on);
-
-	/*
-	 * A domain the bootloader left powered on is registered with is_off=0,
-	 * so genpd never invokes our power_on callback - and the DTZPC master
-	 * grant that lives in that callback would never run. Apply it once here
-	 * so masters behind this domain (e.g. the G3D GPU) can reach DRAM from
-	 * first use rather than bus-faulting on their first transaction.
-	 */
-	if (pd->needs_secure_transition && on) {
-		int sret = exynos_pd_secure_prepare(pd, true);
-
-		pr_info("PDDBG: %s: probe-time DTZPC restore -> %d\n",
-			pd->pd.name, sret);
-	}
+	ret = pm_genpd_init(&pd->pd, NULL, !on);
+	if (ret)
+		return ret;
 
 	ret = of_genpd_add_provider_simple(np, &pd->pd);
 
