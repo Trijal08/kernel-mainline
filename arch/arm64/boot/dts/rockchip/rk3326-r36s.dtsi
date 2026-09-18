@@ -76,8 +76,20 @@
 		/*
 		 * Measured on the hardware: mux channel 0 is the RIGHT stick's
 		 * X and channel 3 is the LEFT stick's X - the opposite of what
-		 * the vendor driver's channel_mapping implies - and both read
-		 * backwards. The Y channels (1 and 2) are correct as-is.
+		 * the vendor driver's channel_mapping implies.
+		 *
+		 * The two sticks are wired mirrored, so polarity is per stick
+		 * rather than per axis. The left stick reads high towards up
+		 * and left and is declared descending; the right stick reads
+		 * low towards up and left and is declared ascending, like
+		 * rk3326-odroid-go3, which shares this SoC, the same 4:1
+		 * joystick_mux and the same 180..800 range.
+		 *
+		 * Raw values at full deflection:
+		 *   ch3  ABS_X   left 903   right  42
+		 *   ch1  ABS_Y   up   901   down   72
+		 *   ch0  ABS_RX  left   7   right 882
+		 *   ch2  ABS_RY  up    96   down  889
 		 */
 		axis@0 {
 			reg = <0>;
@@ -99,7 +111,7 @@
 			reg = <2>;
 			abs-flat = <32>;
 			abs-fuzz = <32>;
-			abs-range = <800 180>;
+			abs-range = <180 800>;
 			linux,code = <ABS_RY>;
 		};
 
