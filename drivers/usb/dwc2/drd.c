@@ -33,6 +33,18 @@ static void dwc2_ovr_init(struct dwc2_hsotg *hsotg)
 		gotgctl |= GOTGCTL_BVALOVAL | GOTGCTL_VBVALOVAL;
 	dwc2_writel(hsotg, gotgctl, GOTGCTL);
 
+	/*
+	 * Overriding the session keeps it permanently valid, so a cable
+	 * attaching later raises no session interrupt and nothing advances
+	 * op_state. Put the state machine where the override has just put the
+	 * hardware, or dwc2_hsotg_pullup() takes its "not in peripheral mode"
+	 * early return forever and the pull-up is never released.
+	 */
+	if (hsotg->role_sw_default_mode == USB_DR_MODE_HOST)
+		hsotg->op_state = OTG_STATE_A_HOST;
+	else if (hsotg->role_sw_default_mode == USB_DR_MODE_PERIPHERAL)
+		hsotg->op_state = OTG_STATE_B_PERIPHERAL;
+
 	spin_unlock_irqrestore(&hsotg->lock, flags);
 
 	dwc2_force_mode(hsotg, (hsotg->dr_mode == USB_DR_MODE_HOST) ||
