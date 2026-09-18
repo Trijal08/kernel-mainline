@@ -3615,6 +3615,7 @@
 		cmu_hsi0: clock-controller@11000000 {
 			compatible = "google,zuma-cmu-hsi0";
 			reg = <0x11000000 0x10000>;
+			power-domains = <&pd_hsi0>;
 			#clock-cells = <1>;
 
 			clocks = <&ext_24_5m>,
@@ -4398,6 +4399,7 @@
 		cmu_dpu: clock-controller@19400000 {
 			compatible = "google,zuma-cmu-dpu";
 			reg = <0x19400000 0x10000>;
+			power-domains = <&pd_dpub>;
 			#clock-cells = <1>;
 
 			clocks = <&ext_26m>,
