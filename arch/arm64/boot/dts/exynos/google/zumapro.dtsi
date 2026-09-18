@@ -938,205 +938,221 @@
 		 * SoC.  Mark both always-on to adopt the live state until the
 		 * off-sequence is implemented.
 		 */
-		pd_g3d: pd-g3d@15461A80 {
-			compatible = "google,gs101-pd";
-			reg = <0x15461A80 0x20>;
-			cal_id = <0xB1380000>;
-			need_smc = <0x1EE10204>;
-			cmu_id = <0x1EE00000>;
-			status = "okay";
-			skip-idle-ip;
+		pd_g3d: power-domain@15461a80 {
+			compatible = "google,zumapro-pd";
+			reg = <0x15461a80 0x20>,
+			      <0x1ee00000 0x10000>,
+			      <0x1ee20000 0x1000>;
+			reg-names = "pmu", "cmu", "sysreg";
+			samsung,secure-pd-id = <0x1ee10204>;
 			samsung,always-on;
 			#power-domain-cells = <0>;
+			label = "G3D";
 		};
-		pd_embedded_g3d: pd-embedded_g3d@15461C80 {
-			compatible = "google,gs101-pd";
-			reg = <0x15461C80 0x20>;
-			cal_id = <0xB1380001>;
-			status = "okay";
+		pd_embedded_g3d: power-domain@15461c80 {
+			compatible = "google,zumapro-pd";
+			reg = <0x15461c80 0x40>,
+			      <0x1ee00000 0x10000>;
+			reg-names = "pmu", "cmu";
 			power-domains = <&pd_g3d>;
 			samsung,always-on;
 			#power-domain-cells = <0>;
+			label = "G3D_CORES";
 		};
-		pd_dpub: pd-dpub@15461D00 {
-			compatible = "google,gs101-pd";
-			reg = <0x15461D00 0x20>;
-			cal_id = <0xB1380002>;
-			need_smc = <0x19410204>;
-			cmu_id = <0x19400000>;
-			status = "okay";
+		pd_dpub: power-domain@15461d00 {
+			compatible = "google,zumapro-pd";
+			reg = <0x15461d00 0x20>,
+			      <0x19400000 0x10000>,
+			      <0x19420000 0x1000>;
+			reg-names = "pmu", "cmu", "sysreg";
+			samsung,secure-pd-id = <0x19410204>;
 			#power-domain-cells = <0>;
-			skip-idle-ip;
+			label = "DPUB";
 		};
-		pd_dpuf0: pd-dpuf0@15461D80 {
-			compatible = "google,gs101-pd";
-			reg = <0x15461D80 0x20>;
-			cal_id = <0xB1380003>;
-			need_smc = <0x19810204>;
-			cmu_id = <0x19800000>;
-			status = "okay";
+		pd_dpuf0: power-domain@15461d80 {
+			compatible = "google,zumapro-pd";
+			reg = <0x15461d80 0x20>,
+			      <0x19800000 0x8000>,
+			      <0x19820000 0x1000>;
+			reg-names = "pmu", "cmu", "sysreg";
+			samsung,secure-pd-id = <0x19810204>;
 			power-domains = <&pd_dpub>;
 			#power-domain-cells = <0>;
-			skip-idle-ip;
+			label = "DPUF0";
 		};
-		pd_dpuf1: pd-dpuf1@15461E00 {
-			compatible = "google,gs101-pd";
-			reg = <0x15461E00 0x20>;
-			cal_id = <0xB1380004>;
-			need_smc = <0x19C10204>;
-			cmu_id = <0x19C00000>;
-			status = "okay";
+		pd_dpuf1: power-domain@15461e00 {
+			compatible = "google,zumapro-pd";
+			reg = <0x15461e00 0x20>,
+			      <0x19c00000 0x8000>,
+			      <0x19c20000 0x1000>;
+			reg-names = "pmu", "cmu", "sysreg";
+			samsung,secure-pd-id = <0x19c10204>;
 			power-domains = <&pd_dpub>;
 			#power-domain-cells = <0>;
-			skip-idle-ip;
+			label = "DPUF1";
 		};
-		pd_g2d: pd-g2d@15461E80 {
-			compatible = "google,gs101-pd";
-			reg = <0x15461E80 0x20>;
-			cal_id = <0xB1380005>;
-			need_smc = <0x1A810204>;
-			cmu_id = <0x1A800000>;
-			status = "okay";
+		pd_g2d: power-domain@15461e80 {
+			compatible = "google,zumapro-pd";
+			reg = <0x15461e80 0x20>,
+			      <0x1a800000 0x10000>,
+			      <0x1a820000 0x1000>;
+			reg-names = "pmu", "cmu", "sysreg";
+			samsung,secure-pd-id = <0x1a810204>;
 			#power-domain-cells = <0>;
+			label = "G2D";
 		};
-		pd_gdc: pd-gdc@15461F00 {
-			compatible = "google,gs101-pd";
-			reg = <0x15461F00 0x20>;
-			cal_id = <0xB1380006>;
-			need_smc = <0x1D410204>;
-			cmu_id = <0x1D400000>;
-			status = "okay";
+		pd_gdc: power-domain@15461f00 {
+			compatible = "google,zumapro-pd";
+			reg = <0x15461f00 0x20>,
+			      <0x1d400000 0x10000>,
+			      <0x1d420000 0x1000>;
+			reg-names = "pmu", "cmu", "sysreg";
+			samsung,secure-pd-id = <0x1d410204>;
 			#power-domain-cells = <0>;
+			label = "GDC";
 		};
-		pd_gse: pd-gse@15461F80 {
-			compatible = "google,gs101-pd";
-			reg = <0x15461F80 0x20>;
-			cal_id = <0xB1380007>;
-			need_smc = <0x1D810204>;
-			cmu_id = <0x1D800000>;
-			status = "okay";
+		pd_gse: power-domain@15461f80 {
+			compatible = "google,zumapro-pd";
+			reg = <0x15461f80 0x20>,
+			      <0x1d800000 0x10000>,
+			      <0x1d820000 0x1000>;
+			reg-names = "pmu", "cmu", "sysreg";
+			samsung,secure-pd-id = <0x1d810204>;
 			#power-domain-cells = <0>;
+			label = "GSE";
 		};
-		pd_mcsc: pd-mcsc@15462000 {
-			compatible = "google,gs101-pd";
-			reg = <0x15462000 0x20>;
-			cal_id = <0xB1380008>;
-			need_smc = <0x1D010204>;
-			cmu_id = <0x1D000000>;
-			status = "okay";
+		pd_mcsc: power-domain@15462000 {
+			compatible = "google,zumapro-pd";
+			reg = <0x15462000 0x20>,
+			      <0x1d000000 0x10000>,
+			      <0x1d020000 0x1000>;
+			reg-names = "pmu", "cmu", "sysreg";
+			samsung,secure-pd-id = <0x1d010204>;
 			#power-domain-cells = <0>;
+			label = "MCSC";
 		};
-		pd_mfc: pd-mfc@15462080 {
-			compatible = "google,gs101-pd";
-			reg = <0x15462080 0x20>;
-			cal_id = <0xB1380009>;
-			need_smc = <0x1A410204>;
-			cmu_id = <0x1A400000>;
-			status = "okay";
+		pd_mfc: power-domain@15462080 {
+			compatible = "google,zumapro-pd";
+			reg = <0x15462080 0x20>,
+			      <0x1a400000 0x10000>,
+			      <0x1a420000 0x1000>;
+			reg-names = "pmu", "cmu", "sysreg";
+			samsung,secure-pd-id = <0x1a410204>;
 			#power-domain-cells = <0>;
+			label = "MFC";
 		};
-		pd_rgbp: pd-rgbp@15462100 {
-			compatible = "google,gs101-pd";
-			reg = <0x15462100 0x20>;
-			cal_id = <0xB138000A>;
-			need_smc = <0x1C410204>;
-			cmu_id = <0x1C400000>;
-			status = "okay";
+		pd_rgbp: power-domain@15462100 {
+			compatible = "google,zumapro-pd";
+			reg = <0x15462100 0x20>,
+			      <0x1c400000 0x10000>,
+			      <0x1c420000 0x1000>;
+			reg-names = "pmu", "cmu", "sysreg";
+			samsung,secure-pd-id = <0x1c410204>;
 			#power-domain-cells = <0>;
+			label = "RGBP";
 		};
-		pd_tnr: pd-tnr@15462180 {
-			compatible = "google,gs101-pd";
-			reg = <0x15462180 0x20>;
-			cal_id = <0xB138000B>;
-			need_smc = <0x1CC10204>;
-			cmu_id = <0x1CC00000>;
-			status = "okay";
+		pd_tnr: power-domain@15462180 {
+			compatible = "google,zumapro-pd";
+			reg = <0x15462180 0x20>,
+			      <0x1cc00000 0x10000>,
+			      <0x1cc20000 0x1000>;
+			reg-names = "pmu", "cmu", "sysreg";
+			samsung,secure-pd-id = <0x1cc10204>;
 			#power-domain-cells = <0>;
+			label = "TNR";
 		};
-		pd_yuvp: pd-yuvp@15462200 {
-			compatible = "google,gs101-pd";
-			reg = <0x15462200 0x20>;
-			cal_id = <0xB138000C>;
-			need_smc = <0x1C810204>;
-			cmu_id = <0x1C800000>;
-			status = "okay";
+		pd_yuvp: power-domain@15462200 {
+			compatible = "google,zumapro-pd";
+			reg = <0x15462200 0x20>,
+			      <0x1c800000 0x10000>,
+			      <0x1c820000 0x1000>;
+			reg-names = "pmu", "cmu", "sysreg";
+			samsung,secure-pd-id = <0x1c810204>;
 			#power-domain-cells = <0>;
+			label = "YUVP";
 		};
-		pd_aoc: pd-aoc@15462280 {
-			compatible = "google,gs101-pd";
-			reg = <0x15462280 0x20>;
-			cal_id = <0xB138000D>;
-			need_smc = <0x19010204>;
-			cmu_id = <0x19000000>;
+		pd_aoc: power-domain@15462280 {
+			compatible = "google,zumapro-pd";
+			reg = <0x15462280 0x20>,
+			      <0x19000000 0x10000>;
+			reg-names = "pmu", "cmu";
+			samsung,secure-pd-id = <0x19010204>;
+			samsung,always-on;
+			#power-domain-cells = <0>;
+			label = "AOC";
 			status = "disabled";
-			#power-domain-cells = <0>;
 		};
-		pd_aur: pd-aur@15462300 {
-			compatible = "google,gs101-pd";
-			reg = <0x15462300 0x20>;
-			cal_id = <0xB138000E>;
-			need_smc = <0x20A10204>;
-			cmu_id = <0x20A00000>;
-			status = "okay";
+		pd_aur: power-domain@15462300 {
+			compatible = "google,zumapro-pd";
+			reg = <0x15462300 0x20>,
+			      <0x20a00000 0x10000>,
+			      <0x20a40000 0x1000>;
+			reg-names = "pmu", "cmu", "sysreg";
+			samsung,secure-pd-id = <0x20a10204>;
 			#power-domain-cells = <0>;
+			label = "AUR";
 		};
-		pd_bw: pd-bw@15462380 {
-			compatible = "google,gs101-pd";
-			reg = <0x15462380 0x20>;
-			cal_id = <0xB138000F>;
-			need_smc = <0x1A610204>;
-			cmu_id = <0x1A600000>;
-			status = "okay";
+		pd_bw: power-domain@15462380 {
+			compatible = "google,zumapro-pd";
+			reg = <0x15462380 0x20>,
+			      <0x1a600000 0x10000>,
+			      <0x1a620000 0x1000>;
+			reg-names = "pmu", "cmu", "sysreg";
+			samsung,secure-pd-id = <0x1a610204>;
 			#power-domain-cells = <0>;
+			label = "BW";
 		};
-		pd_eh: pd-eh@15462400 {
-			compatible = "google,gs101-pd";
-			reg = <0x15462400 0x20>;
-			cal_id = <0xB1380010>;
-			need_smc = <0x16C10204>;
-			cmu_id = <0x16C00000>;
-			status = "okay";
-			skip-idle-ip;
+		pd_eh: power-domain@15462400 {
+			compatible = "google,zumapro-pd";
+			reg = <0x15462400 0x20>,
+			      <0x16c00000 0x10000>,
+			      <0x16c20000 0x1000>;
+			reg-names = "pmu", "cmu", "sysreg";
+			samsung,secure-pd-id = <0x16c10204>;
 			#power-domain-cells = <0>;
+			label = "EH";
 		};
-		pd_ispfe: pd-ispfe@15462480 {
-			compatible = "google,gs101-pd";
-			reg = <0x15462480 0x20>;
-			cal_id = <0xB1380011>;
-			need_smc = <0x1C010204>;
-			cmu_id = <0x1C000000>;
-			status = "okay";
+		pd_ispfe: power-domain@15462480 {
+			compatible = "google,zumapro-pd";
+			reg = <0x15462480 0x20>,
+			      <0x1c000000 0x10000>,
+			      <0x1c020000 0x1000>;
+			reg-names = "pmu", "cmu", "sysreg";
+			samsung,secure-pd-id = <0x1c010204>;
 			#power-domain-cells = <0>;
+			label = "ISPFE";
 		};
-		pd_tpu: pd-tpu@15462500 {
-			compatible = "google,gs101-pd";
-			reg = <0x15462500 0x20>;
-			cal_id = <0xB1380012>;
-			need_smc = <0x1A310204>;
-			cmu_id = <0x1A300000>;
-			status = "okay";
+		pd_tpu: power-domain@15462500 {
+			compatible = "google,zumapro-pd";
+			reg = <0x15462500 0x20>,
+			      <0x1a300000 0x10000>,
+			      <0x1a320000 0x1000>;
+			reg-names = "pmu", "cmu", "sysreg";
+			samsung,secure-pd-id = <0x1a310204>;
 			#power-domain-cells = <0>;
+			label = "TPU";
 		};
-		pd_hsi0: pd-hsi0@15462A80 {
-			compatible = "google,gs101-pd";
-			reg = <0x15462A80 0x20>;
-			cal_id = <0xB1380018>;
-			need_smc = <0x11010204>;
-			cmu_id = <0x11000000>;
-			status = "okay";
+		pd_hsi0: power-domain@15462a80 {
+			compatible = "google,zumapro-pd";
+			reg = <0x15462a80 0x20>,
+			      <0x11000000 0x10000>,
+			      <0x11020000 0x1000>;
+			reg-names = "pmu", "cmu", "sysreg";
+			samsung,secure-pd-id = <0x11010204>;
 			#power-domain-cells = <0>;
-			power-down-ok = <0x3>;
-			skip-idle-ip;
+			label = "HSI0";
 		};
-		pd_hsi1: pd-hsi1@15462B00 {
+		pd_hsi1: power-domain@15462b00 {
 			/* BLK_HSI1: modem PCIe CH0 root complex (Gen3 x2) */
-			compatible = "google,gs101-pd";
-			reg = <0x15462B00 0x20>;
-			cal_id = <0xB1380019>;
-			need_smc = <0x12010204>;
-			cmu_id = <0x12000000>;
-			status = "okay";
+			compatible = "google,zumapro-pd";
+			reg = <0x15462b00 0x20>,
+			      <0x12000000 0x10000>,
+			      <0x12020000 0x1000>;
+			reg-names = "pmu", "cmu", "sysreg";
+			samsung,secure-pd-id = <0x12010204>;
+			samsung,always-on;
 			#power-domain-cells = <0>;
+			label = "HSI1";
 		};
 
 		efuse@10000000 {
