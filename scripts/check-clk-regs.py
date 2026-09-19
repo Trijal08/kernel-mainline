@@ -8,11 +8,13 @@ offsets claimed by two different names -- and a bogus offset is an SError that
 resets the SoC with no post-mortem, so each one has so far cost a reboot.
 
 The model is the trustworthy side: a mux, divider or PLL register that a MUX()
-DIV() or PLL() entry references is read and often written at probe, so its
-offset is proven good on live hardware. A gate register is weaker -- with
-auto_clock_gate its enable and disable are nops and only the gate-debug alias at
-offset + 0x4000 is ever read -- so gates are counted as modelled but are not
-proof. Anything in the list that not even the model names is a bare guess.
+DIV() or PLL() entry names is read at probe, so its offset has been exercised on
+live hardware. A gate register is weaker -- with auto_clock_gate its enable and
+disable are nops and only the gate-debug alias at offset + 0x4000 is ever read.
+
+This is the coarse pass. What an entry has to survive in the end is the vendor's
+own table: see scripts/vendor-clk-saves.py, which diffs every save list against
+the PMUCAL_SAVE_RESTORE rows of the Zuma power sequence for that domain.
 
 Reports, does not enforce: not every CMU follows the rule yet, and in
 auto_clock_gate mode nobody writes the gate registers, so "model offset missing
@@ -92,9 +94,8 @@ def audit(path):
                       if o not in model and o not in option]
         lost = [hex(o) for o in sorted(model - set(save))]
         if unverified:
-            print(f"  unverified (not in model): {len(unverified)}: "
+            print(f"  not named by any model clock: {len(unverified)}: "
                   + " ".join(unverified))
-            total += len(unverified)
         if lost:
             print(f"  model offsets not saved: {len(lost)}: " + " ".join(lost))
     print(f"{path}: {total} findings")
