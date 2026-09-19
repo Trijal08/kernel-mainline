@@ -2068,64 +2068,51 @@ static const struct samsung_cmu_info dpu_cmu_info __initconst = {
 #define QCH_CON_USB31DRD_QCH_SLV_LINK							0x3078
 #define QUEUE_CTRL_REG_BLK_HSI0_CMU_HSI0						0x3c00
 
+/*
+ * Registers to carry across a CMU_HSI0 power cycle: exactly the ones the clock
+ * framework itself can change while the domain is up -- the controller option,
+ * the PLL mux-user switches, the muxes, the dividers, the USI gates -- plus the
+ * two FOUT_USB registers this driver reads (parent, lock status).
+ *
+ * Modelled on the vendor driver for Tegu, whose CMU_HSI0 list is 18 entries
+ * with the same shape. The old list was 57 transcribed from a register dump
+ * that cannot be trusted: seven pairs of CMU_HSI0 gate registers claim the same
+ * offset (run scripts/check-clk-regs.py), so at least one of each pair points
+ * nowhere, and every bogus offset is an SError the moment this CMU suspends --
+ * no oops, no pstore, one reboot per discovery.
+ *
+ * Left out on purpose: the CLK_CON_GAT_* fabric gates -- with auto_clock_gate
+ * their enable and disable are nops, the framework only ever reads the
+ * gate-debug alias at offset + 0x4000, so no software path changes them. Also
+ * the PCH/QCH and QUEUE_CTRL link registers, CLKOUT_CON, and the PLL_CON1/2/4
+ * tuning registers. If any of them really does have to survive, the fix is to
+ * model the clock that uses it and read its offset from somewhere the driver
+ * already proves good, not to save a guess. If a consumer instead comes back
+ * dead after a resume, that is the same conclusion from the other side: its
+ * gate bit did have to be restored, and the offset has to be established, not
+ * guessed.
+ */
 static const unsigned long hsi0_clk_regs[] __initconst = {
-	PLL_LOCKTIME_PLL_USB,
 	PLL_CON0_PLL_USB,
-	PLL_CON1_PLL_USB,
-	PLL_CON2_PLL_USB,
 	PLL_CON3_PLL_USB,
-	PLL_CON4_PLL_USB,
 	PLL_CON0_MUX_CLKCMU_HSI0_ALT_USER,
-	PLL_CON1_MUX_CLKCMU_HSI0_ALT_USER,
+	PLL_CON0_MUX_CLKCMU_HSI0_BUS_USER,
 	PLL_CON0_MUX_CLKCMU_HSI0_TCXO_USER,
-	PLL_CON1_MUX_CLKCMU_HSI0_TCXO_USER,
 	PLL_CON0_MUX_CLKCMU_HSI0_USB20_USER,
-	PLL_CON1_MUX_CLKCMU_HSI0_USB20_USER,
 	PLL_CON0_MUX_CLKCMU_HSI0_USB31DRD_USER,
-	PLL_CON1_MUX_CLKCMU_HSI0_USB31DRD_USER,
 	PLL_CON0_MUX_CLKCMU_HSI0_USPDPDBG_USER,
 	PLL_CON0_MUX_CLKCMU_HSI0_DPOSC_USER,
-	PLL_CON1_MUX_CLKCMU_HSI0_USPDPDBG_USER,
 	HSI0_CMU_HSI0_CONTROLLER_OPTION,
-	CLKOUT_CON_BLK_HSI0_CMU_HSI0_CLKOUT0,
 	CLK_CON_MUX_MUX_CLK_HSI0_BUS,
 	CLK_CON_MUX_MUX_CLK_HSI0_USB20_REF,
 	CLK_CON_MUX_MUX_CLK_HSI0_USB31DRD,
-	CLK_CON_MUX_MUX_CLK_HSI0_USI2,
 	CLK_CON_DIV_DIV_CLK_HSI0_USB31DRD,
 	CLK_CON_DIV_DIV_CLK_HSI0_USI1,
 	CLK_CON_DIV_DIV_CLK_HSI0_USI2,
 	CLK_CON_DIV_DIV_CLK_HSI0_USI3,
-	CLK_CON_GAT_CLK_BLK_HSI0_UID_HSI0_CMU_HSI0_IPCLKPORT_PCLK,
-	CLK_CON_GAT_CLK_BLK_HSI0_UID_USB31DRD_IPCLKPORT_I_USB31DRD_SUSPEND_CLK_26,
-	CLK_CON_GAT_GOUT_BLK_HSI0_UID_D_TZPC_HSI0_IPCLKPORT_PCLK,
-	CLK_CON_GAT_GOUT_BLK_HSI0_UID_GPC_HSI0_IPCLKPORT_PCLK,
-	CLK_CON_GAT_GOUT_BLK_HSI0_UID_LHM_AXI_G_ETR_HSI0_IPCLKPORT_I_CLK,
-	CLK_CON_GAT_GOUT_BLK_HSI0_UID_LHM_AXI_P_AOCHSI0_IPCLKPORT_I_CLK,
-	CLK_CON_GAT_GOUT_BLK_HSI0_UID_LHM_AXI_P_HSI0_IPCLKPORT_I_CLK,
-	CLK_CON_GAT_GOUT_BLK_HSI0_UID_LHS_ACEL_D_HSI0_IPCLKPORT_I_CLK,
-	CLK_CON_GAT_GOUT_BLK_HSI0_UID_LHS_AXI_D_HSI0AOC_IPCLKPORT_I_CLK,
-	CLK_CON_GAT_GOUT_BLK_HSI0_UID_PPMU_HSI0_AOC_IPCLKPORT_ACLK,
-	CLK_CON_GAT_GOUT_BLK_HSI0_UID_PPMU_HSI0_AOC_IPCLKPORT_PCLK,
-	CLK_CON_GAT_GOUT_BLK_HSI0_UID_PPMU_HSI0_BUS0_IPCLKPORT_PCLK,
-	CLK_CON_GAT_GOUT_BLK_HSI0_UID_RSTNSYNC_CLK_HSI0_BUS_IPCLKPORT_CLK,
-	CLK_CON_GAT_GOUT_BLK_HSI0_UID_UASC_HSI0_LINK_IPCLKPORT_ACLK,
-	CLK_CON_GAT_GOUT_BLK_HSI0_UID_UASC_HSI0_LINK_IPCLKPORT_PCLK,
-	CLK_CON_GAT_GOUT_BLK_HSI0_UID_USB31DRD_IPCLKPORT_ACLK_PHYCTRL,
-	CLK_CON_GAT_GOUT_BLK_HSI0_UID_USB31DRD_IPCLKPORT_BUS_CLK_EARLY,
-	CLK_CON_GAT_GOUT_BLK_HSI0_UID_USB31DRD_IPCLKPORT_I_USB20_PHY_REFCLK_26,
-	CLK_CON_GAT_GOUT_BLK_HSI0_UID_USB31DRD_IPCLKPORT_I_USB31DRD_REF_CLK_40,
-	CLK_CON_GAT_GOUT_BLK_HSI0_UID_USB31DRD_IPCLKPORT_I_USBDPPHY_REF_SOC_PLL,
-	CLK_CON_GAT_GOUT_BLK_HSI0_UID_USB31DRD_IPCLKPORT_I_USBDPPHY_SCL_APB_PCLK,
-	CLK_CON_GAT_GOUT_BLK_HSI0_UID_USB31DRD_IPCLKPORT_I_USBPCS_APB_CLK,
-	CLK_CON_GAT_GOUT_BLK_HSI0_UID_USB31DRD_IPCLKPORT_USBDPPHY_I_ACLK,
-	CLK_CON_GAT_GOUT_BLK_HSI0_UID_XIU_D0_HSI0_IPCLKPORT_ACLK,
-	CLK_CON_GAT_GOUT_BLK_HSI0_UID_XIU_D1_HSI0_IPCLKPORT_ACLK,
-	CLK_CON_GAT_GOUT_BLK_HSI0_UID_XIU_P_HSI0_IPCLKPORT_ACLK,
 	CLK_CON_GAT_GATE_CLK_HSI0_USI1,
 	CLK_CON_GAT_GATE_CLK_HSI0_USI2,
 	CLK_CON_GAT_GATE_CLK_HSI0_USI3,
-	QUEUE_CTRL_REG_BLK_HSI0_CMU_HSI0,
 };
 
 /* List of parent clocks for Muxes in CMU_HSI0 */
