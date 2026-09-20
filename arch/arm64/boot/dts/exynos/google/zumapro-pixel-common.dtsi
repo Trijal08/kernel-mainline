@@ -269,7 +269,7 @@
 				/* UFS/MIPI PLL rail on zumapro */
 				regulator-name = "vdd_ufs_pll";
 				regulator-min-microvolt = <700000>;
-				regulator-max-microvolt = <1300000>;
+				regulator-max-microvolt = <1087500>;
 				regulator-always-on;
 			};
 
