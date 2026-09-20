@@ -763,6 +763,7 @@ static enum drm_gpu_sched_stat panfrost_job_timedout(struct drm_sched_job
 	struct panfrost_job *job = to_panfrost_job(sched_job);
 	struct panfrost_device *pfdev = job->pfdev;
 	int js = panfrost_job_get_slot(job);
+	int ret;
 
 	/*
 	 * If the GPU managed to complete this jobs fence, the timeout has
@@ -787,6 +788,27 @@ static enum drm_gpu_sched_stat panfrost_job_timedout(struct drm_sched_job
 		return DRM_GPU_SCHED_STAT_NO_HANG;
 	}
 
+	/*
+	 * Everything below this point touches GPU registers: the status dump,
+	 * the core dump and the reset sequence itself. None of that is safe
+	 * unless the GPU is powered.
+	 *
+	 * A timeout can race with runtime suspend, and on SoCs whose GPU power
+	 * domain fails its idle handshake the domain can end up gated while
+	 * the job is still considered in flight. The first register read then
+	 * raises a synchronous external abort, which is fatal - a hung job
+	 * takes the whole machine down instead of being reset. Resume the
+	 * device first, and if it cannot be resumed, report the timeout
+	 * without touching the hardware.
+	 */
+	ret = pm_runtime_resume_and_get(pfdev->base.dev);
+	if (ret < 0) {
+		dev_err(pfdev->base.dev,
+			"gpu sched timeout, js=%d, sched_job=%p (GPU not resumable: %d, skipping dump and reset)",
+			js, sched_job, ret);
+		return DRM_GPU_SCHED_STAT_RESET;
+	}
+
 	dev_err(pfdev->base.dev, "gpu sched timeout, js=%d, config=0x%x, status=0x%x, head=0x%x, tail=0x%x, sched_job=%p",
 		js,
 		job_read(pfdev, JS_CONFIG(js)),
@@ -799,6 +821,8 @@ static enum drm_gpu_sched_stat panfrost_job_timedout(struct drm_sched_job
 
 	atomic_set(&pfdev->reset.pending, 1);
 	panfrost_reset(pfdev, sched_job);
+
+	pm_runtime_put_autosuspend(pfdev->base.dev);
 
 	return DRM_GPU_SCHED_STAT_RESET;
 }
