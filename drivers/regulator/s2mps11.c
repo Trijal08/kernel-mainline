@@ -1799,6 +1799,9 @@ S2MPG10_VOLTAGE_RANGE(s2mpg15_buck, 2, 600000, 600000, 3787500, STEP_12_5_MV);
 /* voltage range for s2mpg15 LDO 1 */
 S2MPG10_VOLTAGE_RANGE(s2mpg15_ldo, 1, 300000, 700000, 1300000, STEP_12_5_MV);
 
+/* voltage range for s2mpg15 LDO 2 (64 selectors, bits 5:0) */
+S2MPG10_VOLTAGE_RANGE(s2mpg15_ldo, 2, 300000, 700000, 1087500, STEP_12_5_MV);
+
 /* voltage range for s2mpg15 LDO 9 */
 S2MPG10_VOLTAGE_RANGE(s2mpg15_ldo, 9, 725000, 725000, 1512500, STEP_12_5_MV);
 
@@ -1867,7 +1870,14 @@ S2MPG10_VOLTAGE_RANGE(s2mpg15_ldo, 10, 700000, 700000, 2275000, STEP_25_MV);
 	.ramp_delay	= 12500,					\
 }
 
-#define regulator_desc_s2mpg15_ldo(_num, _supply, _range) {		\
+/*
+ * The s2mpg15 LDO enable fields are not uniform: most LDOs switch on a
+ * single bit 7 of their own CTRL register, but LDO1S and LDO2S gate on
+ * two-bit fields in the shared LDO_CTRL1 register.  LDO1S also has a
+ * seven-bit voltage selector, so both masks are per-descriptor.
+ */
+#define regulator_desc_s2mpg15_ldo(_num, _supply, _range, _vmask,	\
+				   _eregreg, _emask) {			\
 	.name		= "ldo"#_num"s",				\
 	.supply_name	= _supply,					\
 	.of_match	= of_match_ptr("ldo"#_num"s"),			\
@@ -1880,9 +1890,9 @@ S2MPG10_VOLTAGE_RANGE(s2mpg15_ldo, 10, 700000, 700000, 2275000, STEP_25_MV);
 	.n_linear_ranges = ARRAY_SIZE(_range),				\
 	.n_voltages	= _range##_count,				\
 	.vsel_reg	= S2MPG15_PMIC_L##_num##S_CTRL,			\
-	.vsel_mask	= GENMASK(5, 0),				\
-	.enable_reg	= S2MPG15_PMIC_L##_num##S_CTRL,			\
-	.enable_mask	= GENMASK(7, 6),				\
+	.vsel_mask	= _vmask,					\
+	.enable_reg	= _eregreg,					\
+	.enable_mask	= _emask,					\
 }
 
 static const struct regulator_desc s2mpg14_regulators[] = {
@@ -1949,12 +1959,22 @@ static const struct regulator_desc s2mpg15_regulators[] = {
 		.enable_mask	= GENMASK(7, 6),
 		.ramp_delay	= 12500,
 	},
-	regulator_desc_s2mpg15_ldo(1, "vinl1s", s2mpg15_ldo_vranges1),
-	regulator_desc_s2mpg15_ldo(2, "vinl2s", s2mpg15_ldo_vranges1),
+	regulator_desc_s2mpg15_ldo(1, "vinl1s", s2mpg15_ldo_vranges1,
+				   GENMASK(6, 0), S2MPG15_PMIC_LDO_CTRL1,
+				   GENMASK(1, 0)),
+	regulator_desc_s2mpg15_ldo(2, "vinl2s", s2mpg15_ldo_vranges2,
+				   GENMASK(5, 0), S2MPG15_PMIC_LDO_CTRL1,
+				   GENMASK(3, 2)),
 	/* GNSS core, RF and aux rails */
-	regulator_desc_s2mpg15_ldo(9, "vinl9s", s2mpg15_ldo_vranges9),
-	regulator_desc_s2mpg15_ldo(10, "vinl10s", s2mpg15_ldo_vranges10),
-	regulator_desc_s2mpg15_ldo(11, "vinl11s", s2mpg15_ldo_vranges10),
+	regulator_desc_s2mpg15_ldo(9, "vinl9s", s2mpg15_ldo_vranges9,
+				   GENMASK(5, 0), S2MPG15_PMIC_L9S_CTRL,
+				   BIT(7)),
+	regulator_desc_s2mpg15_ldo(10, "vinl10s", s2mpg15_ldo_vranges10,
+				   GENMASK(5, 0), S2MPG15_PMIC_L10S_CTRL,
+				   BIT(7)),
+	regulator_desc_s2mpg15_ldo(11, "vinl11s", s2mpg15_ldo_vranges10,
+				   GENMASK(5, 0), S2MPG15_PMIC_L11S_CTRL,
+				   BIT(7)),
 	/* AoC sensor rails; see s2mpg15_reg_enable_only_ops above */
 	regulator_desc_s2mpg15_ldo_en(5),
 	regulator_desc_s2mpg15_ldo_en(7),
