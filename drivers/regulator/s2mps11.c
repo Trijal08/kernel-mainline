@@ -1820,7 +1820,7 @@ S2MPG10_VOLTAGE_RANGE(s2mpg15_ldo, 10, 700000, 700000, 2275000, STEP_25_MV);
 	.linear_ranges	= _range,					\
 	.n_linear_ranges = ARRAY_SIZE(_range),				\
 	.n_voltages	= _range##_count,				\
-	.vsel_reg	= S2MPG14_PMIC_B##_num##M_OUT1,			\
+	.vsel_reg	= S2MPG14_PMIC_B##_num##M_OUT0,			\
 	.vsel_mask	= GENMASK(7, 0),				\
 	.enable_reg	= S2MPG14_PMIC_B##_num##M_CTRL,			\
 	.enable_mask	= GENMASK(7, 6),				\
