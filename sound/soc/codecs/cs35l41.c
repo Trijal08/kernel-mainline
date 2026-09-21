@@ -1466,6 +1466,14 @@ static int cs35l41_runtime_suspend(struct device *dev)
 	if (!cs35l41->dsp.preloaded || !cs35l41->dsp.cs_dsp.running)
 		return 0;
 
+	/*
+	 * nosync: the threaded handler's first act is to resume the device, so
+	 * waiting for it to drain here would deadlock against the suspend it is
+	 * waiting on -- and an interrupt in exactly this window is the case
+	 * being suppressed, not a rare one.
+	 */
+	disable_irq_nosync(cs35l41->irq);
+
 	wm_adsp_hibernate(&cs35l41->dsp, true);
 	cs35l41_enter_hibernate(dev, cs35l41->regmap, cs35l41->hw_cfg.bst_type);
 
@@ -1487,7 +1495,9 @@ static int cs35l41_runtime_resume(struct device *dev)
 
 	regcache_cache_only(cs35l41->regmap, false);
 
+	/* Only once the part is back up, so INTB has been released */
 	ret = cs35l41_exit_hibernate(cs35l41->dev, cs35l41->regmap);
+	enable_irq(cs35l41->irq);
 	if (ret)
 		return ret;
 
