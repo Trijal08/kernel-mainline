@@ -788,6 +788,7 @@
 	role-switch-default-mode = "peripheral";
 	status = "okay";
 	usb-role-switch;
+	vbus-supply = <&vcc_host>;
 };
 
 &vopb {
