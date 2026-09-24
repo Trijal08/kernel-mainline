@@ -376,6 +376,8 @@
 		enable-active-high;
 		pinctrl-names = "default";
 		pinctrl-0 = <&vcc5_usb>;
+		regulator-always-on;
+		regulator-boot-on;
 		vin-supply = <&usb_midu>;
 	};
 
@@ -786,16 +788,6 @@
 	role-switch-default-mode = "peripheral";
 	status = "okay";
 	usb-role-switch;
-
-	/*
-	 * dwc2 enables this entering host mode and disables it leaving, so in
-	 * peripheral mode the port is powered by whatever it is plugged into.
-	 * That is what makes the session track the cable: the vendor tree
-	 * marks the switch regulator-always-on, which leaves B-session-valid
-	 * stuck high, so unplugging raises no session end and plugging back in
-	 * raises no session start - the gadget never re-asserts its pull-up
-	 * and the host sees nothing until the gadget is torn down and rebuilt.
-	 */
 	vbus-supply = <&vcc_host>;
 };
 
