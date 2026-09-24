@@ -27,10 +27,24 @@ static void dwc2_ovr_init(struct dwc2_hsotg *hsotg)
 	gotgctl = dwc2_readl(hsotg, GOTGCTL);
 	dwc2_ovr_gotgctl(gotgctl);
 	gotgctl &= ~(GOTGCTL_BVALOVAL | GOTGCTL_AVALOVAL | GOTGCTL_VBVALOVAL);
-	if (hsotg->role_sw_default_mode == USB_DR_MODE_HOST)
+	if (hsotg->role_sw_default_mode == USB_DR_MODE_HOST) {
 		gotgctl |= GOTGCTL_AVALOVAL | GOTGCTL_VBVALOVAL;
-	else if (hsotg->role_sw_default_mode == USB_DR_MODE_PERIPHERAL)
-		gotgctl |= GOTGCTL_BVALOVAL | GOTGCTL_VBVALOVAL;
+	} else if (hsotg->role_sw_default_mode == USB_DR_MODE_PERIPHERAL) {
+		/*
+		 * Leave the B-session and VBUS inputs alone so the PHY's own
+		 * sensing still drives them. Overriding them pins the session
+		 * valid for good, and a session that is already valid raises no
+		 * interrupt when a cable is attached, so nothing ever connects
+		 * the gadget: a board booted without a cable stays silent for
+		 * the rest of its uptime however many times one is plugged in.
+		 *
+		 * The override is there for boards whose role switch is driven
+		 * by a Type-C controller and which cannot sense VBUS at all.
+		 * Where the PHY can, the hardware is the better source, and
+		 * role_sw_set() still forces a session for a userspace switch.
+		 */
+		gotgctl &= ~(GOTGCTL_BVALOEN | GOTGCTL_VBVALOEN);
+	}
 	dwc2_writel(hsotg, gotgctl, GOTGCTL);
 
 	/*
@@ -153,6 +167,19 @@ static int dwc2_drd_role_sw_set(struct usb_role_switch *sw, enum usb_role role)
 	} else if (role == USB_ROLE_DEVICE) {
 		already = dwc2_ovr_bvalid(hsotg, true);
 		if (dwc2_is_device_enabled(hsotg)) {
+			/*
+			 * Set the core up before attaching it. Connecting on its
+			 * own leaves the endpoints and FIFOs as the previous
+			 * session left them, so the host finds a device that
+			 * never answers:
+			 *
+			 *   usb 1-1: new high-speed USB device number 37
+			 *   usb 1-1: device descriptor read/64, error -110
+			 *
+			 * This is the same order dwc2_hsotg_pullup() uses.
+			 */
+			dwc2_hsotg_core_init_disconnected(hsotg, false);
+			dwc2_enable_acg(hsotg);
 			/* This clear DCTL.SFTDISCON bit */
 			dwc2_hsotg_core_connect(hsotg);
 		}
