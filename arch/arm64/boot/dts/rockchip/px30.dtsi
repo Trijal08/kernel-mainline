@@ -341,7 +341,8 @@
 			};
 			power-domain@PX30_PD_GPU {
 				reg = <PX30_PD_GPU>;
-				clocks = <&cru SCLK_GPU>;
+				clocks = <&cru SCLK_GPU>,
+					 <&cru ACLK_GPU>;
 				pm_qos = <&qos_gpu>;
 				#power-domain-cells = <0>;
 			};
