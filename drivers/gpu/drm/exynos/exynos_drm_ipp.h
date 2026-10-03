@@ -136,7 +136,6 @@ void exynos_drm_ipp_task_done(struct exynos_drm_ipp_task *task, int ret);
 #ifdef CONFIG_DRM_EXYNOS_IPP
 int exynos_drm_ipp_get_res_ioctl(struct drm_device *dev, void *data,
 				 struct drm_file *file_priv);
-int exynos_drm_ipp_count(void);
 int exynos_drm_ipp_get_caps_ioctl(struct drm_device *dev, void *data,
 				  struct drm_file *file_priv);
 int exynos_drm_ipp_get_limits_ioctl(struct drm_device *dev, void *data,
@@ -150,10 +149,6 @@ static inline int exynos_drm_ipp_get_res_ioctl(struct drm_device *dev,
 	struct drm_exynos_ioctl_ipp_get_res *resp = data;
 
 	resp->count_ipps = 0;
-	return 0;
-}
-static inline int exynos_drm_ipp_count(void)
-{
 	return 0;
 }
 static inline int exynos_drm_ipp_get_caps_ioctl(struct drm_device *dev,
