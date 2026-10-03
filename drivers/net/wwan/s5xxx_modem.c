@@ -729,9 +729,9 @@ static int s5xxx_open_bridge_window(struct s5xxx_modem *sm)
 
 	pci_read_config_dword(bridge, PCI_MEMORY_BASE, &val);
 	if (val != want) {
-		dev_info(sm->dev,
-			 "opening root-port memory window %#x-%#x (was %#010x)\n",
-			 base, limit, val);
+		dev_dbg(sm->dev,
+			"opening root-port memory window %#x-%#x (was %#010x)\n",
+			base, limit, val);
 		pci_write_config_dword(bridge, PCI_MEMORY_BASE, want);
 		pci_read_config_dword(bridge, PCI_MEMORY_BASE, &val);
 		if (val != want) {
@@ -1022,7 +1022,7 @@ static void s5xxx_pm_work(struct work_struct *work)
 			 */
 			sm->main_armed = true;
 			spin_unlock_irqrestore(&sm->lock, flags);
-			dev_info(sm->dev, "CP wakeup: link up (MAIN armed)\n");
+			dev_dbg(sm->dev, "CP wakeup: link up (MAIN armed)\n");
 		} else {
 			dev_err(sm->dev, "CP wakeup: relink failed\n");
 		}
@@ -1072,7 +1072,7 @@ static void s5xxx_pm_work(struct work_struct *work)
 
 			if (park) {
 				zumapro_pcie_modem_link_down(sm->rc_dev);
-				dev_info(sm->dev, "CP sleep: link down (parked)\n");
+				dev_dbg(sm->dev, "CP sleep: link down (parked)\n");
 			}
 		}
 	}
@@ -1113,7 +1113,7 @@ static irqreturn_t s5xxx_cp2ap_wakeup_irq(int irq, void *data)
 	int up = gpiod_get_value(sm->cp2ap_wakeup);
 
 	WRITE_ONCE(sm->cp_wants_up, up);
-	dev_info(sm->dev, "CP2AP_WAKEUP irq: level %d\n", up);
+	dev_dbg(sm->dev, "CP2AP_WAKEUP irq: level %d\n", up);
 	queue_work(sm->pm_wq, &sm->pm_work);
 	return IRQ_HANDLED;
 }
@@ -2600,7 +2600,7 @@ static void s5xxx_drain_fmt_rxq(struct s5xxx_modem *sm, u32 intval)
 			 */
 			struct wwan_port *port = READ_ONCE(sc->port);
 
-			dev_info(sm->dev, "fmt rxq SIT ch %#x payload %u\n",
+			dev_dbg(sm->dev, "fmt rxq SIT ch %#x payload %u\n",
 				 hdr[8], plen);
 			if (port)
 				s5xxx_fmt_deliver(port, buff, out, plen);
@@ -2822,7 +2822,7 @@ static bool s5xxx_pktproc_ul_xmit(struct s5xxx_modem *sm, struct sk_buff *skb,
 	writel(slot, qinfo + 12);	/* fore_ptr (AP producer) */
 	spin_unlock_irqrestore(&sm->tx_lock, flags);
 
-	dev_info_ratelimited(sm->dev, "UL lcid %#x len %u dsize %u\n",
+	dev_dbg_ratelimited(sm->dev, "UL lcid %#x len %u dsize %u\n",
 			     lcid, skb->len, dsize);
 	s5xxx_send_ipc_irq(sm, S5XXX_INT_VALID | S5XXX_INT_SEND_RAW);
 	return true;
