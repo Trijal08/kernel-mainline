@@ -2065,6 +2065,23 @@ int zumapro_pcie_modem_power_cycle(struct device *rc_dev)
 }
 EXPORT_SYMBOL_GPL(zumapro_pcie_modem_power_cycle);
 
+/*
+ * Carry the AP's sleep state to the CP.  The line itself belongs to the CP
+ * power sequencer; this is the modem driver's route to it, the same way the
+ * resets are.  Callable from noirq system-sleep callbacks: nothing below
+ * sleeps.
+ */
+int zumapro_pcie_modem_set_ap_active(struct device *rc_dev, bool active)
+{
+	struct exynos_pcie *ep = zumapro_pcie_from_dev(rc_dev);
+
+	if (!ep || !ep->cp_power)
+		return -ENODEV;
+
+	return exynos_cp_power_set_ap_active(ep->cp_power, active);
+}
+EXPORT_SYMBOL_GPL(zumapro_pcie_modem_set_ap_active);
+
 static int zumapro_pcie_modem_reset_mode(struct device *rc_dev, bool dump)
 {
 	struct exynos_pcie *ep = zumapro_pcie_from_dev(rc_dev);
