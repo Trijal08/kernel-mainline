@@ -4732,6 +4732,20 @@
 			reg = <0x19c70000 0x10000>;
 			power-domains = <&pd_dpuf1>;
 		};
+
+		/*
+		 * The video codec's DMA firewall.  pd_mfc is off until a client
+		 * opens the codec, so the unit comes up at its reset state -
+		 * blocking every access - each time the domain is powered.  The
+		 * driver's power-on notifier runs before the codec resumes, so
+		 * the allow-all table is in place by the time the RISC fetches
+		 * its firmware.
+		 */
+		s2mpu_s0_mfc: s2mpu@1a4a0000 {
+			compatible = "google,s2mpu-v9";
+			reg = <0x1a4a0000 0x10000>;
+			power-domains = <&pd_mfc>;
+		};
 		
 		gpu: gpu@1f000000 {
 			compatible = "google,zuma-mali", "arm,mali-valhall-csf";
