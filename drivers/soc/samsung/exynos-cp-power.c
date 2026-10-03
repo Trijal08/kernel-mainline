@@ -283,6 +283,33 @@ int exynos_cp_power_warm_reset(struct exynos_cp_power *cp, bool dump)
 }
 EXPORT_SYMBOL_GPL(exynos_cp_power_warm_reset);
 
+/*
+ * Tell the CP whether the AP is awake.  The CP treats AP2CP_PDA_ACTIVE as the
+ * AP's liveness: left high across system sleep it keeps addressing an AP and an
+ * HSI1 fabric that are gone, and falls out of ONLINE rather than waiting.
+ *
+ * Called from the modem's noirq system-sleep callbacks, so this must not sleep.
+ * The line is a Samsung SoC GPIO -- memory-mapped, never a sleeping expander --
+ * and the cold power-on has already made it an output.
+ */
+int exynos_cp_power_set_ap_active(struct exynos_cp_power *cp, bool active)
+{
+	int value;
+
+	if (!cp || !cp->cp_pda_active)
+		return -ENODEV;
+
+	gpiod_set_value(cp->cp_pda_active, active);
+
+	/* Read it back: a mux or direction mistake here is silent otherwise. */
+	value = gpiod_get_value(cp->cp_pda_active);
+	if (value < 0)
+		return value;
+
+	return value == active ? 0 : -EIO;
+}
+EXPORT_SYMBOL_GPL(exynos_cp_power_set_ap_active);
+
 int exynos_cp_power_cold_cycle(struct exynos_cp_power *cp)
 {
 	dev_info(cp->dev, "CP cold power cycle\n");

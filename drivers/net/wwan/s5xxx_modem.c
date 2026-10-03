@@ -51,6 +51,7 @@
 #include <linux/platform_device.h>
 #include <linux/sizes.h>
 #include <linux/skbuff.h>
+#include <linux/timekeeping.h>
 #include <linux/slab.h>
 #include <linux/sprintf.h>
 #include <linux/unaligned.h>
@@ -252,6 +253,14 @@ struct s5xxx_variant {
 #define S5XXX_IPC_AP2CP_MSG		0x800
 #define S5XXX_IPC_CP2AP_MSG		0x804
 #define S5XXX_IPC_AP2CP_STATUS		0x808
+/*
+ * The AP's monotonic clock, which the CP reads to align its own log timestamps
+ * with the AP's.  Downstream publishes it immediately before each
+ * AP2CP_PDA_ACTIVE transition: seconds within the hour in the upper 12 bits,
+ * microseconds in the lower 20.
+ */
+#define S5XXX_IPC_AP2CP_KERNELTIME	0x824
+#define S5XXX_KERNELTIME_SEC_SHIFT	20
 #define S5XXX_IPC_CP2AP_STATUS		0x80c
 /*
  * The one runtime payload of cp2ap_status (downstream shmem_tx_state_handler):
@@ -1303,6 +1312,19 @@ static bool ds_det = true;
 module_param(ds_det, bool, 0444);
 MODULE_PARM_DESC(ds_det,
 		 "let the CP idle-park the PCIe link post-ONLINE (0 pins it at L0)");
+
+static void s5xxx_publish_kernel_time(struct s5xxx_modem *sm)
+{
+	struct timespec64 ts;
+	u32 seconds, useconds;
+
+	ktime_get_ts64(&ts);
+	seconds = ts.tv_sec % 3600;
+	useconds = ts.tv_nsec / NSEC_PER_USEC;
+	writel((seconds << S5XXX_KERNELTIME_SEC_SHIFT) | useconds,
+	       sm->ipc + S5XXX_IPC_AP2CP_KERNELTIME);
+	dev_dbg(sm->dev, "AP2CP kernel time %u.%06u\n", seconds, useconds);
+}
 
 static void s5xxx_init_control_messages(struct s5xxx_modem *sm)
 {
@@ -4868,6 +4890,17 @@ static int s5xxx_probe(struct platform_device *pdev)
 	}
 
 	/*
+	 * The CP asks for the link on this line, and it has to be able to do so
+	 * while the AP is asleep -- otherwise an incoming call or SMS waits for
+	 * something else to wake us.
+	 */
+	ret = enable_irq_wake(sm->cp2ap_irq);
+	if (ret) {
+		dev_err(dev, "CP2AP_WAKEUP enable_irq_wake: %d\n", ret);
+		goto err_cp2ap_irq;
+	}
+
+	/*
 	 * Armed from the start (unlike the wakeup IRQ): logs the CP coming
 	 * alive during boot and any crash after ONLINE.  Non-fatal if missing.
 	 */
@@ -4894,6 +4927,8 @@ static int s5xxx_probe(struct platform_device *pdev)
 
 	return 0;
 
+err_cp2ap_irq:
+	free_irq(sm->cp2ap_irq, sm);
 err_rfs:
 	destroy_workqueue(sm->rfs_wq);
 err_wq:
@@ -4928,6 +4963,7 @@ static void s5xxx_remove(struct platform_device *pdev)
 	 * the in-flight handler, so cancel_work_sync() then flushes the last relink
 	 * before the endpoint state it touches goes away.
 	 */
+	disable_irq_wake(sm->cp2ap_irq);
 	free_irq(sm->cp2ap_irq, sm);
 	if (sm->cp_active_irq >= 0)
 		free_irq(sm->cp_active_irq, sm);
@@ -4966,6 +5002,41 @@ static void s5xxx_remove(struct platform_device *pdev)
 	put_device(sm->rc_dev);
 }
 
+/*
+ * System sleep.  The CP has to be told, because it reads AP2CP_PDA_ACTIVE as
+ * the AP's liveness: left high while we are suspended it keeps addressing an AP
+ * and an HSI1 fabric that are gone, and drops out of ONLINE instead of waiting.
+ *
+ * Refuse to suspend while CP2AP_WAKEUP is high.  That means the CP still wants
+ * the PCIe link, and taking it away mid-transaction is how the control plane
+ * gets lost.  Downstream allows this during a tracked voice call, having an
+ * in-kernel notion of call state; there is none here, so reject every high
+ * level and let the suspend be retried once the CP parks.
+ */
+static int s5xxx_suspend_noirq(struct device *dev)
+{
+	struct s5xxx_modem *sm = dev_get_drvdata(dev);
+
+	if (gpiod_get_value(sm->cp2ap_wakeup)) {
+		dev_info(dev, "CP requests PCIe, aborting system suspend\n");
+		return -EBUSY;
+	}
+
+	s5xxx_publish_kernel_time(sm);
+	return zumapro_pcie_modem_set_ap_active(sm->rc_dev, false);
+}
+
+static int s5xxx_resume_noirq(struct device *dev)
+{
+	struct s5xxx_modem *sm = dev_get_drvdata(dev);
+
+	s5xxx_publish_kernel_time(sm);
+	return zumapro_pcie_modem_set_ap_active(sm->rc_dev, true);
+}
+
+static DEFINE_NOIRQ_DEV_PM_OPS(s5xxx_pm_ops, s5xxx_suspend_noirq,
+			       s5xxx_resume_noirq);
+
 static const struct of_device_id s5xxx_of_match[] = {
 	{ .compatible = "samsung,s5300-modem", .data = &s5xxx_variant_s5300 },
 	{ .compatible = "samsung,s5400-modem", .data = &s5xxx_variant_s5400 },
@@ -4993,6 +5064,7 @@ static void s5xxx_shutdown(struct platform_device *pdev)
 		if (sm->ndev[i])
 			netif_tx_disable(sm->ndev[i]);
 
+	disable_irq_wake(sm->cp2ap_irq);
 	free_irq(sm->cp2ap_irq, sm);
 	if (sm->cp_active_irq >= 0)
 		free_irq(sm->cp_active_irq, sm);
@@ -5012,6 +5084,7 @@ static struct platform_driver s5xxx_driver = {
 	.driver	= {
 		.name		= "s5xxx-modem",
 		.of_match_table	= s5xxx_of_match,
+		.pm		= pm_sleep_ptr(&s5xxx_pm_ops),
 	},
 };
 module_platform_driver(s5xxx_driver);
