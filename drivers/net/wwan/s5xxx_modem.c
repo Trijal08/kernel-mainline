@@ -485,6 +485,21 @@ struct s5xxx_variant {
  * channel is exposed as a port and the boot conversation is left to user space.
  */
 #define S5XXX_CH_GNSS_BOOT		0xf0
+/*
+ * The receiver's second channel.  Downstream calls it gnss_dump and it does
+ * carry the receiver's account of itself -- OSP-encoded diagnostics with
+ * embedded text: calibration tables, state transitions, the configuration it
+ * believes it was given, about 1.6 MB of it across a stock boot.  But it is not
+ * only a log: the aiding goes up it too, as encrypted SGEE blobs, so it is
+ * bidirectional and belongs to the receiver's normal operation rather than to
+ * debugging.  Frames are BETP, same as the boot channel.
+ *
+ * Exposed as a second WWAN_PORT_GNSS port, so it names as gnss1 beside the
+ * boot channel's gnss0, rather than as a port type of its own: the type already
+ * means "a CP link channel to the GNSS receiver", which is what both are.
+ */
+#define S5XXX_CH_GNSS_DUMP		0xef
+#define S5XXX_GNSS_DUMP_MAX		SZ_4K
 #define S5XXX_FMT_MAX			(S5XXX_FMT_TXQ_SIZE - S5XXX_SIT_HDR - 8)
 #define S5XXX_SIT_CH_BOOT		0xf1		/* EXYNOS_CH_ID_BOOT */
 #define S5XXX_DL_HDR			12
@@ -617,6 +632,8 @@ struct s5xxx_modem {
 	 */
 	struct wwan_port	*gnss_port;
 	u8			gnss_ch_seq;	/* GNSS per-channel sequence */
+	struct wwan_port	*gnss_dump_port;
+	u8			gnss_dump_ch_seq;
 	/*
 	 * The in-kernel codeload (s5xxx_gnss_codeload) runs before gnss_port
 	 * exists and collects the CP's ch-0xf0 replies here; once the port is up
@@ -1543,6 +1560,7 @@ static void s5xxx_init_ipc_queues(struct s5xxx_modem *sm)
 		sm->sit[i].ch_seq = 0;
 	sm->at_ch_seq = 0;
 	sm->rfs_ch_seq = 0;
+	sm->gnss_dump_ch_seq = 0;
 
 	writel(0, sm->ipc + S5XXX_IPC_MAGIC);
 	writel(0, sm->ipc + S5XXX_IPC_ACCESS);
@@ -1822,7 +1840,9 @@ static void s5xxx_gnss_codeload(struct s5xxx_modem *sm, u32 fw_size, u32 hdr4)
 /*
  * gnss_boot char port (RAW ch 0xf0).  After the in-kernel codeload has started
  * the receiver, this exposes the channel raw so user space can drive the
- * runtime side (SGEE aiding); the CP's replies arrive as port reads.
+ * runtime side; the CP's replies arrive as port reads.  The aiding upload is
+ * not here -- it goes up the dump channel (gnss1) -- but the session control
+ * the receiver expects after boot is.
  */
 static int s5xxx_gnss_tx(struct wwan_port *port, struct sk_buff *skb)
 {
@@ -1844,6 +1864,30 @@ static const struct wwan_port_ops s5xxx_gnss_ops = {
 	.start	= s5xxx_wwan_start,
 	.stop	= s5xxx_wwan_stop,
 	.tx	= s5xxx_gnss_tx,
+};
+
+/* The dump channel's uplink: the encrypted SGEE aiding the receiver asks for. */
+static int s5xxx_gnss_dump_tx(struct wwan_port *port, struct sk_buff *skb)
+{
+	struct s5xxx_modem *sm = wwan_port_get_drvdata(port);
+	int ret;
+
+	if (!sm->online)
+		return -ENODEV;
+	ret = s5xxx_ring_tx(sm, &s5xxx_raw_txring, &sm->frame_seq,
+			    S5XXX_CH_GNSS_DUMP, &sm->gnss_dump_ch_seq,
+			    S5XXX_GNSS_DUMP_MAX - S5XXX_SIT_HDR,
+			    skb->data, skb->len, -EAGAIN);
+	if (ret)
+		return ret;
+	consume_skb(skb);
+	return 0;
+}
+
+static const struct wwan_port_ops s5xxx_gnss_dump_ops = {
+	.start	= s5xxx_wwan_start,
+	.stop	= s5xxx_wwan_stop,
+	.tx	= s5xxx_gnss_dump_tx,
 };
 
 /* Free space (bytes) in the FMT txq; 0 if the CP left the pointers corrupt. */
@@ -2434,6 +2478,10 @@ static void s5xxx_drain_raw_rxq(struct s5xxx_modem *sm, u32 intval)
 				port = NULL;
 				max = 0;
 			}
+		} else if (ch == S5XXX_CH_GNSS_DUMP) {
+			port = sm->gnss_dump_port;
+			max = S5XXX_GNSS_DUMP_MAX;
+			had_raw = true;
 		} else if (pdp) {
 			/*
 			 * PS data on the legacy ring rather than on pktproc.
@@ -3107,6 +3155,21 @@ static void s5xxx_online(struct s5xxx_modem *sm)
 	} else {
 		dev_info(sm->dev, "GNSS boot port up (gnss_boot, ch %#x)\n",
 			 S5XXX_CH_GNSS_BOOT);
+	}
+
+	/*
+	 * The receiver's diagnostic-and-aiding channel.  Created after the boot
+	 * port so the two name as gnss0 and gnss1 in channel order.
+	 */
+	sm->gnss_dump_port = wwan_create_port(sm->dev, WWAN_PORT_GNSS,
+					      &s5xxx_gnss_dump_ops, NULL, sm);
+	if (IS_ERR(sm->gnss_dump_port)) {
+		dev_err(sm->dev, "failed to create GNSS dump port: %ld\n",
+			PTR_ERR(sm->gnss_dump_port));
+		sm->gnss_dump_port = NULL;
+	} else {
+		dev_info(sm->dev, "GNSS dump port up (gnss_dump, ch %#x)\n",
+			 S5XXX_CH_GNSS_DUMP);
 	}
 
 	/*
@@ -4882,6 +4945,8 @@ static void s5xxx_remove(struct platform_device *pdev)
 	cancel_work_sync(&sm->rfs_work);
 	destroy_workqueue(sm->rfs_wq);
 	s5xxx_rfs_cleanup(sm);
+	if (sm->gnss_dump_port)
+		wwan_remove_port(sm->gnss_dump_port);
 	if (sm->gnss_port)
 		wwan_remove_port(sm->gnss_port);
 	for (i = 0; i < S5XXX_OEM_PORTS; i++)
