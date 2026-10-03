@@ -2071,6 +2071,22 @@ EXPORT_SYMBOL_GPL(zumapro_pcie_modem_power_cycle);
  * resets are.  Callable from noirq system-sleep callbacks: nothing below
  * sleeps.
  */
+/*
+ * Whether the modem link is physically up.  The cached state in the modem
+ * driver can disagree after system sleep: the root complex's own suspend path
+ * parks a link that the runtime worker had deferred parking, and suppresses the
+ * link-down notification for that deliberate teardown.
+ */
+int zumapro_pcie_modem_link_active(struct device *rc_dev)
+{
+	struct exynos_pcie *ep = zumapro_pcie_from_dev(rc_dev);
+
+	if (!ep)
+		return 0;
+	return exynos_zuma_pcie_link_up(&ep->pci) ? 1 : 0;
+}
+EXPORT_SYMBOL_GPL(zumapro_pcie_modem_link_active);
+
 int zumapro_pcie_modem_set_ap_active(struct device *rc_dev, bool active)
 {
 	struct exynos_pcie *ep = zumapro_pcie_from_dev(rc_dev);
