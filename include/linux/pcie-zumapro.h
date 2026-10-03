@@ -40,6 +40,7 @@ int zumapro_pcie_modem_link_down(struct device *rc_dev);
 int zumapro_pcie_modem_link_up(struct device *rc_dev);
 int zumapro_pcie_modem_gen3(struct device *rc_dev);
 int zumapro_pcie_modem_wake(struct device *rc_dev);
+int zumapro_pcie_modem_link_active(struct device *rc_dev);
 int zumapro_pcie_modem_set_ap_active(struct device *rc_dev, bool active);
 int zumapro_pcie_modem_reset(struct device *rc_dev);
 int zumapro_pcie_modem_dump_reset(struct device *rc_dev);
@@ -78,6 +79,11 @@ static inline int zumapro_pcie_modem_gen3(struct device *rc_dev)
 static inline int zumapro_pcie_modem_wake(struct device *rc_dev)
 {
 	return -ENODEV;
+}
+
+static inline int zumapro_pcie_modem_link_active(struct device *rc_dev)
+{
+	return 0;
 }
 
 static inline int zumapro_pcie_modem_set_ap_active(struct device *rc_dev,

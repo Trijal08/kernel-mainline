@@ -178,6 +178,23 @@ static int exynos_s2mpu_probe(struct platform_device *pdev)
 	return 0;
 }
 
+/*
+ * Firmware resets these units to blocking across system sleep, and the genpd
+ * notifier above cannot cover the always-on ones: their domain never gates, so
+ * nothing fires.  Reinstall on resume_early, before any consumer's resume
+ * callback can issue a transaction -- consumers that name us in
+ * access-controllers are ordered after us, which is what that link is for here.
+ */
+static int __maybe_unused exynos_s2mpu_resume_early(struct device *dev)
+{
+	exynos_s2mpu_install(dev_get_drvdata(dev));
+	return 0;
+}
+
+static const struct dev_pm_ops exynos_s2mpu_pm_ops = {
+	.resume_early = exynos_s2mpu_resume_early,
+};
+
 static const struct of_device_id exynos_s2mpu_of_match[] = {
 	{ .compatible = "google,s2mpu-v9" },
 	{ }
@@ -189,6 +206,7 @@ static struct platform_driver exynos_s2mpu_driver = {
 	.driver	= {
 		.name		= "exynos-s2mpu",
 		.of_match_table	= exynos_s2mpu_of_match,
+		.pm		= pm_sleep_ptr(&exynos_s2mpu_pm_ops),
 		.suppress_bind_attrs = true,
 	},
 };

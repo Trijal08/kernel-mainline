@@ -602,6 +602,7 @@ struct s5xxx_modem {
 	struct mutex		pcie_onoff_lock; /* serialises relink up/down */
 	bool			pm_armed;	/* cp2ap_irq enabled (boot-seq guard) */
 	bool			link_up;	/* RC link powered on (sm->lock) */
+	bool			resume_recheck;	/* reconcile an RC-forced park (sm->lock) */
 	bool			db_reserved;	/* doorbell deferred to wake (sm->lock) */
 	bool			cp_wants_up;	/* CP2AP_WAKEUP level latched at edge */
 	bool			main_armed;	/* MAIN took a link-up ISR (services rings) */
@@ -1022,6 +1023,7 @@ static void s5xxx_pm_work(struct work_struct *work)
 	struct s5xxx_modem *sm = container_of(work, struct s5xxx_modem, pm_work);
 	bool want_up = READ_ONCE(sm->cp_wants_up);
 	unsigned long flags;
+	bool recheck;
 
 	/*
 	 * Relink ONLY when the CP is actually asking for the link (CP2AP_WAKEUP
@@ -1034,6 +1036,27 @@ static void s5xxx_pm_work(struct work_struct *work)
 	 * lock in case the edge that queued us has already fallen again.
 	 */
 	mutex_lock(&sm->pcie_onoff_lock);
+
+	/*
+	 * First run after a system resume.  The root complex's suspend path may
+	 * have parked a link the runtime worker had deferred parking, and it
+	 * suppresses the link-down callback for that deliberate teardown -- so
+	 * our cached link_up can be stale-true.  Reconcile against the hardware
+	 * before deciding whether the CP's wake request needs a relink; without
+	 * this the request is treated as already satisfied and never trains.
+	 */
+	spin_lock_irqsave(&sm->lock, flags);
+	recheck = sm->resume_recheck;
+	sm->resume_recheck = false;
+	spin_unlock_irqrestore(&sm->lock, flags);
+
+	if (recheck && sm->link_up &&
+	    !zumapro_pcie_modem_link_active(sm->rc_dev)) {
+		spin_lock_irqsave(&sm->lock, flags);
+		sm->link_up = false;
+		spin_unlock_irqrestore(&sm->lock, flags);
+		dev_dbg(sm->dev, "system resume: link was parked by the RC\n");
+	}
 
 	if (want_up && !sm->link_up &&
 	    gpiod_get_value_cansleep(sm->cp2ap_wakeup)) {
@@ -4860,7 +4883,13 @@ static int s5xxx_probe(struct platform_device *pdev)
 	 * enabled once the CP reaches ONLINE (PHONE_START).  Ordered wq: relinks
 	 * must not race.
 	 */
-	sm->pm_wq = alloc_ordered_workqueue("s5xxx-pm", 0);
+	/*
+	 * Freezable: wake IRQs are enabled before resume_early reopens the
+	 * always-on HSI1 S2MPU, and relinking in that window lets the CP fault
+	 * its first shared-memory DMA.  A worker queued while frozen reads the
+	 * current GPIO level once it thaws, so no edge is lost.
+	 */
+	sm->pm_wq = alloc_ordered_workqueue("s5xxx-pm", WQ_FREEZABLE);
 	if (!sm->pm_wq) {
 		ret = -ENOMEM;
 		goto err_irq;
@@ -5030,8 +5059,22 @@ static int s5xxx_resume_noirq(struct device *dev)
 {
 	struct s5xxx_modem *sm = dev_get_drvdata(dev);
 
+	unsigned long flags;
+	int ret;
+
 	s5xxx_publish_kernel_time(sm);
-	return zumapro_pcie_modem_set_ap_active(sm->rc_dev, true);
+	ret = zumapro_pcie_modem_set_ap_active(sm->rc_dev, true);
+
+	/*
+	 * The work runs only once pm_wq thaws, i.e. after every device resume
+	 * callback has completed and the S2MPU is open again.
+	 */
+	spin_lock_irqsave(&sm->lock, flags);
+	sm->resume_recheck = true;
+	spin_unlock_irqrestore(&sm->lock, flags);
+	queue_work(sm->pm_wq, &sm->pm_work);
+
+	return ret;
 }
 
 static DEFINE_NOIRQ_DEV_PM_OPS(s5xxx_pm_ops, s5xxx_suspend_noirq,
