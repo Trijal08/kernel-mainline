@@ -3835,6 +3835,22 @@
 			power-domains = <&pd_hsi1>;
 		};
 
+		/*
+		 * HSI1's stage-2 protection unit, in front of the modem's PCIe
+		 * root complex.  Unlike the DPU and AoC units this one is
+		 * always on, so the genpd notifier that reopens those never
+		 * fires for it -- firmware resets it to blocking across system
+		 * sleep and nothing would reopen it.  The root complex names it
+		 * in access-controllers so the resume order is right: without
+		 * it the CP's first shared-memory DMA after resume faults, and
+		 * the CP stops consuming its queue while the link looks healthy.
+		 */
+		s2mpu_s0_hsi1: s2mpu@12090000 {
+			compatible = "google,s2mpu-v9";
+			reg = <0x12090000 0x10000>;
+			#access-controller-cells = <0>;
+		};
+
 		sysreg_hsi1: syscon@12020000 {
 			compatible = "google,gs101-hsi1-sysreg", "syscon";
 			reg = <0x12020000 0x2000>;
@@ -3926,6 +3942,7 @@
 				 <&cmu_hsi1 CLK_GOUT_HSI1_PCIE_GEN3_0_PIPE_PAL_APB_PCLK>;
 			phys = <&pcie_0_phy>;
 			phy-names = "pcie-phy";
+			access-controllers = <&s2mpu_s0_hsi1>;
 			samsung,pmu-syscon = <&pmu_system_controller>;
 			samsung,pmu-offset = <0x3ec4>;
 			samsung,perst-delay-us = <15000>;
