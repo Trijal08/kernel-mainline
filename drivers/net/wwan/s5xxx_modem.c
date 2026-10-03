@@ -3022,16 +3022,31 @@ static void s5xxx_register_netdev(struct s5xxx_modem *sm)
 	if (!sm->pktproc || sm->ndev[0])
 		return;
 
+	/*
+	 * Name each interface explicitly rather than letting "rmnet%d"
+	 * enumerate.  The trailing index *is* the channel offset, and a bearer
+	 * picks its interface by that name, so it must not slide if some other
+	 * rmnet is already up -- which is exactly what %d allocation would do.
+	 *
+	 * An interface that will not register is logged and skipped. Thirty
+	 * registrations are thirty chances to fail, and losing the whole set --
+	 * or the rest of it -- over one name already taken would cost data
+	 * contexts that have nothing to do with it. The slot stays NULL, which
+	 * the uplink, both downlink demuxes and the flow-control walk all
+	 * already handle.
+	 */
 	for (i = 0; i < S5XXX_PDP_CH_COUNT; i++) {
 		struct s5xxx_rmnet_priv *priv;
 		struct net_device *ndev;
+		char name[IFNAMSIZ];
 		int ret;
 
-		ndev = alloc_netdev(sizeof(*priv), "rmnet%d",
-				    NET_NAME_ENUM, s5xxx_netdev_setup);
+		snprintf(name, sizeof(name), "rmnet%d", i);
+		ndev = alloc_netdev(sizeof(*priv), name, NET_NAME_PREDICTABLE,
+				    s5xxx_netdev_setup);
 		if (!ndev) {
-			dev_err(sm->dev, "failed to allocate rmnet netdev\n");
-			break;
+			dev_err(sm->dev, "alloc_netdev(%s) failed\n", name);
+			continue;
 		}
 		priv = netdev_priv(ndev);
 		priv->sm = sm;
@@ -3040,9 +3055,9 @@ static void s5xxx_register_netdev(struct s5xxx_modem *sm)
 
 		ret = register_netdev(ndev);
 		if (ret) {
-			dev_err(sm->dev, "failed to register rmnet netdev: %d\n", ret);
+			dev_err(sm->dev, "register_netdev(%s): %d\n", name, ret);
 			free_netdev(ndev);
-			break;
+			continue;
 		}
 		WRITE_ONCE(sm->ndev[i], ndev);
 	}
