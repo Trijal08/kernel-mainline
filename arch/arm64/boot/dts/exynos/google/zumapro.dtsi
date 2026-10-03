@@ -7,8 +7,8 @@
 
 #include <dt-bindings/clock/google,zuma.h>
 #include <dt-bindings/clock/google,zuma-acpm.h>
-#include <dt-bindings/interconnect/google,zumapro.h>
 #include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/interconnect/google,zumapro.h>
 #include <dt-bindings/interrupt-controller/arm-gic.h>
 #include <dt-bindings/soc/samsung,exynos-usi.h>
 #include <dt-bindings/soc/samsung_sysmmu_v9.h>
@@ -911,6 +911,21 @@
 			reusable;
 			size = <0x08000000>;		/* 128 MiB: 8 screens */
 			alignment = <0x00400000>;
+		};
+
+		/*
+		 * The codec's RISC addresses everything relative to the
+		 * firmware it is given, and can only reach 0xf0000000 bytes
+		 * past it.  Keep the firmware in the last 1 MiB below 256 MiB
+		 * so every later buffer sits above it and still inside that
+		 * window: reserve the 255 MiB underneath and the top 1 MiB of
+		 * the 32-bit space so the DMA allocator cannot place a buffer
+		 * there.  This describes device addresses only, so the node
+		 * carries no reg and needs no memory of its own.
+		 */
+		mfc_firmware_iova: mfc-firmware-iova {
+			iommu-addresses = <&mfc 0x00000000 0x0ff00000>,
+					  <&mfc 0xfff00000 0x00100000>;
 		};
 
 		pstore: ramoops@fd3ff000 {
@@ -2078,7 +2093,7 @@
 		 * ACPM domain that sets the block's operating point.
 		 */
 		mfc: codec@1a4d0000 {
-			compatible = "google,zuma-mfc";
+			compatible = "google,zumapro-mfc";
 			reg = <0x1a4d0000 0x10000>;
 			interrupts = <GIC_SPI 515 IRQ_TYPE_LEVEL_HIGH 0>;
 			clocks = <&cmu_mfc CLK_GOUT_MFC_MFC_ACLK>,
@@ -2089,6 +2104,7 @@
 			interconnect-names = "memory";
 			power-domains = <&pd_mfc>;
 			iommus = <&sysmmu_mfc>;
+			memory-region = <&mfc_firmware_iova>;
 			status = "disabled";
 		};
 
