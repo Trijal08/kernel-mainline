@@ -6,6 +6,7 @@
 #include <linux/io.h>
 #include <linux/iopoll.h>
 #include <linux/of.h>
+#include <linux/of_reserved_mem.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
 
@@ -475,6 +476,23 @@ static int dpu_dma_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	platform_set_drvdata(pdev, ctx);
+
+	/*
+	 * Take the framebuffer pool if one is described.  Dumb buffers are
+	 * allocated physically contiguous, so each one needs a single run the
+	 * size of a screen; drawn from the global CMA they compete with every
+	 * other contiguous allocator on the SoC and eventually cannot be
+	 * assembled at all -- not for want of free pages, but because the ones
+	 * that are free cannot be migrated together.  A pool of our own is not
+	 * shared with those allocators, so the run is always there.
+	 *
+	 * Not fatal: without it allocations simply come from global CMA as
+	 * before.  of_dma_configure() only wires up restricted-dma-pool
+	 * automatically, so a shared-dma-pool has to be claimed here.
+	 */
+	ret = of_reserved_mem_device_init_by_idx(dev, dev->of_node, 0);
+	if (ret && ret != -ENODEV)
+		dev_warn(dev, "no framebuffer pool (%d); using global CMA\n", ret);
 
 	ctx->aclk = devm_clk_get_enabled(dev, "aclk");
 	if (IS_ERR(ctx->aclk))
