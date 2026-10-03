@@ -743,6 +743,31 @@
 	sram-supply = <&s_ldo1_reg>;
 };
 
+/*
+ * Hardware video encode and decode, with its own CMU and that CMU's SYSREG.
+ * The power domain and the SysMMU need no enabling - they carry no status and
+ * are live already.
+ */
+&mfc {
+	status = "okay";
+};
+
+&cmu_mfc {
+	status = "okay";
+};
+
+&sysreg_mfc {
+	status = "okay";
+};
+
+/*
+ * The NoC QoS ports the codec votes memory bandwidth through.  Not codec
+ * specific - any master that needs a bandwidth floor goes through here.
+ */
+&bts {
+	status = "okay";
+};
+
 &ufs_0 {
 	vcc-supply = <&ufs_0_fixed_vcc_reg>;
 	vdd-hba-supply = <&s_ldo2_reg>;
