@@ -7,6 +7,7 @@
 
 #include <dt-bindings/clock/google,zuma.h>
 #include <dt-bindings/clock/google,zuma-acpm.h>
+#include <dt-bindings/interconnect/google,zumapro.h>
 #include <dt-bindings/gpio/gpio.h>
 #include <dt-bindings/interrupt-controller/arm-gic.h>
 #include <dt-bindings/soc/samsung,exynos-usi.h>
@@ -2067,6 +2068,28 @@
 			#iommu-cells = <0>;
 			pmmu0,default_stream = <STR_CFG(STR_SPTLB(0x00, 0x00), S2_EN, BL8, PREF_PRED, STLB_NONE, PTLB_NONE)>;
 			pmmu1,default_stream = <STR_CFG(STR_SPTLB(0x00, 0x00), S2_EN, BL8, PREF_PRED, STLB_NONE, PTLB_NONE)>;
+		};
+
+		/*
+		 * The Multi Format Codec: hardware video encode and decode,
+		 * driven as a V4L2 mem2mem device.  Its firmware is loaded
+		 * through the IOMMU, it votes memory bandwidth through the NoC
+		 * QoS ports, and the second clock is the firmware-controlled
+		 * ACPM domain that sets the block's operating point.
+		 */
+		mfc: codec@1a4d0000 {
+			compatible = "google,zuma-mfc";
+			reg = <0x1a4d0000 0x10000>;
+			interrupts = <GIC_SPI 515 IRQ_TYPE_LEVEL_HIGH 0>;
+			clocks = <&cmu_mfc CLK_GOUT_MFC_MFC_ACLK>,
+				 <&acpm_ipc GS101_CLK_ACPM_DVFS_MFC>;
+			clock-names = "mfc", "sclk_mfc";
+			interconnects = <&bts ZUMAPRO_BTS_MASTER_MFC
+					 &bts ZUMAPRO_BTS_SLAVE_MIF>;
+			interconnect-names = "memory";
+			power-domains = <&pd_mfc>;
+			iommus = <&sysmmu_mfc>;
+			status = "disabled";
 		};
 
 		sysmmu_mcsc: iommu@1D0A0000 {
@@ -4622,6 +4645,33 @@
 			};
 		};
 
+		/*
+		 * The video codec's own CMU.  Disabled: a board turns it on
+		 * together with the codec.
+		 */
+		cmu_mfc: clock-controller@1a400000 {
+			compatible = "google,zuma-cmu-mfc";
+			reg = <0x1a400000 0x10000>;
+			#clock-cells = <1>;
+			clocks = <&ext_24_5m>,
+				 <&cmu_top CLK_DOUT_CMU_MFC_MFC>;
+			clock-names = "oscclk", "bus";
+			power-domains = <&pd_mfc>;
+			samsung,sysreg = <&sysreg_mfc>;
+			status = "disabled";
+		};
+
+		/*
+		 * CMU_MFC reaches this only while the domain is active, so it
+		 * names no clock: a reference here would pin the runtime-PM
+		 * clock provider on for as long as the syscon exists.
+		 */
+		sysreg_mfc: syscon@1a420000 {
+			compatible = "google,zuma-mfc-sysreg", "syscon";
+			reg = <0x1a420000 0x1000>;
+			status = "disabled";
+		};
+
 		cmu_top: clock-controller@26040000 {
 			compatible = "google,zuma-cmu-top";
 			reg = <0x26040000 0x10000>;
@@ -4629,6 +4679,23 @@
 
 			clocks = <&ext_24_5m>;
 			clock-names = "oscclk";
+		};
+
+		/*
+		 * The NoC QoS ports in front of the codec's two memory masters.
+		 * An interconnect provider rather than a driver-private poke, so
+		 * the codec's bandwidth request composes with whatever else votes
+		 * on MIF and INT.  Offsets from the downstream Zuma BTS tables.
+		 */
+		bts: interconnect@26c48380 {
+			compatible = "google,zumapro-bts";
+			reg = <0x26c48380 0x80>, <0x26c48400 0x80>;
+			reg-names = "mfc0", "mfc1";
+			clocks = <&acpm_ipc GS101_CLK_ACPM_DVFS_MIF>,
+				 <&acpm_ipc GS101_CLK_ACPM_DVFS_INT>;
+			clock-names = "mif", "int";
+			#interconnect-cells = <1>;
+			status = "disabled";
 		};
 		
 		/*
