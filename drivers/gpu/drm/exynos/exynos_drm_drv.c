@@ -294,21 +294,6 @@ static int exynos_drm_bind(struct device *dev)
 	/* init kms poll for handling hpd */
 	drm_kms_helper_poll_init(drm);
 
-	/*
-	 * The render node carries nothing but the G2D and IPP ioctls. When
-	 * neither engine bound, publishing one is worse than useless: on a SoC
-	 * whose GPU is a separate DRM device this driver registers first and
-	 * takes renderD128, so clients opening the first render node get the
-	 * display controller, and Mesa's kmsro path then tries to allocate
-	 * scanout buffers here -- which needs DRM master and so can never
-	 * succeed for a client of a running compositor.
-	 *
-	 * driver_features is a per-device mask, and drm_dev_register() gates
-	 * the render minor on it, so clear the bit before registering.
-	 */
-	if (!private->g2d_dev && !exynos_drm_ipp_count())
-		drm->driver_features &= ~DRIVER_RENDER;
-
 	/* register the DRM device */
 	ret = drm_dev_register(drm, 0);
 	if (ret < 0)
