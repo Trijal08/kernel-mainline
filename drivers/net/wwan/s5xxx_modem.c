@@ -493,6 +493,16 @@ struct s5xxx_variant {
  * RAW channel -- the vendor's gnss_boot io_device.  Plain passthrough, so the
  * channel is exposed as a port and the boot conversation is left to user space.
  */
+/*
+ * Consecutive failed relinks before the CP is declared dead.  Ten is what
+ * downstream allows before forcing a CP crash, and each relink already makes
+ * its own training attempts.  Reaching it stops further relinks until something
+ * resets the CP, which is what clears the count -- unlike downstream, nothing
+ * here clears sm->online on a crash, so the count is what has to hold the
+ * storm off.
+ */
+#define S5XXX_RELINK_FAIL_LIMIT		10
+
 #define S5XXX_CH_GNSS_BOOT		0xf0
 /*
  * The receiver's second channel.  Downstream calls it gnss_dump and it does
@@ -603,6 +613,7 @@ struct s5xxx_modem {
 	bool			pm_armed;	/* cp2ap_irq enabled (boot-seq guard) */
 	bool			link_up;	/* RC link powered on (sm->lock) */
 	bool			resume_recheck;	/* reconcile an RC-forced park (sm->lock) */
+	unsigned int		relink_failures; /* consecutive failed relinks (pm_work only) */
 	bool			db_reserved;	/* doorbell deferred to wake (sm->lock) */
 	bool			cp_wants_up;	/* CP2AP_WAKEUP level latched at edge */
 	bool			main_armed;	/* MAIN took a link-up ISR (services rings) */
@@ -854,7 +865,18 @@ static void s5xxx_verify_msi_target(struct s5xxx_modem *sm)
 		pci_restore_msi_state(sm->pdev);
 	}
 
-	dev_err(sm->dev, "MSI address won't hold %pap\n", &sm->msi_phys);
+	/*
+	 * Say which of the two it is, because they read identically here and
+	 * point opposite ways.  Outside D0, or with MSI disabled, the core never
+	 * issued the write at all -- __pci_write_msi_msg() skips the hardware
+	 * for any non-D0 state -- so the endpoint is innocent and the fault is
+	 * on this side.  In D0 with MSI enabled the write was issued and
+	 * dropped, which is the half-alive ROM a warm reset of a running CP
+	 * leaves behind.
+	 */
+	dev_err(sm->dev, "MSI address won't hold %pap (endpoint %s, msi %s)\n",
+		&sm->msi_phys, pci_power_name(sm->pdev->current_state),
+		sm->pdev->msi_enabled ? "enabled" : "disabled");
 }
 
 /*
@@ -1059,6 +1081,7 @@ static void s5xxx_pm_work(struct work_struct *work)
 	}
 
 	if (want_up && !sm->link_up &&
+	    sm->relink_failures < S5XXX_RELINK_FAIL_LIMIT &&
 	    gpiod_get_value_cansleep(sm->cp2ap_wakeup)) {
 		if (zumapro_pcie_modem_link_up(sm->rc_dev) == 0) {
 			s5xxx_relink_restore(sm);
@@ -1071,9 +1094,32 @@ static void s5xxx_pm_work(struct work_struct *work)
 			 */
 			sm->main_armed = true;
 			spin_unlock_irqrestore(&sm->lock, flags);
+			sm->relink_failures = 0;
 			dev_dbg(sm->dev, "CP wakeup: link up (MAIN armed)\n");
 		} else {
-			dev_err(sm->dev, "CP wakeup: relink failed\n");
+			/*
+			 * A CP can stay alive -- CP_ACTIVE and PS_HOLD high --
+			 * and still stop answering AP2CP_WAKEUP and link
+			 * training.  The crash IRQ never fires, so without a
+			 * budget here every transmit queues another relink that
+			 * fails identically, for as long as anything transmits,
+			 * and the modem stays unusable until a reboot.
+			 *
+			 * Ten is what downstream allows before forcing a CP
+			 * crash, and each relink already makes its own training
+			 * attempts.  Past that, hand the CP to the recovery path
+			 * the way the crash IRQ does: userspace sees it leave
+			 * ONLINE and resets it, and the cleared flag stops
+			 * further relinks from here.
+			 */
+			if (++sm->relink_failures < S5XXX_RELINK_FAIL_LIMIT) {
+				dev_err(sm->dev, "CP wakeup: relink failed\n");
+			} else {
+				dev_err(sm->dev,
+					"relink failed %u times, taking the CP offline\n",
+					sm->relink_failures);
+				WRITE_ONCE(sm->online, false);
+			}
 		}
 	} else if (!want_up && sm->link_up) {
 		bool park;
@@ -4198,6 +4244,19 @@ static int s5xxx_boot_bootloader(struct s5xxx_modem *sm)
 				ret);
 			return ret;
 		}
+		/*
+		 * Re-sync the core's idea of the endpoint's power state before
+		 * touching the MSI capability.  A crash caught while the CP had
+		 * the link parked leaves the endpoint D3hot *in software*: the
+		 * park quiesced it and cleared bus-master, and relink_restore()
+		 * -- the only path back to D0 -- never ran, because the relink
+		 * itself failed on the dying CP.  The power cycle above put the
+		 * hardware back in D0, but until the core agrees the MSI target
+		 * write is silently dropped and the ROM boots with a zero
+		 * boot-status DMA target: every recovery attempt then sits at
+		 * boot_stage 0 and the crash reason is never decoded.
+		 */
+		pci_set_power_state(pdev, PCI_D0);
 		pci_restore_state(pdev);
 		pci_set_master(pdev);
 		s5xxx_open_bridge_window(sm);
@@ -4253,6 +4312,9 @@ static int s5xxx_dump_boot(struct s5xxx_modem *sm)
 	const char *fw_name;
 	u8 *buf;
 	int ret, i;
+
+	/* A reset is what earns the CP another relink budget. */
+	sm->relink_failures = 0;
 
 	if (sm->pbl)
 		return -EBUSY;			/* a boot is already in flight */
