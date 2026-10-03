@@ -899,7 +899,7 @@ int zumapro_pcie_set_msi_target(struct device *rc_dev, phys_addr_t target)
 	dw_pcie_writel_dbi(&ep->pci, PCIE_MSI_ADDR_LO, lower_32_bits(target));
 	dw_pcie_writel_dbi(&ep->pci, PCIE_MSI_ADDR_HI, upper_32_bits(target));
 
-	dev_info(rc_dev, "MSI target moved to %pap\n", &target);
+	dev_dbg(rc_dev, "MSI target moved to %pap\n", &target);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(zumapro_pcie_set_msi_target);
@@ -1048,7 +1048,7 @@ int zumapro_pcie_modem_link_down(struct device *rc_dev)
 	 * CLKREQ#.  Proceed on timeout (like downstream) but log the reached state.
 	 */
 	val = exynos_pcie_readl(elbi, PCIE_ZUMA_RDLH_LINKUP) & LTSSM_STATE_MASK;
-	dev_info(ep->pci.dev, "link_down: entry ltssm %#x\n", val);
+	dev_dbg(ep->pci.dev, "link_down: entry ltssm %#x\n", val);
 	if (val >= LTSSM_STATE_RCVRY_LOCK && val <= LTSSM_STATE_L1_IDLE) {
 		/* PCIE_IRQ_PULSE is write-1-to-clear; clear any stale PM_TO_ACK. */
 		val = exynos_pcie_readl(elbi, PCIE_IRQ_PULSE);
@@ -1081,7 +1081,7 @@ int zumapro_pcie_modem_link_down(struct device *rc_dev)
 				 "link_down: did NOT reach L2_IDLE (ltssm %#x)\n",
 				 val & LTSSM_STATE_MASK);
 		else
-			dev_info(ep->pci.dev, "link_down: reached L2_IDLE\n");
+			dev_dbg(ep->pci.dev, "link_down: reached L2_IDLE\n");
 	}
 
 	/*
@@ -1352,7 +1352,7 @@ int zumapro_pcie_modem_link_up(struct device *rc_dev)
 				ret = -EAGAIN;
 				continue;
 			}
-			dev_info(pci->dev, "modem link up (LNKSTA %#x)\n", lnksta);
+			dev_dbg(pci->dev, "modem link up (LNKSTA %#x)\n", lnksta);
 			ret = 0;
 			break;
 		}

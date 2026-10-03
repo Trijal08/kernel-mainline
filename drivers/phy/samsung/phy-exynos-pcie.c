@@ -359,7 +359,7 @@ static int zuma_pcie_phy_reset(struct phy *phy)
 	/* Bisect breadcrumb for the Wi-Fi L1.2-exit hunt: downstream's x1 cal
 	 * never writes CLK_SEL (it inherits the boot-chain value), so log what
 	 * we found before forcing the ext-PLL select. */
-	dev_info(&phy->dev, "CLK_SEL pre-modify %#x\n", val);
+	dev_dbg(&phy->dev, "CLK_SEL pre-modify %#x\n", val);
 	val &= ~ZUMA_SOC_PHY_CLK_TCXO;
 	val |= ZUMA_SOC_PHY_CLK_EXTPLL | ZUMA_SOC_PHY_CLK_INPUT_EN;
 	writel(val, ep->soc_base + ZUMA_SOC_PHY_CLK_SEL);
