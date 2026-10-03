@@ -75,7 +75,7 @@ struct hwmgr_state_rsp {
 #define AOC_TZ_MSG_TIMEOUT_MS		10000
 #define AOC_TZ_BUF_TIMEOUT_MS		10000
 
-#define AOC_FIRMWARE_NAME	"google/aoc.bin"
+#define AOC_FIRMWARE_NAME	"google/zumapro/aoc.bin"
 
 /* A signed AOC image begins with a fixed-size authentication header (the cert
  * the GSA verifies); the body that the certificate signs follows it.
