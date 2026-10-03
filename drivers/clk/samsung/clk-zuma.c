@@ -26,6 +26,7 @@
 #define CLKS_NR_MISC	(CLK_GOUT_MISC_XIU_D_MISC_ACLK + 1)
 #define CLKS_NR_PERIC0	(CLK_GOUT_PERIC0_SYSREG_PERIC0_PCLK + 1)
 #define CLKS_NR_PERIC1	(CLK_GOUT_PERIC1_SYSREG_PERIC1_PCLK + 1)
+#define CLKS_NR_MFC	(CLK_GOUT_MFC_SYSREG_PCLK + 1)
 
 #define GS101_GATE_DBG_OFFSET 0x4000
 #define GS101_DRCG_EN_OFFSET  0x104
@@ -4026,6 +4027,97 @@ static const struct samsung_cmu_info peric1_cmu_info __initconst = {
  * "power-domains" property is not a reliable filter: cmu_dpu lives in BLK_DPU
  * but does not declare one, and it faults once pd-dpuf0/pd-dpuf1 go down.
  */
+/* ---- CMU_MFC ------------------------------------------------------------ */
+
+/*
+ * The video codec's own CMU.  It takes the CMU_TOP MFC feed through a local
+ * user mux, divides it for the block's NoC, and gates the codec and SYSREG
+ * clocks.  Automatic (HWACG) mode and the Q-channel interface are the same as
+ * CMU_TOP's.
+ */
+#define PLL_CON0_MUX_CLKCMU_MFC_MFC_USER	0x0600
+#define MFC_CMU_MFC_CONTROLLER_OPTION		0x0800
+#define CLK_CON_DIV_DIV_CLK_MFC_NOCP		0x1800
+#define CLK_CON_GAT_GOUT_MFC_ACLK		0x2030
+#define CLK_CON_GAT_GOUT_MFC_SYSREG_PCLK	0x206c
+
+static const unsigned long mfc_clk_regs[] __initconst = {
+	CLK_CON_DIV_DIV_CLK_MFC_NOCP,
+	PLL_CON0_MUX_CLKCMU_MFC_MFC_USER,
+	CLK_CON_GAT_GOUT_MFC_ACLK,
+	CLK_CON_GAT_GOUT_MFC_SYSREG_PCLK,
+	/* Q-channel state, lost whenever the MFC power domain turns off. */
+	0x300c,		/* D_TZPC */
+	0x3010,		/* GPC */
+	0x3014,		/* LH_AXI_SI_D0 */
+	0x3018,		/* LH_AXI_SI_D1 */
+	0x301c,		/* CMU */
+	0x3020,		/* MFC */
+	0x3024,		/* PPMU_D0 */
+	0x3028,		/* PPMU_D1 */
+	0x302c,		/* RSTNSYNC_NOCD_SW_RESET */
+	0x3034,		/* SLH_AXI_MI_P */
+	0x3038,		/* SSMT_D0 */
+	0x303c,		/* SSMT_D1 */
+	0x3040,		/* SYSMMU_S0 */
+	0x3044,		/* SYSMMU_PMMU0 */
+	0x3048,		/* SYSMMU_PMMU1 */
+	0x304c,		/* SYSREG */
+	MFC_CMU_MFC_CONTROLLER_OPTION,
+};
+
+static const struct samsung_clk_reg_dump mfc_suspend_regs[] = {
+	/*
+	 * Keep the automatic-mode bits CMU initialisation installed, but clear
+	 * controller-option bit 24 so the CMU may reset while the domain is
+	 * down, matching the downstream MFC power-off sequence.  The saved
+	 * active value is restored on power-up.  The CMU owns this register, so
+	 * the power-domain node needs only its PMU resource.
+	 */
+	{ MFC_CMU_MFC_CONTROLLER_OPTION, 0xf0000000 },
+};
+
+PNAME(mout_mfc_mfc_user_p) = { "oscclk", "dout_cmu_mfc_mfc" };
+
+static const struct samsung_mux_clock mfc_mux_clks[] __initconst = {
+	MUX(CLK_MOUT_MFC_MFC_USER, "mout_mfc_mfc_user", mout_mfc_mfc_user_p,
+	    PLL_CON0_MUX_CLKCMU_MFC_MFC_USER, 4, 1),
+};
+
+static const struct samsung_div_clock mfc_div_clks[] __initconst = {
+	DIV(CLK_DOUT_MFC_NOCP, "dout_mfc_nocp", "mout_mfc_mfc_user",
+	    CLK_CON_DIV_DIV_CLK_MFC_NOCP, 0, 3),
+};
+
+static const struct samsung_gate_clock mfc_gate_clks[] __initconst = {
+	GATE(CLK_GOUT_MFC_MFC_ACLK, "gout_mfc_mfc_aclk", "mout_mfc_mfc_user",
+	     CLK_CON_GAT_GOUT_MFC_ACLK, 21, 0, 0),
+	GATE(CLK_GOUT_MFC_SYSREG_PCLK, "gout_mfc_sysreg_pclk", "dout_mfc_nocp",
+	     CLK_CON_GAT_GOUT_MFC_SYSREG_PCLK, 21, 0, 0),
+};
+
+static const struct samsung_cmu_info mfc_cmu_info __initconst = {
+	.mux_clks		= mfc_mux_clks,
+	.nr_mux_clks		= ARRAY_SIZE(mfc_mux_clks),
+	.div_clks		= mfc_div_clks,
+	.nr_div_clks		= ARRAY_SIZE(mfc_div_clks),
+	.gate_clks		= mfc_gate_clks,
+	.nr_gate_clks		= ARRAY_SIZE(mfc_gate_clks),
+	.nr_clk_ids		= CLKS_NR_MFC,
+	.clk_regs		= mfc_clk_regs,
+	.nr_clk_regs		= ARRAY_SIZE(mfc_clk_regs),
+	.sysreg_clk_regs	= dcrg_memclk_sysreg,
+	.nr_sysreg_clk_regs	= ARRAY_SIZE(dcrg_memclk_sysreg),
+	.suspend_regs		= mfc_suspend_regs,
+	.nr_suspend_regs	= ARRAY_SIZE(mfc_suspend_regs),
+	.clk_name		= "bus",
+	.auto_clock_gate	= true,
+	.gate_dbg_offset	= GS101_GATE_DBG_OFFSET,
+	.option_offset		= MFC_CMU_MFC_CONTROLLER_OPTION,
+	.drcg_offset		= GS101_DRCG_EN_OFFSET,
+	.memclk_offset		= GS101_MEMCLK_OFFSET,
+};
+
 static int __init zuma_cmu_probe(struct platform_device *pdev)
 {
 	return exynos_arm64_register_cmu_pm(pdev, true);
@@ -4068,6 +4160,12 @@ static const struct of_device_id zuma_cmu_of_match[] = {
 	}, {
 		.compatible = "google,zumapro-cmu-peric1",
 		.data = &peric1_cmu_info,
+	}, {
+		.compatible = "google,zuma-cmu-mfc",
+		.data = &mfc_cmu_info,
+	}, {
+		.compatible = "google,zumapro-cmu-mfc",
+		.data = &mfc_cmu_info,
 	}, {
 	},
 };
