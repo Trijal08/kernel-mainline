@@ -2827,16 +2827,29 @@ static void s5xxx_pktproc_ul_activate(struct s5xxx_modem *sm)
 {
 	void __iomem *info = sm->pktproc + S5XXX_PKTPROC_UL_INFO_OFS;
 	void __iomem *qinfo = info + 8 + S5XXX_PKTPROC_UL_TXQ * 20;
+	unsigned long flags;
 
 	if (!sm->pktproc)
 		return;
 
 	sm->ul_end_bit_owner = (readl(info) >> 24) & 1;
 	sm->ul_cp_quota = readl(info + 4) & 0xffff;
+
+	/*
+	 * Reset the producer state under the transmit lock.  This runs from the
+	 * hard IRQ on the CP's PHONE_START, against up to thirty netdevs each
+	 * with its own transmit queue: without the lock a transmit can publish a
+	 * descriptor into a ring whose pointers are being zeroed underneath it,
+	 * and the CP walks a fore_ptr that does not describe what is there.
+	 * Opening the gate last, inside the same section, publishes
+	 * end_bit_owner to the transmit path along with it.
+	 */
+	spin_lock_irqsave(&sm->tx_lock, flags);
 	sm->ul_done = 0;
 	writel(0, qinfo + 12);		/* fore_ptr (AP producer) */
 	writel(0, qinfo + 16);		/* rear_ptr (CP consumer) */
 	sm->ul_active = !!sm->pktproc;
+	spin_unlock_irqrestore(&sm->tx_lock, flags);
 
 	dev_info(sm->dev, "pktproc UL %s: end_bit_owner=%u cp_quota=%u\n",
 		 sm->ul_active ? "active" : "provisioned (UL cap withheld)",
@@ -2870,6 +2883,15 @@ static bool s5xxx_pktproc_ul_xmit(struct s5xxx_modem *sm, struct sk_buff *skb,
 		return false;
 
 	spin_lock_irqsave(&sm->tx_lock, flags);
+	/*
+	 * Under the lock, with the ring reset: a transmit that arrives while the
+	 * CP is restarting sees the gate closed and bails, so the reset cannot
+	 * land between a descriptor and the fore_ptr that hands it to the CP.
+	 */
+	if (!sm->ul_active) {
+		spin_unlock_irqrestore(&sm->tx_lock, flags);
+		return false;
+	}
 	slot = sm->ul_done;
 	rear = readl(qinfo + 16) % n;	/* rear_ptr (CP consumer) */
 	/* circ_space(n, fore=slot, rear): need at least one free descriptor. */
@@ -2974,8 +2996,8 @@ static netdev_tx_t s5xxx_ndo_start_xmit(struct sk_buff *skb,
 	}
 	len = skb->len;
 
-	if (sm->ul_active &&
-	    s5xxx_pktproc_ul_xmit(sm, skb, priv->ch, !netdev_xmit_more())) {
+	/* ul_active is tested under tx_lock inside ul_xmit, not here. */
+	if (s5xxx_pktproc_ul_xmit(sm, skb, priv->ch, !netdev_xmit_more())) {
 		ndev->stats.tx_packets++;
 		ndev->stats.tx_bytes += len;
 	} else {
@@ -5111,13 +5133,20 @@ MODULE_DEVICE_TABLE(of, s5xxx_of_match);
 static void s5xxx_shutdown(struct platform_device *pdev)
 {
 	struct s5xxx_modem *sm = platform_get_drvdata(pdev);
+	unsigned long flags;
 	int i;
 
 	if (!sm)
 		return;
 
-	/* Stop rmnet TX from ringing the doorbell on a link about to die. */
+	/*
+	 * Stop rmnet TX from ringing the doorbell on a link about to die.  Under
+	 * the transmit lock, so a transmit already inside ul_xmit finishes before
+	 * the gate closes rather than publishing into a ring nobody will drain.
+	 */
+	spin_lock_irqsave(&sm->tx_lock, flags);
 	sm->ul_active = false;
+	spin_unlock_irqrestore(&sm->tx_lock, flags);
 	for (i = 0; i < S5XXX_PDP_CH_COUNT; i++)
 		if (sm->ndev[i])
 			netif_tx_disable(sm->ndev[i]);
