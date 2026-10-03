@@ -33,18 +33,6 @@ static int num_ipp;
 static LIST_HEAD(ipp_list);
 
 /**
- * exynos_drm_ipp_count - number of registered picture processors
- *
- * Returns:
- * The number of ipp modules bound to this driver, zero on a SoC that has no
- * picture processor at all.
- */
-int exynos_drm_ipp_count(void)
-{
-	return num_ipp;
-}
-
-/**
  * exynos_drm_ipp_register - Register a new picture processor hardware module
  * @dev: DRM device
  * @ipp: ipp module to init
