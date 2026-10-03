@@ -158,8 +158,22 @@ static int exynos_s2mpu_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, s2mpu);
 	exynos_s2mpu_install(s2mpu);
 
+	/*
+	 * An always-on unit has no domain to watch, and dev_pm_genpd_add_notifier()
+	 * says -ENODEV for it.  That is not a failure: the permissive mapping is
+	 * already installed above, there is no power-down to lose it to, and
+	 * nothing needs re-installing until system sleep -- which resume_early
+	 * below covers.  Treating it as fatal left the unit open but the device
+	 * unbound, so anything naming it in access-controllers waited forever for
+	 * a supplier that would never be ready.
+	 */
 	s2mpu->genpd_nb.notifier_call = exynos_s2mpu_genpd_notify;
 	ret = dev_pm_genpd_add_notifier(dev, &s2mpu->genpd_nb);
+	if (ret == -ENODEV) {
+		dev_info(dev, "v9 allow-all installed, always-on (version %#x, %u contexts)\n",
+			 version, s2mpu->num_ctx);
+		return 0;
+	}
 	if (ret)
 		return dev_err_probe(dev, ret, "cannot watch the power domain\n");
 
