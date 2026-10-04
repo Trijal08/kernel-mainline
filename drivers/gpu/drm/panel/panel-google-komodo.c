@@ -395,6 +395,13 @@ static int komodo_panel_get_modes(struct drm_panel *panel,
 
 	connector->display_info.width_mm = komodo_modes[0].mode.width_mm;
 	connector->display_info.height_mm = komodo_modes[0].mode.height_mm;
+	/*
+	 * Eight, matching bits_per_component in both DSC configurations and
+	 * every mode the vendor driver describes. There is no EDID on a DSI
+	 * panel, so left unsaid this reads as unknown and userspace has to
+	 * guess at the depth it is compositing for.
+	 */
+	connector->display_info.bpc = 8;
 
 	return ARRAY_SIZE(komodo_modes);
 }
