@@ -195,6 +195,7 @@ struct aoc_data {
 	u32 chip_product_id;
 	u32 chip_type;
 	u32 chip_rev;
+	u32 wifi_chip;
 	struct iommu_domain *domain;	/* the AOC's SysMMU translation */
 
 	/* Runtime IPC, valid once the AOC has published its control block. */
@@ -314,7 +315,7 @@ static void aoc_write_params(struct aoc_data *aoc)
 		{ kAOCGnssType,			0 },
 		{ kAOCVolteReleaseMif,		0 },
 		{ kAOCChipProductId,		aoc->chip_product_id },
-		{ kAOCWifiChip,			0 },
+		{ kAOCWifiChip,			aoc->wifi_chip },
 	};
 	unsigned int i, n = ARRAY_SIZE(tbl);
 
@@ -1381,6 +1382,8 @@ static int aoc_services_show(struct seq_file *s, void *unused)
 
 	for (i = 0; i < live; i++) {
 		void *hdr = (u8 *)aoc->ipc + soff + (size_t)i * size;
+		void *up = svc_region(hdr, AOC_UP);
+		void *dn = svc_region(hdr, AOC_DOWN);
 		char nm[AOC_SERVICE_NAME_LEN + 1];
 		int t = svc_type(hdr);
 
@@ -1390,6 +1393,19 @@ static int aoc_services_show(struct seq_file *s, void *unused)
 			   t < (int)ARRAY_SIZE(types) ? types[t] : "?",
 			   svc_mbox(hdr),
 			   i >= aoc->n_services ? "  [appeared after probe]" : "");
+		/*
+		 * The pointers, not just the names: whether the far side has
+		 * consumed what the AP wrote is the difference between "nobody is
+		 * listening" and "somebody listened and declined to answer".
+		 */
+		seq_printf(s, "     up size %u slots %u tx %u rx %u wp %#x rp %#x\n",
+			   ipc_r32(up + REG_SIZE), ipc_r32(up + REG_SLOTS),
+			   ipc_r32(up + REG_TX), ipc_r32(up + REG_RX),
+			   ipc_r32(up + REG_WP), ipc_r32(up + REG_RP));
+		seq_printf(s, "     dn size %u slots %u tx %u rx %u wp %#x rp %#x\n",
+			   ipc_r32(dn + REG_SIZE), ipc_r32(dn + REG_SLOTS),
+			   ipc_r32(dn + REG_TX), ipc_r32(dn + REG_RX),
+			   ipc_r32(dn + REG_WP), ipc_r32(dn + REG_RP));
 	}
 	return 0;
 }
@@ -1500,6 +1516,7 @@ static int aoc_probe(struct platform_device *pdev)
 
 	of_property_read_u32(dev->of_node, "aoc-board-id", &aoc->board_id);
 	of_property_read_u32(dev->of_node, "aoc-board-rev", &aoc->board_rev);
+	of_property_read_u32(dev->of_node, "google,wifi-chip", &aoc->wifi_chip);
 	aoc_read_chipid(aoc);
 
 	dev_info(dev, "carveout %pa (%zu MiB), gsa %s\n", &aoc->carveout_base,

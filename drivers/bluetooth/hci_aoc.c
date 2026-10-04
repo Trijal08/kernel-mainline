@@ -14,23 +14,23 @@
  *
  * -- and platform_bt_offload_manager.cc sits next to the service names used
  * here.  So this driver is an ordinary HCI transport whose "wire" is a pair of
- * AOC ring services carrying H4, with controller setup delegated to the shared
+ * AOC ring services, with controller setup delegated to the shared
  * Broadcom helpers exactly as btusb does.
  *
  * Note the service names say "chre_bt_offload": on this firmware that is the
  * only Bluetooth pipe (the string "com.google.bt" does not appear in the image
- * at all -- that name belongs to other Tensor products).  Whether the AOC's
- * proxy will serve a general HCI host or only context-hub clients is the open
- * question this driver exists to answer, so the service names, the ring
- * direction and the control handshake are all overridable at runtime.
+ * at all -- that name belongs to other Tensor products).
  *
  * Copyright 2026 Trijal Saha <trijalsaha2012@gmail.com>
  */
 
 #include <linux/delay.h>
+#include <linux/completion.h>
 #include <linux/gpio/consumer.h>
-#include <linux/hex.h>
+#include <linux/ktime.h>
+#include <linux/sizes.h>
 #include <linux/module.h>
+#include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/of_platform.h>
 #include <linux/platform_device.h>
@@ -44,47 +44,107 @@
 
 #include "btbcm.h"
 
-/* Live service table (see the AOC's debugfs "services"): idx 22 queue,
- * idx 89 ring, idx 90 ring on komodo's AOC build 1050. */
-static char *ctl_service = "chre_bt_offload_ctl";
-module_param(ctl_service, charp, 0444);
-MODULE_PARM_DESC(ctl_service, "AOC control service for the BT offload proxy");
-
-static char *tx_service = "chre_bt_offload_data_tx";
-module_param(tx_service, charp, 0444);
-MODULE_PARM_DESC(tx_service, "AOC service carrying host->controller H4");
-
-static char *rx_service = "chre_bt_offload_data_rx";
-module_param(rx_service, charp, 0444);
-MODULE_PARM_DESC(rx_service, "AOC service carrying controller->host H4");
-
-/*
- * The tx/rx names are the AOC's, and it is not established whose point of view
- * they take.  Each AOC service has both an AP->AOC and an AOC->AP region, so if
- * the sense is inverted this simply swaps which service is written and which is
- * read, with no other change.
- */
-static bool swap_rings;
-module_param(swap_rings, bool, 0644);
-MODULE_PARM_DESC(swap_rings, "write to rx_service and read from tx_service");
-
-/*
- * Some proxies need to be told to start.  The control service's message format
- * is not known, so rather than invent one, allow a byte sequence to be handed
- * in at runtime; anything the control service sends back is logged, which is
- * how that format gets learned.  Empty (the default) sends nothing.
- */
-static char *ctl_enable;
-module_param(ctl_enable, charp, 0644);
-MODULE_PARM_DESC(ctl_enable, "hex bytes to send on the control service at open");
-
-static bool setup_patchram = true;
-module_param(setup_patchram, bool, 0644);
-MODULE_PARM_DESC(setup_patchram,
-		 "run the Broadcom patchram download (clear if the AOC already did it)");
+/* idx 22 queue, idx 89 and 90 rings in the AOC's debugfs "services". */
+#define AOC_BT_CTL_SERVICE	"chre_bt_offload_ctl"
+#define AOC_BT_TX_SERVICE	"chre_bt_offload_data_tx"
+#define AOC_BT_RX_SERVICE	"chre_bt_offload_data_rx"
 
 #define AOC_BT_RX_CHUNK		512
 #define AOC_BT_TX_RETRIES	100
+
+/*
+ * EFW framing, recovered from the stock HAL's EfwApTransport
+ * (android.hardware.bluetooth-service.bcmbtlinux).  Neither ring is a byte
+ * stream: every message is a header plus payload padded out to a 32-byte slot,
+ * and the control queue carries a separate fixed-size message with its own type
+ * byte.  Bare H4 written into the ring is silently dropped, which is exactly
+ * how a controller that never answers presents.
+ *
+ * Bring-up is a handshake, not an open: drain the control queue, send a pause
+ * message, and the AOC answers pause then sync.  The sync carries the geometry
+ * (ring size, its own header size and version), and until it arrives the HAL
+ * refuses to transmit at all.
+ */
+#define AOC_BT_AP_HDR_LEN	17	/* ApTxHdrV1: ts u64, len u32, seq u32, type u8 */
+#define AOC_BT_SLOT_ALIGN	32
+#define AOC_BT_CTL_LEN		48	/* AP -> AOC control message */
+#define AOC_BT_CTL_RX_LEN	56	/* read buffer for AOC -> AP messages */
+#define AOC_BT_SYNC_TIMEOUT_MS	1000
+#define AOC_BT_SYNC_TRIES	6
+#define AOC_BT_SETUP_TRIES	5
+#define AOC_BT_RX_BUF		8192
+
+/* Control-queue message types (byte 0). */
+#define AOC_BT_CTL_PAUSE	0	/* AP -> AOC, 48 zero bytes */
+#define AOC_BT_CTL_AOC_PAUSE	1
+#define AOC_BT_CTL_AP_READY	2	/* AP -> AOC, answers AOC_PAUSE */
+#define AOC_BT_CTL_SYNC		3
+#define AOC_BT_CTL_CREDIT	4	/* both ways: u32 byte delta at +1 */
+#define AOC_BT_CTL_FATAL	5	/* AOC -> AP: error code at +1, then state */
+
+/* Data-ring message types (ApTxHdrV1 byte 16, AocTxHdr byte 0x1c). */
+#define AOC_BT_MSG_DATA		0
+#define AOC_BT_MSG_TRANSACT	1	/* request expecting a reply */
+#define AOC_BT_MSG_PASSTHROUGH	2	/* data too, AOC proxy bypassed */
+
+/*
+ * Every data-ring message opens with a u32 id.  HCI goes out as id 8 followed
+ * by a flag byte and the H4 type; it comes back as id 8..11 for event, ACL,
+ * SCO and ISO, with no type byte.  Requests to the AOC's BT HAL server are id
+ * 39 followed by a FlatBuffer: root { payload_type: ubyte; payload: table },
+ * PowerControl being payload type 3 with { on: bool; ?: bool }.
+ */
+#define AOC_BT_ID_HCI		8
+#define AOC_BT_ID_HAL		39
+#define AOC_BT_XACT_TIMEOUT_MS	800
+
+static const u8 aoc_bt_power_on[] = {
+	0x27, 0x00, 0x00, 0x00, 0x0c, 0x00, 0x00, 0x00, 0x08, 0x00, 0x0e, 0x00,
+	0x07, 0x00, 0x08, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03,
+	0x0c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x06, 0x00, 0x08, 0x00, 0x07, 0x00,
+	0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+};
+
+/* BaudrateChange { baud: u32 @ 44; mode: u8 = 1 }, payload type 5. */
+static const u8 aoc_bt_baud_tmpl[] = {
+	0x27, 0x00, 0x00, 0x00, 0x0c, 0x00, 0x00, 0x00, 0x08, 0x00, 0x0c, 0x00,
+	0x07, 0x00, 0x08, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05,
+	0x0c, 0x00, 0x00, 0x00, 0x08, 0x00, 0x0c, 0x00, 0x08, 0x00, 0x07, 0x00,
+	0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0xc2, 0x01, 0x00,
+};
+#define AOC_BT_BAUD_OFF		44
+#define AOC_BT_BAUD_INIT	115200
+/*
+ * The vendor HAL runs 4M, but at 4M here HCI worked and A2DP signalling
+ * timed out.  Above 3M hci_bcm first moves the chip's UART to a 48 MHz
+ * clock (0xfc45), which is the likely gap.  3M is 10x what A2DP needs.
+ */
+#define AOC_BT_BAUD_OPER	3000000
+
+static const u8 aoc_bt_power_off[] = {
+	0x27, 0x00, 0x00, 0x00, 0x0c, 0x00, 0x00, 0x00, 0x08, 0x00, 0x0c, 0x00,
+	0x07, 0x00, 0x08, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03,
+	0x08, 0x00, 0x00, 0x00, 0x04, 0x00, 0x04, 0x00, 0x04, 0x00, 0x00, 0x00,
+};
+
+/* Sync-message fields, all unaligned. */
+#define AOC_BT_SYNC_RING	1	/* u32 data-ring size */
+#define AOC_BT_SYNC_HDR		9	/* u32 AocTxHdr size */
+#define AOC_BT_SYNC_VER		14	/* u8 AocTxHdr version */
+
+/* AocTxHdr field offsets.  Version 0 has a 24-byte header and no type byte, so
+ * every field past +0x10 has to be checked against the reported size. */
+#define AOC_BT_FW_SIZE		0x10	/* u32 payload length */
+#define AOC_BT_FW_SEQ		0x14	/* u32 */
+#define AOC_BT_FW_XACT		0x18	/* u32, the request's seq on a reply */
+#define AOC_BT_FW_TYPE		0x1c	/* u8 */
+#define AOC_BT_FW_STATUS	0x1d	/* u8, pw::Status of a reply */
+
+enum aoc_bt_state {
+	AOC_BT_ST_CREATED,		/* nothing exchanged yet */
+	AOC_BT_ST_PAUSED,		/* our pause was answered */
+	AOC_BT_ST_READY,		/* sync received, data may flow */
+};
 
 struct aoc_bt {
 	struct device *dev;
@@ -93,170 +153,53 @@ struct aoc_bt {
 	struct aoc_service *ctl;
 	struct aoc_service *tx;
 	struct aoc_service *rx;
-	struct gpio_desc *reg_on;	/* BT_REG_ON: powers the BT core */
-	struct gpio_desc *dev_wake;	/* host -> device wake */
+	struct gpio_desc *reg_on;	/* BT_REG_ON */
+	struct gpio_desc *reg_on_latch;	/* clocks BT_REG_ON into the chip */
+	struct gpio_desc *dev_wake;
 	struct work_struct rx_work;
+	struct mutex ctl_lock;		/* the ctl queue has no writer locking */
 
-	/* H4 reassembly: the services are byte rings, not message queues, so a
-	 * read returns whatever happens to be there -- packets split across
-	 * reads and several packets per read are both normal. */
-	u8 rx_type;			/* current H4 packet type, 0 = idle */
-	u8 rx_hdr[4];
-	unsigned int rx_hdr_len;
-	unsigned int rx_have;
-	unsigned int rx_remaining;
-	struct sk_buff *rx_skb;
+	/* EFW transport state; the geometry is all learned from the sync. */
+	enum aoc_bt_state state;
+	struct completion synced;
+	u32 ring_size;
+	u32 fw_hdr_len;			/* AocTxHdr size the AOC reported */
+	u8 fw_hdr_ver;
+	u32 tx_write;			/* our offset into the data_tx ring */
+	u32 tx_acked;			/* the AOC's, advanced by CREDIT */
+	bool tx_full;			/* write caught the ack: ring is full */
+	u32 rx_done;			/* bytes consumed, owed back as credit */
+	u32 rx_ack_at;			/* return credit at ring_size / 4 */
+	u32 seq;
+	u8 *rx_buf;			/* de-framing buffer */
+	size_t rx_len;
+
+	struct completion xact_done;
+	u32 xact_id;
+	u8 xact_status;
 };
 
-/* H4 header length per packet type, 0 for a type we do not accept. */
-static unsigned int aoc_bt_hdr_len(u8 type)
+static void aoc_bt_rx_msg(struct aoc_bt *bt, const u8 *data, u32 len)
 {
-	switch (type) {
-	case HCI_EVENT_PKT:
-		return HCI_EVENT_HDR_SIZE;
-	case HCI_ACLDATA_PKT:
-		return HCI_ACL_HDR_SIZE;
-	case HCI_SCODATA_PKT:
-		return HCI_SCO_HDR_SIZE;
-	case HCI_ISODATA_PKT:
-		return HCI_ISO_HDR_SIZE;
-	default:
-		return 0;
-	}
-}
+	static const u8 types[] = {
+		HCI_EVENT_PKT, HCI_ACLDATA_PKT, HCI_SCODATA_PKT, HCI_ISODATA_PKT,
+	};
+	struct sk_buff *skb;
+	u32 id;
 
-/* Payload length carried by a complete H4 header. */
-static unsigned int aoc_bt_payload_len(u8 type, const u8 *hdr)
-{
-	switch (type) {
-	case HCI_EVENT_PKT:
-		return ((const struct hci_event_hdr *)hdr)->plen;
-	case HCI_ACLDATA_PKT:
-		return __le16_to_cpu(((const struct hci_acl_hdr *)hdr)->dlen);
-	case HCI_SCODATA_PKT:
-		return ((const struct hci_sco_hdr *)hdr)->dlen;
-	case HCI_ISODATA_PKT:
-		return __le16_to_cpu(((const struct hci_iso_hdr *)hdr)->dlen);
-	default:
-		return 0;
-	}
-}
-
-static void aoc_bt_rx_reset(struct aoc_bt *bt)
-{
-	kfree_skb(bt->rx_skb);
-	bt->rx_skb = NULL;
-	bt->rx_type = 0;
-	bt->rx_hdr_len = 0;
-	bt->rx_have = 0;
-	bt->rx_remaining = 0;
-}
-
-static void aoc_bt_rx_deliver(struct aoc_bt *bt)
-{
-	struct sk_buff *skb = bt->rx_skb;
-
-	bt->rx_skb = NULL;
-	bt->rx_type = 0;
-	bt->rx_have = 0;
-	bt->rx_hdr_len = 0;
-	hci_recv_frame(bt->hdev, skb);		/* consumes skb */
-}
-
-/* Feed a chunk of the ring into the H4 reassembler. */
-static void aoc_bt_rx_stream(struct aoc_bt *bt, const u8 *data, size_t len)
-{
-	while (len) {
-		unsigned int n;
-
-		if (!bt->rx_type) {
-			u8 type = *data++;
-
-			len--;
-			bt->rx_hdr_len = aoc_bt_hdr_len(type);
-			if (!bt->rx_hdr_len) {
-				/* Not H4, or we lost sync.  Say so once and
-				 * drop the byte rather than build garbage. */
-				bt_dev_warn_ratelimited(bt->hdev,
-					"unexpected H4 type %#x, resyncing",
-					type);
-				continue;
-			}
-			bt->rx_type = type;
-			bt->rx_have = 0;
-			continue;
-		}
-
-		if (bt->rx_have < bt->rx_hdr_len) {
-			n = min_t(size_t, len, bt->rx_hdr_len - bt->rx_have);
-			memcpy(bt->rx_hdr + bt->rx_have, data, n);
-			bt->rx_have += n;
-			data += n;
-			len -= n;
-			if (bt->rx_have < bt->rx_hdr_len)
-				return;		/* header still incomplete */
-
-			bt->rx_remaining = aoc_bt_payload_len(bt->rx_type,
-							      bt->rx_hdr);
-			bt->rx_skb = bt_skb_alloc(bt->rx_hdr_len +
-						  bt->rx_remaining, GFP_KERNEL);
-			if (!bt->rx_skb) {
-				aoc_bt_rx_reset(bt);
-				return;
-			}
-			hci_skb_pkt_type(bt->rx_skb) = bt->rx_type;
-			skb_put_data(bt->rx_skb, bt->rx_hdr, bt->rx_hdr_len);
-			if (!bt->rx_remaining)
-				aoc_bt_rx_deliver(bt);
-			continue;
-		}
-
-		n = min_t(size_t, len, bt->rx_remaining);
-		skb_put_data(bt->rx_skb, data, n);
-		bt->rx_remaining -= n;
-		data += n;
-		len -= n;
-		if (!bt->rx_remaining)
-			aoc_bt_rx_deliver(bt);
-	}
-}
-
-/* Doorbell callback -- interrupt context, so only kick the worker. */
-static void aoc_bt_service_irq(struct aoc_service *svc, void *priv)
-{
-	struct aoc_bt *bt = priv;
-
-	schedule_work(&bt->rx_work);
-}
-
-static void aoc_bt_rx_work(struct work_struct *work)
-{
-	struct aoc_bt *bt = container_of(work, struct aoc_bt, rx_work);
-	u8 *buf;
-
-	buf = kmalloc(AOC_BT_RX_CHUNK, GFP_KERNEL);
-	if (!buf)
+	if (len < 4)
 		return;
-
-	/* Anything the control service says is unmapped protocol; log it, as
-	 * that is how the handshake gets identified. */
-	while (bt->ctl && aoc_service_can_read(bt->ctl)) {
-		int len = aoc_service_read(bt->ctl, buf, AOC_BT_RX_CHUNK);
-
-		if (len <= 0)
-			break;
-		bt_dev_info(bt->hdev, "ctl message (%d bytes): %*ph",
-			    len, min(len, 32), buf);
+	id = get_unaligned_le32(data);
+	if (id < AOC_BT_ID_HCI || id >= AOC_BT_ID_HCI + ARRAY_SIZE(types)) {
+		bt_dev_dbg(bt->hdev, "rx message id %u, %u bytes", id, len);
+		return;
 	}
-
-	while (bt->rx && aoc_service_can_read(bt->rx)) {
-		int len = aoc_service_read(bt->rx, buf, AOC_BT_RX_CHUNK);
-
-		if (len <= 0)
-			break;
-		aoc_bt_rx_stream(bt, buf, len);
-	}
-	kfree(buf);
+	skb = bt_skb_alloc(len - 4, GFP_KERNEL);
+	if (!skb)
+		return;
+	hci_skb_pkt_type(skb) = types[id - AOC_BT_ID_HCI];
+	skb_put_data(skb, data + 4, len - 4);
+	hci_recv_frame(bt->hdev, skb);
 }
 
 /* Ring writes can be short when the AOC is behind; finish the packet. */
@@ -283,18 +226,295 @@ static int aoc_bt_write_all(struct aoc_bt *bt, struct aoc_service *svc,
 	return 0;
 }
 
-static int aoc_bt_send_frame(struct hci_dev *hdev, struct sk_buff *skb)
+static u32 aoc_bt_slot(u32 payload, u32 hdr)
 {
-	struct aoc_bt *bt = hci_get_drvdata(hdev);
+	return ALIGN(payload + hdr, AOC_BT_SLOT_ALIGN);
+}
+
+static int aoc_bt_ctl_write(struct aoc_bt *bt, const u8 *msg)
+{
+	int ret;
+
+	mutex_lock(&bt->ctl_lock);
+	ret = aoc_bt_write_all(bt, bt->ctl, msg, AOC_BT_CTL_LEN);
+	mutex_unlock(&bt->ctl_lock);
+	return ret;
+}
+
+/* One fixed-size control message.  PAUSE is all zeroes, so val is ignored. */
+static int aoc_bt_ctl_send(struct aoc_bt *bt, u8 type, u32 val)
+{
+	u8 msg[AOC_BT_CTL_LEN] = { };
+
+	if (!bt->ctl)
+		return -ENODEV;
+
+	msg[0] = type;
+	put_unaligned_le32(val, &msg[1]);
+	return aoc_bt_ctl_write(bt, msg);
+}
+
+/*
+ * The AOC's pause asks the AP to drop whatever data_rx holds and describe its
+ * own header; only then does the AOC send the sync.  Bytes 5..7 are what the
+ * HAL sends: ApTxHdr version 1, then 3 (meaning unknown), then 0 for "no
+ * second rx channel".
+ */
+static void aoc_bt_ap_ready(struct aoc_bt *bt)
+{
+	u8 msg[AOC_BT_CTL_LEN] = { AOC_BT_CTL_AP_READY };
+
+	while (aoc_service_can_read(bt->rx) &&
+	       aoc_service_read(bt->rx, bt->rx_buf, AOC_BT_RX_BUF) > 0)
+		;
+	put_unaligned_le32(AOC_BT_AP_HDR_LEN, &msg[1]);
+	msg[5] = 1;
+	msg[6] = 3;
+	if (aoc_bt_ctl_write(bt, msg))
+		bt_dev_warn(bt->hdev, "cannot answer the AOC's pause");
+}
+
+/* Hand the AOC back credit for the data_rx bytes we consumed, or it fills the
+ * ring and stops sending.  The HAL does this once a quarter ring is owed. */
+static void aoc_bt_rx_credit(struct aoc_bt *bt)
+{
+	if (!bt->rx_ack_at || bt->rx_done < bt->rx_ack_at)
+		return;
+
+	if (aoc_bt_ctl_send(bt, AOC_BT_CTL_CREDIT, bt->rx_done))
+		bt_dev_warn_ratelimited(bt->hdev, "cannot return rx credit");
+	bt->rx_done = 0;
+}
+
+static void aoc_bt_ctl_msg(struct aoc_bt *bt, const u8 *msg, int len)
+{
+	if (len < 1)
+		return;
+
+	switch (msg[0]) {
+	case AOC_BT_CTL_AOC_PAUSE:
+		if (bt->state == AOC_BT_ST_CREATED) {
+			bt->state = AOC_BT_ST_PAUSED;
+			aoc_bt_ap_ready(bt);
+		} else
+			bt_dev_info(bt->hdev, "unsolicited pause from the AOC");
+		break;
+
+	case AOC_BT_CTL_SYNC:
+		if (len <= AOC_BT_SYNC_VER) {
+			bt_dev_err(bt->hdev, "short sync message (%d bytes)",
+				   len);
+			break;
+		}
+		bt->ring_size = get_unaligned_le32(msg + AOC_BT_SYNC_RING);
+		bt->fw_hdr_len = get_unaligned_le32(msg + AOC_BT_SYNC_HDR);
+		bt->fw_hdr_ver = msg[AOC_BT_SYNC_VER];
+		if (bt->fw_hdr_len < AOC_BT_FW_SIZE + 4 ||
+		    bt->fw_hdr_len > 64 || !bt->ring_size ||
+		    bt->ring_size > SZ_1M) {
+			bt_dev_err(bt->hdev,
+				   "implausible sync: hdr %u ver %u ring %u",
+				   bt->fw_hdr_len, bt->fw_hdr_ver,
+				   bt->ring_size);
+			bt->fw_hdr_len = 0;
+			break;
+		}
+		bt->tx_write = 0;
+		bt->tx_acked = 0;
+		bt->tx_full = false;
+		bt->rx_done = 0;
+		bt->rx_ack_at = bt->ring_size / 4;
+		bt->seq = 0;		/* the AOC restarts its count too */
+		bt->state = AOC_BT_ST_READY;
+		bt_dev_info(bt->hdev,
+		    "EFW ready: AocTxHdrV%u %u bytes, ring %u, ApTxHdrV1 %u",
+		    bt->fw_hdr_ver, bt->fw_hdr_len, bt->ring_size,
+		    AOC_BT_AP_HDR_LEN);
+		complete(&bt->synced);
+		break;
+
+	case AOC_BT_CTL_CREDIT:
+		/* A byte delta against our write pointer, not an absolute. */
+		if (len >= 5 && bt->ring_size) {
+			bt->tx_acked = (bt->tx_acked +
+					get_unaligned_le32(msg + 1)) %
+				       bt->ring_size;
+			bt->tx_full = false;
+		}
+		break;
+
+	case AOC_BT_CTL_FATAL:
+		bt_dev_err(bt->hdev, "AOC fatal error %u: %*ph", msg[1],
+			   min(len, 48), msg);
+		break;
+
+	default:
+		bt_dev_info(bt->hdev, "ctl type %u (%d bytes): %*ph", msg[0],
+			    len, min(len, 32), msg);
+		break;
+	}
+}
+
+/* Peel whole messages off the de-framing buffer.  A read can end mid-slot, so
+ * whatever is left over stays for the next round. */
+static void aoc_bt_rx_frames(struct aoc_bt *bt)
+{
+	if (!bt->fw_hdr_len)
+		return;
+
+	while (bt->rx_len >= bt->fw_hdr_len) {
+		u32 payload = get_unaligned_le32(bt->rx_buf + AOC_BT_FW_SIZE);
+		u8 type = bt->fw_hdr_len > AOC_BT_FW_TYPE ?
+				bt->rx_buf[AOC_BT_FW_TYPE] : AOC_BT_MSG_DATA;
+		u32 slot = aoc_bt_slot(payload, bt->fw_hdr_len);
+
+		if (slot > AOC_BT_RX_BUF) {
+			bt_dev_err(bt->hdev,
+				   "bad frame: type %u payload %u, resyncing",
+				   type, payload);
+			bt->rx_len = 0;
+			return;
+		}
+		if (bt->rx_len < slot)
+			return;		/* slot not all here yet */
+
+		if (type == AOC_BT_MSG_DATA || type == AOC_BT_MSG_PASSTHROUGH) {
+			aoc_bt_rx_msg(bt, bt->rx_buf + bt->fw_hdr_len, payload);
+		} else if (type == AOC_BT_MSG_TRANSACT &&
+			   bt->fw_hdr_len > AOC_BT_FW_STATUS &&
+			   get_unaligned_le32(bt->rx_buf + AOC_BT_FW_XACT) ==
+			   bt->xact_id) {
+			bt->xact_status = bt->rx_buf[AOC_BT_FW_STATUS];
+			complete(&bt->xact_done);
+		} else {
+			bt_dev_info(bt->hdev, "rx message type %u, %u bytes",
+				    type, payload);
+		}
+
+		memmove(bt->rx_buf, bt->rx_buf + slot, bt->rx_len - slot);
+		bt->rx_len -= slot;
+		bt->rx_done += slot;
+		aoc_bt_rx_credit(bt);
+	}
+}
+
+/* Doorbell callback -- interrupt context, so only kick the worker. */
+static void aoc_bt_service_irq(struct aoc_service *svc, void *priv)
+{
+	struct aoc_bt *bt = priv;
+
+	schedule_work(&bt->rx_work);
+}
+
+static void aoc_bt_rx_work(struct work_struct *work)
+{
+	struct aoc_bt *bt = container_of(work, struct aoc_bt, rx_work);
+	u8 *buf;
+
+	buf = kmalloc(AOC_BT_RX_CHUNK, GFP_KERNEL);
+	if (!buf)
+		return;
+
+	while (bt->ctl && aoc_service_can_read(bt->ctl)) {
+		int len = aoc_service_read(bt->ctl, buf, AOC_BT_CTL_RX_LEN);
+
+		if (len <= 0)
+			break;
+		aoc_bt_ctl_msg(bt, buf, len);
+	}
+
+	while (bt->rx && bt->fw_hdr_len && aoc_service_can_read(bt->rx)) {
+		size_t room = AOC_BT_RX_BUF - bt->rx_len;
+		int len;
+
+		if (!room)
+			break;
+		len = aoc_service_read(bt->rx, bt->rx_buf + bt->rx_len,
+				       min_t(size_t, room, AOC_BT_RX_CHUNK));
+		if (len <= 0)
+			break;
+		bt->rx_len += len;
+		aoc_bt_rx_frames(bt);
+	}
+	kfree(buf);
+}
+
+/* One data-ring message: ApTxHdrV1, then pre and data back to back. */
+static int aoc_bt_tx(struct aoc_bt *bt, u8 type, const u8 *pre, size_t pre_len,
+		     const u8 *data, size_t len)
+{
+	unsigned int tries = 0;
+	u32 slot, avail;
+	u8 *msg;
 	int ret;
 
 	if (!bt->tx)
 		return -ENODEV;
+	if (bt->state != AOC_BT_ST_READY)
+		return -EHOSTDOWN;
 
-	/* H4: one type byte ahead of the packet. */
-	memcpy(skb_push(skb, 1), &hci_skb_pkt_type(skb), 1);
+	slot = aoc_bt_slot(pre_len + len, AOC_BT_AP_HDR_LEN);
+	if (slot > bt->ring_size)
+		return -EMSGSIZE;
 
-	ret = aoc_bt_write_all(bt, bt->tx, skb->data, skb->len);
+	/* Wait for the AOC to ack enough of the ring.  Equal pointers mean
+	 * empty, not full -- tx_full tells those apart, as it does in the HAL.
+	 */
+	for (;;) {
+		avail = bt->tx_full ? 0 :
+			bt->ring_size - (bt->tx_write + bt->ring_size -
+					 bt->tx_acked) % bt->ring_size;
+		if (avail >= slot)
+			break;
+		if (++tries > AOC_BT_TX_RETRIES)
+			return -ENOBUFS;
+		usleep_range(200, 400);
+	}
+
+	msg = kzalloc(slot, GFP_KERNEL);
+	if (!msg)
+		return -ENOMEM;
+	put_unaligned_le64(ktime_get_boottime_ns(), msg);
+	put_unaligned_le32(pre_len + len, msg + 8);
+	put_unaligned_le32(bt->seq++, msg + 12);
+	msg[16] = type;
+	memcpy(msg + AOC_BT_AP_HDR_LEN, pre, pre_len);
+	memcpy(msg + AOC_BT_AP_HDR_LEN + pre_len, data, len);
+
+	ret = aoc_bt_write_all(bt, bt->tx, msg, slot);
+	kfree(msg);
+	if (ret)
+		return ret;
+	bt->tx_write = (bt->tx_write + slot) % bt->ring_size;
+	if (bt->tx_write == bt->tx_acked)
+		bt->tx_full = true;
+	return 0;
+}
+
+/* A request to the AOC's BT HAL server; returns its pw::Status or -errno. */
+static int aoc_bt_transact(struct aoc_bt *bt, const u8 *req, size_t len)
+{
+	int ret;
+
+	reinit_completion(&bt->xact_done);
+	bt->xact_id = bt->seq;		/* the reply echoes our sequence */
+	ret = aoc_bt_tx(bt, AOC_BT_MSG_TRANSACT, NULL, 0, req, len);
+	if (ret)
+		return ret;
+	if (!wait_for_completion_timeout(&bt->xact_done,
+			msecs_to_jiffies(AOC_BT_XACT_TIMEOUT_MS)))
+		return -ETIMEDOUT;
+	return bt->xact_status;
+}
+
+static int aoc_bt_send_frame(struct hci_dev *hdev, struct sk_buff *skb)
+{
+	struct aoc_bt *bt = hci_get_drvdata(hdev);
+	u8 pre[6] = { AOC_BT_ID_HCI, 0, 0, 0, 0, hci_skb_pkt_type(skb) };
+	int ret;
+
+	ret = aoc_bt_tx(bt, AOC_BT_MSG_DATA, pre, sizeof(pre), skb->data,
+			skb->len);
 	if (ret)
 		return ret;
 
@@ -314,59 +534,97 @@ static int aoc_bt_send_frame(struct hci_dev *hdev, struct sk_buff *skb)
 	return 0;
 }
 
-/* Optional, runtime-supplied kick for the control service (see ctl_enable). */
-static void aoc_bt_send_ctl_enable(struct aoc_bt *bt)
+static int aoc_bt_close(struct hci_dev *hdev);
+
+/*
+ * BT_REG_ON reaches the chip through a flip-flop: a level change only takes
+ * effect once the latch line is pulsed.  This is the vendor nitrous driver's
+ * sequence; without the pulses the core stays off and HCI goes unanswered.
+ */
+static void aoc_bt_latch(struct aoc_bt *bt)
 {
-	u8 buf[32];
-	size_t n;
+	gpiod_set_value_cansleep(bt->reg_on_latch, 1);
+	udelay(1);
+	gpiod_set_value_cansleep(bt->reg_on_latch, 0);
+}
 
-	if (!bt->ctl || !ctl_enable || !*ctl_enable)
-		return;
-
-	n = min(strlen(ctl_enable) / 2, sizeof(buf));
-	if (!n)
-		return;
-	if (hex2bin(buf, ctl_enable, n)) {
-		dev_warn(bt->dev, "ctl_enable is not valid hex\n");
-		return;
+static void aoc_bt_power(struct aoc_bt *bt, bool on)
+{
+	if (on) {
+		gpiod_set_value_cansleep(bt->reg_on, 0);
+		aoc_bt_latch(bt);
+		msleep(30);
+		gpiod_set_value_cansleep(bt->reg_on, 1);
+		aoc_bt_latch(bt);
+		gpiod_set_value_cansleep(bt->dev_wake, 1);
+		/* The vendor HAL's reg_on_delay_ms; 10-20 ms leaves HCI mute. */
+		msleep(100);
+	} else {
+		gpiod_set_value_cansleep(bt->dev_wake, 0);
+		gpiod_set_value_cansleep(bt->reg_on, 0);
+		aoc_bt_latch(bt);
 	}
-	dev_info(bt->dev, "sending %zu ctl byte(s): %*ph\n", n, (int)n, buf);
-	aoc_service_write(bt->ctl, buf, n);
+	usleep_range(10000, 20000);
 }
 
 static int aoc_bt_open(struct hci_dev *hdev)
 {
 	struct aoc_bt *bt = hci_get_drvdata(hdev);
-	const char *want_tx = swap_rings ? rx_service : tx_service;
-	const char *want_rx = swap_rings ? tx_service : rx_service;
+	int tries, ret;
 
-	gpiod_set_value_cansleep(bt->dev_wake, 1);
-	gpiod_set_value_cansleep(bt->reg_on, 1);
-	usleep_range(10000, 12000);	/* BT_REG_ON -> core out of reset */
+	aoc_bt_power(bt, true);
 
-	bt->ctl = aoc_service_find(bt->aoc_dev, ctl_service);
-	bt->tx = aoc_service_find(bt->aoc_dev, want_tx);
-	bt->rx = aoc_service_find(bt->aoc_dev, want_rx);
-	if (!bt->tx || !bt->rx) {
-		dev_err(bt->dev, "AOC has no '%s'/'%s' (is the AOC up?)\n",
-			want_tx, want_rx);
-		gpiod_set_value_cansleep(bt->reg_on, 0);
-		gpiod_set_value_cansleep(bt->dev_wake, 0);
+	bt->ctl = aoc_service_find(bt->aoc_dev, AOC_BT_CTL_SERVICE);
+	bt->tx = aoc_service_find(bt->aoc_dev, AOC_BT_TX_SERVICE);
+	bt->rx = aoc_service_find(bt->aoc_dev, AOC_BT_RX_SERVICE);
+	if (!bt->ctl || !bt->tx || !bt->rx) {
+		dev_err(bt->dev, "AOC has no chre_bt_offload services (is the AOC up?)\n");
+		bt->ctl = bt->tx = bt->rx = NULL;
+		aoc_bt_power(bt, false);
 		return -ENODEV;
 	}
-	if (!bt->ctl)
-		dev_warn(bt->dev, "no '%s'; continuing without it\n",
-			 ctl_service);
 
-	aoc_bt_rx_reset(bt);
+	bt->rx_len = 0;
+	bt->fw_hdr_len = 0;
+	bt->state = AOC_BT_ST_CREATED;
+	reinit_completion(&bt->synced);
 	aoc_service_set_handler(bt->rx, aoc_bt_service_irq, bt);
-	if (bt->ctl)
-		aoc_service_set_handler(bt->ctl, aoc_bt_service_irq, bt);
+	aoc_service_set_handler(bt->ctl, aoc_bt_service_irq, bt);
 
-	aoc_bt_send_ctl_enable(bt);
-
-	/* Drain anything queued while we were attaching. */
+	/*
+	 * Handshake: rx_work drains whatever the control queue already holds,
+	 * then we send the pause.  The AOC answers pause and then sync, and the
+	 * sync carries the ring geometry -- until it lands, transmit is refused
+	 * and the data ring is not read.
+	 */
 	schedule_work(&bt->rx_work);
+	flush_work(&bt->rx_work);
+
+	/* Re-send the pause only while unanswered: each one restarts the AOC's
+	 * side of the handshake. */
+	for (tries = 0; tries < AOC_BT_SYNC_TRIES; tries++) {
+		if (bt->state == AOC_BT_ST_CREATED &&
+		    aoc_bt_ctl_send(bt, AOC_BT_CTL_PAUSE, 0))
+			bt_dev_warn(bt->hdev, "cannot send pause");
+		if (wait_for_completion_timeout(&bt->synced,
+				msecs_to_jiffies(AOC_BT_SYNC_TIMEOUT_MS)))
+			break;
+	}
+	if (bt->state != AOC_BT_ST_READY) {
+		bt_dev_err(bt->hdev,
+			   "no EFW sync from the AOC after %d pauses (state %d)",
+			   AOC_BT_SYNC_TRIES, bt->state);
+		aoc_bt_close(hdev);
+		return -ETIMEDOUT;
+	}
+
+	/* The AOC owns BT power on this board; ask it to bring the core up. */
+	ret = aoc_bt_transact(bt, aoc_bt_power_on, sizeof(aoc_bt_power_on));
+	if (ret) {
+		bt_dev_err(bt->hdev, "AOC PowerControl(on) failed: %d", ret);
+		aoc_bt_close(hdev);
+		return ret < 0 ? ret : -EIO;
+	}
 	return 0;
 }
 
@@ -374,40 +632,101 @@ static int aoc_bt_close(struct hci_dev *hdev)
 {
 	struct aoc_bt *bt = hci_get_drvdata(hdev);
 
+	/* Before the handlers go: the reply comes back through rx_work. */
+	if (bt->state == AOC_BT_ST_READY)
+		aoc_bt_transact(bt, aoc_bt_power_off, sizeof(aoc_bt_power_off));
+
 	if (bt->rx)
 		aoc_service_set_handler(bt->rx, NULL, NULL);
 	if (bt->ctl)
 		aoc_service_set_handler(bt->ctl, NULL, NULL);
 	cancel_work_sync(&bt->rx_work);
-	aoc_bt_rx_reset(bt);
+	bt->rx_len = 0;
+	bt->fw_hdr_len = 0;
+	bt->state = AOC_BT_ST_CREATED;
 	bt->ctl = bt->tx = bt->rx = NULL;
-
-	gpiod_set_value_cansleep(bt->reg_on, 0);
-	gpiod_set_value_cansleep(bt->dev_wake, 0);
+	aoc_bt_power(bt, false);
 	return 0;
 }
 
-static int aoc_bt_flush(struct hci_dev *hdev)
+/* Only the AOC's side of the chip UART. */
+static int aoc_bt_aoc_baud(struct aoc_bt *bt, u32 baud)
 {
-	struct aoc_bt *bt = hci_get_drvdata(hdev);
+	u8 req[sizeof(aoc_bt_baud_tmpl)];
+	int ret;
 
-	cancel_work_sync(&bt->rx_work);
-	aoc_bt_rx_reset(bt);
-	return 0;
+	memcpy(req, aoc_bt_baud_tmpl, sizeof(req));
+	put_unaligned_le32(baud, req + AOC_BT_BAUD_OFF);
+	ret = aoc_bt_transact(bt, req, sizeof(req));
+	if (ret)
+		bt_dev_err(bt->hdev, "AOC BaudrateChange(%u) failed: %d", baud,
+			   ret);
+	return ret ? -EIO : 0;
+}
+
+/* The chip answers at the old rate, then switches; the AOC follows. */
+static int aoc_bt_set_baud(struct aoc_bt *bt, u32 baud)
+{
+	u8 param[6] = { };
+	struct sk_buff *skb;
+
+	put_unaligned_le32(baud, param + 2);
+	skb = __hci_cmd_sync(bt->hdev, 0xfc18, sizeof(param), param,
+			     HCI_INIT_TIMEOUT);
+	if (IS_ERR(skb))
+		return PTR_ERR(skb);
+	kfree_skb(skb);
+	return aoc_bt_aoc_baud(bt, baud);
 }
 
 /*
  * Controller bring-up is the ordinary Broadcom sequence (chip name, matching
- * .hcd patchram, re-read local version).  Nothing here is AOC-specific -- the
- * transport is just a pipe -- which is why btbcm is reused rather than vendor
- * commands being open-coded.  If the AOC's proxy has already patched the
- * controller, clear setup_patchram and let the core do a plain HCI reset.
+ * .hcd patchram, re-read local version), reused from btbcm.  The AOC-to-chip
+ * UART comes up at 115200, which caps both the patchram and A2DP at ~11 KB/s,
+ * so like the vendor HAL speed it up -- and again after the patch, since
+ * launching it resets the chip's UART.
+ */
+static int aoc_bt_setup_once(struct hci_dev *hdev)
+{
+	struct aoc_bt *bt = hci_get_drvdata(hdev);
+	bool fw_load_done = false;
+	int ret;
+
+	ret = aoc_bt_aoc_baud(bt, AOC_BT_BAUD_INIT);
+	if (!ret)
+		ret = aoc_bt_set_baud(bt, AOC_BT_BAUD_OPER);
+	if (!ret)
+		ret = btbcm_initialize(hdev, &fw_load_done, false);
+	if (!ret && fw_load_done) {
+		ret = aoc_bt_aoc_baud(bt, AOC_BT_BAUD_INIT);
+		if (!ret)
+			ret = aoc_bt_set_baud(bt, AOC_BT_BAUD_OPER);
+	}
+	if (ret)
+		return ret;
+	return btbcm_finalize(hdev, &fw_load_done, false);
+}
+
+/*
+ * Right after the AOC boots its BT side completes the handshake and
+ * PowerControl but does not yet relay HCI, so the first command times out.
+ * A power cycle through the AOC a little later works.
  */
 static int aoc_bt_setup(struct hci_dev *hdev)
 {
-	if (!setup_patchram)
-		return 0;
-	return btbcm_setup_patchram(hdev);
+	int tries, ret;
+
+	for (tries = 1; ; tries++) {
+		ret = aoc_bt_setup_once(hdev);
+		if (ret != -ETIMEDOUT || tries == AOC_BT_SETUP_TRIES)
+			return ret;
+		bt_dev_warn(hdev, "controller silent, power cycling (%d)", tries);
+		aoc_bt_close(hdev);
+		msleep(1000);
+		ret = aoc_bt_open(hdev);
+		if (ret)
+			return ret;
+	}
 }
 
 static int aoc_bt_probe(struct platform_device *pdev)
@@ -433,11 +752,16 @@ static int aoc_bt_probe(struct platform_device *pdev)
 		return dev_err_probe(dev, -EPROBE_DEFER, "AOC not ready\n");
 	bt->aoc_dev = &aoc_pdev->dev;
 
-	/* BT_REG_ON (gpn8-0 on komodo); the AOC owns the HCI UART itself. */
 	bt->reg_on = devm_gpiod_get(dev, "shutdown", GPIOD_OUT_LOW);
 	if (IS_ERR(bt->reg_on)) {
-		ret = dev_err_probe(dev, PTR_ERR(bt->reg_on),
-				    "no shutdown (BT_REG_ON) GPIO\n");
+		ret = dev_err_probe(dev, PTR_ERR(bt->reg_on), "no BT_REG_ON\n");
+		goto err_put;
+	}
+	bt->reg_on_latch = devm_gpiod_get_optional(dev, "reg-on-latch",
+						   GPIOD_OUT_LOW);
+	if (IS_ERR(bt->reg_on_latch)) {
+		ret = dev_err_probe(dev, PTR_ERR(bt->reg_on_latch),
+				    "bad reg-on-latch GPIO\n");
 		goto err_put;
 	}
 	bt->dev_wake = devm_gpiod_get_optional(dev, "device-wakeup",
@@ -449,6 +773,15 @@ static int aoc_bt_probe(struct platform_device *pdev)
 	}
 
 	INIT_WORK(&bt->rx_work, aoc_bt_rx_work);
+	init_completion(&bt->synced);
+	init_completion(&bt->xact_done);
+	mutex_init(&bt->ctl_lock);
+
+	bt->rx_buf = devm_kmalloc(dev, AOC_BT_RX_BUF, GFP_KERNEL);
+	if (!bt->rx_buf) {
+		ret = -ENOMEM;
+		goto err_put;
+	}
 
 	hdev = hci_alloc_dev();
 	if (!hdev) {
@@ -470,9 +803,10 @@ static int aoc_bt_probe(struct platform_device *pdev)
 
 	hdev->open = aoc_bt_open;
 	hdev->close = aoc_bt_close;
-	hdev->flush = aoc_bt_flush;
 	hdev->send = aoc_bt_send_frame;
 	hdev->setup = aoc_bt_setup;
+	/* Every close cuts power, and with it the patchram. */
+	hci_set_quirk(hdev, HCI_QUIRK_NON_PERSISTENT_SETUP);
 	hdev->set_bdaddr = btbcm_set_bdaddr;
 
 	platform_set_drvdata(pdev, bt);
