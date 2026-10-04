@@ -3674,6 +3674,21 @@
 		};
 
 		/*
+		 * The USB controller's DMA firewall.  Out of reset an S2MPU
+		 * blocks its master outright, and pd_hsi0 gates, so the unit
+		 * returns to that state whenever the domain is powered down -
+		 * the driver's power-on notifier reinstalls the table before
+		 * anything in the domain resumes.  The device describes this
+		 * one with neither a power domain nor always-on, which would
+		 * leave it programmed once and then lost on the first gate.
+		 */
+		s2mpu_s0_hsi0: s2mpu@11070000 {
+			compatible = "google,s2mpu-v9";
+			reg = <0x11070000 0x10000>;
+			power-domains = <&pd_hsi0>;
+		};
+
+		/*
 		 * zuma/zumapro HS is eUSB2 (like exynos2200), not gs101's
 		 * USBDP-internal HS. The combo PHY delegates HS to this eUSB2
 		 * sub-PHY ("hs"), which drives the external eUSB2<->USB2 repeater
