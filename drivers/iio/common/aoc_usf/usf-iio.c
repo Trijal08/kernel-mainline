@@ -3,15 +3,16 @@
  * AoC USF sensor framework -> IIO bridge.
  *
  * Bridges the sensors hosted by the AoC USF (Unified Sensor Framework)
- * firmware to Linux IIO. The AoC sensor registry is loaded out of band by a
- * userspace daemon; once it is loaded this driver enumerates the sensors over
- * the com.google.usf AOCC channel and exposes them as IIO devices. This is the
- * data-plane half described in docs/subsystems/sensors/reference/usf-iio-bridge.md.
+ * firmware to Linux IIO. Once the AoC sensor registry is loaded this driver
+ * enumerates the sensors over the com.google.usf AOCC channel and exposes them
+ * as IIO devices. This is the data-plane half described in
+ * docs/subsystems/sensors/reference/usf-iio-bridge.md.
  *
- * The registry-load daemon "pokes" this driver once the registry is ready by
- * writing the "enumerate" sysfs attribute; the driver stays inert until then.
- * The autopoll module parameter is a kernel-only bring-up escape hatch that
- * enumerates at probe instead.
+ * The registry comes from the firmware search path, fetched by the enumeration
+ * work below, which retries for long enough to outlast the switch to the real
+ * root - so nothing in userspace has to sequence it, and enumeration starts at
+ * probe. The "enumerate" sysfs attribute retriggers it, and autopoll=0 holds it
+ * back for a platform whose userspace would rather own the timing.
  */
 
 #define pr_fmt(fmt) "usf-iio: " fmt
@@ -62,10 +63,10 @@
  */
 #define USF_IIO_MODE		USF_MODE_FUSED
 
-static bool autopoll;
+static bool autopoll = true;
 module_param(autopoll, bool, 0644);
 MODULE_PARM_DESC(autopoll,
-		 "enumerate sensors at probe instead of waiting for the sysfs poke");
+		 "enumerate sensors at probe (default); clear to wait for the sysfs poke instead");
 
 static char *sensor = "";
 module_param(sensor, charp, 0644);
