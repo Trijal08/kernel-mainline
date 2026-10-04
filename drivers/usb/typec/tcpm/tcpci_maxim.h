@@ -80,6 +80,8 @@ struct max_tcpci_chip {
 	enum contamiant_state contaminant_state;
 	bool veto_vconn_swap;
 	struct regulator *vbus_reg;
+	/* Our own enable state for vbus_reg; see max_tcpci_set_vbus(). */
+	bool vbus_enabled;
 	/* SBU/AUX pull-up rail, raised to 3.3V while DP alt mode is up */
 	struct regulator *sbu_reg;
 	bool sbu_reg_enabled;
