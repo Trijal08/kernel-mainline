@@ -32,6 +32,7 @@
 #include <linux/gpio/consumer.h>
 #include <linux/hex.h>
 #include <linux/ktime.h>
+#include <linux/sizes.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/of.h>
@@ -87,13 +88,10 @@ MODULE_PARM_DESC(setup_patchram,
 		 "run the Broadcom patchram download (clear if the AOC already did it)");
 
 /*
- * ApTxHdrV1's type byte for H4 payloads.  The HAL's send entry picks 2 when
- * its caller sets a flag bit and 0 otherwise, and Transact() uses 1 for a
- * request that expects a reply; nothing names which one carries HCI traffic, so
- * it stays switchable.  The AOC's own RX path delivers types 0 and 2 alike and
- * only special-cases 1, so 2 is the informed default.
+ * ApTxHdrV1's type byte for H4 payloads.  The HAL sends 0 for HCI traffic and
+ * 2 only in its "AOC passthrough" mode; 2 drew a fatal error from the AOC.
  */
-static int data_type = 2;	/* AOC_BT_MSG_DATA */
+static int data_type;
 module_param(data_type, int, 0644);
 MODULE_PARM_DESC(data_type, "ApTxHdrV1 type byte used for H4 data");
 
@@ -124,11 +122,14 @@ MODULE_PARM_DESC(data_type, "ApTxHdrV1 type byte used for H4 data");
 /* Control-queue message types (byte 0). */
 #define AOC_BT_CTL_PAUSE	0	/* AP -> AOC, 48 zero bytes */
 #define AOC_BT_CTL_AOC_PAUSE	1
+#define AOC_BT_CTL_AP_READY	2	/* AP -> AOC, answers AOC_PAUSE */
 #define AOC_BT_CTL_SYNC		3
 #define AOC_BT_CTL_CREDIT	4	/* both ways: u32 byte delta at +1 */
+#define AOC_BT_CTL_FATAL	5	/* AOC -> AP: error code at +1, then state */
 
-/* Data-ring message type (ApTxHdrV1 byte 16). */
-#define AOC_BT_MSG_DATA		2
+/* Data-ring message types (ApTxHdrV1 byte 16, AocTxHdr byte 0x1c). */
+#define AOC_BT_MSG_DATA		0
+#define AOC_BT_MSG_PASSTHROUGH	2	/* data too, AOC proxy bypassed */
 
 /* Sync-message fields, all unaligned. */
 #define AOC_BT_SYNC_RING	1	/* u32 data-ring size */
@@ -327,21 +328,47 @@ static u32 aoc_bt_slot(u32 payload, u32 hdr)
 	return ALIGN(payload + hdr, AOC_BT_SLOT_ALIGN);
 }
 
+static int aoc_bt_ctl_write(struct aoc_bt *bt, const u8 *msg)
+{
+	int ret;
+
+	mutex_lock(&bt->ctl_lock);
+	ret = aoc_bt_write_all(bt, bt->ctl, msg, AOC_BT_CTL_LEN);
+	mutex_unlock(&bt->ctl_lock);
+	return ret;
+}
+
 /* One fixed-size control message.  PAUSE is all zeroes, so val is ignored. */
 static int aoc_bt_ctl_send(struct aoc_bt *bt, u8 type, u32 val)
 {
 	u8 msg[AOC_BT_CTL_LEN] = { };
-	int ret;
 
 	if (!bt->ctl)
 		return -ENODEV;
 
 	msg[0] = type;
 	put_unaligned_le32(val, &msg[1]);
-	mutex_lock(&bt->ctl_lock);
-	ret = aoc_bt_write_all(bt, bt->ctl, msg, sizeof(msg));
-	mutex_unlock(&bt->ctl_lock);
-	return ret;
+	return aoc_bt_ctl_write(bt, msg);
+}
+
+/*
+ * The AOC's pause asks the AP to drop whatever data_rx holds and describe its
+ * own header; only then does the AOC send the sync.  Bytes 5..7 are what the
+ * HAL sends: ApTxHdr version 1, then 3 (meaning unknown), then 0 for "no
+ * second rx channel".
+ */
+static void aoc_bt_ap_ready(struct aoc_bt *bt)
+{
+	u8 msg[AOC_BT_CTL_LEN] = { AOC_BT_CTL_AP_READY };
+
+	while (aoc_service_can_read(bt->rx) &&
+	       aoc_service_read(bt->rx, bt->rx_buf, AOC_BT_RX_BUF) > 0)
+		;
+	put_unaligned_le32(AOC_BT_AP_HDR_LEN, &msg[1]);
+	msg[5] = 1;
+	msg[6] = 3;
+	if (aoc_bt_ctl_write(bt, msg))
+		bt_dev_warn(bt->hdev, "cannot answer the AOC's pause");
 }
 
 /* Hand the AOC back credit for the data_rx bytes we consumed, or it fills the
@@ -363,9 +390,10 @@ static void aoc_bt_ctl_msg(struct aoc_bt *bt, const u8 *msg, int len)
 
 	switch (msg[0]) {
 	case AOC_BT_CTL_AOC_PAUSE:
-		if (bt->state == AOC_BT_ST_CREATED)
+		if (bt->state == AOC_BT_ST_CREATED) {
 			bt->state = AOC_BT_ST_PAUSED;
-		else
+			aoc_bt_ap_ready(bt);
+		} else
 			bt_dev_info(bt->hdev, "unsolicited pause from the AOC");
 		break;
 
@@ -380,7 +408,7 @@ static void aoc_bt_ctl_msg(struct aoc_bt *bt, const u8 *msg, int len)
 		bt->fw_hdr_ver = msg[AOC_BT_SYNC_VER];
 		if (bt->fw_hdr_len < AOC_BT_FW_SIZE + 4 ||
 		    bt->fw_hdr_len > 64 || !bt->ring_size ||
-		    bt->ring_size > AOC_BT_RX_BUF * 16) {
+		    bt->ring_size > SZ_1M) {
 			bt_dev_err(bt->hdev,
 				   "implausible sync: hdr %u ver %u ring %u",
 				   bt->fw_hdr_len, bt->fw_hdr_ver,
@@ -393,6 +421,7 @@ static void aoc_bt_ctl_msg(struct aoc_bt *bt, const u8 *msg, int len)
 		bt->tx_full = false;
 		bt->rx_done = 0;
 		bt->rx_ack_at = bt->ring_size / 4;
+		bt->seq = 0;		/* the AOC restarts its count too */
 		bt->state = AOC_BT_ST_READY;
 		bt_dev_info(bt->hdev,
 		    "EFW ready: AocTxHdrV%u %u bytes, ring %u, ApTxHdrV1 %u",
@@ -409,6 +438,11 @@ static void aoc_bt_ctl_msg(struct aoc_bt *bt, const u8 *msg, int len)
 				       bt->ring_size;
 			bt->tx_full = false;
 		}
+		break;
+
+	case AOC_BT_CTL_FATAL:
+		bt_dev_err(bt->hdev, "AOC fatal error %u: %*ph", msg[1],
+			   min(len, 48), msg);
 		break;
 
 	default:
@@ -441,7 +475,8 @@ static void aoc_bt_rx_frames(struct aoc_bt *bt)
 		if (bt->rx_len < slot)
 			return;		/* slot not all here yet */
 
-		if (type == AOC_BT_MSG_DATA && payload)
+		if ((type == AOC_BT_MSG_DATA ||
+		     type == AOC_BT_MSG_PASSTHROUGH) && payload)
 			aoc_bt_rx_stream(bt, bt->rx_buf + bt->fw_hdr_len,
 					   payload);
 		else
@@ -630,13 +665,11 @@ static int aoc_bt_open(struct hci_dev *hdev)
 	schedule_work(&bt->rx_work);
 	flush_work(&bt->rx_work);
 
-	/*
-	 * Re-send the pause until the sync lands.  The HAL sends one and waits,
-	 * but a single doorbell the AOC misses costs a whole bring-up, and a
-	 * repeated pause is harmless.
-	 */
+	/* Re-send the pause only while unanswered: each one restarts the AOC's
+	 * side of the handshake. */
 	for (tries = 0; tries < AOC_BT_SYNC_TRIES; tries++) {
-		if (bt->ctl && aoc_bt_ctl_send(bt, AOC_BT_CTL_PAUSE, 0))
+		if (bt->state == AOC_BT_ST_CREATED &&
+		    aoc_bt_ctl_send(bt, AOC_BT_CTL_PAUSE, 0))
 			bt_dev_warn(bt->hdev, "cannot send pause");
 		if (wait_for_completion_timeout(&bt->synced,
 				msecs_to_jiffies(AOC_BT_SYNC_TIMEOUT_MS)))
