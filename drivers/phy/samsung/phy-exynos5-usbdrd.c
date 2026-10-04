@@ -2080,16 +2080,41 @@ static int zuma_ss_tca_ctrl_sync(struct exynos5_usbdrd_phy *phy_drd, int mux,
 				 int low_power_en);
 
 /*
+ * Which SS lane pair the cable put USB on: 0/1 for a normal cable, 2/3 for a
+ * flipped one. The PMA lane mux, the CR-para window onto the lane registers
+ * and the TCA's own flip all have to agree on it, and the vendor driver keys
+ * all three off this one polarity (its used_phy_port).
+ */
+static bool zuma_ss_phy_flipped(const struct exynos5_usbdrd_phy *phy_drd)
+{
+	return phy_drd->orientation == TYPEC_ORIENTATION_REVERSE;
+}
+
+/*
+ * Carry the cable's polarity into the PHY. This has to be redone on every mux
+ * change rather than once at init: the PHY is initialised at probe, with no
+ * cable attached and the orientation still NONE, and dwc3 role switches only
+ * ever call phy_set_mode() - phy_init() is not run again. Writing it only at
+ * init therefore left the PHY configured for a normal cable for good, and a
+ * flipped one then had the lanes swapped underneath a PHY that did not know
+ * it, which wedges the controller on its first transfer. The vendor driver
+ * writes it immediately before each TCA sync, which is what this matches.
+ */
+static void zuma_ss_apply_flip(struct exynos5_usbdrd_phy *phy_drd)
+{
+	writel(zuma_ss_phy_flipped(phy_drd)
+	       ? ZUMA_USBDP_PHY_TCA_CONFIG_FLIP_INVERT : 0x0,
+	       phy_drd->reg_pma + ZUMA_USBDP_PHY_TCA_CONFIG);
+}
+
+/*
  * Route the four SS lanes for the alternate mode TCPM negotiated. Pin
  * assignments C and E give DP all four lanes; D and F split them two and two,
  * leaving USB3 up alongside.
  *
- * The cable flip is not applied here: zuma_ss_phy_initiate() sets the PHY's
- * FLIP_INVERT from ->orientation at init, and the TCA's own
- * CONNECTOR_ORIENTATION bit is left clear so the USB path keeps the bit pattern
- * it boots and runs with today.
- * ponytail: revisit once a DP sink can actually be trained -- a flipped cable
- * is the case that will show which of the two the DP lanes follow.
+ * The cable flip is not applied here: zuma_ss_phy_initiate() carries it into
+ * the PHY's own FLIP_INVERT, and the TCA's CONNECTOR_ORIENTATION bit stays
+ * clear - which is what the vendor driver does too.
  */
 static int exynos5_usbdrd_mode_sw_set(struct typec_mux_dev *mux,
 				      struct typec_mux_state *state)
@@ -2129,6 +2154,7 @@ static int exynos5_usbdrd_mode_sw_set(struct typec_mux_dev *mux,
 
 	scoped_guard(mutex, &phy_drd->phy_mutex) {
 		phy_drd->tca_mux = tca_mux;
+		zuma_ss_apply_flip(phy_drd);
 		zuma_ss_tca_ctrl_sync(phy_drd, tca_mux, 0);
 	}
 
@@ -3191,15 +3217,31 @@ static const struct exynos5_usbdrd_phy_drvdata gs101_usbd31rd_phy = {
  * zuma boots the PHY in RAM mode (sub_phy_version 0x801 -> ver minor 1), so
  * after de-asserting reset we load the firmware patch into SRAM via the
  * CR-para port, then run the documented RX-cal / per-lane termination tuning.
- * The Type-C orientation is left at normal (port 0) for bring-up.
+ * The Type-C orientation is whatever the connector last reported; with no
+ * cable attached at probe that is normal, and zuma_ss_apply_flip() revisits
+ * it on every mux change.
  *
  * The whole sequence is non-fatal: every wait loop is bounded and any failure
  * just logs and returns, so a dead SS PHY can never hang the combo phy_init()
  * (dwc3 still gets its HS UDC). See zuma_usbdrd_pipe3_init().
  */
-#define ZUMA_SS_PHY_PORT		0
-#define ZUMA_SS_CRREG_LANE_TX(_r)	((_r) + (ZUMA_SS_PHY_PORT == 0 ? 0x0000 : 0x0300))
-#define ZUMA_SS_CRREG_LANE_RX(_r)	((_r) + (ZUMA_SS_PHY_PORT == 0 ? 0x0100 : 0x0200))
+/*
+ * Which SS lane pair the cable put USB on: 0/1 for a normal cable, 2/3 for a
+ * flipped one. The PMA lane mux, the CR-para window onto the lane registers
+ * and the TCA's own flip all have to agree on it, and the vendor driver keys
+ * all three off this one polarity (its used_phy_port).
+ */
+static u16 zuma_ss_crreg_lane_tx(const struct exynos5_usbdrd_phy *phy_drd,
+				 u16 reg)
+{
+	return reg + (zuma_ss_phy_flipped(phy_drd) ? 0x0300 : 0x0000);
+}
+
+static u16 zuma_ss_crreg_lane_rx(const struct exynos5_usbdrd_phy *phy_drd,
+				 u16 reg)
+{
+	return reg + (zuma_ss_phy_flipped(phy_drd) ? 0x0200 : 0x0100);
+}
 
 /*
  * CR-para clock toggle. Unlike exynosautov920_usb31drd_cr_clk() (which drives
@@ -3458,9 +3500,8 @@ static void zuma_ss_phy_initiate(struct exynos5_usbdrd_phy *phy_drd)
 	/* allow REXT calibration to settle */
 	udelay(10);
 
-	/* lane flip per Type-C orientation (normal = port 0) */
-	writel(ZUMA_SS_PHY_PORT == 1 ? ZUMA_USBDP_PHY_TCA_CONFIG_FLIP_INVERT : 0x0,
-	       base + ZUMA_USBDP_PHY_TCA_CONFIG);
+	/* lane flip per Type-C orientation */
+	zuma_ss_apply_flip(phy_drd);
 }
 
 static int zuma_ss_wait_fw_update_done(struct exynos5_usbdrd_phy *phy_drd)
@@ -3615,7 +3656,7 @@ static int zuma_ss_additional_cr_reg_update(struct exynos5_usbdrd_phy *phy_drd)
 
 	/* wait for RX calibration done (bounded) */
 	for (time_out = 100; time_out > 0; time_out--) {
-		cr_reg = zuma_ss_cr_read(phy_drd, ZUMA_SS_CRREG_LANE_RX(0x303e));
+		cr_reg = zuma_ss_cr_read(phy_drd, zuma_ss_crreg_lane_rx(phy_drd, 0x303e));
 		if (cr_reg & 0x2)
 			break;
 		mdelay(1);
@@ -3626,9 +3667,9 @@ static int zuma_ss_additional_cr_reg_update(struct exynos5_usbdrd_phy *phy_drd)
 	}
 
 	/* LFPS threshold control */
-	cr_reg = zuma_ss_cr_read(phy_drd, ZUMA_SS_CRREG_LANE_RX(0x10f0));
+	cr_reg = zuma_ss_cr_read(phy_drd, zuma_ss_crreg_lane_rx(phy_drd, 0x10f0));
 	cr_reg &= ~(1 << 3);
-	zuma_ss_cr_write(phy_drd, ZUMA_SS_CRREG_LANE_RX(0x10f0), cr_reg, false);
+	zuma_ss_cr_write(phy_drd, zuma_ss_crreg_lane_rx(phy_drd, 0x10f0), cr_reg, false);
 
 	/* TX VSWING_LVL = 7 (override enable bit 7) */
 	cr_reg = zuma_ss_cr_read(phy_drd, 0x22);
@@ -3637,9 +3678,9 @@ static int zuma_ss_additional_cr_reg_update(struct exynos5_usbdrd_phy *phy_drd)
 	zuma_ss_cr_write(phy_drd, 0x22, cr_reg, false);
 
 	/* TX enable iBoost / rBoost */
-	cr_reg = zuma_ss_cr_read(phy_drd, ZUMA_SS_CRREG_LANE_TX(0x10eb));
+	cr_reg = zuma_ss_cr_read(phy_drd, zuma_ss_crreg_lane_tx(phy_drd, 0x10eb));
 	cr_reg |= (1 << 3) | (0x3 << 1);
-	zuma_ss_cr_write(phy_drd, ZUMA_SS_CRREG_LANE_TX(0x10eb), cr_reg, false);
+	zuma_ss_cr_write(phy_drd, zuma_ss_crreg_lane_tx(phy_drd, 0x10eb), cr_reg, false);
 
 	/* lanes 0-3 term control: 50 -> 44 ohms */
 	cr_reg = zuma_ss_cr_read(phy_drd, 0x301a);
