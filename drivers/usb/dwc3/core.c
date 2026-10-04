@@ -412,14 +412,24 @@ static void dwc3_ref_clk_period(struct dwc3 *dwc)
 	unsigned long rate;
 	u32 reg;
 
-	if (dwc->ref_clk) {
+	/*
+	 * Prefer the period the integrator stated over the one inferred from
+	 * the clock. The property is a deliberate statement about the
+	 * frequency arriving at the reference pin, whereas a clock rate is a
+	 * model of the tree above it and can be wrong - and when it is, the
+	 * arithmetic below quietly produces a truncated period, an fladj too
+	 * large for its field and a zero divisor, which leaves host SOF and
+	 * ITP generation mistimed while device mode, which follows the host's
+	 * framing, looks perfectly healthy.
+	 */
+	if (dwc->ref_clk_per) {
+		period = dwc->ref_clk_per;
+		rate = NSEC_PER_SEC / period;
+	} else if (dwc->ref_clk) {
 		rate = clk_get_rate(dwc->ref_clk);
 		if (!rate)
 			return;
 		period = NSEC_PER_SEC / rate;
-	} else if (dwc->ref_clk_per) {
-		period = dwc->ref_clk_per;
-		rate = NSEC_PER_SEC / period;
 	} else {
 		return;
 	}
