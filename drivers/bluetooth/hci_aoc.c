@@ -14,15 +14,12 @@
  *
  * -- and platform_bt_offload_manager.cc sits next to the service names used
  * here.  So this driver is an ordinary HCI transport whose "wire" is a pair of
- * AOC ring services carrying H4, with controller setup delegated to the shared
+ * AOC ring services, with controller setup delegated to the shared
  * Broadcom helpers exactly as btusb does.
  *
  * Note the service names say "chre_bt_offload": on this firmware that is the
  * only Bluetooth pipe (the string "com.google.bt" does not appear in the image
- * at all -- that name belongs to other Tensor products).  Whether the AOC's
- * proxy will serve a general HCI host or only context-hub clients is the open
- * question this driver exists to answer, so the service names, the ring
- * direction and the control handshake are all overridable at runtime.
+ * at all -- that name belongs to other Tensor products).
  *
  * Copyright 2026 Trijal Saha <trijalsaha2012@gmail.com>
  */
@@ -30,7 +27,6 @@
 #include <linux/delay.h>
 #include <linux/completion.h>
 #include <linux/gpio/consumer.h>
-#include <linux/hex.h>
 #include <linux/ktime.h>
 #include <linux/sizes.h>
 #include <linux/module.h>
@@ -48,44 +44,10 @@
 
 #include "btbcm.h"
 
-/* Live service table (see the AOC's debugfs "services"): idx 22 queue,
- * idx 89 ring, idx 90 ring on komodo's AOC build 1050. */
-static char *ctl_service = "chre_bt_offload_ctl";
-module_param(ctl_service, charp, 0444);
-MODULE_PARM_DESC(ctl_service, "AOC control service for the BT offload proxy");
-
-static char *tx_service = "chre_bt_offload_data_tx";
-module_param(tx_service, charp, 0444);
-MODULE_PARM_DESC(tx_service, "AOC service carrying host->controller H4");
-
-static char *rx_service = "chre_bt_offload_data_rx";
-module_param(rx_service, charp, 0444);
-MODULE_PARM_DESC(rx_service, "AOC service carrying controller->host H4");
-
-/*
- * The tx/rx names are the AOC's, and it is not established whose point of view
- * they take.  Each AOC service has both an AP->AOC and an AOC->AP region, so if
- * the sense is inverted this simply swaps which service is written and which is
- * read, with no other change.
- */
-static bool swap_rings;
-module_param(swap_rings, bool, 0644);
-MODULE_PARM_DESC(swap_rings, "write to rx_service and read from tx_service");
-
-/*
- * Some proxies need to be told to start.  The control service's message format
- * is not known, so rather than invent one, allow a byte sequence to be handed
- * in at runtime; anything the control service sends back is logged, which is
- * how that format gets learned.  Empty (the default) sends nothing.
- */
-static char *ctl_enable;
-module_param(ctl_enable, charp, 0644);
-MODULE_PARM_DESC(ctl_enable, "hex bytes to send on the control service at open");
-
-static bool setup_patchram = true;
-module_param(setup_patchram, bool, 0644);
-MODULE_PARM_DESC(setup_patchram,
-		 "run the Broadcom patchram download (clear if the AOC already did it)");
+/* idx 22 queue, idx 89 and 90 rings in the AOC's debugfs "services". */
+#define AOC_BT_CTL_SERVICE	"chre_bt_offload_ctl"
+#define AOC_BT_TX_SERVICE	"chre_bt_offload_data_tx"
+#define AOC_BT_RX_SERVICE	"chre_bt_offload_data_rx"
 
 #define AOC_BT_RX_CHUNK		512
 #define AOC_BT_TX_RETRIES	100
@@ -555,26 +517,6 @@ static int aoc_bt_send_frame(struct hci_dev *hdev, struct sk_buff *skb)
 	return 0;
 }
 
-/* Optional, runtime-supplied kick for the control service (see ctl_enable). */
-static void aoc_bt_send_ctl_enable(struct aoc_bt *bt)
-{
-	u8 buf[32];
-	size_t n;
-
-	if (!bt->ctl || !ctl_enable || !*ctl_enable)
-		return;
-
-	n = min(strlen(ctl_enable) / 2, sizeof(buf));
-	if (!n)
-		return;
-	if (hex2bin(buf, ctl_enable, n)) {
-		dev_warn(bt->dev, "ctl_enable is not valid hex\n");
-		return;
-	}
-	dev_info(bt->dev, "sending %zu ctl byte(s): %*ph\n", n, (int)n, buf);
-	aoc_service_write(bt->ctl, buf, n);
-}
-
 static int aoc_bt_close(struct hci_dev *hdev);
 
 /*
@@ -598,6 +540,8 @@ static void aoc_bt_power(struct aoc_bt *bt, bool on)
 		gpiod_set_value_cansleep(bt->reg_on, 1);
 		aoc_bt_latch(bt);
 		gpiod_set_value_cansleep(bt->dev_wake, 1);
+		/* The vendor HAL's reg_on_delay_ms; 10-20 ms leaves HCI mute. */
+		msleep(100);
 	} else {
 		gpiod_set_value_cansleep(bt->dev_wake, 0);
 		gpiod_set_value_cansleep(bt->reg_on, 0);
@@ -609,34 +553,26 @@ static void aoc_bt_power(struct aoc_bt *bt, bool on)
 static int aoc_bt_open(struct hci_dev *hdev)
 {
 	struct aoc_bt *bt = hci_get_drvdata(hdev);
-	const char *want_tx = swap_rings ? rx_service : tx_service;
-	const char *want_rx = swap_rings ? tx_service : rx_service;
 	int tries, ret;
 
 	aoc_bt_power(bt, true);
 
-	bt->ctl = aoc_service_find(bt->aoc_dev, ctl_service);
-	bt->tx = aoc_service_find(bt->aoc_dev, want_tx);
-	bt->rx = aoc_service_find(bt->aoc_dev, want_rx);
-	if (!bt->tx || !bt->rx) {
-		dev_err(bt->dev, "AOC has no '%s'/'%s' (is the AOC up?)\n",
-			want_tx, want_rx);
+	bt->ctl = aoc_service_find(bt->aoc_dev, AOC_BT_CTL_SERVICE);
+	bt->tx = aoc_service_find(bt->aoc_dev, AOC_BT_TX_SERVICE);
+	bt->rx = aoc_service_find(bt->aoc_dev, AOC_BT_RX_SERVICE);
+	if (!bt->ctl || !bt->tx || !bt->rx) {
+		dev_err(bt->dev, "AOC has no chre_bt_offload services (is the AOC up?)\n");
+		bt->ctl = bt->tx = bt->rx = NULL;
 		aoc_bt_power(bt, false);
 		return -ENODEV;
 	}
-	if (!bt->ctl)
-		dev_warn(bt->dev, "no '%s'; the EFW handshake needs it\n",
-			 ctl_service);
 
 	bt->rx_len = 0;
 	bt->fw_hdr_len = 0;
 	bt->state = AOC_BT_ST_CREATED;
 	reinit_completion(&bt->synced);
 	aoc_service_set_handler(bt->rx, aoc_bt_service_irq, bt);
-	if (bt->ctl)
-		aoc_service_set_handler(bt->ctl, aoc_bt_service_irq, bt);
-
-	aoc_bt_send_ctl_enable(bt);
+	aoc_service_set_handler(bt->ctl, aoc_bt_service_irq, bt);
 
 	/*
 	 * Handshake: rx_work drains whatever the control queue already holds,
@@ -700,16 +636,8 @@ static int aoc_bt_close(struct hci_dev *hdev)
  * Controller bring-up is the ordinary Broadcom sequence (chip name, matching
  * .hcd patchram, re-read local version).  Nothing here is AOC-specific -- the
  * transport is just a pipe -- which is why btbcm is reused rather than vendor
- * commands being open-coded.  If the AOC's proxy has already patched the
- * controller, clear setup_patchram and let the core do a plain HCI reset.
+ * commands being open-coded.
  */
-static int aoc_bt_setup(struct hci_dev *hdev)
-{
-	if (!setup_patchram)
-		return 0;
-	return btbcm_setup_patchram(hdev);
-}
-
 static int aoc_bt_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -785,7 +713,9 @@ static int aoc_bt_probe(struct platform_device *pdev)
 	hdev->open = aoc_bt_open;
 	hdev->close = aoc_bt_close;
 	hdev->send = aoc_bt_send_frame;
-	hdev->setup = aoc_bt_setup;
+	hdev->setup = btbcm_setup_patchram;
+	/* Every close cuts power, and with it the patchram. */
+	hci_set_quirk(hdev, HCI_QUIRK_NON_PERSISTENT_SETUP);
 	hdev->set_bdaddr = btbcm_set_bdaddr;
 
 	platform_set_drvdata(pdev, bt);
