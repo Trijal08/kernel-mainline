@@ -605,6 +605,14 @@
 			regulator-name = "vbus";
 			regulator-min-microvolt = <5000000>;
 			regulator-max-microvolt = <5000000>;
+			/*
+			 * Enabling is one write to the boost's enable; it then
+			 * soft-starts on its own and nothing reports when the
+			 * rail is live, so hold consumers off for as long as
+			 * that takes. The vendor driver open-codes the same
+			 * wait as two 5ms sleeps around the assert.
+			 */
+			regulator-enable-ramp-delay = <10000>;
 		};
 
 		gpio {
