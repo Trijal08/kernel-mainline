@@ -657,8 +657,20 @@ static irqreturn_t exynos_sysmmu_irq(int irq, void *dev_id)
 		ret = report_iommu_fault(&data->domain->domain, data->master,
 					 fault.addr, fault.type);
 	}
-	if (ret)
-		panic("Unrecoverable System MMU Fault!");
+	if (ret) {
+		/*
+		 * The unit blocks the transaction before raising this, so the
+		 * access never reached memory and unblocking below simply
+		 * aborts it. Panicking loses the fault address printed just
+		 * above along with everything else, which on a board with no
+		 * way to capture a panic means the one piece of information
+		 * worth having is the piece that cannot be read. Report it and
+		 * let the master take the error instead; a driver whose DMA is
+		 * being refused will fail on its own terms and say so.
+		 */
+		dev_err_ratelimited(data->sysmmu,
+				    "fault left unhandled; aborting the access\n");
+	}
 
 out:
 	writel(1 << itype, SYSMMU_REG(data, int_clear));
