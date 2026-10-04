@@ -3871,6 +3871,19 @@
 				snps,has-lpm-erratum;
 				snps,dis_u2_susphy_quirk;
 				snps,dis_u3_susphy_quirk;
+				/*
+				 * Link and gadget power management as the
+				 * vendor runs it on this silicon: no NYET
+				 * threshold, no USB2 gadget LPM, no
+				 * free-running USB2 PHY clock to fall back
+				 * on, and the host left out of initiating U1
+				 * or U2.
+				 */
+				snps,lpm-nyet-threshold = <0>;
+				snps,usb2-gadget-lpm-disable;
+				snps,dis-u2-freeclk-exists-quirk;
+				snps,dis-u1-entry-quirk;
+				snps,dis-u2-entry-quirk;
 
 				status = "disabled";
 			};
