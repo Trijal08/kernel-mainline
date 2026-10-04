@@ -20,7 +20,7 @@
 #define CLKS_NR_TOP	(CLK_GOUT_CMU_HSI0_DPOSC + 1)
 #define CLKS_NR_APM	(CLK_APM_PLL_DIV16_APM + 1)
 #define CLKS_NR_DPU	(CLK_MOUT_DPU_DSIM_USER + 1)
-#define CLKS_NR_HSI0	(CLK_GOUT_HSI0_DP_LINK_I_DP_OSC_CLK + 1)
+#define CLKS_NR_HSI0	(CLK_DOUT_HSI0_USB + 1)
 #define CLKS_NR_HSI1	(CLK_GOUT_HSI1_PCIE_GEN3_0_PIPE_PAL_APB_PCLK + 1)
 #define CLKS_NR_HSI2	(CLK_GOUT_HSI2_XIU_P_HSI2_ACLK + 1)
 #define CLKS_NR_MISC	(CLK_GOUT_MISC_XIU_D_MISC_ACLK + 1)
@@ -1752,7 +1752,6 @@ static const struct samsung_cmu_info dpu_cmu_info __initconst = {
 #define CLK_CON_MUX_MUX_CLK_HSI0_USB20_REF						0x1004
 #define CLK_CON_MUX_MUX_CLK_HSI0_USB31DRD						0x1008
 #define CLK_CON_MUX_MUX_CLK_HSI0_USI2							0x101c
-#define CLK_CON_DIV_DIV_CLK_HSI0_USB31DRD						0x1800
 #define CLK_CON_DIV_DIV_CLK_HSI0_USI1							0x1818
 #define CLK_CON_DIV_DIV_CLK_HSI0_USI2							0x181c
 #define CLK_CON_DIV_DIV_CLK_HSI0_USI3							0x1820
@@ -2000,12 +1999,12 @@ PNAME(mout_hsi0_dposc_user_p)		= { "oscclk",
 					    "dout_cmu_hsi0_dposc" };
 PNAME(mout_hsi0_bus_p)			= { "mout_hsi0_bus_user",
 					    "mout_hsi0_alt_user" };
-PNAME(mout_hsi0_usb20_ref_p)		= { "mout_pll_usb",
+PNAME(mout_hsi0_usb20_ref_p)		= { "dout_hsi0_usb",
 					    "mout_hsi0_tcxo_user" };
-PNAME(mout_hsi0_usb31drd_p)		= { "fout_usb_pll",
+PNAME(mout_hsi0_usb31drd_p)		= { "dout_hsi0_usb",
+					    "mout_hsi0_tcxo_user",
 					    "mout_hsi0_usb31drd_user",
-					    "dout_hsi0_usb31drd",
-					    "fout_usb_pll" };
+					    "dout_hsi0_usb31drd" };
 
 static const struct samsung_pll_rate_table hsi0_usb_pll_rates[] __initconst = {
 	/*
@@ -2062,9 +2061,16 @@ static const struct samsung_mux_clock hsi0_mux_clks[] __initconst = {
 };
 
 static const struct samsung_div_clock hsi0_div_clks[] __initconst = {
+	/*
+	 * The USB blocks do not take PLL_USB directly; this divider sits
+	 * between them, and every reference under the two muxes below is a
+	 * fraction of the PLL rather than the PLL itself.
+	 */
+	DIV(CLK_DOUT_HSI0_USB, "dout_hsi0_usb", "mout_pll_usb",
+	    CLK_CON_DIV_DIV_CLK_HSI0_USB, 0, 6),
 	DIV(CLK_DOUT_HSI0_USB31DRD,
 	    "dout_hsi0_usb31drd", "mout_hsi0_usb20_user",
-	    CLK_CON_DIV_DIV_CLK_HSI0_USB31DRD, 0, 3),
+	    CLK_CON_DIV_DIV_CLK_HSI0_USB32DRD, 0, 3),
 	DIV(CLK_DOUT_HSI0_USI1,
 	    "dout_hsi0_usi1", "mout_hsi0_bus",
 	    CLK_CON_DIV_DIV_CLK_HSI0_USI1, 0, 4),
