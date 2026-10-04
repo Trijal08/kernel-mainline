@@ -105,6 +105,22 @@ static const u8 aoc_bt_power_on[] = {
 	0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
 };
 
+/* BaudrateChange { baud: u32 @ 44; mode: u8 = 1 }, payload type 5. */
+static const u8 aoc_bt_baud_tmpl[] = {
+	0x27, 0x00, 0x00, 0x00, 0x0c, 0x00, 0x00, 0x00, 0x08, 0x00, 0x0c, 0x00,
+	0x07, 0x00, 0x08, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05,
+	0x0c, 0x00, 0x00, 0x00, 0x08, 0x00, 0x0c, 0x00, 0x08, 0x00, 0x07, 0x00,
+	0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0xc2, 0x01, 0x00,
+};
+#define AOC_BT_BAUD_OFF		44
+#define AOC_BT_BAUD_INIT	115200
+/*
+ * The vendor HAL runs 4M, but at 4M here HCI worked and A2DP signalling
+ * timed out.  Above 3M hci_bcm first moves the chip's UART to a 48 MHz
+ * clock (0xfc45), which is the likely gap.  3M is 10x what A2DP needs.
+ */
+#define AOC_BT_BAUD_OPER	3000000
+
 static const u8 aoc_bt_power_off[] = {
 	0x27, 0x00, 0x00, 0x00, 0x0c, 0x00, 0x00, 0x00, 0x08, 0x00, 0x0c, 0x00,
 	0x07, 0x00, 0x08, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03,
@@ -633,12 +649,65 @@ static int aoc_bt_close(struct hci_dev *hdev)
 	return 0;
 }
 
+/* Only the AOC's side of the chip UART. */
+static int aoc_bt_aoc_baud(struct aoc_bt *bt, u32 baud)
+{
+	u8 req[sizeof(aoc_bt_baud_tmpl)];
+	int ret;
+
+	memcpy(req, aoc_bt_baud_tmpl, sizeof(req));
+	put_unaligned_le32(baud, req + AOC_BT_BAUD_OFF);
+	ret = aoc_bt_transact(bt, req, sizeof(req));
+	if (ret)
+		bt_dev_err(bt->hdev, "AOC BaudrateChange(%u) failed: %d", baud,
+			   ret);
+	return ret ? -EIO : 0;
+}
+
+/* The chip answers at the old rate, then switches; the AOC follows. */
+static int aoc_bt_set_baud(struct aoc_bt *bt, u32 baud)
+{
+	u8 param[6] = { };
+	struct sk_buff *skb;
+
+	put_unaligned_le32(baud, param + 2);
+	skb = __hci_cmd_sync(bt->hdev, 0xfc18, sizeof(param), param,
+			     HCI_INIT_TIMEOUT);
+	if (IS_ERR(skb))
+		return PTR_ERR(skb);
+	kfree_skb(skb);
+	return aoc_bt_aoc_baud(bt, baud);
+}
+
 /*
  * Controller bring-up is the ordinary Broadcom sequence (chip name, matching
- * .hcd patchram, re-read local version).  Nothing here is AOC-specific -- the
- * transport is just a pipe -- which is why btbcm is reused rather than vendor
- * commands being open-coded.
- *
+ * .hcd patchram, re-read local version), reused from btbcm.  The AOC-to-chip
+ * UART comes up at 115200, which caps both the patchram and A2DP at ~11 KB/s,
+ * so like the vendor HAL speed it up -- and again after the patch, since
+ * launching it resets the chip's UART.
+ */
+static int aoc_bt_setup_once(struct hci_dev *hdev)
+{
+	struct aoc_bt *bt = hci_get_drvdata(hdev);
+	bool fw_load_done = false;
+	int ret;
+
+	ret = aoc_bt_aoc_baud(bt, AOC_BT_BAUD_INIT);
+	if (!ret)
+		ret = aoc_bt_set_baud(bt, AOC_BT_BAUD_OPER);
+	if (!ret)
+		ret = btbcm_initialize(hdev, &fw_load_done, false);
+	if (!ret && fw_load_done) {
+		ret = aoc_bt_aoc_baud(bt, AOC_BT_BAUD_INIT);
+		if (!ret)
+			ret = aoc_bt_set_baud(bt, AOC_BT_BAUD_OPER);
+	}
+	if (ret)
+		return ret;
+	return btbcm_finalize(hdev, &fw_load_done, false);
+}
+
+/*
  * Right after the AOC boots its BT side completes the handshake and
  * PowerControl but does not yet relay HCI, so the first command times out.
  * A power cycle through the AOC a little later works.
@@ -648,7 +717,7 @@ static int aoc_bt_setup(struct hci_dev *hdev)
 	int tries, ret;
 
 	for (tries = 1; ; tries++) {
-		ret = btbcm_setup_patchram(hdev);
+		ret = aoc_bt_setup_once(hdev);
 		if (ret != -ETIMEDOUT || tries == AOC_BT_SETUP_TRIES)
 			return ret;
 		bt_dev_warn(hdev, "controller silent, power cycling (%d)", tries);
