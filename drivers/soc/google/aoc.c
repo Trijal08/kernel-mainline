@@ -195,6 +195,7 @@ struct aoc_data {
 	u32 chip_product_id;
 	u32 chip_type;
 	u32 chip_rev;
+	u32 wifi_chip;
 	struct iommu_domain *domain;	/* the AOC's SysMMU translation */
 
 	/* Runtime IPC, valid once the AOC has published its control block. */
@@ -314,7 +315,7 @@ static void aoc_write_params(struct aoc_data *aoc)
 		{ kAOCGnssType,			0 },
 		{ kAOCVolteReleaseMif,		0 },
 		{ kAOCChipProductId,		aoc->chip_product_id },
-		{ kAOCWifiChip,			0 },
+		{ kAOCWifiChip,			aoc->wifi_chip },
 	};
 	unsigned int i, n = ARRAY_SIZE(tbl);
 
@@ -1515,6 +1516,7 @@ static int aoc_probe(struct platform_device *pdev)
 
 	of_property_read_u32(dev->of_node, "aoc-board-id", &aoc->board_id);
 	of_property_read_u32(dev->of_node, "aoc-board-rev", &aoc->board_rev);
+	of_property_read_u32(dev->of_node, "google,wifi-chip", &aoc->wifi_chip);
 	aoc_read_chipid(aoc);
 
 	dev_info(dev, "carveout %pa (%zu MiB), gsa %s\n", &aoc->carveout_base,
