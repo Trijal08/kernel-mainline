@@ -3856,6 +3856,15 @@
 				reg = <0x0 0x10000>;
 				clocks = <&cmu_hsi0 CLK_GOUT_HSI0_USB31DRD_I_USB31DRD_REF_CLK_40>;
 				clock-names = "ref";
+				/*
+				 * 25ns for the ~39.936MHz the gate is named
+				 * for. clk-zuma reports this gate at its
+				 * 614.4MHz PLL grandparent, which is not what
+				 * reaches the pin, so state the period rather
+				 * than let it be derived. The clock stays
+				 * listed because nothing else holds the gate.
+				 */
+				snps,ref-clock-period-ns = <25>;
 				interrupts = <GIC_SPI 402 IRQ_TYPE_LEVEL_HIGH 0>;
 				phys = <&usbdrd31_phy 0>, <&usbdrd31_phy 1>;
 				phy-names = "usb2-phy", "usb3-phy";
