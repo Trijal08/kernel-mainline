@@ -5,8 +5,10 @@
  * MAXIM TCPCI based TCPC driver
  */
 
+#include <linux/delay.h>
 #include <linux/interrupt.h>
 #include <linux/i2c.h>
+#include <linux/jiffies.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/regmap.h>
@@ -224,11 +226,72 @@ static int get_vbus_regulator_handle(struct max_tcpci_chip *chip)
 	return 0;
 }
 
+/*
+ * tVBUSON: the longest a source may take to bring VBUS up to vSafe5V. The
+ * wait below is bounded by it, and 4.75V is what the sink is entitled to
+ * measure at the connector once the rail is up.
+ */
+#define MAX_TCPCI_VBUS_ON_TIMEOUT_MS	275
+#define MAX_TCPCI_VBUS_ON_POLL_MS	5
+#define MAX_TCPCI_VSAFE5V_MIN_MV	4750
+
 static void max_tcpci_sourcing_vbus_work(struct work_struct *work)
 {
 	struct max_tcpci_chip *chip = container_of(work, struct max_tcpci_chip,
 						   sourcing_vbus_work);
+	unsigned long timeout;
+	int mv = 0;
+	int ret;
+	u16 raw;
 
+	/*
+	 * tcpm takes this notification as "the rail is up" and starts sourcing
+	 * capabilities over it, so it must not be raised while the boost is
+	 * still ramping: the partner browns out mid-attach, and the heavier it
+	 * loads the rail the more certainly it does. The external boost cannot
+	 * report readiness itself, but it feeds the connector's VBUS pin and
+	 * the TCPC's own monitor can see that, so wait until the pin measures
+	 * vSafe5V before saying so.
+	 */
+	timeout = jiffies + msecs_to_jiffies(MAX_TCPCI_VBUS_ON_TIMEOUT_MS);
+	for (;;) {
+		ret = max_tcpci_read16(chip, TCPC_VBUS_VOLTAGE, &raw);
+		if (ret < 0) {
+			dev_warn(chip->dev, "sourcing VBUS: cannot measure: %d\n",
+				 ret);
+			break;
+		}
+
+		mv = (raw & TCPC_VBUS_VOLTAGE_MASK) * TCPC_VBUS_VOLTAGE_LSB_MV;
+		if (mv >= MAX_TCPCI_VSAFE5V_MIN_MV)
+			break;
+
+		if (!time_before(jiffies, timeout)) {
+			dev_warn(chip->dev,
+				 "sourcing VBUS: only %d mV after %d ms\n",
+				 mv, MAX_TCPCI_VBUS_ON_TIMEOUT_MS);
+			break;
+		}
+
+		/*
+		 * Only bail if tcpm has since asked us to stop sourcing, in
+		 * which case it is no longer waiting for this and the
+		 * notification is stale. Anything else must still be answered:
+		 * tcpm arms PD_T_PS_SOURCE_ON on entering SRC_ATTACHED and
+		 * falls back to SRC_UNATTACHED if this call never lands, so
+		 * swallowing it makes the port attach and detach forever.
+		 */
+		if (!READ_ONCE(chip->vbus_enabled))
+			return;
+
+		msleep(MAX_TCPCI_VBUS_ON_POLL_MS);
+	}
+
+	/*
+	 * Announced even when the rail never came up: a source that cannot
+	 * reach vSafe5V is a hardware fault, and withholding this would turn
+	 * it into a silent failure to attach rather than a logged one.
+	 */
 	tcpm_sourcing_vbus(chip->port);
 }
 
@@ -256,26 +319,39 @@ static int max_tcpci_set_vbus(struct tcpci *tcpci, struct tcpci_data *tdata, boo
 		return source ? ret : 1;
 	}
 
+	/*
+	 * Track our own enable state rather than probing the regulator. Its
+	 * is_enabled reports the hardware - the TCPC's EXT_BST_EN readback -
+	 * while the core counts users, and gating enable() on the hardware
+	 * view desynchronises the two the moment a disable() reports failure:
+	 * the count stays up, every later enable() is skipped as redundant,
+	 * and VBUS never comes back.
+	 */
 	if (source) {
-		if (!regulator_is_enabled(chip->vbus_reg))
+		if (!chip->vbus_enabled) {
 			ret = regulator_enable(chip->vbus_reg);
-		if (ret >= 0)
-			/*
-			 * The "vbus" regulator is an external boost the TCPC
-			 * cannot sense, so its POWER_STATUS never reports
-			 * SOURCING_VBUS and tcpm would otherwise time out the
-			 * source attach. Tell tcpm explicitly that VBUS is up.
-			 * Deferred to a work item: tcpm calls set_vbus() with
-			 * its port lock held, and tcpm_sourcing_vbus() retakes
-			 * it.
-			 */
-			schedule_work(&chip->sourcing_vbus_work);
-	} else {
-		if (regulator_is_enabled(chip->vbus_reg))
-			ret = regulator_disable(chip->vbus_reg);
+			if (ret < 0)
+				return ret;
+			WRITE_ONCE(chip->vbus_enabled, true);
+		}
+
+		/*
+		 * The "vbus" regulator is an external boost whose source switch
+		 * the TCPC does not drive, so POWER_STATUS never reports
+		 * SOURCING_VBUS and tcpm would otherwise time out the source
+		 * attach. Tell it explicitly, from a work item: tcpm calls
+		 * set_vbus() with its port lock held and tcpm_sourcing_vbus()
+		 * retakes it, and the rail has to be waited for besides.
+		 */
+		schedule_work(&chip->sourcing_vbus_work);
+	} else if (chip->vbus_enabled) {
+		WRITE_ONCE(chip->vbus_enabled, false);
+		ret = regulator_disable(chip->vbus_reg);
+		if (ret < 0)
+			return ret;
 	}
 
-	return ret < 0 ? ret : 1;
+	return 1;
 }
 
 static void process_power_status(struct max_tcpci_chip *chip)
