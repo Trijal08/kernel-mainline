@@ -472,14 +472,6 @@ static const struct regulator_desc max77779_otg_desc = {
 	.ops = &max77779_otg_ops,
 	.fixed_uV = 5000000,
 	.n_voltages = 1,
-	/*
-	 * Enabling is one GPIO write to the boost, which then soft-starts on
-	 * its own; nothing in the write tells us when the rail is up. The
-	 * vendor driver open-codes the same wait as two 5ms sleeps around the
-	 * assert, so charge the regulator core with it instead and let every
-	 * consumer get a rail that is actually live when enable() returns.
-	 */
-	.enable_time = 10000,
 };
 
 static void psy_work_item(struct work_struct *work)
