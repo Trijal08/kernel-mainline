@@ -479,8 +479,16 @@ static struct exynos_iommu_domain *to_exynos_domain(struct iommu_domain *dom)
 	return container_of(dom, struct exynos_iommu_domain, domain);
 }
 
+/*
+ * v9 has no legacy CTRL/STATUS block handshake (__sysmmu_enable skips it too);
+ * its invalidation registers work on a live MMU, as in the vendor driver.
+ * Polling the old STATUS bit there cost ~2.5 s per MFC buffer teardown, and
+ * a poll that times out skips the flush.
+ */
 static void sysmmu_unblock(struct sysmmu_drvdata *data)
 {
+	if (MMU_MAJ_VER(data->version) == 9)
+		return;
 	writel(CTRL_ENABLE, data->sfrbase + REG_MMU_CTRL);
 }
 
@@ -488,6 +496,8 @@ static bool sysmmu_block(struct sysmmu_drvdata *data)
 {
 	int i = 120;
 
+	if (MMU_MAJ_VER(data->version) == 9)
+		return true;
 	writel(CTRL_BLOCK, data->sfrbase + REG_MMU_CTRL);
 	while ((i > 0) && !(readl(data->sfrbase + REG_MMU_STATUS) & 1))
 		--i;
