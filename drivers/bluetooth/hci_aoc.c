@@ -71,6 +71,7 @@
 #define AOC_BT_CTL_RX_LEN	56	/* read buffer for AOC -> AP messages */
 #define AOC_BT_SYNC_TIMEOUT_MS	1000
 #define AOC_BT_SYNC_TRIES	6
+#define AOC_BT_SETUP_TRIES	5
 #define AOC_BT_RX_BUF		8192
 
 /* Control-queue message types (byte 0). */
@@ -637,7 +638,28 @@ static int aoc_bt_close(struct hci_dev *hdev)
  * .hcd patchram, re-read local version).  Nothing here is AOC-specific -- the
  * transport is just a pipe -- which is why btbcm is reused rather than vendor
  * commands being open-coded.
+ *
+ * Right after the AOC boots its BT side completes the handshake and
+ * PowerControl but does not yet relay HCI, so the first command times out.
+ * A power cycle through the AOC a little later works.
  */
+static int aoc_bt_setup(struct hci_dev *hdev)
+{
+	int tries, ret;
+
+	for (tries = 1; ; tries++) {
+		ret = btbcm_setup_patchram(hdev);
+		if (ret != -ETIMEDOUT || tries == AOC_BT_SETUP_TRIES)
+			return ret;
+		bt_dev_warn(hdev, "controller silent, power cycling (%d)", tries);
+		aoc_bt_close(hdev);
+		msleep(1000);
+		ret = aoc_bt_open(hdev);
+		if (ret)
+			return ret;
+	}
+}
+
 static int aoc_bt_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -713,7 +735,7 @@ static int aoc_bt_probe(struct platform_device *pdev)
 	hdev->open = aoc_bt_open;
 	hdev->close = aoc_bt_close;
 	hdev->send = aoc_bt_send_frame;
-	hdev->setup = btbcm_setup_patchram;
+	hdev->setup = aoc_bt_setup;
 	/* Every close cuts power, and with it the patchram. */
 	hci_set_quirk(hdev, HCI_QUIRK_NON_PERSISTENT_SETUP);
 	hdev->set_bdaddr = btbcm_set_bdaddr;
