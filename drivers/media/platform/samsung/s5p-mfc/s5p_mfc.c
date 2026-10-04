@@ -1271,6 +1271,9 @@ static __poll_t s5p_mfc_poll(struct file *file,
 				|| src_vb->state == VB2_BUF_STATE_ERROR))
 		rc |= EPOLLOUT | EPOLLWRNORM;
 	spin_unlock_irqrestore(&src_q->done_lock, flags);
+	/* As vb2_core_poll(): after the LAST buffer, DQBUF returns -EPIPE. */
+	if (dst_q->last_buffer_dequeued)
+		rc |= EPOLLIN | EPOLLRDNORM;
 	spin_lock_irqsave(&dst_q->done_lock, flags);
 	if (!list_empty(&dst_q->done_list))
 		dst_vb = list_first_entry(&dst_q->done_list, struct vb2_buffer,
