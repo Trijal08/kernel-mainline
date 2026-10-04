@@ -92,7 +92,13 @@ int exynos_drm_fbdev_driver_fbdev_probe(struct drm_fb_helper *helper,
 	if (size < PAGE_SIZE)
 		return -EINVAL;
 
-	exynos_gem = exynos_drm_gem_create(dev, EXYNOS_BO_WC, size, true);
+	/*
+	 * Behind an IOMMU the console needs no contiguous memory; without one,
+	 * a large panel's buffer is above the page allocator's maximum order.
+	 */
+	exynos_gem = exynos_drm_gem_create(dev, is_drm_iommu_supported(dev) ?
+					   EXYNOS_BO_NONCONTIG | EXYNOS_BO_WC :
+					   EXYNOS_BO_WC, size, true);
 	if (IS_ERR(exynos_gem))
 		return PTR_ERR(exynos_gem);
 	obj = &exynos_gem->base;
