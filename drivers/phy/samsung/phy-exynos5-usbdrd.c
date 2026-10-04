@@ -2112,9 +2112,9 @@ static void zuma_ss_apply_flip(struct exynos5_usbdrd_phy *phy_drd)
  * assignments C and E give DP all four lanes; D and F split them two and two,
  * leaving USB3 up alongside.
  *
- * The cable flip is not applied here: zuma_ss_phy_initiate() carries it into
- * the PHY's own FLIP_INVERT, and the TCA's CONNECTOR_ORIENTATION bit stays
- * clear - which is what the vendor driver does too.
+ * The cable's polarity goes into the PHY's own FLIP_INVERT, reapplied here on
+ * every mux change; the TCA's CONNECTOR_ORIENTATION bit stays clear, which is
+ * what the vendor driver does too.
  */
 static int exynos5_usbdrd_mode_sw_set(struct typec_mux_dev *mux,
 				      struct typec_mux_state *state)
