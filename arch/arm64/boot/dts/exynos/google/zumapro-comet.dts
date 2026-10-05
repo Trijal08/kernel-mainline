@@ -58,6 +58,37 @@
 	aoc-board-rev = <0x10000>;
 };
 
+/*
+ * The fold sensor: a DRV5032 Hall-effect switch on gpa2-3, which closes as the
+ * halves come together. It needs no driver of its own - it is one GPIO whose
+ * state is a lid switch, which is what gpio-keys reports natively.
+ *
+ * Active low, because the vendor driver inverted the level it read. Note that
+ * the vendor node also carries interrupts = <4 0>, naming a different pin to
+ * its own hall,gpio = <&gpa2 3>; nothing ever read it, since that driver took
+ * the interrupt from gpio_to_irq() on the GPIO. gpa2-3 is the pin.
+ */
+&pinctrl_gpio_alive {
+	hall_sensor: hall-sensor-pins {
+		samsung,pins = "gpa2-3";
+		samsung,pin-function = <GS101_PIN_FUNC_EINT>;
+		samsung,pin-pud = <GS101_PIN_PULL_NONE>;
+		samsung,pin-drv = <GS101_PIN_DRV_2_5_MA>;
+	};
+};
+
+&gpio_keys {
+	pinctrl-0 = <&key_voldown>, <&key_volup>, <&key_power>, <&hall_sensor>;
+
+	switch-lid {
+		label = "Hall Sensor";
+		gpios = <&gpa2 3 GPIO_ACTIVE_LOW>;
+		linux,input-type = <EV_SW>;
+		linux,code = <SW_LID>;
+		wakeup-source;
+	};
+};
+
 &decon_autorefresh_bit {
 	status = "okay";
 };
