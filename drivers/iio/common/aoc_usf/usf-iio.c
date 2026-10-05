@@ -244,6 +244,9 @@ static const struct iio_chan_spec usf_prox_channels[] = {
 static const struct iio_chan_spec usf_pressure_channels[] = {
 	USF_SCALAR_CHANNELS(IIO_PRESSURE),
 };
+static const struct iio_chan_spec usf_temp_channels[] = {
+	USF_SCALAR_CHANNELS(IIO_TEMP),
+};
 
 /* Map a USF sensor name (substring) to an IIO device type + channels. */
 static const struct usf_type_map {
@@ -256,7 +259,8 @@ static const struct usf_type_map {
 	/*
 	 * Android-native -> IIO unit factor, times 1e9: SCALE(nano) =
 	 * resolution * unit_nano. 1e9 = 1:1 (accel m/s^2, gyro rad/s, light
-	 * lux, prox count); mag uT -> Gauss is /100; pressure hPa -> kPa is /10.
+	 * lux, prox count); mag uT -> Gauss is /100; pressure hPa -> kPa is /10;
+	 * temperature degC -> milli-degC is *1000, so 1e12.
 	 */
 	u64 unit_nano;
 } usf_type_maps[] = {
@@ -276,6 +280,21 @@ static const struct usf_type_map {
 	/* the same sensor, named after the part rather than the function */
 	{ "Pressure Sensor", "usf_baro", usf_pressure_channels,
 	  ARRAY_SIZE(usf_pressure_channels), 1, usf_scan_masks_scalar, 100000000ULL },
+	/*
+	 * The infrared thermometer in the camera bar: a Melexis MLX90632
+	 * far-infrared thermopile, which reads the temperature of whatever the
+	 * phone is pointed at rather than its own package. The AoC offers it as
+	 * two sensors over the one part, a default range and an extended one.
+	 *
+	 * Matched on the full names, because "Temperature" alone also matches
+	 * the IMU's and the barometer's own die sensors, which measure
+	 * something entirely different. Neither of these two names is a
+	 * substring of the other, so they cannot shadow each other either.
+	 */
+	{ "MLX90632 FIR Extended Temperature", "usf_irtemp_ext", usf_temp_channels,
+	  ARRAY_SIZE(usf_temp_channels), 1, usf_scan_masks_scalar, 1000000000000ULL },
+	{ "MLX90632 FIR Temperature", "usf_irtemp", usf_temp_channels,
+	  ARRAY_SIZE(usf_temp_channels), 1, usf_scan_masks_scalar, 1000000000000ULL },
 };
 
 static int usf_start_sampling(struct usf_sensor *s);
