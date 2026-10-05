@@ -22,11 +22,20 @@
 #include <linux/module.h>
 #include <linux/rcupdate.h>
 #include <linux/spinlock.h>
+#include <linux/srcu.h>
 
 #include "touch_bus_negotiator.h"
 
 static const struct tbn_ops __rcu *tbn_current;
 static DEFINE_SPINLOCK(tbn_ops_lock);
+/*
+ * Sleepable, because requesting and releasing the bus waits on the
+ * negotiator's handshake with the AoC. Plain RCU would forbid that inside the
+ * read-side section, and does not merely complain: a voluntary schedule there
+ * breaks the grace-period guarantee that keeps the ops table alive for the
+ * duration of the call.
+ */
+DEFINE_STATIC_SRCU(tbn_srcu);
 
 /**
  * tbn_register_ops() - publish the negotiator's operations
@@ -66,24 +75,26 @@ void tbn_unregister_ops(void)
 	rcu_assign_pointer(tbn_current, NULL);
 	spin_unlock(&tbn_ops_lock);
 
-	synchronize_rcu();
+	synchronize_srcu(&tbn_srcu);
 }
 EXPORT_SYMBOL_GPL(tbn_unregister_ops);
 
 /*
- * The calls below run under rcu_read_lock() so the negotiator cannot go away
- * mid-call.  They are not hot: a handful per display transition.
+ * The calls below run under srcu_read_lock() so the negotiator cannot go away
+ * mid-call, and so that the ones which wait on its handshake may sleep there.
+ * They are not hot: a handful per display transition.
  */
 bool tbn_ready(void)
 {
 	const struct tbn_ops *ops;
+	int idx;
 	bool ready = false;
 
-	rcu_read_lock();
-	ops = rcu_dereference(tbn_current);
+	idx = srcu_read_lock(&tbn_srcu);
+	ops = srcu_dereference(tbn_current, &tbn_srcu);
 	if (ops && ops->ready)
 		ready = ops->ready();
-	rcu_read_unlock();
+	srcu_read_unlock(&tbn_srcu, idx);
 
 	return ready;
 }
@@ -96,15 +107,16 @@ EXPORT_SYMBOL_GPL(tbn_ready);
 int register_tbn(u32 *output)
 {
 	const struct tbn_ops *ops;
+	int idx;
 	int ret = 0;
 
 	*output = 0;
 
-	rcu_read_lock();
-	ops = rcu_dereference(tbn_current);
+	idx = srcu_read_lock(&tbn_srcu);
+	ops = srcu_dereference(tbn_current, &tbn_srcu);
 	if (ops && ops->register_tbn)
 		ret = ops->register_tbn(output);
-	rcu_read_unlock();
+	srcu_read_unlock(&tbn_srcu, idx);
 
 	return ret;
 }
@@ -113,12 +125,13 @@ EXPORT_SYMBOL_GPL(register_tbn);
 void unregister_tbn(u32 *output)
 {
 	const struct tbn_ops *ops;
+	int idx;
 
-	rcu_read_lock();
-	ops = rcu_dereference(tbn_current);
+	idx = srcu_read_lock(&tbn_srcu);
+	ops = srcu_dereference(tbn_current, &tbn_srcu);
 	if (ops && ops->unregister_tbn)
 		ops->unregister_tbn(output);
-	rcu_read_unlock();
+	srcu_read_unlock(&tbn_srcu, idx);
 
 	*output = 0;
 }
@@ -129,25 +142,27 @@ void register_tbn_lptw_callback(void (*callback)(struct TbnLptwEvent *lptw,
 				void *cbdata)
 {
 	const struct tbn_ops *ops;
+	int idx;
 
-	rcu_read_lock();
-	ops = rcu_dereference(tbn_current);
+	idx = srcu_read_lock(&tbn_srcu);
+	ops = srcu_dereference(tbn_current, &tbn_srcu);
 	if (ops && ops->register_lptw_callback)
 		ops->register_lptw_callback(callback, cbdata);
-	rcu_read_unlock();
+	srcu_read_unlock(&tbn_srcu, idx);
 }
 EXPORT_SYMBOL_GPL(register_tbn_lptw_callback);
 
 int tbn_request_bus_with_result(u32 dev_mask, bool *lptw_triggered)
 {
 	const struct tbn_ops *ops;
+	int idx;
 	int ret = -ENODEV;
 
-	rcu_read_lock();
-	ops = rcu_dereference(tbn_current);
+	idx = srcu_read_lock(&tbn_srcu);
+	ops = srcu_dereference(tbn_current, &tbn_srcu);
 	if (ops && ops->request_bus)
 		ret = ops->request_bus(dev_mask, lptw_triggered);
-	rcu_read_unlock();
+	srcu_read_unlock(&tbn_srcu, idx);
 
 	return ret;
 }
@@ -162,13 +177,14 @@ EXPORT_SYMBOL_GPL(tbn_request_bus);
 int tbn_release_bus(u32 dev_mask)
 {
 	const struct tbn_ops *ops;
+	int idx;
 	int ret = -ENODEV;
 
-	rcu_read_lock();
-	ops = rcu_dereference(tbn_current);
+	idx = srcu_read_lock(&tbn_srcu);
+	ops = srcu_dereference(tbn_current, &tbn_srcu);
 	if (ops && ops->release_bus)
 		ret = ops->release_bus(dev_mask);
-	rcu_read_unlock();
+	srcu_read_unlock(&tbn_srcu, idx);
 
 	return ret;
 }
