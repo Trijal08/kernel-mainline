@@ -133,6 +133,7 @@ struct usf_sensor {
 	 */
 	s32 last[3];
 	bool have_last;
+	bool dcount_logged;	/* one-shot report of the firmware's value count */
 };
 
 /*
@@ -180,6 +181,7 @@ static const struct iio_chan_spec_ext_info usf_ext_info[] = {
 /* Forced scan masks (all data channels; timestamp is tracked separately). */
 static const unsigned long usf_scan_masks_3axis[] = { GENMASK(2, 0), 0 };
 static const unsigned long usf_scan_masks_scalar[] = { BIT(0), 0 };
+static const unsigned long usf_scan_masks_2axis[] = { GENMASK(1, 0), 0 };
 
 /*
  * Sample axes arrive as f32 in Android sensor units. The data path quantises
@@ -244,8 +246,32 @@ static const struct iio_chan_spec usf_prox_channels[] = {
 static const struct iio_chan_spec usf_pressure_channels[] = {
 	USF_SCALAR_CHANNELS(IIO_PRESSURE),
 };
+/*
+ * A thermopile measures two things: the temperature of whatever it is pointed
+ * at, and its own, which the object reading is derived against. IIO has
+ * modifiers for exactly this pair, and the in-tree mlx90632 driver declares the
+ * same two channels.
+ */
+#define USF_TEMP_CHANNEL(_mod, _idx) {				\
+	.type = IIO_TEMP,					\
+	.modified = 1,						\
+	.channel2 = IIO_MOD_TEMP_##_mod,			\
+	.info_mask_separate = BIT(IIO_CHAN_INFO_RAW),		\
+	.info_mask_shared_by_type = BIT(IIO_CHAN_INFO_SCALE),	\
+	.info_mask_shared_by_all = BIT(IIO_CHAN_INFO_SAMP_FREQ),	\
+	.scan_index = _idx,					\
+	.scan_type = {						\
+		.sign = 's',					\
+		.realbits = 32,					\
+		.storagebits = 32,				\
+		.endianness = IIO_LE,				\
+	},							\
+}
+
 static const struct iio_chan_spec usf_temp_channels[] = {
-	USF_SCALAR_CHANNELS(IIO_TEMP),
+	USF_TEMP_CHANNEL(AMBIENT, 0),
+	USF_TEMP_CHANNEL(OBJECT, 1),
+	IIO_CHAN_SOFT_TIMESTAMP(2),
 };
 
 /* Map a USF sensor name (substring) to an IIO device type + channels. */
@@ -292,9 +318,9 @@ static const struct usf_type_map {
 	 * substring of the other, so they cannot shadow each other either.
 	 */
 	{ "MLX90632 FIR Extended Temperature", "usf_irtemp_ext", usf_temp_channels,
-	  ARRAY_SIZE(usf_temp_channels), 1, usf_scan_masks_scalar, 1000000000000ULL },
+	  ARRAY_SIZE(usf_temp_channels), 2, usf_scan_masks_2axis, 1000000000000ULL },
 	{ "MLX90632 FIR Temperature", "usf_irtemp", usf_temp_channels,
-	  ARRAY_SIZE(usf_temp_channels), 1, usf_scan_masks_scalar, 1000000000000ULL },
+	  ARRAY_SIZE(usf_temp_channels), 2, usf_scan_masks_2axis, 1000000000000ULL },
 };
 
 static int usf_start_sampling(struct usf_sensor *s);
@@ -551,6 +577,11 @@ static void usf_handle_sample(struct usf_iio *usf, const u8 *pay, u32 plen)
 	}
 	indio = match->indio;
 	n = min_t(int, match->ndata, dcount);
+	if (!match->dcount_logged) {
+		match->dcount_logged = true;
+		dev_info(usf->dev, "%s: firmware sends %u value(s) per sample, %d mapped\n",
+			 indio->name, dcount, match->ndata);
+	}
 
 	for (i = 0; i < scount; i++) {
 		u64 tsp;
