@@ -273,6 +273,9 @@ static const struct usf_type_map {
 	  ARRAY_SIZE(usf_prox_channels), 1, usf_scan_masks_scalar, 1000000000ULL },
 	{ "Barometer", "usf_baro", usf_pressure_channels,
 	  ARRAY_SIZE(usf_pressure_channels), 1, usf_scan_masks_scalar, 100000000ULL },
+	/* the same sensor, named after the part rather than the function */
+	{ "Pressure Sensor", "usf_baro", usf_pressure_channels,
+	  ARRAY_SIZE(usf_pressure_channels), 1, usf_scan_masks_scalar, 100000000ULL },
 };
 
 static int usf_start_sampling(struct usf_sensor *s);
