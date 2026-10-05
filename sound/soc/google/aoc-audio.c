@@ -46,6 +46,35 @@
  */
 #define AOC_PLAYBACK_SERVICE	"audio_playback1"
 #define AOC_PLAYBACK_SOURCE	1
+/*
+ * Entry point 4, the AOC's telephony endpoint.
+ *
+ * A call's audio never crosses the AP: the modem hands its downlink to the AOC
+ * and takes its uplink back from it, both inside the coprocessor.  The AP's
+ * part is to open this endpoint and tell the AOC to start the modem's flow.
+ *
+ * It is a front end like any other even though nothing writes to it, because
+ * that is what the endpoint is: opening it is what routes the call, and the
+ * amplifiers come up through the same back end a stream uses.  It also gives a
+ * telephony daemon something to open, which a mixer control does not.
+ */
+#define AOC_VOICE_SERVICE	"audio_playback4"
+#define AOC_VOICE_SOURCE	4
+/*
+ * And the source that actually carries the call.
+ *
+ * For a stream the entry point and the source are the same number: the ring
+ * the AP writes is what the sink is bound to.  Telephony is the one case where
+ * they differ.  Entry point 4 is only the endpoint's identity - what is set up,
+ * switched on, and what the AOC's modem-start gate looks for - and its ring
+ * stays empty, because nothing ever writes to it.  The modem's downlink is a
+ * source of its own, which the vendor stack binds to the sink by this fixed
+ * number, separately from the endpoint.
+ *
+ * Bind the endpoint instead and every command still succeeds while the speaker
+ * is wired to an empty ring, which is silence.
+ */
+#define AOC_SRC_TELEPHONY_DOWNLINK	8
 #define AOC_OUTPUT_CTRL_SERVICE	"audio_output_control"
 #define AOC_CMD_TIMEOUT_MS	200
 #define AOC_CMD_REPLY_TRIES	50	/* ~10ms of 200us polls for a lagging reply */
@@ -69,6 +98,30 @@
  */
 #define AOC_CMD_TYPE_CMD		0
 #define AOC_CMD_AUDIO_OUTPUT_SOURCE_ID	201
+/*
+ * Binding the telephony endpoint only routes it; nothing runs it.  Starting the
+ * modem's audio flow is a separate bare-header command, which the vendor stack
+ * issues from its telephony PCM's prepare ("Binding modem to start audio
+ * flow").  Without it a call connects, the wire is clocked, the amplifiers are
+ * powered, and both directions are silent.
+ */
+#define AOC_CMD_AUDIO_OUTPUT_TELEPHONY_MODEM_START_ID	256
+#define AOC_CMD_AUDIO_OUTPUT_TELEPHONY_MODEM_STOP_ID	257
+/*
+ * The call's uplink, and the downlink's precondition.
+ *
+ * The mic feeds the modem directly rather than a ring the AP reads, so it has
+ * its own command, which carries the echo-cancel reference alongside the mic:
+ * the AOC can only subtract what is being played if it is told what that is.
+ *
+ * It is not an optional extra to the downlink.  The DSP will not bind a sink
+ * with no mic source live - the bind simply goes unanswered - and the vendor
+ * stack goes as far as opening a default mic when none is up.  So the mic
+ * starts before the sink is bound, and stops after it is unbound.
+ */
+#define AOC_CMD_AUDIO_INPUT_MODEM_INPUT_START2_ID	324
+#define AOC_CMD_AUDIO_INPUT_MODEM_INPUT_STOP_ID		211
+#define AOC_MODEM_MIC_INPUT_INDEX			0	/* enum ModemInputIndex */
 
 struct aoc_cmd_hdr {
 	u8 type;
@@ -252,6 +305,7 @@ struct aoc_audio_stream {
 	u32 prev_consumed;
 	bool playback;
 	u8 source;				/* AOC entry point = PCM device */
+	bool voice;				/* the telephony endpoint */
 	u32 base;				/* AOC byte position at start */
 	snd_pcm_uframes_t pushed;		/* frames handed to the ring */
 	spinlock_t ring_lock;			/* serialises ring fill: .ack vs tick */
@@ -399,6 +453,55 @@ static int aoc_audio_ep_setup(struct aoc_audio *aud, u8 source,
 	cmd2.period_size = cpu_to_le32(period_bytes);
 	cmd2.mode = AOC_EP_MODE_PLAYBACK;
 	return aoc_audio_cmd(aud, &cmd2, sizeof(cmd2), rsp, sizeof(rsp));
+}
+
+struct cmd_audio_input_modem_input_start2 {
+	struct aoc_cmd_hdr hdr;
+	u8 mic_input_source;
+	u8 ref_input_source;
+} __packed;
+
+/* Start or stop the mic feeding the modem, with itself as the AEC reference. */
+static int aoc_voice_mic_set(struct aoc_audio *aud, bool on)
+{
+	struct cmd_audio_input_modem_input_start2 start = { };
+	struct aoc_cmd_hdr stop = { };
+	char rsp[64];
+
+	if (!aud->ctrl_in)
+		return -ENODEV;
+
+	if (!on) {
+		stop.type = AOC_CMD_TYPE_CMD;
+		stop.len = cpu_to_le16(sizeof(stop));
+		stop.id = cpu_to_le16(AOC_CMD_AUDIO_INPUT_MODEM_INPUT_STOP_ID);
+		return aoc_audio_cmd_on(aud, aud->ctrl_in, &stop, sizeof(stop),
+					rsp, sizeof(rsp));
+	}
+
+	start.hdr.type = AOC_CMD_TYPE_CMD;
+	start.hdr.len = cpu_to_le16(sizeof(start));
+	start.hdr.id = cpu_to_le16(AOC_CMD_AUDIO_INPUT_MODEM_INPUT_START2_ID);
+	start.mic_input_source = AOC_MODEM_MIC_INPUT_INDEX;
+	start.ref_input_source = AOC_MODEM_MIC_INPUT_INDEX;
+	return aoc_audio_cmd_on(aud, aud->ctrl_in, &start, sizeof(start), rsp,
+				sizeof(rsp));
+}
+
+/*
+ * Open or close the modem's audio flow.  A bare header: the command carries no
+ * payload, the AOC knows which endpoint it means.
+ */
+static int aoc_audio_modem(struct aoc_audio *aud, bool on)
+{
+	struct aoc_cmd_hdr cmd = { };
+	char rsp[64];
+
+	cmd.type = AOC_CMD_TYPE_CMD;
+	cmd.len = cpu_to_le16(sizeof(cmd));
+	cmd.id = cpu_to_le16(on ? AOC_CMD_AUDIO_OUTPUT_TELEPHONY_MODEM_START_ID
+				: AOC_CMD_AUDIO_OUTPUT_TELEPHONY_MODEM_STOP_ID);
+	return aoc_audio_cmd(aud, &cmd, sizeof(cmd), rsp, sizeof(rsp));
 }
 
 /* Bind (or unbind) a source to a sink. */
@@ -674,17 +777,41 @@ static enum hrtimer_restart aoc_pcm_tick(struct hrtimer *t)
 	return HRTIMER_RESTART;
 }
 
+/*
+ * What to bind to the sink, and to set the mixer volume of: the modem's
+ * downlink for a call, the endpoint's own ring for a stream.
+ */
+static u8 aoc_stream_route_src(const struct aoc_audio_stream *s)
+{
+	return s->voice ? AOC_SRC_TELEPHONY_DOWNLINK : s->source;
+}
+
+/* The telephony front end, told apart by its link rather than its direction. */
+static bool aoc_pcm_is_voice(struct snd_pcm_substream *substream)
+{
+	const char *name = snd_soc_substream_to_rtd(substream)->dai_link->name;
+
+	return !strcmp(name, "aoc-voice");
+}
+
 static int aoc_pcm_open(struct snd_soc_component *comp,
 			struct snd_pcm_substream *substream)
 {
 	struct aoc_audio *aud = substream_to_aud(substream);
 	bool playback = substream->stream == SNDRV_PCM_STREAM_PLAYBACK;
-	const char *name = playback ? AOC_PLAYBACK_SERVICE : AOC_CAPTURE_SERVICE;
+	bool voice;
+	const char *name;
 	struct aoc_audio_stream *s;
 	struct aoc_service *svc;
 
 	if (aoc_pcm_is_be(substream))
 		return 0;
+
+	voice = aoc_pcm_is_voice(substream);
+	if (voice)
+		name = AOC_VOICE_SERVICE;
+	else
+		name = playback ? AOC_PLAYBACK_SERVICE : AOC_CAPTURE_SERVICE;
 
 	svc = aoc_service_find(aud->aoc_dev, name);
 	if (!svc)
@@ -699,7 +826,11 @@ static int aoc_pcm_open(struct snd_soc_component *comp,
 	spin_lock_init(&s->ring_lock);
 	hrtimer_setup(&s->tick, aoc_pcm_tick, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 	INIT_WORK(&s->period_work, aoc_pcm_period_work);
-	s->source = playback ? AOC_PLAYBACK_SOURCE : AOC_CAPTURE_SOURCE;
+	s->voice = voice;
+	if (voice)
+		s->source = AOC_VOICE_SOURCE;
+	else
+		s->source = playback ? AOC_PLAYBACK_SOURCE : AOC_CAPTURE_SOURCE;
 	substream->runtime->private_data = s;
 
 	snd_soc_set_runtime_hwparams(substream, &aoc_pcm_hw);
@@ -864,13 +995,25 @@ static int aoc_pcm_hw_params(struct snd_soc_component *comp,
 		return ret;
 	}
 
-	ret = aoc_audio_ep_setup(aud, s->source, params_channels(params),
-				 params_rate(params), params_width(params),
-				 params_buffer_bytes(params),
-				 params_period_bytes(params));
-	if (ret) {
-		dev_err(comp->dev, "endpoint setup failed: %d\n", ret);
-		return ret;
+	/*
+	 * A stream describes its ring to the AOC before anything is bound to
+	 * it.  Telephony has no ring to describe - nothing is ever written to
+	 * the endpoint - and the AOC does not answer the command for it at all,
+	 * which times out and fails the whole hw_params.  The vendor stack
+	 * never issues it either: its telephony path is separate from the one
+	 * that sets endpoints up, and only real streams reach the latter.
+	 */
+	if (!s->voice) {
+		ret = aoc_audio_ep_setup(aud, s->source,
+					 params_channels(params),
+					 params_rate(params),
+					 params_width(params),
+					 params_buffer_bytes(params),
+					 params_period_bytes(params));
+		if (ret) {
+			dev_err(comp->dev, "endpoint setup failed: %d\n", ret);
+			return ret;
+		}
 	}
 
 	/*
@@ -879,20 +1022,42 @@ static int aoc_pcm_hw_params(struct snd_soc_component *comp,
 	 * before the trigger and will not complete their own power-up until
 	 * they can lock to that clock.
 	 */
-	ret = aoc_audio_bind(aud, s->source, AOC_SINK_SPEAKER, true);
+	/* The DSP wants a mic source live before it will bind the sink. */
+	if (s->voice) {
+		ret = aoc_voice_mic_set(aud, true);
+		if (ret) {
+			dev_err(comp->dev, "call mic start failed: %d\n", ret);
+			return ret;
+		}
+	}
+
+	ret = aoc_audio_bind(aud, aoc_stream_route_src(s), AOC_SINK_SPEAKER,
+			     true);
 	if (ret) {
 		dev_err(comp->dev, "speaker bind failed: %d\n", ret);
+		if (s->voice)
+			aoc_voice_mic_set(aud, false);
 		return ret;
 	}
 
-	/* Lift the speaker off the AOC's quiet boot default to unity, matching
+	/*
+	 * Lift the speaker off the AOC's quiet boot default to unity, matching
 	 * the stock HAL -- otherwise full-scale ALSA output is a fraction of the
 	 * loudness Android reaches.
+	 *
+	 * Not for a call: the AOC does not answer this for the telephony
+	 * source, so asking kills the open on a timeout, and the vendor's
+	 * telephony path sets no mixer gain at all.  A call's level belongs to
+	 * the modem and the amplifiers, not to the AOC's mixer.
 	 */
-	ret = aoc_audio_out_volume(aud, s->source, AOC_SINK_SPEAKER,
-				   AOC_SPEAKER_VOLUME_MAX);
-	if (ret)
-		dev_err(comp->dev, "speaker volume set failed: %d\n", ret);
+	if (!s->voice) {
+		ret = aoc_audio_out_volume(aud, aoc_stream_route_src(s),
+					   AOC_SINK_SPEAKER,
+					   AOC_SPEAKER_VOLUME_MAX);
+		if (ret)
+			dev_err(comp->dev, "speaker volume set failed: %d\n",
+				ret);
+	}
 	return ret;
 }
 
@@ -901,11 +1066,21 @@ static int aoc_pcm_hw_free(struct snd_soc_component *comp,
 {
 	struct aoc_audio *aud = substream_to_aud(substream);
 	struct aoc_audio_stream *s = substream->runtime->private_data;
+	int ret;
 
 	if (aoc_pcm_is_be(substream) || !s->playback)
 		return 0;
 
-	return aoc_audio_bind(aud, s->source, AOC_SINK_SPEAKER, false);
+	ret = aoc_audio_bind(aud, aoc_stream_route_src(s), AOC_SINK_SPEAKER,
+			     false);
+	/* Reverse of hw_params: the sink goes first, then the mic it needed. */
+	if (s->voice) {
+		int mic = aoc_voice_mic_set(aud, false);
+
+		if (mic && !ret)
+			ret = mic;
+	}
+	return ret;
 }
 
 /* Start/stop the AOC pulling from the ring (the dai link is nonatomic). */
@@ -941,12 +1116,35 @@ static int aoc_pcm_trigger(struct snd_soc_component *comp,
 	else
 		hrtimer_try_to_cancel(&s->tick);
 
-	/* Capture starts/stops the mics; playback's route is already up. */
+	/*
+	 * Capture starts/stops the mics; playback's route is already up.
+	 *
+	 * Telephony has no entry point to switch on.  Nothing configured one -
+	 * there is no ring to describe - and the AOC says so when asked:
+	 * "Entrypoint GP_2 is not configured and cannot be started".  The
+	 * endpoint is the route, and the route is already bound.
+	 */
 	if (!s->playback)
 		ret = aoc_audio_mic(aud, on);
-	else
+	else if (!s->voice)
 		ret = aoc_audio_source(aud, s->source, on);
-	dev_dbg(comp->dev, "%s %s: %d\n", s->playback ? "playback" : "capture",
+	else
+		ret = 0;
+	if (ret)
+		return ret;
+
+	/*
+	 * The modem's flow is opened once the endpoint it feeds is running, and
+	 * closed before it stops.  The vendor stack starts it from prepare
+	 * instead; here it rides the trigger, which is where the endpoint it
+	 * depends on is started and stopped, and so cannot be left open by a
+	 * prepare that runs twice.
+	 */
+	if (s->voice)
+		ret = aoc_audio_modem(aud, on);
+
+	dev_dbg(comp->dev, "%s %s: %d\n",
+		s->voice ? "voice" : s->playback ? "playback" : "capture",
 		on ? "start" : "stop", ret);
 	return ret;
 }
@@ -984,6 +1182,22 @@ static struct snd_soc_dai_driver aoc_dais[] = {
 	},
 	{
 		/*
+		 * The telephony front end's own DAI.  It could not share the
+		 * playback one: two dynamic front ends on a single DAI contend
+		 * for its one stream, and a call has to be able to coexist with
+		 * whatever else is playing.
+		 */
+		.name = "aoc-voice-fe",
+		.playback = {
+			.stream_name = "AOC Voice",
+			.channels_min = 1,
+			.channels_max = 2,
+			.rates = SNDRV_PCM_RATE_48000,
+			.formats = SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S32_LE,
+		},
+	},
+	{
+		/*
 		 * The AOC's TDM_0 port.  The AOC drives the wire from its own
 		 * firmware, so this DAI carries no data and needs no ops; it
 		 * exists so the amplifiers have a back-end to hang off and get
@@ -1000,9 +1214,14 @@ static struct snd_soc_dai_driver aoc_dais[] = {
 	},
 };
 
-/* The front-end feeds the TDM the AOC clocks out. */
+/*
+ * Both front ends feed the TDM the AOC clocks out.  The telephony one carries
+ * no samples, but it needs the same route: it is what brings the back end up,
+ * and with it the amplifiers.
+ */
 static const struct snd_soc_dapm_route aoc_dapm_routes[] = {
 	{ "TDM_0_RX Playback", NULL, "AOC Playback" },
+	{ "TDM_0_RX Playback", NULL, "AOC Voice" },
 };
 
 /*
@@ -1076,6 +1295,7 @@ static const struct snd_soc_ops aoc_tdm0_ops = {
 
 static struct snd_soc_dai_link_component aoc_fe_cpu = { .dai_name = "aoc-fe" };
 static struct snd_soc_dai_link_component aoc_cap_cpu = { .dai_name = "aoc-fe" };
+static struct snd_soc_dai_link_component aoc_voice_cpu = { .dai_name = "aoc-voice-fe" };
 static struct snd_soc_dai_link_component aoc_be_cpu = { .dai_name = "aoc-tdm0" };
 static struct snd_soc_dai_link_component aoc_platform;
 
@@ -1108,6 +1328,24 @@ static struct snd_soc_dai_link aoc_dai_links[] = {
 		.platforms = &aoc_platform,
 		.num_platforms = 1,
 		.capture_only = 1,
+		.nonatomic = true,
+	},
+	{
+		/*
+		 * The telephony endpoint.  Dynamic like playback, so it routes
+		 * through the same back end and brings the amplifiers up the
+		 * same way; nothing is written to it.
+		 */
+		.name = "aoc-voice",
+		.stream_name = "aoc-voice",
+		.cpus = &aoc_voice_cpu,
+		.num_cpus = 1,
+		.codecs = &snd_soc_dummy_dlc,
+		.num_codecs = 1,
+		.platforms = &aoc_platform,
+		.num_platforms = 1,
+		.dynamic = 1,
+		.playback_only = 1,
 		.nonatomic = true,
 	},
 	{
