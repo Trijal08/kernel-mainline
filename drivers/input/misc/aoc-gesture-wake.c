@@ -3,10 +3,14 @@
  * Wake gestures hosted by the AoC USF firmware, as input events.
  *
  * The AoC coprocessor keeps watching for user gestures while the AP is
- * suspended: a single tap on the (powered-down) touch panel, and lift-to-wake
- * from the accelerometer. It reports each as a USF sample, which this driver
- * turns into KEY_WAKEUP so the display comes back the way a power-key press
- * would bring it back.
+ * suspended: a single tap or a long press on the (powered-down) touch panel,
+ * and lift-to-wake from the accelerometer. It reports each as a USF sample,
+ * which this driver turns into a key press.
+ *
+ * Waking comes from pm_wakeup_event() rather than from the key code, so a
+ * gesture reaches the AP whatever it reports. The wake gestures report
+ * KEY_WAKEUP, so the display comes back the way a power-key press would bring
+ * it back.
  *
  * Two things make the gestures actually able to wake the AP:
  *
@@ -67,20 +71,34 @@
 struct agw_gesture {
 	const char *name;	/* sysfs attribute name */
 	const char *usf_name;	/* USF sensor name substring to match */
+	u32 keycode;		/* what the gesture reports */
 	bool default_on;
 };
 
 /*
  * Match sensors by name: USF handles are assigned by the firmware and are not
- * stable across devices or firmware versions.
+ * stable across devices or firmware versions. The names are not stable either,
+ * so match the shortest distinctive part - the tap sensor is "Proximity Gated
+ * Single Tap" on some firmware and "Touch Single Tap Sensor" on others, and
+ * only "Single Tap" is common to both.
  *
  * Lift-to-wake defaults off. It fires from the accelerometer alone, so a bag or
  * a nudged desk can trigger it, and an unwanted wake costs battery silently.
  * Tap needs a deliberate touch on the panel and defaults on.
+ *
+ * Long press defaults off for a different reason: it reports KEY_PROG1, which
+ * nothing binds until somebody chooses to, so arming it would keep the AoC and
+ * the proximity sensor that gates it busy for an event with no effect. A
+ * deliberate hold on a dark panel is its own gesture rather than another way to
+ * ask for the display back, so reporting it as KEY_WAKEUP would throw away what
+ * the firmware is distinguishing for free; KEY_PROG1 says "programmable" and
+ * carries no meaning of its own, which is the honest description of a key whose
+ * purpose is for the user to decide.
  */
 static const struct agw_gesture agw_gestures[] = {
-	{ "single_tap", "Proximity Gated Single Tap", true },
-	{ "lift_to_wake", "Lift to Wake", false },
+	{ "single_tap", "Single Tap", KEY_WAKEUP, true },
+	{ "long_press", "Long Press", KEY_PROG1, false },
+	{ "lift_to_wake", "Lift to Wake", KEY_WAKEUP, false },
 };
 
 #define AGW_NR_GESTURES ARRAY_SIZE(agw_gestures)
@@ -151,9 +169,9 @@ static void agw_sample(void *ctx, const u8 *pay, u32 plen)
 
 		dev_dbg(agw->dev, "%s gesture\n", agw_gestures[i].name);
 		pm_wakeup_event(agw->dev, AGW_WAKE_HOLD_MS);
-		input_report_key(agw->input, KEY_WAKEUP, 1);
+		input_report_key(agw->input, agw_gestures[i].keycode, 1);
 		input_sync(agw->input);
-		input_report_key(agw->input, KEY_WAKEUP, 0);
+		input_report_key(agw->input, agw_gestures[i].keycode, 0);
 		input_sync(agw->input);
 		return;
 	}
@@ -253,6 +271,7 @@ static ssize_t agw_gesture_store(struct device *dev,
 }
 
 static DEVICE_ATTR(single_tap, 0644, agw_gesture_show, agw_gesture_store);
+static DEVICE_ATTR(long_press, 0644, agw_gesture_show, agw_gesture_store);
 static DEVICE_ATTR(lift_to_wake, 0644, agw_gesture_show, agw_gesture_store);
 
 static ssize_t gestures_show(struct device *dev, struct device_attribute *attr,
@@ -314,6 +333,7 @@ static struct attribute *agw_attrs[] = {
 	&dev_attr_rescan.attr,
 	&dev_attr_armed.attr,
 	&dev_attr_single_tap.attr,
+	&dev_attr_long_press.attr,
 	&dev_attr_lift_to_wake.attr,
 	NULL,
 };
@@ -540,7 +560,9 @@ static int agw_probe(struct platform_device *pdev)
 	agw->input->name = "AoC gesture wake";
 	agw->input->phys = "aoc-gesture-wake/input0";
 	agw->input->id.bustype = BUS_HOST;
-	input_set_capability(agw->input, EV_KEY, KEY_WAKEUP);
+	for (i = 0; i < AGW_NR_GESTURES; i++)
+		input_set_capability(agw->input, EV_KEY,
+				     agw_gestures[i].keycode);
 	ret = input_register_device(agw->input);
 	if (ret)
 		return ret;
