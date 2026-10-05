@@ -45,6 +45,20 @@
  * cirrus/cs35l41-dsp1-spk-prot-komodo.wmfw, and for a tuning of the same stem
  * with "-r" appended on the right-hand amplifier, which carries the prefix.
  */
+/*
+ * Follow the panel, so the controller enters low-power gesture mode when the
+ * display blanks rather than only when the whole system suspends. Without a
+ * "panel" property drm_panel_add_follower() has nothing to look up and fails
+ * with -ENODEV, which costs every wake gesture while the AP is awake with the
+ * display off - which is exactly when they are wanted.
+ *
+ * It cannot live in the common dtsi: only the boards that declare a panel0
+ * could resolve the reference.
+ */
+&spitouch {
+	panel = <&panel0>;
+};
+
 &cs35l41_l {
 	cirrus,subsystem-id = "komodo";
 };
