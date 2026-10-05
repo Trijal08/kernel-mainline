@@ -135,6 +135,44 @@ struct usf_sensor {
 	bool have_last;
 };
 
+/*
+ * How the sensor frame sits in the device frame.
+ *
+ * The AoC reports every sensor in the Android device frame, and that frame sits
+ * half a turn about Z from the one Linux orientation consumers assume, so
+ * samples taken at face value put every rotation upside down - portrait and
+ * landscape alike, both ways round.
+ *
+ * This is a property of the AoC's reporting convention, not of where any one
+ * board puts its IMU: the AoC has already corrected for that by the time a
+ * sample reaches the AP, and it reports the same frame on every device that
+ * runs it. So it belongs here rather than in a per-board DT mount-matrix.
+ */
+static const struct iio_mount_matrix usf_mount_matrix = {
+	.rotation = {
+		"-1", "0", "0",
+		"0", "-1", "0",
+		"0", "0", "1",
+	},
+};
+
+static const struct iio_mount_matrix *
+usf_get_mount_matrix(const struct iio_dev *indio_dev,
+		     const struct iio_chan_spec *chan)
+{
+	return &usf_mount_matrix;
+}
+
+/*
+ * IIO_SHARED_BY_TYPE names the attribute in_<type>_mount_matrix, which is
+ * where userspace looks for it. Only the three-axis sensors have a frame to
+ * describe, so the scalar channels do not carry it.
+ */
+static const struct iio_chan_spec_ext_info usf_ext_info[] = {
+	IIO_MOUNT_MATRIX(IIO_SHARED_BY_TYPE, usf_get_mount_matrix),
+	{ }
+};
+
 /* Fixed-point fraction bits for the resolution divisor (res_q). */
 #define USF_SCALE_Q	30
 #define USF_NANO	1000000000ULL
@@ -155,6 +193,7 @@ static const unsigned long usf_scan_masks_scalar[] = { BIT(0), 0 };
 	.channel2 = IIO_MOD_##_mod,				\
 	.info_mask_shared_by_type = BIT(IIO_CHAN_INFO_SCALE),	\
 	.info_mask_shared_by_all = BIT(IIO_CHAN_INFO_SAMP_FREQ),	\
+	.ext_info = usf_ext_info,				\
 	.scan_index = _idx,					\
 	.scan_type = {						\
 		.sign = 's',					\
