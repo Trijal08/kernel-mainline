@@ -183,7 +183,7 @@ struct syna_tcm {
 	unsigned long slots_seen;
 
 	/* Touch Bus Negotiator (AoC bus handoff for wake gestures). */
-	bool tbn_enabled;	/* opted in via goog,tbn-enabled and registered */
+	bool tbn_enabled;	/* opted in via goog,tbn-enabled */
 	u32 tbn_mask;		/* device bit from register_tbn() */
 	bool tbn_suspended;	/* bus was released to AoC across this suspend */
 
@@ -972,12 +972,29 @@ static void syna_tcm_tbn_unregister(void *data)
 }
 
 /*
- * Opt in to the Touch Bus Negotiator when the DT asks for it.  Registration
- * only reserves a device bit in the (global) negotiator; if the negotiator has
- * not probed yet register_tbn() yields mask 0 and the driver quietly keeps the
- * deep-sleep suspend path.  The feature must never be able to break touch, so a
- * missing/late TBN is not fatal.
+ * Reserve a device bit in the (global) negotiator.  Fails harmlessly while the
+ * negotiator has not probed: register_tbn() then yields mask 0.  The feature
+ * must never be able to break touch, so a missing TBN is not fatal.
  */
+static int syna_tcm_register_tbn(struct syna_tcm *ts)
+{
+	struct device *dev = &ts->spi->dev;
+
+	register_tbn(&ts->tbn_mask);
+	if (!ts->tbn_mask)
+		return -ENODEV;
+
+	if (devm_add_action_or_reset(dev, syna_tcm_tbn_unregister, ts)) {
+		ts->tbn_mask = 0;
+		return -ENOMEM;
+	}
+
+	register_tbn_lptw_callback(syna_tcm_lptw_report, ts);
+	dev_info(dev, "TBN bus handoff enabled, mask %#x\n", ts->tbn_mask);
+	return 0;
+}
+
+/* Opt in to the Touch Bus Negotiator when the DT asks for it. */
 static void syna_tcm_setup_tbn(struct syna_tcm *ts)
 {
 	struct device *dev = &ts->spi->dev;
@@ -986,22 +1003,10 @@ static void syna_tcm_setup_tbn(struct syna_tcm *ts)
 	if (!ts->tbn_enabled)
 		return;
 
-	register_tbn(&ts->tbn_mask);
-	if (!ts->tbn_mask) {
-		dev_warn(dev, "TBN unavailable, using deep-sleep suspend\n");
-		ts->tbn_enabled = false;
-		return;
-	}
-
-	if (devm_add_action_or_reset(dev, syna_tcm_tbn_unregister, ts)) {
-		ts->tbn_enabled = false;
-		return;
-	}
-
-	register_tbn_lptw_callback(syna_tcm_lptw_report, ts);
 	devm_device_init_wakeup(dev);
 
-	dev_info(dev, "TBN bus handoff enabled, mask %#x\n", ts->tbn_mask);
+	if (syna_tcm_register_tbn(ts))
+		dev_info(dev, "TBN not up yet, retrying before low power\n");
 }
 
 /*
@@ -1017,12 +1022,23 @@ static void syna_tcm_setup_tbn(struct syna_tcm *ts)
 static void syna_tcm_enter_low_power(struct syna_tcm *ts)
 {
 	struct device *dev = &ts->spi->dev;
-	bool use_tbn = ts->tbn_enabled && tbn_ready();
+	bool use_tbn;
 	int error;
 
 	if (ts->powered_off)
 		return;
 	ts->powered_off = true;
+
+	/*
+	 * The negotiator waits for the AoC and so comes up seconds after this
+	 * driver probes: a registration that failed back then says nothing
+	 * about now.  Retry here, where the answer is first needed.  Dispatch
+	 * is RCU-read-side, so this does not sleep.
+	 */
+	if (ts->tbn_enabled && !ts->tbn_mask)
+		syna_tcm_register_tbn(ts);
+
+	use_tbn = ts->tbn_mask && tbn_ready();
 
 	disable_irq(ts->spi->irq);
 
