@@ -709,6 +709,42 @@ static const char *s5xxx_fw_path(struct s5xxx_modem *sm, char *buf,
 }
 
 /*
+ * Where the AOC expects to find the CP.
+ *
+ * The AOC's SysMMU table is baked into aoc.bin and maps two 512K windows at
+ * *CPU* addresses 0x40000000 and 0x40400000.  Those are inside pcie_0's
+ * outbound window, which this SoC's DT translates
+ *
+ *	CPU 0x40000000 + n  <->  PCI 0x14e00000 + n	(size 0xff0000)
+ *
+ * so the CP's BARs -- which hold PCI bus addresses, not CPU ones -- have to be
+ * placed at the translated addresses.  Taking the layout the PCI core assigns
+ * on a stock device and converting it:
+ *
+ *	BAR2  1M   CPU 0x40000000  ->  PCI 0x14e00000   CP memory; the AOC
+ *	                                                reads CallInfo here
+ *	BAR3  1M   CPU 0x40100000  ->  PCI 0x14f00000
+ *	BAR4  1M   CPU 0x40200000  ->  PCI 0x15000000
+ *	BAR5  1M   CPU 0x40300000  ->  PCI 0x15100000
+ *	BAR0  64K  CPU 0x40400000  ->  PCI 0x15200000   the doorbell page
+ *
+ * We used to put BAR0 at PCI 0x14e60000 -- inside what should be BAR2's window
+ * -- and leave every other BAR unassigned.  That is enough for the AP, which
+ * only rings the doorbell and DMAs through DRAM, but it leaves both of the
+ * AOC's windows decoding to nothing: every read it makes of them returns
+ * all-ones.  Hence a call that connects, carries RTP and clocks voice frames
+ * while the AOC logs "PCIe Modem Configuration: Unknown codec type
+ * (0xffffffff)" for its whole duration with the speaker silent.
+ *
+ * Only BAR0 and BAR2 are programmed; BAR3-5 are not mapped by the AOC and
+ * nothing on the AP reaches them.
+ */
+#define S5XXX_CP_BAR0_BUS	0x15200000u	/* AOC sees CPU 0x40400000 */
+#define S5XXX_CP_BAR2_BUS	0x14e00000u	/* AOC sees CPU 0x40000000 */
+#define S5XXX_CP_WIN_BASE	0x14e00000u
+#define S5XXX_CP_WIN_LIMIT	0x152fffffu
+
+/*
  * Program the doorbell BAR and read it back, like downstream does (it
  * computes the doorbell offset from what actually landed, and its restore
  * path runs a "BAR0 value correction" rewrite).  The ROM-phase BAR is 1M
@@ -722,23 +758,49 @@ static int s5xxx_program_doorbell_bar(struct s5xxx_modem *sm)
 
 	for (try = 0; try < 10; try++) {
 		pci_write_config_dword(sm->pdev, PCI_BASE_ADDRESS_0,
-				       sm->db_bus_addr);
+				       S5XXX_CP_BAR0_BUS);
 		pci_write_config_dword(sm->pdev, PCI_BASE_ADDRESS_1, 0);
 		pci_read_config_dword(sm->pdev, PCI_BASE_ADDRESS_0, &val);
 		base = val & PCI_BASE_ADDRESS_MEM_MASK;
-		if (base && base <= sm->db_bus_addr &&
-		    sm->db_bus_addr - base < SZ_1M) {
+		if (base && base <= S5XXX_CP_BAR0_BUS &&
+		    S5XXX_CP_BAR0_BUS - base < SZ_1M) {
 			if (try)
 				dev_warn(sm->dev,
 					 "doorbell BAR stuck after %d retries (%#x)\n",
 					 try, val);
+			/*
+			 * The doorbell sits at the base of this BAR, so it
+			 * moves with it; the DT address named the same page
+			 * in the CP's own space.
+			 */
+			if (sm->db_bus_addr != base) {
+				dev_info(sm->dev,
+					 "doorbell bus address %#x -> %#x (AOC-visible BAR layout)\n",
+					 sm->db_bus_addr, base);
+				sm->db_bus_addr = base;
+			}
+
+			/*
+			 * BAR2 is the window the AOC reads CallInfo through.
+			 * Nothing on the AP touches it, so it is write-only
+			 * housekeeping -- but without it the AOC is blind.
+			 */
+			pci_write_config_dword(sm->pdev, PCI_BASE_ADDRESS_2,
+					       S5XXX_CP_BAR2_BUS);
+			pci_read_config_dword(sm->pdev, PCI_BASE_ADDRESS_2,
+					      &val);
+			if ((val & PCI_BASE_ADDRESS_MEM_MASK) !=
+			    S5XXX_CP_BAR2_BUS)
+				dev_warn(sm->dev,
+					 "CP BAR2 won't hold %#x (reads %#010x); the AOC will not see the CP\n",
+					 S5XXX_CP_BAR2_BUS, val);
 			return 0;
 		}
 		udelay(100);
 	}
 
 	dev_err(sm->dev, "doorbell BAR won't hold %#x (reads %#x)\n",
-		sm->db_bus_addr, val);
+		S5XXX_CP_BAR0_BUS, val);
 	return -EIO;
 }
 
@@ -756,8 +818,8 @@ static int s5xxx_program_doorbell_bar(struct s5xxx_modem *sm)
 static int s5xxx_open_bridge_window(struct s5xxx_modem *sm)
 {
 	struct pci_dev *bridge = pci_upstream_bridge(sm->pdev);
-	u32 base = sm->db_bus_addr & ~(SZ_1M - 1);
-	u32 limit = base + SZ_1M - 1;
+	u32 base = S5XXX_CP_WIN_BASE;
+	u32 limit = S5XXX_CP_WIN_LIMIT;
 	u32 want = (((limit >> 16) & 0xfff0) << 16) | ((base >> 16) & 0xfff0);
 	u32 val;
 	u16 cmd;
