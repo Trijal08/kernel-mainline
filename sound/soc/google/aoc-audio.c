@@ -936,6 +936,31 @@ static const struct snd_pcm_hardware aoc_pcm_hw = {
 };
 
 /*
+ * The telephony front end, which is not a speaker stream and must not inherit
+ * speaker constraints.  Call media is 16 kHz mono -- the rate the CP decodes
+ * AMR-WB to and hands the AOC -- and tegu-audio opens this endpoint at exactly
+ * 16000/1/S16_LE on a phone where call audio works.  We were opening it at
+ * 48000/2, the speaker's rate, which is not a configuration the voice path
+ * ever has.
+ *
+ * Nothing is written here, so the buffer sizes only have to be legal.
+ */
+static const struct snd_pcm_hardware aoc_voice_hw = {
+	.info = SNDRV_PCM_INFO_INTERLEAVED | SNDRV_PCM_INFO_BLOCK_TRANSFER,
+	.formats = SNDRV_PCM_FMTBIT_S16_LE,
+	.rates = SNDRV_PCM_RATE_16000,
+	.rate_min = 16000,
+	.rate_max = 16000,
+	.channels_min = 1,
+	.channels_max = 1,
+	.buffer_bytes_max = AOC_PCM_BUFFER_BYTES,
+	.period_bytes_min = 256,
+	.period_bytes_max = 65536,
+	.periods_min = 2,
+	.periods_max = 64,
+};
+
+/*
  * The AOC does not interrupt as it drains a playback ring: it just moves the
  * read pointer.  Poll it, and tell the core how far it has got.
  */
@@ -1028,7 +1053,8 @@ static int aoc_pcm_open(struct snd_soc_component *comp,
 		s->source = playback ? AOC_PLAYBACK_SOURCE : AOC_CAPTURE_SOURCE;
 	substream->runtime->private_data = s;
 
-	snd_soc_set_runtime_hwparams(substream, &aoc_pcm_hw);
+	snd_soc_set_runtime_hwparams(substream,
+				     voice ? &aoc_voice_hw : &aoc_pcm_hw);
 	return 0;
 }
 
@@ -1374,6 +1400,8 @@ static int aoc_pcm_trigger(struct snd_soc_component *comp,
 
 static const struct snd_soc_component_driver aoc_component = {
 	.name = "aoc-pcm",
+	/* Honour each dai_link's .id as its PCM device number. */
+	.use_dai_pcm_id = 1,
 	.open = aoc_pcm_open,
 	.close = aoc_pcm_close,
 	.pcm_new = aoc_pcm_new,
@@ -1413,10 +1441,11 @@ static struct snd_soc_dai_driver aoc_dais[] = {
 		.name = "aoc-voice-fe",
 		.playback = {
 			.stream_name = "AOC Voice",
+			/* Call media is 16 kHz mono; see aoc_voice_hw. */
 			.channels_min = 1,
-			.channels_max = 2,
-			.rates = SNDRV_PCM_RATE_48000,
-			.formats = SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S32_LE,
+			.channels_max = 1,
+			.rates = SNDRV_PCM_RATE_16000,
+			.formats = SNDRV_PCM_FMTBIT_S16_LE,
 		},
 	},
 	{
@@ -1526,6 +1555,7 @@ static struct snd_soc_dai_link aoc_dai_links[] = {
 	{
 		.name = "aoc-playback0",
 		.stream_name = "aoc-playback0",
+		.id = 0,
 		.cpus = &aoc_fe_cpu,
 		.num_cpus = 1,
 		.codecs = &snd_soc_dummy_dlc,
@@ -1544,6 +1574,7 @@ static struct snd_soc_dai_link aoc_dai_links[] = {
 		 */
 		.name = "aoc-capture0",
 		.stream_name = "aoc-capture0",
+		.id = 1,
 		.cpus = &aoc_cap_cpu,
 		.num_cpus = 1,
 		.codecs = &snd_soc_dummy_dlc,
@@ -1561,6 +1592,16 @@ static struct snd_soc_dai_link aoc_dai_links[] = {
 		 */
 		.name = "aoc-voice",
 		.stream_name = "aoc-voice",
+		/*
+		 * PCM device 4, not wherever the link order happens to put it.
+		 * The vendor stack keys telephony on the entry point the PCM
+		 * device number *is* -- aoc_alsa_stream.entry_point_idx is
+		 * substream->pcm->device, and prepare_phonecall() does nothing
+		 * unless it is 4 -- and tegu-audio opens hw:C,4 on a phone
+		 * where call audio works.  Needs use_dai_pcm_id on the
+		 * component, which makes every link take its own .id.
+		 */
+		.id = 4,
 		.cpus = &aoc_voice_cpu,
 		.num_cpus = 1,
 		.codecs = &snd_soc_dummy_dlc,
