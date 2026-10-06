@@ -108,6 +108,30 @@
 #define AOC_CMD_AUDIO_OUTPUT_TELEPHONY_MODEM_START_ID	256
 #define AOC_CMD_AUDIO_OUTPUT_TELEPHONY_MODEM_STOP_ID	257
 /*
+ * EXPERIMENT: the AOC has three telephony starts -- MODEM (256) for a circuit
+ * bearer the CP decodes, VOIP (258), and RTP (289).  Every call since IMS came
+ * up is VoLTE, and on MODEM the AOC reports "PCIe Modem Configuration: Unknown
+ * codec type (0xffffffff)" -- it is told a call is up and finds no format
+ * behind it.  Try the RTP start instead.
+ */
+#define AOC_CMD_AUDIO_OUTPUT_TELEPHONY_VOIP_START_ID	258
+#define AOC_CMD_AUDIO_OUTPUT_TELEPHONY_VOIP_STOP_ID	259
+/*
+ * The AOC's audio DSP runs one processing mode at a time, and a call needs
+ * TELEPHONY: in the boot default the modem mixer comes up with its
+ * post-processing bypassed and the DSP never pulls the downlink, which reads
+ * as "AMixMODEM PostProcessing Config: BYPASS" plus a modem underrun.  Set
+ * from the vendor driver's "Audio DSP Mode" control (aoc_set_audio_dsp_mode).
+ */
+#define AOC_CMD_AUDIO_OUTPUT_DSP_MODE_SET_ID	277
+#define AOC_DSP_MODE_AMBIENT		0
+#define AOC_DSP_MODE_TELEPHONY		2
+/* Switching mode reloads DSP blocks, well past the ordinary reply window. */
+#define AOC_CMD_DSP_MODE_TIMEOUT_MS	700
+
+#define AOC_CMD_AUDIO_OUTPUT_TELEPHONY_RTP_START_ID	289
+#define AOC_CMD_AUDIO_OUTPUT_TELEPHONY_RTP_STOP_ID	290
+/*
  * The call's uplink, and the downlink's precondition.
  *
  * The mic feeds the modem directly rather than a ring the AP reads, so it has
@@ -122,6 +146,22 @@
 #define AOC_CMD_AUDIO_INPUT_MODEM_INPUT_START2_ID	324
 #define AOC_CMD_AUDIO_INPUT_MODEM_INPUT_STOP_ID		211
 #define AOC_MODEM_MIC_INPUT_INDEX			0	/* enum ModemInputIndex */
+/*
+ * The telephony mic source.  The vendor stack starts the modem's input with
+ * hw_id_to_phone_mic_source(DEFAULT_TELEPHONY_MIC), and DEFAULT_TELEPHONY_MIC
+ * is PORT_INCALL_TX (hw id 16), which maps to MODEM_INCALL_INPUT_INDEX -- not
+ * to MODEM_MIC_INPUT_INDEX.  Captured from this phone running Android, at the
+ * point the telephony sink is bound:
+ *
+ *   aoc_telephony_sink_open: use default mic source: 3 - 16
+ *   Modem mic input source: 3, aec ref source: 0
+ *   open telephony sink id: 0 - 6
+ *   bind: src:8 - sink:0!
+ *
+ * The AEC reference stays MODEM_MIC_INPUT_INDEX (the speaker-playback case in
+ * the vendor's ft_aec_ref_source switch), so the two are NOT the same value.
+ */
+#define AOC_MODEM_INCALL_INPUT_INDEX			3
 
 struct aoc_cmd_hdr {
 	u8 type;
@@ -204,6 +244,20 @@ struct cmd_audio_output_bind {
  */
 #define AOC_CMD_AUDIO_OUTPUT_SET_PARAM_ID	209
 #define AOC_AUDIO_SINK_BLOCK_ID_BASE		16
+/*
+ * The telephony sink's processing block (sink 3).  Android configures it twice
+ * around a call, captured from this phone with the AoC command log
+ * unratelimited (CMD_AUDIO_OUTPUT_SET_PARAMETER, block/component/key/val):
+ *
+ *   19, 0,  16, 0    before the telephony path is built
+ *   19, 30, 16, 0    immediately after TELEPHONY_MODEM_START
+ *
+ * Nothing else in the capture touches block 19, and we were never sending it.
+ */
+#define AOC_TELEPHONY_SINK_BLOCK			19
+#define AOC_TELEPHONY_BLOCK_KEY			16
+#define AOC_TELEPHONY_COMPONENT_PRE		0
+#define AOC_TELEPHONY_COMPONENT_POST		30
 #define AOC_SPEAKER_VOLUME_MAX			1000	/* stock chip->volume */
 
 struct cmd_audio_output_set_param {
@@ -345,9 +399,9 @@ static void aoc_audio_ctrl_isr(struct aoc_service *svc, void *priv)
  * dai link is nonatomic), and is woken by the control channel's doorbell rather
  * than by polling.
  */
-static int aoc_audio_cmd_on(struct aoc_audio *aud, struct aoc_service *ctrl,
+static int aoc_audio_cmd_to(struct aoc_audio *aud, struct aoc_service *ctrl,
 			    const void *req, size_t req_len,
-			    void *rsp, size_t rsp_len)
+			    void *rsp, size_t rsp_len, unsigned int timeout_ms)
 {
 	struct device *dev = aud->card.dev;
 	char drain[64];
@@ -373,7 +427,7 @@ static int aoc_audio_cmd_on(struct aoc_audio *aud, struct aoc_service *ctrl,
 	}
 
 	if (!wait_for_completion_timeout(&aud->cmd_done,
-					 msecs_to_jiffies(AOC_CMD_TIMEOUT_MS))) {
+					 msecs_to_jiffies(timeout_ms))) {
 		dev_err(dev, "control command timed out (no reply)\n");
 		ret = -ETIMEDOUT;
 		goto out;
@@ -398,11 +452,117 @@ out:
 	return ret < 0 ? ret : 0;
 }
 
+static int aoc_audio_cmd_on(struct aoc_audio *aud, struct aoc_service *ctrl,
+			    const void *req, size_t req_len,
+			    void *rsp, size_t rsp_len)
+{
+	return aoc_audio_cmd_to(aud, ctrl, req, req_len, rsp, rsp_len,
+				AOC_CMD_TIMEOUT_MS);
+}
+
 /* The output control channel, for the playback commands. */
 static int aoc_audio_cmd(struct aoc_audio *aud, const void *req, size_t req_len,
 			 void *rsp, size_t rsp_len)
 {
 	return aoc_audio_cmd_on(aud, aud->ctrl, req, req_len, rsp, rsp_len);
+}
+
+/*
+ * The AP->AOC telephony prologue, replayed byte for byte from this phone
+ * running Android with the vendor driver's command log unratelimited
+ * (google-modules/aoc/alsa/aoc_alsa_hw.c, pr_notice_ratelimited -> pr_notice
+ * plus a print_hex_dump of the command).  The capture is gap-free: its cntr
+ * field runs 176..226 with no holes.  Payloads are exactly as sent, so that a
+ * stream identical to Android's can be tested and then bisected; anything we
+ * can explain gets its own helper, the rest stays opaque on purpose.
+ *
+ *   cntr 176  SET_PARAMETER   block 19 (telephony sink), component 0, key 16
+ *   cntr 177  DSP_MODE_SET    mode 2 (TELEPHONY)
+ *   cntr 178-182  sidetone EQ, five stages (1.0f/1.0f coefficients, stage last)
+ *   cntr 183-186  sidetone cfg get/set pairs (volume -96 then -90 dB)
+ *   cntr 187  OUTPUT_SOURCE   source 11 (Sidetone) on
+ *   cntr 188  OUTPUT_BIND     source 11 -> sink 0
+ * then mic start (cntr 189) and the sink bind (cntr 190) from their helpers,
+ * then:
+ *   cntr 191  [input] 0x00f9  mic/EQ parameter
+ *   cntr 192  [input] 0x00fe  mic high-power HW gain, 0
+ * then MODEM_START (cntr 193) and the block-19 component-30 write.
+ */
+struct aoc_voice_raw_cmd {
+	bool	input;		/* true: the input control channel */
+	u16	id;
+	u8	len;		/* payload bytes after the 8-byte header */
+	u8	pay[25];
+};
+
+static const struct aoc_voice_raw_cmd aoc_voice_pre[] = {
+	{ false, 0x00d1, 10, { 0x13, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 } },
+	{ false, 0x0115,  1, { 0x02 } },
+	{ false, 0x00f9, 25, { 0x00, 0x00, 0x80, 0x3f, 0x00, 0x00, 0x80, 0x3f, 0x00, 0x00,
+			       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			       0x00, 0x00, 0x00, 0x00, 0x00 } },
+	{ false, 0x00f9, 25, { 0x00, 0x00, 0x80, 0x3f, 0x00, 0x00, 0x80, 0x3f, 0x00, 0x00,
+			       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			       0x00, 0x00, 0x00, 0x00, 0x01 } },
+	{ false, 0x00f9, 25, { 0x00, 0x00, 0x80, 0x3f, 0x00, 0x00, 0x80, 0x3f, 0x00, 0x00,
+			       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			       0x00, 0x00, 0x00, 0x00, 0x02 } },
+	{ false, 0x00f9, 25, { 0x00, 0x00, 0x80, 0x3f, 0x00, 0x00, 0x80, 0x3f, 0x00, 0x00,
+			       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			       0x00, 0x00, 0x00, 0x00, 0x03 } },
+	{ false, 0x00f9, 25, { 0x00, 0x00, 0x80, 0x3f, 0x00, 0x00, 0x80, 0x3f, 0x00, 0x00,
+			       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			       0x00, 0x00, 0x00, 0x00, 0x04 } },
+	{ false, 0x00f8,  3, { 0x00, 0x00, 0x00 } },
+	{ false, 0x00f7,  3, { 0xa0, 0x05, 0x00 } },
+	{ false, 0x00f8,  3, { 0x00, 0x00, 0x00 } },
+	{ false, 0x00f7,  3, { 0xa6, 0x05, 0x00 } },
+	{ false, 0x00c9,  2, { 0x0b, 0x01 } },
+	{ false, 0x010f,  3, { 0x0b, 0x00, 0x01 } },
+};
+
+static const struct aoc_voice_raw_cmd aoc_voice_post_bind[] = {
+	{ true,  0x00f9,  4, { 0x00, 0x00, 0x00, 0x00 } },
+	{ true,  0x00fe,  4, { 0x00, 0x00, 0x00, 0x00 } },
+};
+
+/* Undo of aoc_voice_pre's lasting effects, in reverse order. */
+static const struct aoc_voice_raw_cmd aoc_voice_teardown[] = {
+	{ false, 0x010f,  3, { 0x0b, 0x00, 0x00 } },	/* unbind 11 -> 0 */
+	{ false, 0x00c9,  2, { 0x0b, 0x00 } },		/* source 11 off */
+};
+
+/* Replay a captured command table verbatim on its own control channel. */
+static int aoc_voice_replay(struct aoc_audio *aud,
+			    const struct aoc_voice_raw_cmd *tbl, size_t n)
+{
+	unsigned int i;
+	int ret;
+
+	for (i = 0; i < n; i++) {
+		struct {
+			struct aoc_cmd_hdr hdr;
+			u8 pay[25];
+		} __packed cmd = { };
+		char rsp[64];
+		size_t len = sizeof(cmd.hdr) + tbl[i].len;
+
+		cmd.hdr.type = AOC_CMD_TYPE_CMD;
+		cmd.hdr.len = cpu_to_le16(len);
+		cmd.hdr.id = cpu_to_le16(tbl[i].id);
+		memcpy(cmd.pay, tbl[i].pay, tbl[i].len);
+
+		ret = aoc_audio_cmd_on(aud,
+				       tbl[i].input ? aud->ctrl_in : aud->ctrl,
+				       &cmd, len, rsp, sizeof(rsp));
+		if (ret) {
+			dev_err(aud->card.dev,
+				"voice replay %#06x (%zu bytes) failed: %d\n",
+				tbl[i].id, len, ret);
+			return ret;
+		}
+	}
+	return 0;
 }
 
 /* Turn a playback source (entry point) on or off. */
@@ -482,10 +642,29 @@ static int aoc_voice_mic_set(struct aoc_audio *aud, bool on)
 	start.hdr.type = AOC_CMD_TYPE_CMD;
 	start.hdr.len = cpu_to_le16(sizeof(start));
 	start.hdr.id = cpu_to_le16(AOC_CMD_AUDIO_INPUT_MODEM_INPUT_START2_ID);
-	start.mic_input_source = AOC_MODEM_MIC_INPUT_INDEX;
+	start.mic_input_source = AOC_MODEM_INCALL_INPUT_INDEX;
 	start.ref_input_source = AOC_MODEM_MIC_INPUT_INDEX;
 	return aoc_audio_cmd_on(aud, aud->ctrl_in, &start, sizeof(start), rsp,
 				sizeof(rsp));
+}
+
+struct cmd_audio_output_dsp_mode {
+	struct aoc_cmd_hdr hdr;
+	u8 mode;
+} __packed;
+
+/* Put the AOC's audio DSP into one of the AudioDSPMode processing modes. */
+static int aoc_audio_dsp_mode(struct aoc_audio *aud, u8 mode)
+{
+	struct cmd_audio_output_dsp_mode cmd = { };
+	char rsp[64];
+
+	cmd.hdr.type = AOC_CMD_TYPE_CMD;
+	cmd.hdr.len = cpu_to_le16(sizeof(cmd));
+	cmd.hdr.id = cpu_to_le16(AOC_CMD_AUDIO_OUTPUT_DSP_MODE_SET_ID);
+	cmd.mode = mode;
+	return aoc_audio_cmd_to(aud, aud->ctrl, &cmd, sizeof(cmd), rsp,
+				sizeof(rsp), AOC_CMD_DSP_MODE_TIMEOUT_MS);
 }
 
 /*
@@ -516,6 +695,24 @@ static int aoc_audio_bind(struct aoc_audio *aud, u8 src, u8 dst, bool on)
 	cmd.src = src;
 	cmd.dst = dst;
 	cmd.bind = on ? 1 : 0;
+	return aoc_audio_cmd(aud, &cmd, sizeof(cmd), rsp, sizeof(rsp));
+}
+
+
+/* Set one block/component parameter on the AOC's output graph. */
+static int aoc_audio_set_param(struct aoc_audio *aud, u8 block, u8 component,
+			       u32 key, u32 val)
+{
+	struct cmd_audio_output_set_param cmd = { };
+	char rsp[64];
+
+	cmd.hdr.type = AOC_CMD_TYPE_CMD;
+	cmd.hdr.len = cpu_to_le16(sizeof(cmd));
+	cmd.hdr.id = cpu_to_le16(AOC_CMD_AUDIO_OUTPUT_SET_PARAM_ID);
+	cmd.block = block;
+	cmd.component = component;
+	cmd.key = cpu_to_le32(key);
+	cmd.val = cpu_to_le32(val);
 	return aoc_audio_cmd(aud, &cmd, sizeof(cmd), rsp, sizeof(rsp));
 }
 
@@ -1024,9 +1221,16 @@ static int aoc_pcm_hw_params(struct snd_soc_component *comp,
 	 */
 	/* The DSP wants a mic source live before it will bind the sink. */
 	if (s->voice) {
+		ret = aoc_voice_replay(aud, aoc_voice_pre,
+				       ARRAY_SIZE(aoc_voice_pre));
+		if (ret)
+			return ret;
 		ret = aoc_voice_mic_set(aud, true);
 		if (ret) {
 			dev_err(comp->dev, "call mic start failed: %d\n", ret);
+			aoc_voice_replay(aud, aoc_voice_teardown,
+					 ARRAY_SIZE(aoc_voice_teardown));
+			aoc_audio_dsp_mode(aud, AOC_DSP_MODE_AMBIENT);
 			return ret;
 		}
 	}
@@ -1035,9 +1239,21 @@ static int aoc_pcm_hw_params(struct snd_soc_component *comp,
 			     true);
 	if (ret) {
 		dev_err(comp->dev, "speaker bind failed: %d\n", ret);
-		if (s->voice)
+		if (s->voice) {
 			aoc_voice_mic_set(aud, false);
+			aoc_voice_replay(aud, aoc_voice_teardown,
+					 ARRAY_SIZE(aoc_voice_teardown));
+			aoc_audio_dsp_mode(aud, AOC_DSP_MODE_AMBIENT);
+		}
 		return ret;
+	}
+
+	/* cntr 191-192: the input-channel pair Android sends after the bind. */
+	if (s->voice) {
+		ret = aoc_voice_replay(aud, aoc_voice_post_bind,
+				       ARRAY_SIZE(aoc_voice_post_bind));
+		if (ret)
+			return ret;
 	}
 
 	/*
@@ -1079,6 +1295,9 @@ static int aoc_pcm_hw_free(struct snd_soc_component *comp,
 
 		if (mic && !ret)
 			ret = mic;
+		aoc_voice_replay(aud, aoc_voice_teardown,
+				 ARRAY_SIZE(aoc_voice_teardown));
+		aoc_audio_dsp_mode(aud, AOC_DSP_MODE_AMBIENT);
 	}
 	return ret;
 }
@@ -1140,8 +1359,14 @@ static int aoc_pcm_trigger(struct snd_soc_component *comp,
 	 * depends on is started and stopped, and so cannot be left open by a
 	 * prepare that runs twice.
 	 */
-	if (s->voice)
+	if (s->voice) {
 		ret = aoc_audio_modem(aud, on);
+		if (!ret && on)
+			ret = aoc_audio_set_param(aud,
+						  AOC_TELEPHONY_SINK_BLOCK,
+						  AOC_TELEPHONY_COMPONENT_POST,
+						  AOC_TELEPHONY_BLOCK_KEY, 0);
+	}
 
 	dev_dbg(comp->dev, "%s %s: %d\n",
 		s->voice ? "voice" : s->playback ? "playback" : "capture",
