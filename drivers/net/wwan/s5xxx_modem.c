@@ -140,6 +140,9 @@ struct s5xxx_dl_sec {
  */
 struct s5xxx_variant {
 	const char	*fw_dir;		/* google/<fw_dir>/... */
+	/* GNSS header policy that differs per board; see s5xxx_gnss_hdr_cfg. */
+	u32		gnss_mems_cfg;
+	u16		gnss_const_cfg;
 	bool		two_stage_boot;	/* mask ROM wants BL1 then bootloader */
 	u32		bl1_done;	/* boot_stage after the first image */
 	u32		boot_done;	/* boot_stage once the ROM is finished */
@@ -1905,6 +1908,23 @@ static const struct wwan_port_ops s5xxx_wwan_ops = {
 #define S5XXX_GNSS_LOAD		0x0e05
 #define S5XXX_GNSS_BLC		0x0e09
 
+/* The receiver state an INIT reply carries in its first payload byte. */
+#define S5XXX_GNSS_STATE_OFF		0
+#define S5XXX_GNSS_STATE_RUNNING	1
+#define S5XXX_GNSS_STATE_RESET		2
+
+/* BLC pairs: start the staged image, and tear a running receiver down. */
+#define S5XXX_GNSS_BLC_START		0x00020020, 0x60000001
+#define S5XXX_GNSS_BLC_TEARDOWN		0x01020000, 0
+
+/*
+ * Smallest header block the configuration below fits in.  The s5300 packages a
+ * 912-byte header and the s5400 a 960-byte one, and every field written here
+ * lives below 0x390, so one set of offsets covers both.
+ */
+#define S5XXX_GNSS_HDR_MIN		0x390
+#define S5XXX_GNSS_HDR_MAX		SZ_8K
+
 struct s5xxx_gnss_load_cmd {
 	__le16	opcode;
 	__le32	addr;
@@ -1960,34 +1980,120 @@ static int s5xxx_gnss_blc(struct s5xxx_modem *sm, u32 field0, u32 arg)
 }
 
 /*
- * Run the codeload for a staged image.  @hdr4 is the u32 at file offset 4 (the
- * header block size); @fw_size is the whole file size.  Returns 0 once the
- * sequence has been sent.
+ * The board configuration the stock GNSS daemon writes into the firmware header
+ * before staging it, from /vendor/etc/gnss/gps.cfg.
+ *
+ * kepler.bin ships defaults that the daemon overwrites, so staging the image
+ * unmodified leaves the receiver with no RF misc control and no crystal type.
+ * It is then silent on both of its channels -- no CHPP reply and no diagnostic
+ * output -- which is what a mainline boot produced before this.
+ *
+ * Offsets are into the header block at file offset 4.  Only the MEMS and
+ * constellation words differ per board, and those come from the variant; the
+ * rest is identical on the s5300 and s5400.  `customer` and the product model
+ * are not in gps.cfg at all: they are the stock parser's own defaults, 4 and
+ * 0x1f (getProductModel()).
  */
-static void s5xxx_gnss_codeload(struct s5xxx_modem *sm, u32 fw_size, u32 hdr4)
+static void s5xxx_gnss_hdr_cfg(struct s5xxx_modem *sm, u8 *hdr)
 {
+	u32 flags;
+
+	put_unaligned_le32(0x80008001, hdr + 0x00c);	/* RfMiscCtrl */
+	put_unaligned_le32(0x00020046, hdr + 0x018);	/* AidingConfiguration */
+	put_unaligned_le32(sm->var->gnss_mems_cfg, hdr + 0x01c);
+	hdr[0x028] = 5;					/* ACT */
+	hdr[0x029] = 5;					/* ACT, L5 */
+
+	/* bit 0 = SDL bypass, bit 10 = Android measurement corrections. */
+	flags = get_unaligned_le32(hdr + 0x02c) | BIT(0) | BIT(10);
+	put_unaligned_le32(flags, hdr + 0x02c);
+
+	put_unaligned_le16(sm->var->gnss_const_cfg, hdr + 0x20e);
+
+	/* scheduling_enabled */
+	flags = get_unaligned_le32(hdr + 0x23c) | BIT(0);
+	put_unaligned_le32(flags, hdr + 0x23c);
+
+	hdr[0x256] = 1;					/* DCXO crystal type */
+	hdr[0x289] = 4;					/* customer */
+	hdr[0x28a] = 0x1f;				/* product model */
+	hdr[0x325] = 0;					/* mailbox disabled */
+	put_unaligned_le16(0, hdr + 0x330);		/* watchdog period */
+	put_unaligned_le32(200, hdr + 0x340);		/* VDR high distance */
+	put_unaligned_le32(200, hdr + 0x344);		/* VDR low distance */
+	put_unaligned_le32(20, hdr + 0x348);		/* VDR high time */
+	put_unaligned_le32(20, hdr + 0x34c);		/* VDR low time */
+	hdr[0x38c] = 1;					/* timemark option */
+}
+
+/* The receiver state the last INIT reply reported: opcode, length, payload. */
+static u8 s5xxx_gnss_state(struct s5xxx_modem *sm)
+{
+	return sm->gnss_rsp_len >= 3 ? sm->gnss_rsp_buf[2]
+				     : S5XXX_GNSS_STATE_OFF;
+}
+
+/*
+ * Run the codeload for @fw.  @hdr4 is the u32 at file offset 4 (the header
+ * block size); @fw_size is the whole file size.
+ */
+static void s5xxx_gnss_codeload(struct s5xxx_modem *sm, const u8 *fw,
+				u32 fw_size, u32 hdr4)
+{
+	void __iomem *win = sm->ipc + S5XXX_GNSS_FW_OFFSET;
+	u8 *hdr;
+	u8 state;
 	int i;
+
+	hdr = kmemdup(fw + 4, hdr4, GFP_KERNEL);
+	if (!hdr)
+		return;
+	s5xxx_gnss_hdr_cfg(sm, hdr);
 
 	for (i = 0; i < 3; i++)
 		s5xxx_gnss_op(sm, S5XXX_GNSS_INIT);
-	s5xxx_gnss_op(sm, S5XXX_GNSS_POWER_ON);
-	s5xxx_gnss_op(sm, S5XXX_GNSS_ASSERT_RESET);
-	s5xxx_gnss_op(sm, S5XXX_GNSS_RELEASE_RESET);
+	state = s5xxx_gnss_state(sm);
 
-	/* seg0 = whole file at window offset 0; seg1 = its header block. */
+	/*
+	 * The start path branches on that state, and getting it wrong is not
+	 * recoverable: POWER_ON sent to a receiver that is already reset wedges
+	 * it until the CP itself is rebooted.  A running receiver is torn down
+	 * rather than powered on, and one that is already reset is staged to
+	 * straight away.
+	 */
+	if (state == S5XXX_GNSS_STATE_RUNNING) {
+		s5xxx_gnss_blc(sm, S5XXX_GNSS_BLC_TEARDOWN);
+		s5xxx_gnss_op(sm, S5XXX_GNSS_ASSERT_RESET);
+		s5xxx_gnss_op(sm, S5XXX_GNSS_RELEASE_RESET);
+		s5xxx_gnss_op(sm, S5XXX_GNSS_INIT);
+		state = s5xxx_gnss_state(sm);
+		if (state != S5XXX_GNSS_STATE_RESET)
+			dev_warn(sm->dev, "GNSS state %u after reset, expected %u\n",
+				 state, S5XXX_GNSS_STATE_RESET);
+	} else if (state != S5XXX_GNSS_STATE_RESET) {
+		s5xxx_gnss_op(sm, S5XXX_GNSS_POWER_ON);
+		s5xxx_gnss_op(sm, S5XXX_GNSS_ASSERT_RESET);
+		s5xxx_gnss_op(sm, S5XXX_GNSS_RELEASE_RESET);
+	}
+
+	/*
+	 * Stage and describe, twice.  The second pass puts the configured header
+	 * block at the window's base with the image's leading magic dropped;
+	 * without it the window is not what the stock stack leaves behind.
+	 */
+	memcpy_toio(win, fw, fw_size);
 	s5xxx_gnss_load(sm, 0, fw_size);
+	memcpy_toio(win, hdr, hdr4);
 	s5xxx_gnss_load(sm, 4, hdr4);
 
-	/* Chip-config train (fixed field0/arg pairs from the stock sequence;
-	 * the 0x02 command carries a 0x20 flag in field0 and a 32-bit arg).
-	 */
-	s5xxx_gnss_blc(sm, 0x00020020, 0x60000001);
-	s5xxx_gnss_blc(sm, 0x00240000, 0);
-	s5xxx_gnss_blc(sm, 0x00230000, 0);
-	s5xxx_gnss_blc(sm, 0x00230000, 0);
-	s5xxx_gnss_blc(sm, 0x00240000, 0);
-	s5xxx_gnss_blc(sm, 0x00230000, 0);
-	s5xxx_gnss_blc(sm, 0x00230000, 0);
+	/* Start the image, then the status reads that follow it in stock. */
+	s5xxx_gnss_blc(sm, S5XXX_GNSS_BLC_START);
+	for (i = 0; i < 2; i++) {
+		s5xxx_gnss_blc(sm, 0x00240000, 0);
+		s5xxx_gnss_blc(sm, 0x00230000, 0);
+		s5xxx_gnss_blc(sm, 0x00230000, 0);
+	}
+	kfree(hdr);
 }
 
 /*
@@ -3928,6 +4034,8 @@ static const struct s5xxx_dl_sec s5xxx_dl_secs_s5300[] = {
 
 static const struct s5xxx_variant s5xxx_variant_s5300 = {
 	.fw_dir		= "s5300",
+	.gnss_mems_cfg	= 0x5,
+	.gnss_const_cfg	= 0x602f,
 	.two_stage_boot	= false,
 	.boot_done	= S5XXX_BOOT_STAGE_BL1_DONE,
 	.dl_secs	= s5xxx_dl_secs_s5300,
@@ -3936,6 +4044,8 @@ static const struct s5xxx_variant s5xxx_variant_s5300 = {
 
 static const struct s5xxx_variant s5xxx_variant_s5400 = {
 	.fw_dir		= "s5400",
+	.gnss_mems_cfg	= 0x25,
+	.gnss_const_cfg	= 0x60ff,
 	.two_stage_boot	= true,
 	.bl1_done	= S5XXX_BOOT_STAGE_BL1_DONE,
 	.boot_done	= S5XXX_BOOT_STAGE_DONE,
@@ -4191,11 +4301,16 @@ static void s5xxx_load_gnss_fw(struct s5xxx_modem *sm)
 		/* seg1 size lives in the image header at offset 4. */
 		u32 hdr4 = get_unaligned_le32(fw->data + 4);
 
-		memcpy_toio(sm->ipc + S5XXX_GNSS_FW_OFFSET, fw->data, fw->size);
-		s5xxx_gnss_codeload(sm, fw->size, hdr4);
-		dev_info(sm->dev,
-			 "staged GNSS firmware (%zu bytes) and ran the codeload\n",
-			 fw->size);
+		if (hdr4 < S5XXX_GNSS_HDR_MIN || hdr4 > S5XXX_GNSS_HDR_MAX ||
+		    hdr4 > fw->size - 4) {
+			dev_warn(sm->dev, "%s header block %u; skipping\n",
+				 path, hdr4);
+		} else {
+			s5xxx_gnss_codeload(sm, fw->data, fw->size, hdr4);
+			dev_info(sm->dev,
+				 "staged GNSS firmware (%zu bytes) and ran the codeload\n",
+				 fw->size);
+		}
 	}
 
 	release_firmware(fw);
