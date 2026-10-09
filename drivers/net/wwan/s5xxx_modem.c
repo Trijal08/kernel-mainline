@@ -5403,6 +5403,42 @@ static void s5xxx_shutdown(struct platform_device *pdev)
 	dev_info(sm->dev, "quiesced for shutdown\n");
 }
 
+/*
+ * Re-run the GNSS codeload on demand.
+ *
+ * The receiver can stop asserting its SPI ready line part way through a
+ * session, and nothing in user space revives it: the CHPP transport then fails
+ * every write with -ETIMEDOUT until the image is staged and started again.
+ * That used to mean reloading this module, which takes the modem down with it.
+ * Expose the codeload instead, so whoever owns the receiver can recover it by
+ * itself -- kepler-gnssd pokes this before each attempt.
+ *
+ * Safe against a receiver that is still running: the codeload branches on the
+ * state INIT reports and tears a live receiver down rather than powering it on.
+ */
+static ssize_t gnss_codeload_store(struct device *dev,
+				   struct device_attribute *attr,
+				   const char *buf, size_t count)
+{
+	struct s5xxx_modem *sm = dev_get_drvdata(dev);
+
+	if (!sm)
+		return -ENODEV;
+	if (!READ_ONCE(sm->online))
+		return -EAGAIN;
+
+	s5xxx_load_gnss_fw(sm);
+
+	return count;
+}
+static DEVICE_ATTR_WO(gnss_codeload);
+
+static struct attribute *s5xxx_attrs[] = {
+	&dev_attr_gnss_codeload.attr,
+	NULL,
+};
+ATTRIBUTE_GROUPS(s5xxx);
+
 static struct platform_driver s5xxx_driver = {
 	.probe	= s5xxx_probe,
 	.remove	= s5xxx_remove,
@@ -5411,6 +5447,7 @@ static struct platform_driver s5xxx_driver = {
 		.name		= "s5xxx-modem",
 		.of_match_table	= s5xxx_of_match,
 		.pm		= pm_sleep_ptr(&s5xxx_pm_ops),
+		.dev_groups	= s5xxx_groups,
 	},
 };
 module_platform_driver(s5xxx_driver);
