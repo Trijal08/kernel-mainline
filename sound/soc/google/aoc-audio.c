@@ -348,6 +348,7 @@ struct aoc_audio {
 	struct completion cmd_done;		/* a control reply arrived */
 	int mic_hw_gain_cb;			/* mic preamp gain, centibels */
 	int mic_soft_gain_db;			/* record soft gain, dB */
+	bool mic_muted;				/* capture switch, off = both gains zero */
 };
 
 /* Per-open stream state. */
@@ -747,7 +748,7 @@ static int aoc_audio_mic_gain(struct aoc_audio *aud)
 	hw.hdr.type = AOC_CMD_TYPE_CMD;
 	hw.hdr.len = cpu_to_le16(sizeof(hw));
 	hw.hdr.id = cpu_to_le16(AOC_CMD_AUDIO_INPUT_SET_MIC_HP_GAIN_ID);
-	hw.gain_cb = cpu_to_le32(aud->mic_hw_gain_cb);
+	hw.gain_cb = cpu_to_le32(aud->mic_muted ? 0 : aud->mic_hw_gain_cb);
 	ret = aoc_audio_cmd_on(aud, aud->ctrl_in, &hw, sizeof(hw), rsp,
 			       sizeof(rsp));
 	if (ret)
@@ -759,7 +760,7 @@ static int aoc_audio_mic_gain(struct aoc_audio *aud)
 	soft.block = AOC_PARAM_BLOCK_MIC;
 	soft.component = AOC_PARAM_COMP_REC_GAIN;
 	soft.key = cpu_to_le32(AOC_PARAM_KEY_DB);
-	soft.val = cpu_to_le32(aud->mic_soft_gain_db);
+	soft.val = cpu_to_le32(aud->mic_muted ? 0 : aud->mic_soft_gain_db);
 	return aoc_audio_cmd_on(aud, aud->ctrl_in, &soft, sizeof(soft), rsp,
 				sizeof(rsp));
 }
@@ -818,7 +819,52 @@ static int aoc_mic_gain_put(struct snd_kcontrol *kc,
 	return 1;
 }
 
+/*
+ * Capture switch.  The AOC has no mute of its own and the card has no other
+ * boolean control on the capture side, so there is nothing for UCM's
+ * CaptureSwitch to name and nothing a mute applied in userspace can reach:
+ * on this part the microphone path is only silenced by taking its gains to
+ * zero, which is real silence rather than 0 dB.
+ *
+ * Named "Mic Capture Switch" so alsa-lib's simple mixer presents element
+ * "Mic" carrying a capture switch; UCM binds to it as CaptureSwitch "Mic",
+ * and a mute then reaches the hardware instead of being applied to a stream
+ * that carries no call audio.  ALSA's sense is inverted from the flag: 1 is
+ * capture enabled.
+ */
+static int aoc_mic_switch_get(struct snd_kcontrol *kc,
+			      struct snd_ctl_elem_value *uc)
+{
+	struct snd_soc_card *card = snd_kcontrol_chip(kc);
+	struct aoc_audio *aud = container_of(card, struct aoc_audio, card);
+
+	uc->value.integer.value[0] = !aud->mic_muted;
+	return 0;
+}
+
+static int aoc_mic_switch_put(struct snd_kcontrol *kc,
+			      struct snd_ctl_elem_value *uc)
+{
+	struct snd_soc_card *card = snd_kcontrol_chip(kc);
+	struct aoc_audio *aud = container_of(card, struct aoc_audio, card);
+	bool muted = !uc->value.integer.value[0];
+
+	if (muted == aud->mic_muted)
+		return 0;
+
+	aud->mic_muted = muted;
+	aoc_audio_mic_gain(aud);	/* a no-op until the AOC is up */
+	return 1;
+}
+
 static const struct snd_kcontrol_new aoc_mic_controls[] = {
+	{
+		.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
+		.name = "Mic Capture Switch",
+		.info = snd_ctl_boolean_mono_info,
+		.get = aoc_mic_switch_get,
+		.put = aoc_mic_switch_put,
+	},
 	{
 		.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
 		.name = "Mic HW Gain (cB)",
