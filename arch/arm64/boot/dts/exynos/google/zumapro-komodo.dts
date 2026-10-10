@@ -75,7 +75,7 @@
 	/*
 	 * The rails the AoC's physical sensors hang off.  The AoC does not
 	 * switch these itself, and without them its sensor stack enumerates
-	 * only the fused and software sensors -- the LSM6DSV, magnetometer,
+	 * only the fused and software sensors -- the ICM45631, magnetometer,
 	 * barometer and proximity chips never answer.  Mapping matches the
 	 * downstream komodo aoc@17000000: sensor_1v8 = L7S_SENSORS (LDO7S),
 	 * sensor_3v3 = L5S_PROX (LDO5S).
