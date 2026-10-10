@@ -45,6 +45,20 @@
  * cirrus/cs35l41-dsp1-spk-prot-caiman.wmfw, and for a tuning of the same stem
  * with "-r" appended on the right-hand amplifier, which carries the prefix.
  */
+/*
+ * Follow the panel, so the controller enters low-power gesture mode when the
+ * display blanks rather than only when the whole system suspends. Without a
+ * "panel" property drm_panel_add_follower() has nothing to look up and fails
+ * with -ENODEV, which costs every wake gesture while the AP is awake with the
+ * display off - which is exactly when they are wanted.
+ *
+ * It cannot live in the common dtsi: only the boards that declare a panel0
+ * could resolve the reference.
+ */
+&spitouch {
+	panel = <&panel0>;
+};
+
 &cs35l41_l {
 	cirrus,subsystem-id = "caiman";
 };
@@ -57,6 +71,88 @@
 	aoc-board-id = <0x40902>;
 	aoc-board-rev = <0x10000>;
 	google,wifi-chip = <1>;	/* BCM4390 */
+
+	/*
+	 * The rails the AoC's physical sensors hang off.  The AoC does not
+	 * switch these itself, and without them its sensor stack enumerates
+	 * only the fused and software sensors -- the ICM45631, magnetometer,
+	 * barometer and proximity chips never answer.  Mapping matches the
+	 * downstream zumapro-common.dtsi, which describes them once for every
+	 * zumapro board: sensor_1v8 = L7S_SENSORS (LDO7S), sensor_3v3 =
+	 * L5S_PROX (LDO5S).
+	 */
+	sensor_1v8-supply = <&s_ldo7_reg>;
+	sensor_3v3-supply = <&s_ldo5_reg>;
+
+	/*
+	 * The sensor registry, described here rather than on a consumer,
+	 * because it is one piece of AoC-global state: the IIO bridge and the
+	 * wake-gesture driver both ask for it, and whichever arrives first
+	 * loads it.
+	 *
+	 * These are the vendor .reg scripts, copied unmodified into the
+	 * firmware path -- the tree under /vendor/etc/sensors/registry, layout
+	 * and all.  They are named here rather than discovered, because the
+	 * kernel cannot enumerate a directory to load firmware from, and
+	 * because which scripts a board carries is board description.
+	 *
+	 * All of them are uploaded whatever the stage.  Each carries its own
+	 * ?+CDT/?-CDT filter and the AoC evaluates those against the CDT
+	 * composed from /chosen/plat; caiman is product 9, so a stage-6 part
+	 * (CDT 0x00096100) is left with caiman_common, caiman_dvt and the two
+	 * append scripts.  Order matters: the common script defines the buses
+	 * and the devices, the stage script refines them -- each wingboard
+	 * script directly after the board script it shadows, since the base
+	 * excludes exactly the variant that follows it -- and the append
+	 * scripts come last.
+	 */
+	google,usf-registry = "google/usf/caiman/caiman_common.reg",
+			      "google/usf/caiman/caiman_proto.reg",
+			      "google/usf/caiman/caiman_proto_mag_doe.reg",
+			      "google/usf/caiman/caiman_evt_1_0.reg",
+			      "google/usf/caiman/caiman_evt_1_0_win.reg",
+			      "google/usf/caiman/caiman_evt_1_1.reg",
+			      "google/usf/caiman/caiman_evt_1_1_win.reg",
+			      "google/usf/caiman/caiman_evt_mag_doe.reg",
+			      "google/usf/caiman/caiman_dvt.reg",
+			      "google/usf/caiman/append/motion_state.reg",
+			      "google/usf/caiman/append/power.reg";
+};
+
+/ {
+	/*
+	 * Touch Bus Negotiator.  tbn,mode = 2 is the AoC-channel handshake: the
+	 * AP <-> AoC arbitration runs as messages over the com.google.tbn_service AoC
+	 * service rather than over GPIOs, which is what the downstream tbn node
+	 * describes.  One consumer, the touch controller.
+	 */
+	tbn: tbn {
+		compatible = "touch_bus_negotiator";
+		google,aoc = <&aoc>;
+		tbn,mode = <2>;
+		tbn,max_devices = <1>;
+	};
+
+	/*
+	 * The AoC sensor hub, bridged to IIO.  No hardware is described here:
+	 * the sensors live in AoC firmware behind the com.google.usf service.
+	 * The registry it needs is named on the AoC node above.
+	 */
+	aoc_usf: aoc-usf {
+		compatible = "google,aoc-usf";
+		google,aoc = <&aoc>;
+	};
+
+	/*
+	 * Wake gestures the AoC watches while the AP sleeps: a tap on the dark panel,
+	 * and lift-to-wake, reported as KEY_WAKEUP.  Armed only while the panel it
+	 * names is off.
+	 */
+	aoc-gesture-wake {
+		compatible = "google,aoc-gesture-wake";
+		google,aoc = <&aoc>;
+		panel = <&panel0>;
+	};
 };
 
 // &decon_autorefresh_bit {
