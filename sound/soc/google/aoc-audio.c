@@ -871,7 +871,144 @@ static int aoc_mic_switch_put(struct snd_kcontrol *kc,
 	return 1;
 }
 
-static const struct snd_kcontrol_new aoc_mic_controls[] = {
+/*
+ * The routes' own volume.
+ *
+ * A call's audio never reaches the AP, so there is no stream for user space to
+ * attenuate: the only gain left in the path is the amplifiers' own, and there
+ * is one control per amplifier.  A pair of mono controls cannot be driven in
+ * step from user space -- a volume merge spends the whole attenuation on the
+ * first element it finds and leaves the other alone, which is an imbalance
+ * rather than a volume -- so present each route the way it uses the pair: the
+ * loudspeaker as one stereo control over both amplifiers, and the earpiece as
+ * a mono one over the left, with the right kept silent.
+ *
+ * Each tops out where its route was tuned to sit rather than where the
+ * hardware ends, so full scale is the level the route had before it had a
+ * volume at all and the amplifiers' +12 dB is not reachable through either.
+ * UCM names whichever control belongs to the device, and the dialler's volume
+ * keys then land on hardware that is in the path.
+ */
+#define AOC_AMP_VOL_EARPIECE_MAX	641	/* -22 dB, the near-field backoff */
+#define AOC_AMP_VOL_SPEAKER_MAX		817	/* 0 dB, unity */
+
+static const char * const aoc_amp_vol_ctl[] = {
+	"Digital PCM Volume",		/* the left amplifier */
+	"R Digital PCM Volume",		/* and the right */
+};
+
+/* Both mirror the amplifiers' own scale, which is 0 to mute and 0.125 dB a step. */
+static const DECLARE_TLV_DB_RANGE(aoc_earpiece_tlv,
+		0, 0, TLV_DB_SCALE_ITEM(TLV_DB_GAIN_MUTE, 0, 1),
+		1, AOC_AMP_VOL_EARPIECE_MAX, TLV_DB_MINMAX_ITEM(-10200, -2200));
+static const DECLARE_TLV_DB_RANGE(aoc_speaker_tlv,
+		0, 0, TLV_DB_SCALE_ITEM(TLV_DB_GAIN_MUTE, 0, 1),
+		1, AOC_AMP_VOL_SPEAKER_MAX, TLV_DB_MINMAX_ITEM(-10200, 0));
+
+struct aoc_route_vol {
+	unsigned int channels;		/* amplifiers this route drives */
+	unsigned int max;
+};
+
+static const struct aoc_route_vol aoc_vol_earpiece = {
+	.channels = 1,
+	.max = AOC_AMP_VOL_EARPIECE_MAX,
+};
+
+static const struct aoc_route_vol aoc_vol_speaker = {
+	.channels = 2,
+	.max = AOC_AMP_VOL_SPEAKER_MAX,
+};
+
+/* An amplifier's volume is its own control's; go through it rather than behind it. */
+static int aoc_amp_vol_rw(struct snd_soc_card *card, unsigned int amp,
+			  long *val, bool write)
+{
+	struct snd_ctl_elem_value uv = { };
+	struct snd_kcontrol *kctl;
+	int ret;
+
+	kctl = snd_soc_card_get_kcontrol(card, aoc_amp_vol_ctl[amp]);
+	if (!kctl)
+		return -ENODEV;
+
+	if (write) {
+		uv.value.integer.value[0] = *val;
+		return kctl->put(kctl, &uv);
+	}
+
+	ret = kctl->get(kctl, &uv);
+	if (ret < 0)
+		return ret;
+	*val = uv.value.integer.value[0];
+	return 0;
+}
+
+static int aoc_route_vol_info(struct snd_kcontrol *kc,
+			      struct snd_ctl_elem_info *uinfo)
+{
+	const struct aoc_route_vol *v = (const void *)kc->private_value;
+
+	uinfo->type = SNDRV_CTL_ELEM_TYPE_INTEGER;
+	uinfo->count = v->channels;
+	uinfo->value.integer.min = 0;
+	uinfo->value.integer.max = v->max;
+	return 0;
+}
+
+static int aoc_route_vol_get(struct snd_kcontrol *kc,
+			     struct snd_ctl_elem_value *uc)
+{
+	struct snd_soc_card *card = snd_kcontrol_chip(kc);
+	const struct aoc_route_vol *v = (const void *)kc->private_value;
+	unsigned int i;
+	int ret;
+
+	for (i = 0; i < v->channels; i++) {
+		long val;
+
+		ret = aoc_amp_vol_rw(card, i, &val, false);
+		if (ret)
+			return ret;
+
+		/* The amplifier can be louder than this route is allowed to be. */
+		uc->value.integer.value[i] = min_t(long, val, v->max);
+	}
+	return 0;
+}
+
+static int aoc_route_vol_put(struct snd_kcontrol *kc,
+			     struct snd_ctl_elem_value *uc)
+{
+	struct snd_soc_card *card = snd_kcontrol_chip(kc);
+	const struct aoc_route_vol *v = (const void *)kc->private_value;
+	unsigned int i;
+	int ret, changed = 0;
+	long val;
+
+	for (i = 0; i < v->channels; i++) {
+		val = uc->value.integer.value[i];
+		if (val < 0 || val > v->max)
+			return -EINVAL;
+
+		ret = aoc_amp_vol_rw(card, i, &val, true);
+		if (ret < 0)
+			return ret;
+		changed |= ret;
+	}
+
+	/* The earpiece is the left amplifier alone: silence the right. */
+	if (v->channels == 1) {
+		val = 0;
+		ret = aoc_amp_vol_rw(card, 1, &val, true);
+		if (ret < 0)
+			return ret;
+		changed |= ret;
+	}
+	return changed;
+}
+
+static const struct snd_kcontrol_new aoc_controls[] = {
 	{
 		.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
 		.name = "Mic Capture Switch",
@@ -900,6 +1037,28 @@ static const struct snd_kcontrol_new aoc_mic_controls[] = {
 		.put = aoc_mic_gain_put,
 		.tlv.p = aoc_mic_capture_tlv,
 		.private_value = AOC_PARAM_KEY_DB,
+	},
+	{
+		.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
+		.name = "Earpiece Playback Volume",
+		.access = SNDRV_CTL_ELEM_ACCESS_READWRITE |
+			  SNDRV_CTL_ELEM_ACCESS_TLV_READ,
+		.info = aoc_route_vol_info,
+		.get = aoc_route_vol_get,
+		.put = aoc_route_vol_put,
+		.tlv.p = aoc_earpiece_tlv,
+		.private_value = (unsigned long)&aoc_vol_earpiece,
+	},
+	{
+		.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
+		.name = "Speaker Playback Volume",
+		.access = SNDRV_CTL_ELEM_ACCESS_READWRITE |
+			  SNDRV_CTL_ELEM_ACCESS_TLV_READ,
+		.info = aoc_route_vol_info,
+		.get = aoc_route_vol_get,
+		.put = aoc_route_vol_put,
+		.tlv.p = aoc_speaker_tlv,
+		.private_value = (unsigned long)&aoc_vol_speaker,
 	},
 };
 
@@ -1801,8 +1960,8 @@ static int aoc_audio_probe(struct platform_device *pdev)
 	aud->card.num_dapm_widgets = ARRAY_SIZE(aoc_dapm_widgets);
 	aud->card.dapm_routes = aoc_dapm_routes;
 	aud->card.num_dapm_routes = ARRAY_SIZE(aoc_dapm_routes);
-	aud->card.controls = aoc_mic_controls;
-	aud->card.num_controls = ARRAY_SIZE(aoc_mic_controls);
+	aud->card.controls = aoc_controls;
+	aud->card.num_controls = ARRAY_SIZE(aoc_controls);
 
 	ret = devm_snd_soc_register_card(dev, &aud->card);
 	if (ret) {
