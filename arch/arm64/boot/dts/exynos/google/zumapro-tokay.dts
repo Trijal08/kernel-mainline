@@ -35,11 +35,17 @@
  * cirrus/cs35l41-dsp1-spk-prot-tokay.wmfw, and for a tuning of the same stem
  * with "-r" appended on the right-hand amplifier, which carries the prefix.
  */
+/*
+ * Follow the panel, so the controller enters low-power gesture mode when the
+ * display blanks rather than only when the whole system suspends. Without a
+ * "panel" property drm_panel_add_follower() has nothing to look up and fails
+ * with -ENODEV, which costs every wake gesture while the AP is awake with the
+ * display off - which is exactly when they are wanted.
+ *
+ * It cannot live in the common dtsi: only the boards that declare a panel0
+ * could resolve the reference.
+ */
 &spitouch {
-	st,dchip_id = /bits/ 8 <0x36 0x48>;
-	st,max-coords = <1079 2399>;
-	st,udfps-coords = <540 1769>;
-	st,touch_offload_id = /bits/ 8 <'0' '0' 'o' '6'>;
 	panel = <&panel0>;
 };
 
@@ -59,10 +65,11 @@
 	/*
 	 * The rails the AoC's physical sensors hang off.  The AoC does not
 	 * switch these itself, and without them its sensor stack enumerates
-	 * only the fused and software sensors -- the LSM6DSV, magnetometer,
+	 * only the fused and software sensors -- the ICM45631, magnetometer,
 	 * barometer and proximity chips never answer.  Mapping matches the
-	 * downstream komodo aoc@17000000: sensor_1v8 = L7S_SENSORS (LDO7S),
-	 * sensor_3v3 = L5S_PROX (LDO5S).
+	 * downstream zumapro-common.dtsi, which describes them once for every
+	 * zumapro board: sensor_1v8 = L7S_SENSORS (LDO7S), sensor_3v3 =
+	 * L5S_PROX (LDO5S).
 	 */
 	sensor_1v8-supply = <&s_ldo7_reg>;
 	sensor_3v3-supply = <&s_ldo5_reg>;
@@ -82,20 +89,19 @@
 	 * All of them are uploaded whatever the stage.  Each carries its own
 	 * ?+CDT/?-CDT filter and the AoC evaluates those against the CDT
 	 * composed from /chosen/plat, so the scripts for other stages exclude
-	 * themselves; on a stage-6 part (CDT 0x00086100) that leaves
-	 * komodo_common, komodo_dvt and the two append scripts.  Order
+	 * themselves; tokay is product A, so a stage-6 part (CDT 0x000A6100) is
+	 * left with tokay_common, tokay_dvt and the two append scripts.  Order
 	 * matters: the common script defines the buses and the devices, the
-	 * stage script refines them, and the append scripts come last.
+	 * stage script refines them, and the append scripts come last.  tokay
+	 * carries no mag-DOE or wingboard scripts; it has one script per stage.
 	 */
-	google,usf-registry = "google/usf/komodo/komodo_common.reg",
-			      "google/usf/komodo/komodo_proto.reg",
-			      "google/usf/komodo/komodo_proto_mag_doe.reg",
-			      "google/usf/komodo/komodo_evt_1_0.reg",
-			      "google/usf/komodo/komodo_evt_1_1.reg",
-			      "google/usf/komodo/komodo_evt_mag_doe.reg",
-			      "google/usf/komodo/komodo_dvt.reg",
-			      "google/usf/komodo/append/motion_state.reg",
-			      "google/usf/komodo/append/power.reg";
+	google,usf-registry = "google/usf/tokay/tokay_common.reg",
+			      "google/usf/tokay/tokay_proto.reg",
+			      "google/usf/tokay/tokay_evt_1_0.reg",
+			      "google/usf/tokay/tokay_evt_1_1.reg",
+			      "google/usf/tokay/tokay_dvt.reg",
+			      "google/usf/tokay/append/motion_state.reg",
+			      "google/usf/tokay/append/power.reg";
 };
 
 / {
@@ -158,11 +164,12 @@
 // };
 
 /*
- * Display (DPU) bring-up for komodo.
+ * Display (DPU) bring-up for tokay.
  *
  * The DECON0/DPP/DPU-DMA/DSIM0 topology is defined in zumapro.dtsi; this
- * board section enables it and attaches the komodo (google,gs-km4) panel via
- * a minimal boot-handoff panel driver (google,komodo-panel).
+ * board section enables it and attaches the tokay panel via a minimal
+ * boot-handoff panel driver (google,gs-tk4c, unlike komodo's and caiman's
+ * google,<board>-panel - the driver matches the downstream panel name here).
  *
  * The bootloader initialises the DCPHY, DSIM link and panel and leaves the
  * (dual-DSC, command-mode) link streaming - that is what the simple-
