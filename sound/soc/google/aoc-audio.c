@@ -34,6 +34,7 @@
 #include <sound/pcm.h>
 #include <sound/pcm_params.h>
 #include <sound/soc.h>
+#include <sound/tlv.h>
 
 /* The ring the AOC drains is 16K; keep the staging buffer a few of those. */
 #define AOC_PCM_BUFFER_BYTES	(16384 * 6)
@@ -773,6 +774,16 @@ static int aoc_audio_mic_gain(struct aoc_audio *aud)
 #define AOC_MIC_HW_GAIN_CB_MAX		400	/* generous headroom over stock's 130 */
 #define AOC_MIC_SOFT_GAIN_DB_MAX	40
 
+/*
+ * Both gains are real decibels, so describe them: userspace can then show a
+ * scale rather than a raw number, and a mixer can map a percentage onto the
+ * control sensibly.  The record gain counts whole dB and its zero is silence
+ * rather than 0 dB -- say so, so a volume taken to the bottom is understood
+ * as a mute.  The preamp counts centibels and its zero is unity.
+ */
+static const DECLARE_TLV_DB_SCALE(aoc_mic_capture_tlv, 0, 100, 1);
+static const DECLARE_TLV_DB_SCALE(aoc_mic_boost_tlv, 0, 10, 0);
+
 static int aoc_mic_gain_info(struct snd_kcontrol *kc,
 			     struct snd_ctl_elem_info *ui)
 {
@@ -867,18 +878,24 @@ static const struct snd_kcontrol_new aoc_mic_controls[] = {
 	},
 	{
 		.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
-		.name = "Mic HW Gain (cB)",
+		.name = "Mic Boost Volume",
+		.access = SNDRV_CTL_ELEM_ACCESS_READWRITE |
+			  SNDRV_CTL_ELEM_ACCESS_TLV_READ,
 		.info = aoc_mic_gain_info,
 		.get = aoc_mic_gain_get,
 		.put = aoc_mic_gain_put,
+		.tlv.p = aoc_mic_boost_tlv,
 		.private_value = AOC_PARAM_KEY_DB + 1,	/* != the soft-gain tag */
 	},
 	{
 		.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
-		.name = "Mic Record Soft Gain (dB)",
+		.name = "Mic Capture Volume",
+		.access = SNDRV_CTL_ELEM_ACCESS_READWRITE |
+			  SNDRV_CTL_ELEM_ACCESS_TLV_READ,
 		.info = aoc_mic_gain_info,
 		.get = aoc_mic_gain_get,
 		.put = aoc_mic_gain_put,
+		.tlv.p = aoc_mic_capture_tlv,
 		.private_value = AOC_PARAM_KEY_DB,
 	},
 };
