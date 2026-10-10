@@ -349,7 +349,8 @@ struct aoc_audio {
 	struct completion cmd_done;		/* a control reply arrived */
 	int mic_hw_gain_cb;			/* mic preamp gain, centibels */
 	int mic_soft_gain_db;			/* record soft gain, dB */
-	bool mic_muted;				/* capture switch, off = both gains zero */
+	bool mic_muted;				/* capture switch, off */
+	bool voice_mic_on;			/* the modem's mic input is running */
 };
 
 /* Per-open stream state. */
@@ -865,6 +866,17 @@ static int aoc_mic_switch_put(struct snd_kcontrol *kc,
 
 	aud->mic_muted = muted;
 	aoc_audio_mic_gain(aud);	/* a no-op until the AOC is up */
+
+	/*
+	 * The gains above are the record chain. A call does not travel it: the
+	 * uplink is the AOC's modem input, taken from the microphones and
+	 * handed to the modem, and the AOC offers no gain or mute on it. Its
+	 * only lever is whether it runs at all, so muting a call means not
+	 * running it. Nothing to do when no call is up -- hw_params starts it
+	 * muted or not according to the flag.
+	 */
+	if (aud->voice_mic_on)
+		aoc_voice_mic_set(aud, !muted);
 	return 1;
 }
 
@@ -1312,8 +1324,10 @@ static int aoc_pcm_hw_params(struct snd_soc_component *comp,
 				       ARRAY_SIZE(aoc_voice_pre));
 		if (ret)
 			return ret;
-		ret = aoc_voice_mic_set(aud, true);
+		aud->voice_mic_on = true;
+		ret = aoc_voice_mic_set(aud, !aud->mic_muted);
 		if (ret) {
+			aud->voice_mic_on = false;
 			dev_err(comp->dev, "call mic start failed: %d\n", ret);
 			aoc_voice_replay(aud, aoc_voice_teardown,
 					 ARRAY_SIZE(aoc_voice_teardown));
@@ -1327,6 +1341,7 @@ static int aoc_pcm_hw_params(struct snd_soc_component *comp,
 	if (ret) {
 		dev_err(comp->dev, "speaker bind failed: %d\n", ret);
 		if (s->voice) {
+			aud->voice_mic_on = false;
 			aoc_voice_mic_set(aud, false);
 			aoc_voice_replay(aud, aoc_voice_teardown,
 					 ARRAY_SIZE(aoc_voice_teardown));
@@ -1378,7 +1393,10 @@ static int aoc_pcm_hw_free(struct snd_soc_component *comp,
 			     false);
 	/* Reverse of hw_params: the sink goes first, then the mic it needed. */
 	if (s->voice) {
-		int mic = aoc_voice_mic_set(aud, false);
+		int mic;
+
+		aud->voice_mic_on = false;
+		mic = aoc_voice_mic_set(aud, false);
 
 		if (mic && !ret)
 			ret = mic;
