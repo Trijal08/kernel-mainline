@@ -668,6 +668,12 @@ struct s5xxx_modem {
 
 	/* RFS file channel (umts_rfs0, ch 0x29) on the NORM_RAW ring. */
 	struct wwan_port	*rfs_port;
+	/*
+	 * Set while user space has the RFS port open. The in-kernel server is
+	 * a fallback for when it does not: see the S5XXX_CH_RFS arm of the rx
+	 * path.
+	 */
+	bool			rfs_port_open;
 	u8			rfs_ch_seq;	/* RFS per-channel sequence */
 
 	/*
@@ -2369,9 +2375,25 @@ static int s5xxx_rfs_port_tx(struct wwan_port *port, struct sk_buff *skb)
 	return 0;
 }
 
+static int s5xxx_rfs_start(struct wwan_port *port)
+{
+	struct s5xxx_modem *sm = wwan_port_get_drvdata(port);
+
+	WRITE_ONCE(sm->rfs_port_open, true);
+	return s5xxx_wwan_start(port);
+}
+
+static void s5xxx_rfs_stop(struct wwan_port *port)
+{
+	struct s5xxx_modem *sm = wwan_port_get_drvdata(port);
+
+	WRITE_ONCE(sm->rfs_port_open, false);
+	s5xxx_wwan_stop(port);
+}
+
 static const struct wwan_port_ops s5xxx_rfs_ops = {
-	.start	= s5xxx_wwan_start,
-	.stop	= s5xxx_wwan_stop,
+	.start	= s5xxx_rfs_start,
+	.stop	= s5xxx_rfs_stop,
 	.tx	= s5xxx_rfs_port_tx,
 };
 
@@ -2525,6 +2547,16 @@ static void s5xxx_rfs_handle(struct s5xxx_modem *sm, const u8 *f, u32 n)
 	u16 cmd = get_unaligned_le16(f), token = get_unaligned_le16(f + 2);
 	u32 fid, off, iolen, iotype, clen, plen;
 	struct s5xxx_rfs_file *e;
+
+	/*
+	 * Whether the CP uses this channel at all is the first thing anyone
+	 * debugging a missing carrier configuration needs to know, and it is
+	 * not otherwise observable: only the OPEN-by-path arm logs, so a CP
+	 * that asks for nothing and a CP that asks for an NV file look
+	 * identical from user space. Once per boot, at the first frame.
+	 */
+	dev_info_once(sm->dev, "CP started using RFS (first cmd %#x)\n", cmd);
+	dev_dbg(sm->dev, "RFS rx cmd %#x token %#x len %u\n", cmd, token, n);
 
 	switch (cmd) {
 	case S5XXX_RFS_C_OPEN:			/* 4: open a path */
@@ -2741,7 +2773,22 @@ static void s5xxx_drain_raw_rxq(struct s5xxx_modem *sm, u32 intval)
 
 		if (ch == S5XXX_CH_RFS) {
 			had_raw = true;
-			if (plen <= S5XXX_RFS_MAX) {
+			/*
+			 * User space owns this protocol when it is listening.
+			 * It has to: the CP writes its NV back over this
+			 * channel, and a driver cannot write files -- the
+			 * in-kernel server acks those writes and drops them,
+			 * so a CP served from here believes it has persisted
+			 * state that does not exist.
+			 *
+			 * The in-kernel server stays as the fallback for a
+			 * system with no daemon, because every RFS request
+			 * must be answered or the CP stalls its IPC.
+			 */
+			if (READ_ONCE(sm->rfs_port_open) && sm->rfs_port) {
+				port = sm->rfs_port;
+				max = S5XXX_RFS_MAX;
+			} else if (plen <= S5XXX_RFS_MAX) {
 				/* Serve the request in-kernel, not via the port. */
 				s5xxx_rfs_enqueue(sm, buff,
 						  (out + S5XXX_SIT_HDR) %
