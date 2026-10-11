@@ -10,7 +10,7 @@
  *
  * This is a minimal bring-up port of the vendor google-modules GSA driver
  * (gsa_core.c + gsa_mbox.c): just enough to probe and round-trip a command.
- * The Trusty (HWMGR) service link, the external GSC/Titan proxy, KDN/SJTAG/TPU
+ * The Trusty (HWMGR) service link, KDN/SJTAG/TPU
  * helpers, the log region, the char device and the pKVM S2MPU wakelock dance
  * are all omitted; the GSA S2MPU is a permissive google,s2mpu-v9 handled by its
  * own driver and is not needed for MMIO mailbox traffic.
@@ -31,6 +31,15 @@
 #include <linux/spinlock.h>
 
 #include <linux/soc/samsung/exynos-gsa.h>
+
+/* Read-only bring-up query; leave the external security chip alone by default. */
+static bool gsc_version;
+module_param(gsc_version, bool, 0400);
+MODULE_PARM_DESC(gsc_version, "Query the Titan/GSC firmware version at probe");
+
+#define GSA_GSC_BUFFER_SIZE	4096
+#define GSC_APP_NUGGET		0
+#define GSC_PARAM_VERSION	0
 
 /* Mailbox registers (base = the gsa-ns MMIO window). */
 #define MBOX_INTCR0_REG		0x0024	/* GSA->AP interrupt clear */
@@ -54,6 +63,7 @@
 
 /* Mailbox command opcodes (subset; full set in the vendor gsa_mbox.h). */
 enum gsa_mbox_cmd {
+	GSA_MB_CMD_GSC_NOS_CALL		= 65,
 	GSA_MB_CMD_LOAD_AOC_FW_IMG	= 90,
 	GSA_MB_CMD_AOC_CMD		= 91,
 	GSA_MB_CMD_UNLOAD_AOC_FW_IMG	= 92,
@@ -89,6 +99,11 @@ struct gsa_dev_state {
 	spinlock_t slock;		/* RMW of the interrupt-mask register */
 	struct mutex mbox_lock;		/* one command in flight at a time */
 	struct completion rsp;
+	bool mbox_timed_out;	/* a late response must not satisfy a new command */
+	struct mutex gsc_lock;	/* protects the shared request/reply buffer */
+	void *gsc_buf;
+	dma_addr_t gsc_buf_da;
+	bool gsc_timed_out;	/* retain the buffer if firmware may still use it */
 	u32 exp_intmr0;			/* expected mask, re-synced if GSA reset us */
 };
 
@@ -171,7 +186,7 @@ static int gsa_mb_err_to_errno(u32 err)
 
 /*
  * Send one mailbox command and collect the response.  Returns the number of
- * response args on success, or a negative errno.  Serialised by the caller.
+ * response args on success, or a negative errno.  Serialised internally.
  */
 static int gsa_send_mbox_cmd(struct gsa_dev_state *s, u32 cmd,
 			     const u32 *req_args, u32 req_argc,
@@ -182,7 +197,7 @@ static int gsa_send_mbox_cmd(struct gsa_dev_state *s, u32 cmd,
 	int ret;
 	u32 i;
 
-	if (req_argc + 2 > MBOX_SR_NUM)
+	if (req_argc > MBOX_SR_NUM - 2)
 		return -EINVAL;
 	if (req_argc && !req_args)
 		return -EINVAL;
@@ -190,6 +205,10 @@ static int gsa_send_mbox_cmd(struct gsa_dev_state *s, u32 cmd,
 		return -EINVAL;
 
 	mutex_lock(&s->mbox_lock);
+	if (s->mbox_timed_out) {
+		ret = -ESHUTDOWN;
+		goto out;
+	}
 
 	/* stage the request in the shared registers */
 	writel(cmd, s->base + MBOX_SR_REG(0));
@@ -207,6 +226,7 @@ static int gsa_send_mbox_cmd(struct gsa_dev_state *s, u32 cmd,
 	timeleft = wait_for_completion_timeout(&s->rsp,
 					       msecs_to_jiffies(GSA_MBOX_TIMEOUT_MS));
 	if (!timeleft) {
+		s->mbox_timed_out = true;
 		dev_err(s->dev, "mbox cmd 0x%x timed out\n", cmd);
 		ret = -ETIMEDOUT;
 		goto out;
@@ -227,16 +247,14 @@ static int gsa_send_mbox_cmd(struct gsa_dev_state *s, u32 cmd,
 		ret = gsa_mb_err_to_errno(rsp_err);
 		goto out;
 	}
-	if (rsp_argc + 3 > MBOX_SR_NUM) {
+	if (rsp_argc > MBOX_SR_NUM - 3) {
 		dev_err(s->dev, "mbox cmd 0x%x: malformed argc %u\n",
 			cmd, rsp_argc);
 		ret = -EIO;
 		goto out;
 	}
 
-	if (rsp_argc > rsp_max_argc)
-		rsp_argc = rsp_max_argc;
-	for (i = 0; i < rsp_argc; i++)
+	for (i = 0; i < min(rsp_argc, rsp_max_argc); i++)
 		rsp_args[i] = readl(s->base + MBOX_SR_REG(i + 3));
 
 	ret = rsp_argc;
@@ -245,6 +263,122 @@ out:
 	gsa_mbox_mask_irq0(s, BIT(MBOX_CLIENT_RSP_IRQ));
 	mutex_unlock(&s->mbox_lock);
 	return ret;
+}
+
+static void gsa_gsc_free_buffer(void *data)
+{
+	struct gsa_dev_state *s = data;
+
+	/* The AP has no way to cancel DMA by the always-running GSA firmware. */
+	if (s->gsc_timed_out) {
+		dev_warn(s->dev, "retaining GSC DMA buffer after timeout; reboot required\n");
+		return;
+	}
+	dma_free_coherent(s->dev, GSA_GSC_BUFFER_SIZE, s->gsc_buf,
+			  s->gsc_buf_da);
+}
+
+int gsa_gsc_nos_call(struct device *gsa, u8 app_id, u16 params,
+		     const void *args, size_t arg_len, void *reply,
+		     size_t *reply_len, u32 *call_status)
+{
+	struct gsa_dev_state *s = dev_get_drvdata(gsa);
+	u32 req[8], rsp[2];
+	size_t capacity;
+	int ret;
+
+	if (!s)
+		return -ENODEV;
+	if (!reply_len || !call_status || (arg_len && !args))
+		return -EINVAL;
+	capacity = *reply_len;
+	if (capacity && !reply)
+		return -EINVAL;
+	if (arg_len > GSA_GSC_BUFFER_SIZE || capacity > GSA_GSC_BUFFER_SIZE)
+		return -E2BIG;
+
+	mutex_lock(&s->gsc_lock);
+	if (s->gsc_timed_out) {
+		ret = -ESHUTDOWN;
+		goto out;
+	}
+	if (!s->gsc_buf) {
+		s->gsc_buf = dma_alloc_coherent(gsa, GSA_GSC_BUFFER_SIZE,
+						&s->gsc_buf_da, GFP_KERNEL);
+		if (!s->gsc_buf) {
+			ret = -ENOMEM;
+			goto out;
+		}
+		ret = devm_add_action_or_reset(gsa, gsa_gsc_free_buffer, s);
+		if (ret) {
+			s->gsc_buf = NULL;
+			goto out;
+		}
+	}
+
+	/* The vendor ABI aliases request and response in one coherent buffer. */
+	memset(s->gsc_buf, 0, GSA_GSC_BUFFER_SIZE);
+	if (arg_len)
+		memcpy(s->gsc_buf, args, arg_len);
+	req[0] = app_id;
+	req[1] = params;
+	req[2] = lower_32_bits(s->gsc_buf_da);
+	req[3] = upper_32_bits(s->gsc_buf_da);
+	req[4] = arg_len;
+	req[5] = req[2];
+	req[6] = req[3];
+	req[7] = capacity;
+
+	ret = gsa_send_mbox_cmd(s, GSA_MB_CMD_GSC_NOS_CALL, req,
+				ARRAY_SIZE(req), rsp, ARRAY_SIZE(rsp));
+	if (ret < 0) {
+		if (ret == -ETIMEDOUT)
+			s->gsc_timed_out = true;
+		goto out;
+	}
+	if (ret != ARRAY_SIZE(rsp)) {
+		ret = -EPROTO;
+		goto out;
+	}
+	if (rsp[1] > capacity) {
+		ret = -EMSGSIZE;
+		goto out;
+	}
+
+	*call_status = rsp[0];
+	*reply_len = rsp[1];
+	if (rsp[1])
+		memcpy(reply, s->gsc_buf, rsp[1]);
+	ret = 0;
+out:
+	mutex_unlock(&s->gsc_lock);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(gsa_gsc_nos_call);
+
+static void gsa_gsc_query_version(struct device *dev)
+{
+	char version[256];
+	size_t len = sizeof(version) - 1;
+	u32 status;
+	int ret;
+
+	ret = gsa_gsc_nos_call(dev, GSC_APP_NUGGET, GSC_PARAM_VERSION,
+			       NULL, 0, version, &len, &status);
+	if (ret) {
+		dev_warn(dev, "GSC version query failed: %d\n", ret);
+		return;
+	}
+	if (status) {
+		dev_warn(dev, "GSC version query returned NOS status %#x\n", status);
+		return;
+	}
+	if (!len) {
+		dev_warn(dev, "GSC version query returned an empty reply\n");
+		return;
+	}
+	version[len] = '\0';
+	dev_info(dev, "GSC firmware version: %s\n", version);
 }
 
 /**
@@ -337,6 +471,7 @@ static int gsa_probe(struct platform_device *pdev)
 	s->dev = dev;
 	spin_lock_init(&s->slock);
 	mutex_init(&s->mbox_lock);
+	mutex_init(&s->gsc_lock);
 	init_completion(&s->rsp);
 	platform_set_drvdata(pdev, s);
 
@@ -375,6 +510,9 @@ static int gsa_probe(struct platform_device *pdev)
 		dev_warn(dev, "GSA mailbox up, unexpected chip-id arg count %d\n", ret);
 	else
 		dev_info(dev, "GSA up: chip id %08x%08x\n", chip_id[1], chip_id[0]);
+
+	if (gsc_version)
+		gsa_gsc_query_version(dev);
 
 	return 0;
 }
