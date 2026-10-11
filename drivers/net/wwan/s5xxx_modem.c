@@ -426,6 +426,25 @@ struct s5xxx_variant {
 #define S5XXX_INIT_TIMEOUT		(15 * HZ)
 
 /*
+ * How long to wait, after the control ports are published, for user space to
+ * open one before releasing the CP anyway.
+ *
+ * INIT_END is what takes the CP ONLINE, and the first thing it does there is
+ * ask the AP for things only user space can answer: its carrier configuration
+ * over the RFS channel, and the GEMS requests on oem_ipc3 whose queue overflows
+ * into an assert if they go unanswered.  Those requests used to arrive before
+ * the ports they need existed -- s5xxx_online() publishes them after the
+ * handshake completes -- so they were asked into a void every boot.  A CP that
+ * never got its carrier configuration keeps no URSP rules, which costs it every
+ * PDN but the one it attached with.
+ *
+ * Short on purpose: the CP has its own patience for INIT_END, and expiring here
+ * is not a failure.  It releases the CP exactly as before, which is a modem
+ * that works with no daemon installed at all -- the AT port included.
+ */
+#define S5XXX_LISTENER_TIMEOUT		(2 * HZ)
+
+/*
  * Shared-memory IPC arming + the NORM_RAW boot-download ring (vendor
  * init_legacy_link / xmit_to_legacy_link).  The CP polls the SIT boot magic
  * at IPC+0 to recognise the region and MEM_ACCESS gates AP visibility.  On a
@@ -600,6 +619,8 @@ struct s5xxx_modem {
 	u32			last_cp2ap;	/* last CP2AP_MSG value (debug) */
 	struct work_struct	boot_work;
 	struct completion	init_done;
+	/* Raised when user space opens a control port; see s5xxx_release_cp(). */
+	struct completion	cp_release;
 	spinlock_t		lock;	/* orders ap2cp_msg word + doorbell */
 	bool			online;
 
@@ -2215,8 +2236,20 @@ static int s5xxx_ctrl_tx(struct wwan_port *port, struct sk_buff *skb)
 	return 0;
 }
 
+/*
+ * A reader on any SIT control port is what the deferred INIT_END waits for: it
+ * is the port the CP's own requests arrive on, and the one a RIL opens first.
+ */
+static int s5xxx_ctrl_start(struct wwan_port *port)
+{
+	struct s5xxx_sit_ch *sc = wwan_port_get_drvdata(port);
+
+	complete_all(&sc->sm->cp_release);
+	return s5xxx_wwan_start(port);
+}
+
 static const struct wwan_port_ops s5xxx_ctrl_ops = {
-	.start	= s5xxx_wwan_start,
+	.start	= s5xxx_ctrl_start,
 	.stop	= s5xxx_wwan_stop,
 	.tx	= s5xxx_ctrl_tx,
 };
@@ -3440,6 +3473,21 @@ static void s5xxx_online(struct s5xxx_modem *sm)
 	}
 
 	/*
+	 * Everything the CP asks the AP for arrives on the ports above, so they
+	 * are published before INIT_END releases it; the GNSS ports are not,
+	 * because the in-kernel codeload owns ch 0xf0 until gnss_port exists.
+	 */
+}
+
+/*
+ * The GNSS ports and the data path, published after the codeload has run.
+ * Creating gnss_port hands ch 0xf0 to user space -- the rx path routes to the
+ * port as soon as it is non-NULL -- so the codeload would stop seeing its own
+ * replies if this ran any earlier.
+ */
+static void s5xxx_publish_gnss(struct s5xxx_modem *sm)
+{
+	/*
 	 * The GNSS boot channel (ch 0xf0), exposed raw for codeload development.
 	 */
 	sm->gnss_port = wwan_create_port(sm->dev, WWAN_PORT_GNSS, &s5xxx_gnss_ops,
@@ -3553,9 +3601,15 @@ static irqreturn_t s5xxx_irq_handler(int irq, void *data)
 				s5xxx_pktproc_ul_activate(sm);
 			s5xxx_init_ipc_queues(sm);
 			sm->online = true;
+			/*
+			 * INIT_END is deferred to s5xxx_release_cp(), which runs
+			 * once the ports are published: it is what lets the CP
+			 * start asking, and it cannot sleep here anyway.
+			 */
+		} else {
+			/* Re-entrant PHONE_START just gets the INIT_END again. */
+			s5xxx_send_ipc_irq(sm, S5XXX_CMD(S5XXX_CMD_INIT_END));
 		}
-		/* Re-entrant PHONE_START just gets the INIT_END again. */
-		s5xxx_send_ipc_irq(sm, S5XXX_CMD(S5XXX_CMD_INIT_END));
 		complete_all(&sm->init_done);
 		break;
 	case S5XXX_CMD_CRASH_RESET:
@@ -4664,6 +4718,21 @@ static int s5xxx_dump_boot_set(void *data, u64 val)
 DEFINE_DEBUGFS_ATTRIBUTE(s5xxx_dump_boot_fops, NULL, s5xxx_dump_boot_set,
 			 "%llu\n");
 
+/*
+ * Send the INIT_END the PHONE_START handler deferred, once the control ports
+ * exist and, if user space is quick enough, once one of them has a reader.
+ * See S5XXX_LISTENER_TIMEOUT for why the wait is short and why expiring is
+ * not an error.
+ */
+static void s5xxx_release_cp(struct s5xxx_modem *sm)
+{
+	if (!wait_for_completion_timeout(&sm->cp_release, S5XXX_LISTENER_TIMEOUT))
+		dev_info(sm->dev,
+			 "no control-port reader yet; releasing the CP anyway\n");
+
+	s5xxx_send_ipc_irq(sm, S5XXX_CMD(S5XXX_CMD_INIT_END));
+}
+
 static void s5xxx_boot_work(struct work_struct *work)
 {
 	struct s5xxx_modem *sm = container_of(work, struct s5xxx_modem,
@@ -4738,6 +4807,7 @@ static void s5xxx_boot_work(struct work_struct *work)
 	 * re-runs INIT_START/PHONE_START against the rings we just cleared.
 	 */
 	reinit_completion(&sm->init_done);
+	reinit_completion(&sm->cp_release);
 	dev_info(sm->dev, "forcing a fresh MAIN download\n");
 
 	/*
@@ -4820,9 +4890,16 @@ static void s5xxx_boot_work(struct work_struct *work)
 		return;
 	}
 
+	/*
+	 * Publish the control ports, let user space attach, then release the CP.
+	 * The GNSS codeload stays on the far side of the release, where it has
+	 * always run, and its ports are published after it.
+	 */
+	s5xxx_online(sm);
+	s5xxx_release_cp(sm);
 	dev_info(sm->dev, "CP is ONLINE\n");
 	s5xxx_load_gnss_fw(sm);
-	s5xxx_online(sm);
+	s5xxx_publish_gnss(sm);
 	return;
 
 out_fw:
@@ -4886,6 +4963,7 @@ static int s5xxx_probe(struct platform_device *pdev)
 	spin_lock_init(&sm->tx_lock);
 	mutex_init(&sm->pcie_onoff_lock);
 	init_completion(&sm->init_done);
+	init_completion(&sm->cp_release);
 	init_completion(&sm->gnss_rsp);
 	INIT_WORK(&sm->boot_work, s5xxx_boot_work);
 	INIT_WORK(&sm->pm_work, s5xxx_pm_work);
