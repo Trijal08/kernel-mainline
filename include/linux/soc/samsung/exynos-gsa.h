@@ -14,6 +14,29 @@
 struct device;
 
 /**
+ * gsa_gsc_nos_call() - call a Titan/GSC application through the GSA
+ * @gsa: the bound GSA device; the caller must keep it bound during the call
+ * @app_id: NOS application ID
+ * @params: application-specific command parameter
+ * @args: request data (may be NULL when @arg_len is zero)
+ * @arg_len: request length, at most 4096 bytes
+ * @reply: response buffer (may be NULL when its capacity is zero)
+ * @reply_len: response capacity on entry, actual length on success (max 4096)
+ * @call_status: NOS application status on success, zero means APP_SUCCESS
+ *
+ * Sleeps. Request/reply data is copied through a coherent DMA buffer allocated
+ * on the GSA device. Calls share the mailbox with AoC operations. Output lengths
+ * and status are unchanged on transport errors; a nonzero application status is
+ * returned separately from the transport result. A timed-out call disables
+ * further GSC calls and quarantines the DMA buffer until reboot.
+ *
+ * Return: 0 for a completed call (inspect @call_status), or a negative errno.
+ */
+int gsa_gsc_nos_call(struct device *gsa, u8 app_id, u16 params,
+		     const void *args, size_t arg_len, void *reply,
+		     size_t *reply_len, u32 *call_status);
+
+/**
  * gsa_load_aoc_fw_image() - have the GSA authenticate and load an AOC image
  * @gsa:    the GSA device (resolve it from a "gsa-device" phandle)
  * @header: DMA address of the image's authentication header (in coherent memory
