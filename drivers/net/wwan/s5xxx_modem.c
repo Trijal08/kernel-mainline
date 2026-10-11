@@ -2480,7 +2480,17 @@ static int s5xxx_rfs_open_path(struct s5xxx_modem *sm, struct s5xxx_rfs_file *e,
 	scnprintf(fw, sizeof(fw), "google/%s/%s/%s", sm->var->fw_dir,
 		  S5XXX_CC_DIR, rel);
 	ret = request_firmware_direct(&e->fw, fw, sm->dev);
-	dev_dbg(sm->dev, "RFS serve %s: %d\n", fw, ret);
+	/*
+	 * A carrier configuration the CP asked for and did not get leaves it
+	 * with no policy at all, which it reports only in a status indication
+	 * nothing is obliged to read -- so say it here, once, where it is
+	 * actionable. Success stays at debug level: there are two dozen of
+	 * these per boot.
+	 */
+	if (ret)
+		dev_warn(sm->dev, "RFS serve %s failed: %d\n", fw, ret);
+	else
+		dev_dbg(sm->dev, "RFS serve %s\n", fw);
 	return ret;
 }
 
