@@ -910,7 +910,7 @@
 			compatible = "shared-dma-pool";
 			reusable;
 			size = <0x08000000>;		/* 128 MiB: 8 screens */
-			alignment = <0x00400000>;
+			alignment = <0x0 0x00400000>;
 		};
 
 		/*
