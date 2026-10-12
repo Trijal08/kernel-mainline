@@ -36,12 +36,8 @@ static inline void exynos_pcie_phy_all_pwrdn_clear(struct phy *phy) { }
 #if IS_ENABLED(CONFIG_PCI_EXYNOS)
 int zumapro_pcie_set_msi_target(struct device *rc_dev, phys_addr_t target);
 int zumapro_pcie_reserve_msi_base(struct device *rc_dev, unsigned int count);
-int zumapro_pcie_modem_link_down(struct device *rc_dev);
-int zumapro_pcie_modem_link_up(struct device *rc_dev);
 int zumapro_pcie_modem_wake(struct device *rc_dev);
 int zumapro_pcie_modem_set_ap_active(struct device *rc_dev, bool active);
-int zumapro_pcie_modem_dump_reset(struct device *rc_dev);
-int zumapro_pcie_modem_power_cycle(struct device *rc_dev);
 /* Wi-Fi (BCM4390) runtime relink for dhd D3 power management. */
 int zumapro_pcie_wifi_link_up(struct device *rc_dev);
 int zumapro_pcie_wifi_link_down(struct device *rc_dev);
@@ -60,14 +56,6 @@ static inline int zumapro_pcie_reserve_msi_base(struct device *rc_dev,
 {
 	return -ENODEV;
 }
-static inline int zumapro_pcie_modem_link_down(struct device *rc_dev)
-{
-	return -ENODEV;
-}
-static inline int zumapro_pcie_modem_link_up(struct device *rc_dev)
-{
-	return -ENODEV;
-}
 static inline int zumapro_pcie_modem_wake(struct device *rc_dev)
 {
 	return -ENODEV;
@@ -79,15 +67,7 @@ static inline int zumapro_pcie_modem_set_ap_active(struct device *rc_dev,
 {
 	return -ENODEV;
 }
-static inline int zumapro_pcie_modem_dump_reset(struct device *rc_dev)
-{
-	return -ENODEV;
-}
 
-static inline int zumapro_pcie_modem_power_cycle(struct device *rc_dev)
-{
-	return -ENODEV;
-}
 static inline int zumapro_pcie_wifi_link_up(struct device *rc_dev)
 {
 	return -ENODEV;

@@ -49,6 +49,7 @@
 #include <linux/pci.h>
 #include <linux/pcie-zumapro.h>
 #include <linux/platform_device.h>
+#include <linux/reset.h>
 #include <linux/sizes.h>
 #include <linux/skbuff.h>
 #include <linux/timekeeping.h>
@@ -627,6 +628,15 @@ struct s5xxx_modem {
 	const struct s5xxx_variant *var;
 	struct device		*dev;
 	struct device		*rc_dev;
+	/*
+	 * Link and baseband resets the root complex offers.  The CP's
+	 * bootloader drops the link part way through its boot and waits for
+	 * the AP to bring it back, so the park and the retrain are separate
+	 * halves of one reset with a CP2AP_WAKEUP wait in between.
+	 */
+	struct reset_control	*link_rst;
+	struct reset_control	*cp_cold_rst;
+	struct reset_control	*cp_dump_rst;
 	struct pci_dev		*pdev;
 	struct gpio_desc	*cp2ap_wakeup;
 	struct gpio_desc	*cp_active;	/* CP2AP_PHONE_ACTIVE (crash detect) */
@@ -1200,7 +1210,7 @@ static void s5xxx_pm_work(struct work_struct *work)
 	if (want_up && !sm->link_up &&
 	    sm->relink_failures < S5XXX_RELINK_FAIL_LIMIT &&
 	    gpiod_get_value_cansleep(sm->cp2ap_wakeup)) {
-		if (zumapro_pcie_modem_link_up(sm->rc_dev) == 0) {
+		if (reset_control_deassert(sm->link_rst) == 0) {
 			s5xxx_relink_restore(sm);
 			spin_lock_irqsave(&sm->lock, flags);
 			sm->link_up = true;
@@ -1283,7 +1293,7 @@ static void s5xxx_pm_work(struct work_struct *work)
 			spin_unlock_irqrestore(&sm->lock, flags);
 
 			if (park) {
-				zumapro_pcie_modem_link_down(sm->rc_dev);
+				reset_control_assert(sm->link_rst);
 				dev_dbg(sm->dev, "CP sleep: link down (parked)\n");
 			}
 		}
@@ -4293,7 +4303,7 @@ static int s5xxx_boot_bootloader(struct s5xxx_modem *sm)
 		 * retry the download once.
 		 */
 		dev_warn(sm->dev, "boot wedged; escalating to a CP power cycle\n");
-		ret = zumapro_pcie_modem_power_cycle(sm->rc_dev);
+		ret = reset_control_reset(sm->cp_cold_rst);
 		if (ret) {
 			dev_err(sm->dev, "post-power-cycle relink failed: %d\n",
 				ret);
@@ -4400,7 +4410,7 @@ static int s5xxx_dump_boot(struct s5xxx_modem *sm)
 	sm->link_up = true;
 
 	dev_info(sm->dev, "dump boot: resetting the CP into minidump mode\n");
-	ret = zumapro_pcie_modem_dump_reset(sm->rc_dev);
+	ret = reset_control_reset(sm->cp_dump_rst);
 	if (ret) {
 		dev_err(sm->dev, "dump boot: reset/relink failed: %d\n", ret);
 		goto out;
@@ -4442,13 +4452,13 @@ static int s5xxx_dump_boot(struct s5xxx_modem *sm)
 	dev_info(sm->dev,
 		 "dump boot: PBL up (CP2AP_WAKEUP=%d); bouncing the link for the minidump agent\n",
 		 gpiod_get_value_cansleep(sm->cp2ap_wakeup));
-	ret = zumapro_pcie_modem_link_down(sm->rc_dev);
+	ret = reset_control_assert(sm->link_rst);
 	if (ret)
 		goto out;
 	ret = s5xxx_poll_cp_wakeup(sm);
 	if (ret)
 		goto out;
-	ret = zumapro_pcie_modem_link_up(sm->rc_dev);
+	ret = reset_control_deassert(sm->link_rst);
 	if (ret) {
 		dev_err(sm->dev, "dump boot: link re-establishment failed: %d\n",
 			ret);
@@ -4586,13 +4596,13 @@ static void s5xxx_boot_work(struct work_struct *work)
 	 */
 	if (pci_set_power_state(pdev, PCI_D3hot))
 		dev_warn(sm->dev, "could not D3hot the CP before the re-link\n");
-	ret = zumapro_pcie_modem_link_down(sm->rc_dev);
+	ret = reset_control_assert(sm->link_rst);
 	if (ret)
 		goto out_fw;
 	ret = s5xxx_poll_cp_wakeup(sm);
 	if (ret)
 		goto out_fw;
-	ret = zumapro_pcie_modem_link_up(sm->rc_dev);
+	ret = reset_control_deassert(sm->link_rst);
 	if (ret) {
 		dev_err(sm->dev, "link re-establishment failed: %d\n", ret);
 		goto out_fw;
@@ -4849,6 +4859,30 @@ static int s5xxx_probe(struct platform_device *pdev)
 		goto err_rc;
 	}
 
+	/*
+	 * The root complex publishes these once its host is up, so asking for
+	 * them is also how this driver waits for a controller that can carry
+	 * the CP's mid-boot relink.
+	 */
+	sm->link_rst = devm_reset_control_get_exclusive(dev, "link");
+	if (IS_ERR(sm->link_rst)) {
+		ret = dev_err_probe(dev, PTR_ERR(sm->link_rst),
+				    "no link reset\n");
+		goto err_rc;
+	}
+	sm->cp_cold_rst = devm_reset_control_get_exclusive(dev, "cp-cold");
+	if (IS_ERR(sm->cp_cold_rst)) {
+		ret = dev_err_probe(dev, PTR_ERR(sm->cp_cold_rst),
+				    "no CP cold reset\n");
+		goto err_rc;
+	}
+	sm->cp_dump_rst = devm_reset_control_get_exclusive(dev, "cp-dump");
+	if (IS_ERR(sm->cp_dump_rst)) {
+		ret = dev_err_probe(dev, PTR_ERR(sm->cp_dump_rst),
+				    "no CP dump reset\n");
+		goto err_rc;
+	}
+
 	ret = of_property_read_u32(dev->of_node, "samsung,doorbell-addr",
 				   &sm->db_bus_addr);
 	if (ret) {
@@ -4945,7 +4979,7 @@ static int s5xxx_probe(struct platform_device *pdev)
 	 * boot ROM, not a live endpoint).  The power cycle includes the relink,
 	 * so there is no separate warm reset here.
 	 */
-	ret = zumapro_pcie_modem_power_cycle(sm->rc_dev);
+	ret = reset_control_reset(sm->cp_cold_rst);
 	if (ret)
 		dev_warn(dev, "CP power cycle: no link (%d); continuing\n", ret);
 

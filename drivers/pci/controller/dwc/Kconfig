@@ -397,6 +397,7 @@ config PCI_EXYNOS
 	depends on ARCH_EXYNOS || COMPILE_TEST
 	depends on PCI_MSI
 	select PCIE_DW_HOST
+	select RESET_CONTROLLER
 	help
 	  Enables support for the PCIe controller in the Samsung Exynos and
 	  Google Tensor (zuma/zumapro) SoCs to work in host mode. The PCI
