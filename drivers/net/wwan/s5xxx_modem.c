@@ -44,11 +44,9 @@
 #include <linux/mutex.h>
 #include <linux/netdevice.h>
 #include <linux/of.h>
-#include <linux/of_platform.h>
 #include <linux/of_reserved_mem.h>
 #include <linux/pci.h>
 #include <linux/pcie-zumapro.h>
-#include <linux/platform_device.h>
 #include <linux/reset.h>
 #include <linux/sizes.h>
 #include <linux/skbuff.h>
@@ -4775,24 +4773,38 @@ static int s5xxx_map_region(struct s5xxx_modem *sm, const char *name,
 	return 0;
 }
 
-static int s5xxx_probe(struct platform_device *pdev)
+static int s5xxx_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 {
 	struct device *dev = &pdev->dev;
-	struct platform_device *rc_pdev;
-	struct device_node *rc_node;
+	struct pci_host_bridge *bridge;
 	struct s5xxx_modem *sm;
 	const char *fw_name;
 	u16 cmd;
 	int ret, i;
 
+	/*
+	 * The root port carries the same 144d:a5a5 ID as the endpoint behind
+	 * it, so this driver is offered both.  -ENODEV is how a PCI driver says
+	 * "not mine" and leaves the device for the port driver.
+	 */
+	if (pci_pcie_type(pdev) != PCI_EXP_TYPE_ENDPOINT)
+		return -ENODEV;
+
 	sm = devm_kzalloc(dev, sizeof(*sm), GFP_KERNEL);
 	if (!sm)
 		return -ENOMEM;
 
+	/*
+	 * Which modem this is comes from the device tree, not the PCI ID: every
+	 * variant's mask ROM enumerates as 144d:a5a5, and what differs is the
+	 * boot shape and the firmware layout, which the board describes.
+	 */
 	sm->var = of_device_get_match_data(dev);
 	if (!sm->var)
-		return -EINVAL;
+		return dev_err_probe(dev, -ENODEV,
+				     "no modem variant for this endpoint\n");
 	sm->dev = dev;
+	sm->pdev = pdev;
 	spin_lock_init(&sm->lock);
 	spin_lock_init(&sm->tx_lock);
 	mutex_init(&sm->pcie_onoff_lock);
@@ -4844,20 +4856,18 @@ static int s5xxx_probe(struct platform_device *pdev)
 		sm->sit[i].ch = S5XXX_CH_FMT + i;
 	}
 	sm->link_up = true;	/* boot handshake rings directly; PM arms at ONLINE */
-	platform_set_drvdata(pdev, sm);
+	pci_set_drvdata(pdev, sm);
 
-	rc_node = of_parse_phandle(dev->of_node, "google,pcie", 0);
-	if (!rc_node)
-		return dev_err_probe(dev, -EINVAL, "missing google,pcie\n");
-	rc_pdev = of_find_device_by_node(rc_node);
-	of_node_put(rc_node);
-	if (!rc_pdev)
-		return -EPROBE_DEFER;
-	sm->rc_dev = &rc_pdev->dev;
-	if (!sm->rc_dev->driver) {
-		ret = -EPROBE_DEFER;
-		goto err_rc;
-	}
+	/*
+	 * The handful of root-complex hooks left take the controller's device.
+	 * It is the host bridge's parent, so there is no phandle to follow and
+	 * no question of whether it is bound: this driver only runs at all
+	 * because that controller enumerated the endpoint.
+	 */
+	bridge = pci_find_host_bridge(pdev->bus);
+	if (!bridge || !bridge->dev.parent)
+		return dev_err_probe(dev, -ENODEV, "no host bridge\n");
+	sm->rc_dev = bridge->dev.parent;
 
 	/*
 	 * The root complex publishes these once its host is up, so asking for
@@ -4868,33 +4878,33 @@ static int s5xxx_probe(struct platform_device *pdev)
 	if (IS_ERR(sm->link_rst)) {
 		ret = dev_err_probe(dev, PTR_ERR(sm->link_rst),
 				    "no link reset\n");
-		goto err_rc;
+		goto err_out;
 	}
 	sm->cp_cold_rst = devm_reset_control_get_exclusive(dev, "cp-cold");
 	if (IS_ERR(sm->cp_cold_rst)) {
 		ret = dev_err_probe(dev, PTR_ERR(sm->cp_cold_rst),
 				    "no CP cold reset\n");
-		goto err_rc;
+		goto err_out;
 	}
 	sm->cp_dump_rst = devm_reset_control_get_exclusive(dev, "cp-dump");
 	if (IS_ERR(sm->cp_dump_rst)) {
 		ret = dev_err_probe(dev, PTR_ERR(sm->cp_dump_rst),
 				    "no CP dump reset\n");
-		goto err_rc;
+		goto err_out;
 	}
 
 	ret = of_property_read_u32(dev->of_node, "samsung,doorbell-addr",
 				   &sm->db_bus_addr);
 	if (ret) {
 		dev_err_probe(dev, ret, "missing samsung,doorbell-addr\n");
-		goto err_rc;
+		goto err_out;
 	}
 
 	sm->cp2ap_wakeup = devm_gpiod_get(dev, "cp2ap-wakeup", GPIOD_IN);
 	if (IS_ERR(sm->cp2ap_wakeup)) {
 		ret = dev_err_probe(dev, PTR_ERR(sm->cp2ap_wakeup),
 				    "failed to get CP2AP_WAKEUP\n");
-		goto err_rc;
+		goto err_out;
 	}
 
 	/* CP2AP_PHONE_ACTIVE crash monitor; optional (diagnosis only). */
@@ -4902,7 +4912,7 @@ static int s5xxx_probe(struct platform_device *pdev)
 	if (IS_ERR(sm->cp_active)) {
 		ret = dev_err_probe(dev, PTR_ERR(sm->cp_active),
 				    "failed to get CP2AP_PHONE_ACTIVE\n");
-		goto err_rc;
+		goto err_out;
 	}
 
 	/*
@@ -4915,19 +4925,19 @@ static int s5xxx_probe(struct platform_device *pdev)
 	if (IS_ERR(sm->cp_partial_rst)) {
 		ret = dev_err_probe(dev, PTR_ERR(sm->cp_partial_rst),
 				    "failed to get AP2CP_PARTIAL_RST_N\n");
-		goto err_rc;
+		goto err_out;
 	}
 
 	ret = s5xxx_map_region(sm, "ipc", &sm->ipc_phys, &sm->ipc_size,
 			       &sm->ipc);
 	if (ret) {
 		dev_err_probe(dev, ret, "failed to map IPC carveout\n");
-		goto err_rc;
+		goto err_out;
 	}
 	ret = s5xxx_map_region(sm, "msi", &sm->msi_phys, NULL, &sm->msi);
 	if (ret) {
 		dev_err_probe(dev, ret, "failed to map MSI carveout\n");
-		goto err_rc;
+		goto err_out;
 	}
 	/*
 	 * Optional: the pktproc carveout the CP DMAs downlink packets into.  We
@@ -4943,7 +4953,7 @@ static int s5xxx_probe(struct platform_device *pdev)
 	ret = request_firmware(&sm->pbl, fw_name, dev);
 	if (ret) {
 		dev_err_probe(dev, ret, "failed to load %s\n", fw_name);
-		goto err_rc;
+		goto err_out;
 	}
 	s5xxx_find_boot(sm);
 	if (sm->boot_size > sm->ipc_size - S5XXX_BOOT_IMG_OFFSET) {
@@ -4951,23 +4961,7 @@ static int s5xxx_probe(struct platform_device *pdev)
 		goto err_fw;
 	}
 
-	/*
-	 * The zumapro root port carries the same 144d:a5a5 ID as the modem
-	 * endpoint, and it registers first -- a bare first-match lookup
-	 * returns the root port.  Match the endpoint by port type.
-	 */
-	sm->pdev = NULL;
-	while ((sm->pdev = pci_get_device(S5XXX_PCI_VENDOR_ID,
-					  S5XXX_PCI_DEVICE_ID, sm->pdev))) {
-		if (pci_pcie_type(sm->pdev) == PCI_EXP_TYPE_ENDPOINT)
-			break;
-	}
-	if (!sm->pdev) {
-		ret = dev_err_probe(dev, -ENODEV,
-				    "CP endpoint not enumerated\n");
-		goto err_fw;
-	}
-	dev_info(dev, "CP endpoint %s\n", pci_name(sm->pdev));
+	dev_info(dev, "CP endpoint %s\n", pci_name(pdev));
 
 	/*
 	 * FULL CP power cycle (vendor gpio_power_offon_cp): genuinely powers the
@@ -4997,16 +4991,16 @@ static int s5xxx_probe(struct platform_device *pdev)
 	/* Before MSI allocation: the EP capability must carry the carveout. */
 	ret = zumapro_pcie_set_msi_target(sm->rc_dev, sm->msi_phys);
 	if (ret)
-		goto err_pci;
+		goto err_fw;
 
 	ret = s5xxx_setup_doorbell(sm);
 	if (ret)
-		goto err_pci;
+		goto err_fw;
 
 	ret = pci_enable_device(sm->pdev);
 	if (ret) {
 		dev_err(dev, "pci_enable_device: %d\n", ret);
-		goto err_pci;
+		goto err_fw;
 	}
 	pci_set_master(sm->pdev);
 	/* MSE by hand: BAR0 is programmed behind the PCI core's back. */
@@ -5197,18 +5191,15 @@ err_vectors:
 	pci_free_irq_vectors(sm->pdev);
 err_disable:
 	pci_disable_device(sm->pdev);
-err_pci:
-	pci_dev_put(sm->pdev);
 err_fw:
 	release_firmware(sm->pbl);
-err_rc:
-	put_device(sm->rc_dev);
+err_out:
 	return ret;
 }
 
-static void s5xxx_remove(struct platform_device *pdev)
+static void s5xxx_remove(struct pci_dev *pdev)
 {
-	struct s5xxx_modem *sm = platform_get_drvdata(pdev);
+	struct s5xxx_modem *sm = pci_get_drvdata(pdev);
 	int i;
 
 	debugfs_remove_recursive(sm->dbgfs);
@@ -5253,7 +5244,6 @@ static void s5xxx_remove(struct platform_device *pdev)
 	release_firmware(sm->pbl);
 	pci_free_irq_vectors(sm->pdev);
 	pci_disable_device(sm->pdev);
-	pci_dev_put(sm->pdev);
 	put_device(sm->rc_dev);
 }
 
@@ -5311,7 +5301,6 @@ static const struct of_device_id s5xxx_of_match[] = {
 	{ .compatible = "samsung,s5400-modem", .data = &s5xxx_variant_s5400 },
 	{ },
 };
-MODULE_DEVICE_TABLE(of, s5xxx_of_match);
 
 /*
  * Quiesce on system shutdown/reboot: stop every worker and IRQ path that
@@ -5319,9 +5308,9 @@ MODULE_DEVICE_TABLE(of, s5xxx_of_match);
  * in the shutdown path (an access to a dead CP link throws an SError on this
  * SoC), so with autoload enabled this hook is load-bearing.
  */
-static void s5xxx_shutdown(struct platform_device *pdev)
+static void s5xxx_shutdown(struct pci_dev *pdev)
 {
-	struct s5xxx_modem *sm = platform_get_drvdata(pdev);
+	struct s5xxx_modem *sm = pci_get_drvdata(pdev);
 	unsigned long flags;
 	int i;
 
@@ -5388,18 +5377,35 @@ static struct attribute *s5xxx_attrs[] = {
 };
 ATTRIBUTE_GROUPS(s5xxx);
 
-static struct platform_driver s5xxx_driver = {
-	.probe	= s5xxx_probe,
-	.remove	= s5xxx_remove,
-	.shutdown = s5xxx_shutdown,
+/*
+ * Every variant's mask ROM enumerates as the same ID, so this table only says
+ * "a Samsung modem endpoint"; which one it is comes from the device tree.
+ */
+static const struct pci_device_id s5xxx_pci_ids[] = {
+	{ PCI_DEVICE(S5XXX_PCI_VENDOR_ID, S5XXX_PCI_DEVICE_ID) },
+	{ }
+};
+MODULE_DEVICE_TABLE(pci, s5xxx_pci_ids);
+
+static struct pci_driver s5xxx_driver = {
+	.name		= "s5xxx-modem",
+	.id_table	= s5xxx_pci_ids,
+	.probe		= s5xxx_probe,
+	.remove		= s5xxx_remove,
+	.shutdown	= s5xxx_shutdown,
+	.dev_groups	= s5xxx_groups,
 	.driver	= {
-		.name		= "s5xxx-modem",
 		.of_match_table	= s5xxx_of_match,
 		.pm		= pm_sleep_ptr(&s5xxx_pm_ops),
-		.dev_groups	= s5xxx_groups,
+		/*
+		 * Probe boots the CP: it stages the bootloader, bounces the
+		 * link and waits out a shared-memory handshake, which is
+		 * seconds of work.  Do not hold up the rest of the bus for it.
+		 */
+		.probe_type	= PROBE_PREFER_ASYNCHRONOUS,
 	},
 };
-module_platform_driver(s5xxx_driver);
+module_pci_driver(s5xxx_driver);
 
 /* Firmware the driver loads; all of it is staged under a fixed name. */
 /*
