@@ -1864,8 +1864,8 @@ static void brcmf_pcie_poll_worker(struct work_struct *work)
 					u32 rxp_r = devinfo->read_ptr(devinfo,
 							rxp->r_idx_addr);
 
-					dev_err(&devinfo->pdev->dev,
-						"DBG WEDGE stall=%u: RX fw_w=%u mem_r=%u | RXPOST host_w=%u fw_r=%u avail=%u | TX fw_w=%u mem_r=%u | dsreq=%u dsexit=%u d3ack=%u mbwait=%u\n",
+					brcmf_dbg(PCIE,
+						  "DBG WEDGE stall=%u: RX fw_w=%u mem_r=%u | RXPOST host_w=%u fw_r=%u avail=%u | TX fw_w=%u mem_r=%u | dsreq=%u dsexit=%u d3ack=%u mbwait=%u\n",
 						dbg_stall, rxw, rxr_r,
 						rxp_w, rxp_r,
 						(rxp_w - rxp_r) & 0xffff,
