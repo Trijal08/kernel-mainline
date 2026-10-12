@@ -1190,8 +1190,7 @@ static void s5xxx_pm_work(struct work_struct *work)
 	sm->resume_recheck = false;
 	spin_unlock_irqrestore(&sm->lock, flags);
 
-	if (recheck && sm->link_up &&
-	    !zumapro_pcie_modem_link_active(sm->rc_dev)) {
+	if (recheck && sm->link_up && !pci_device_is_present(sm->pdev)) {
 		spin_lock_irqsave(&sm->lock, flags);
 		sm->link_up = false;
 		spin_unlock_irqrestore(&sm->lock, flags);
