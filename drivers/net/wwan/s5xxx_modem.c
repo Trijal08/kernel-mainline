@@ -169,12 +169,13 @@ struct s5xxx_variant {
  * AP capability part 0 (downstream set_ap_capabilities()), published at
  * INIT_START before PIF_INIT_DONE.  Bit0 PKTPROC_UL, bit1 CH_EXTENSION
  * (modem_v1.h).  CH_EXTENSION is a no-op on the AP side (pure protocol-format
- * flag); PKTPROC_UL is the only bit that arms real memory (pktproc_init_ul) --
- * setting it makes the CP DMA into UL descriptor memory that does not exist yet
- * and drops the link.  So keep bit0 clear.  The gate that actually lets MAIN arm
- * its runtime IPC is the DL pktproc info region (below), NOT this word.
+ * flag); PKTPROC_UL is the only bit that arms real memory (pktproc_init_ul).
+ * Stock publishes 0x3 (its info_region reads ap_capability[0]:0x00000003),
+ * because it implements the uplink pktproc rings; this driver carries uplink on
+ * the legacy RAW ring instead.  The gate that actually lets MAIN arm its
+ * runtime IPC is the DL pktproc info region (below), NOT this word.
  */
-#define S5XXX_AP_CAPABILITY_0		0x2
+#define S5XXX_AP_CAPABILITY_0		0x3
 
 /*
  * Downlink pktproc info region (downstream pktproc_init(), link_rx_pktproc.c).
@@ -325,15 +326,44 @@ struct s5xxx_variant {
 #define S5XXX_GNSS_FW_OFFSET		0x800000
 #define S5XXX_GNSS_FW_SIZE		0x400000
 /*
- * ap2cp_united_status ds_det field (downstream sbi_ds_det_pos=14, mask 0x3;
- * get_ds_detect() returns 1 on this device, so the live modem reads 0x4000).
- * Load-bearing for runtime IPC: with ds_det=0 the CP never runs its deep-sleep
- * link handshake, so after MAIN loads it never takes a link-up ISR to arm its
- * runtime IPC and the FMT/RAW control queues are never drained.  With ds_det=1
- * the CP cycles CP2AP_WAKEUP; each wake relink (s5xxx_pm_work) re-arms MAIN's
- * IPC.  Published in s5xxx_init_control_messages().
+ * ap2cp_united_status ds_det field: how many SIMs the AP tells the CP it has
+ * (downstream sbi_ds_det_mask=0x3, sbi_ds_det_pos=14, from
+ * zuma-cp-s5300-sit.dtsi).
+ *
+ * Stock publishes 1, i.e. 0x4000, which is what this driver sends.  Worth
+ * spelling out because stock's own sysfs invites the opposite conclusion:
+ * /sys/devices/platform/cpif/sim/ds_detect reads 2 on this phone, but that is
+ * downstream's module parameter, not the word it wrote.  The published word is
+ * in the same sysfs tree -- info_region prints
+ * get_ctrl_msg(&mld->ap2cp_united_status), a live read of shared memory -- and
+ * on stock it reads 0x00004000.
+ *
+ * 2 (0x8000) was tried on hardware: the CP reaches ONLINE and crashes about a
+ * second later (CP2AP_PHONE_ACTIVE drops, cp2ap 0xc8), every boot, and it does
+ * so without ever touching a channel this driver has not published, so it is
+ * not a missing port.  It is the CP refusing a configuration stock never sends.
+ *
+ * Load-bearing beyond the SIM count: with ds_det=0 the CP never runs its
+ * deep-sleep link handshake, so after MAIN loads it never takes a link-up ISR
+ * to arm its runtime IPC and the FMT/RAW control queues are never drained.
+ * Non-zero makes the CP cycle CP2AP_WAKEUP; each wake relink (s5xxx_pm_work)
+ * re-arms MAIN's IPC.  Published in s5xxx_init_control_messages().
  */
-#define S5XXX_IPC_DS_DET		(1u << 14)		/* 0x4000 */
+#define S5XXX_IPC_DS_DET		(1u << 14)		/* 0x4000, what stock publishes */
+
+/*
+ * The other two ap2cp_united_status fields downstream publishes from
+ * start_normal_boot(), both literal 1 (modem_ctrl_s5000ap.c):
+ *
+ *   sbi_ap_status   pos 1, mask 0xf -- the AP's own state, 1 = online
+ *   sbi_pda_active  pos 5, mask 0x1 -- the AP is awake
+ *
+ * Masks and positions from zuma-cp-s5300-sit.dtsi.  Downstream also keeps
+ * ap_status up to date across its PM transitions; this driver publishes the
+ * boot value only, which is what the CP reads before it brings its IPC up.
+ */
+#define S5XXX_IPC_AP_STATUS_ONLINE	(1u << 1)		/* 0x2 */
+#define S5XXX_IPC_PDA_ACTIVE		(1u << 5)		/* 0x20 */
 
 #define S5XXX_IPC_SRINFO_OFFSET		0x400000
 #define S5XXX_IPC_SRINFO_SIZE		0x300000
@@ -395,18 +425,7 @@ struct s5xxx_variant {
  * Framing (RE'd from downstream rfsd): u16 cmd, u16 token, u32 payload_len, then
  * the payload.  Every request MUST be answered or the CP stalls its IPC.
  */
-#define S5XXX_RFS_MAXFID		32
-#define S5XXX_RFS_CHUNK			2012	/* downstream rfsd chunk size */
 #define S5XXX_CC_DIR			"carrierconfig"
-#define S5XXX_RFS_C_READ		0x0001	/* AP->CP chunk / CP->AP next-ack */
-#define S5XXX_RFS_C_WRITE		0x0002	/* AP->CP req / CP->AP data */
-#define S5XXX_RFS_C_STATUS		0x0003	/* status + fid + file-size */
-#define S5XXX_RFS_C_OPEN		0x0004	/* open a path */
-#define S5XXX_RFS_C_CLOSE		0x0005
-#define S5XXX_RFS_C_IO			0x0006	/* start a read or write */
-#define S5XXX_RFS_C_OPEN_FID		0x0007	/* open an NV file by id */
-#define S5XXX_RFS_IO_READ		1
-#define S5XXX_RFS_IO_WRITE		2
 
 /* Doorbell values: bit 16 triggers, low bits select the mailbox index. */
 #define S5XXX_DB_TRIGGER		BIT(16)
@@ -507,7 +526,32 @@ struct s5xxx_variant {
  */
 #define S5XXX_CH_OEM0			0x81
 #define S5XXX_CH_OEM3			0x84
-#define S5XXX_OEM_PORTS			3
+
+/*
+ * The rest of the CP's char channels, from downstream's iodevs list
+ * (zuma-cp-s5300-sit.dtsi).  Nothing in this driver drives them; they are
+ * published so a daemon can, and so a frame on one is delivered rather than
+ * dropped.  The CP uses 0x83 on stock -- the modem_ml_svc_sit service
+ * registering mmWave beam-prediction models -- and that frame had nowhere to go
+ * here.
+ *
+ * iod,format picks the ring: IPC_FMT ones join the OEM table below, IPC_RAW
+ * ones the raw table.  oem_ipc is declared ch 129 with ch_count 8, so the whole
+ * 0x81..0x88 range is one multi-channel iod.
+ */
+#define S5XXX_CH_OEM_LAST		0x88	/* oem_ipc7, EXYNOS_CH_ID_OEM_7 */
+#define S5XXX_CH_RCS0			0x5b	/* 91, umts_rcs0,     IPC_FMT */
+#define S5XXX_CH_WFS0			0x5d	/* 93, umts_wfc0,     IPC_FMT */
+#define S5XXX_CH_CPLOG			0x51	/* 81, umts_dm0,      IPC_RAW */
+#define S5XXX_CH_LOOPBACK		0x52	/* 82, umts_loopback, IPC_RAW */
+#define S5XXX_CH_RCS1			0x5c	/* 92, umts_rcs1,     IPC_RAW */
+#define S5XXX_CH_WFS1			0x5e	/* 94, umts_wfc1,     IPC_RAW */
+#define S5XXX_CH_OEM_TEST		0x89	/* 137, oem_test,     IPC_RAW */
+
+/* FMT-ring char ports: oem_ipc0..7, then rcs0 and wfc0. */
+#define S5XXX_OEM_PORTS			10
+/* NORM_RAW-ring char ports: dm0, loopback, rcs1, wfc1, oem_test. */
+#define S5XXX_RAW_PORTS			5
 
 /*
  * The GNSS receiver is booted by the CP, not by us: once its firmware is in
@@ -555,17 +599,6 @@ struct s5xxx_variant {
 #define S5XXX_DL_SEC_VERIFY(tag)	(0xa301 | ((tag) << 4))	/* CRC-verify */
 #define S5XXX_DL_FINISH			0xa400
 
-/* Per-open state for the in-kernel RFS server (indexed by the CP's fid). */
-struct s5xxx_rfs_file {
-	bool			used;
-	const struct firmware	*fw;	/* cached read source, or NULL */
-	size_t			size;	/* file size reported at OPEN */
-	loff_t			roff;	/* read cursor */
-	size_t			rremain;	/* bytes left to serve */
-	loff_t			woff;	/* write cursor */
-	size_t			wremain;	/* bytes left to sink */
-	u16			token;	/* active IO token, echoed in chunks */
-};
 
 struct s5xxx_modem;
 
@@ -587,6 +620,7 @@ struct s5xxx_oem_ch {
 	struct wwan_port	*port;
 	u8			ch;
 	u8			ch_seq;		/* per-channel link-header seq */
+	const char		*name;		/* downstream's node name, for logs */
 };
 
 struct s5xxx_modem {
@@ -662,6 +696,7 @@ struct s5xxx_modem {
 	 * a blocked oem writer when the CP drains the txq and frees ring space.
 	 */
 	struct s5xxx_oem_ch	oem[S5XXX_OEM_PORTS];
+	struct s5xxx_oem_ch	raw[S5XXX_RAW_PORTS];
 	struct dentry		*dbgfs;		/* dump-boot trigger */
 	wait_queue_head_t	fmt_tx_wq;
 	unsigned long		fmt_busy_until;	/* inhibit park during an FMT transfer (jiffies) */
@@ -673,7 +708,6 @@ struct s5xxx_modem {
 	 * a fallback for when it does not: see the S5XXX_CH_RFS arm of the rx
 	 * path.
 	 */
-	bool			rfs_port_open;
 	u8			rfs_ch_seq;	/* RFS per-channel sequence */
 
 	/*
@@ -693,14 +727,6 @@ struct s5xxx_modem {
 	struct completion	gnss_rsp;
 	u8			gnss_rsp_buf[8];
 	u8			gnss_rsp_len;
-
-	/* In-kernel RFS server: carrierconfig/NV files the CP pulls post-attach. */
-	struct s5xxx_rfs_file	rfs_files[S5XXX_RFS_MAXFID];
-	struct work_struct	rfs_work;
-	struct list_head	rfs_rxq;	/* queued CP requests (rfs_lock) */
-	spinlock_t		rfs_lock;
-	struct workqueue_struct	*rfs_wq;
-	u8			*rfs_txbuf;	/* one READ frame (rfs_work only) */
 
 	/*
 	 * PKTPROC data path: the raw-IP data netdevs (rmnet0..).  DL queue q is
@@ -1504,12 +1530,18 @@ static void s5xxx_init_control_messages(struct s5xxx_modem *sm)
 	writel(0, sm->ipc + S5XXX_IPC_AP2CP_MSG);
 	writel(0, sm->ipc + S5XXX_IPC_CP2AP_MSG);
 	/*
-	 * ds_det=1 (0x4000) tells the CP to run its deep-sleep link PM: park the
-	 * link when idle and ask for it back on CP2AP_WAKEUP (s5xxx_pm_work).
-	 * ds_det=0 keeps the link pinned at L0 -- diagnostic for the post-ONLINE
-	 * crash, and not what stock does (stock ap2cp_united reads 0x4000).
+	 * ds_det=1 tells the CP to run its deep-sleep link PM: park the link
+	 * when idle and ask for it back on CP2AP_WAKEUP (s5xxx_pm_work).
+	 * ds_det=0 keeps the link pinned at L0 -- diagnostic for the
+	 * post-ONLINE crash, and not what stock does.
+	 *
+	 * ap_status and pda_active go in the same word, as downstream's
+	 * start_normal_boot() sets them: the AP telling the CP that it is
+	 * online and awake before the CP arms its runtime IPC.
 	 */
-	writel(ds_det ? S5XXX_IPC_DS_DET : 0, sm->ipc + S5XXX_IPC_AP2CP_STATUS);
+	writel((ds_det ? S5XXX_IPC_DS_DET : 0) | S5XXX_IPC_AP_STATUS_ONLINE |
+		       S5XXX_IPC_PDA_ACTIVE,
+	       sm->ipc + S5XXX_IPC_AP2CP_STATUS);
 	writel(0, sm->ipc + S5XXX_IPC_CP2AP_STATUS);
 	for (i = 0; i < S5XXX_IPC_CAP_WORDS; i++)
 		writel(0, sm->ipc + S5XXX_IPC_CAP_BASE + 4 * i);
@@ -2347,6 +2379,47 @@ static struct s5xxx_oem_ch *s5xxx_oem_lookup(struct s5xxx_modem *sm, u8 ch)
 	return NULL;
 }
 
+static struct s5xxx_oem_ch *s5xxx_raw_lookup(struct s5xxx_modem *sm, u8 ch)
+{
+	int i;
+
+	for (i = 0; i < S5XXX_RAW_PORTS; i++)
+		if (sm->raw[i].ch == ch)
+			return &sm->raw[i];
+	return NULL;
+}
+
+/*
+ * The NORM_RAW-ring char channels.  Same frame shape as the FMT ones, different
+ * ring, and each keeps its own channel sequence -- the link header counts per
+ * channel, not per ring.  Capped like RFS, the other raw char channel.
+ */
+static int s5xxx_raw_port_tx(struct wwan_port *port, struct sk_buff *skb)
+{
+	struct s5xxx_oem_ch *rc = wwan_port_get_drvdata(port);
+	struct s5xxx_modem *sm = rc->sm;
+	int ret;
+
+	if (!sm->online)
+		return -ENODEV;
+	if (skb->len > S5XXX_RFS_MAX)
+		return -EMSGSIZE;
+
+	ret = s5xxx_ring_tx(sm, &s5xxx_raw_txring, &sm->frame_seq, rc->ch,
+			    &rc->ch_seq, S5XXX_RFS_MAX, skb->data, skb->len,
+			    -EAGAIN);
+	if (ret)
+		return ret;
+	consume_skb(skb);
+	return 0;
+}
+
+static const struct wwan_port_ops s5xxx_raw_port_ops = {
+	.start	= s5xxx_wwan_start,
+	.stop	= s5xxx_wwan_stop,
+	.tx	= s5xxx_raw_port_tx,
+};
+
 static const struct wwan_port_ops s5xxx_oem_ops = {
 	.start		= s5xxx_wwan_start,
 	.stop		= s5xxx_wwan_stop,
@@ -2375,340 +2448,12 @@ static int s5xxx_rfs_port_tx(struct wwan_port *port, struct sk_buff *skb)
 	return 0;
 }
 
-static int s5xxx_rfs_start(struct wwan_port *port)
-{
-	struct s5xxx_modem *sm = wwan_port_get_drvdata(port);
-
-	WRITE_ONCE(sm->rfs_port_open, true);
-	return s5xxx_wwan_start(port);
-}
-
-static void s5xxx_rfs_stop(struct wwan_port *port)
-{
-	struct s5xxx_modem *sm = wwan_port_get_drvdata(port);
-
-	WRITE_ONCE(sm->rfs_port_open, false);
-	s5xxx_wwan_stop(port);
-}
-
 static const struct wwan_port_ops s5xxx_rfs_ops = {
-	.start	= s5xxx_rfs_start,
-	.stop	= s5xxx_rfs_stop,
+	.start	= s5xxx_wwan_start,
+	.stop	= s5xxx_wwan_stop,
 	.tx	= s5xxx_rfs_port_tx,
 };
 
-/* One queued CP request, handed from the hard-IRQ demux to s5xxx_rfs_work. */
-struct s5xxx_rfs_frame {
-	struct list_head	node;
-	u32			len;
-	u8			data[];
-};
-
-/* Send an RFS app frame, retrying while the RAW tx ring is momentarily full. */
-static void s5xxx_rfs_send(struct s5xxx_modem *sm, const u8 *frame, u32 len)
-{
-	int i;
-
-	for (i = 0; i < 200; i++) {
-		if (s5xxx_rfs_tx(sm, frame, len) != -EAGAIN)
-			return;
-		usleep_range(1000, 2000);
-	}
-	dev_warn_ratelimited(sm->dev, "RFS tx stalled (ring full)\n");
-}
-
-/* OP_STATUS(3): status=success, fid, and (on OPEN) the file size. */
-static void s5xxx_rfs_op_status(struct s5xxx_modem *sm, u16 token, u32 fid,
-				u32 extra)
-{
-	u8 r[20];
-
-	put_unaligned_le16(S5XXX_RFS_C_STATUS, r + 0);
-	put_unaligned_le16(token, r + 2);
-	put_unaligned_le32(12, r + 4);
-	put_unaligned_le32(0, r + 8);		/* status 0 = success */
-	put_unaligned_le32(fid, r + 0xc);
-	put_unaligned_le32(extra, r + 0x10);
-	s5xxx_rfs_send(sm, r, sizeof(r));
-}
-
-static void s5xxx_rfs_close_file(struct s5xxx_rfs_file *e)
-{
-	if (e->fw)
-		release_firmware(e->fw);
-	memset(e, 0, sizeof(*e));
-}
-
-/* Serve the next READ chunk for fid, or OP_STATUS when the read is done. */
-static void s5xxx_rfs_read_step(struct s5xxx_modem *sm, u32 fid)
-{
-	struct s5xxx_rfs_file *e = &sm->rfs_files[fid];
-	u32 clen = min_t(size_t, e->rremain, S5XXX_RFS_CHUNK);
-	u8 *tx = sm->rfs_txbuf;
-
-	if (!clen || !e->fw || e->roff + clen > e->fw->size) {
-		s5xxx_rfs_op_status(sm, e->token, fid, 0);
-		return;
-	}
-	put_unaligned_le16(S5XXX_RFS_C_READ, tx + 0);
-	put_unaligned_le16(e->token, tx + 2);
-	put_unaligned_le32(12 + clen, tx + 4);
-	put_unaligned_le32(fid, tx + 8);
-	put_unaligned_le32(e->roff, tx + 0xc);
-	put_unaligned_le32(clen, tx + 0x10);
-	memcpy(tx + 0x14, e->fw->data + e->roff, clen);
-	s5xxx_rfs_send(sm, tx, 0x14 + clen);
-	e->roff += clen;
-	e->rremain -= clen;
-}
-
-/* Ask the CP for the next write chunk for fid (the data is sunk + discarded). */
-static void s5xxx_rfs_write_req(struct s5xxx_modem *sm, u32 fid)
-{
-	struct s5xxx_rfs_file *e = &sm->rfs_files[fid];
-	u32 clen = min_t(size_t, e->wremain, S5XXX_RFS_CHUNK);
-	u8 r[20];
-
-	put_unaligned_le16(S5XXX_RFS_C_WRITE, r + 0);
-	put_unaligned_le16(e->token, r + 2);
-	put_unaligned_le32(12, r + 4);
-	put_unaligned_le32(fid, r + 8);
-	put_unaligned_le32(e->woff, r + 0xc);
-	put_unaligned_le32(clen, r + 0x10);
-	s5xxx_rfs_send(sm, r, sizeof(r));
-}
-
-/* Map + open a whitelisted OPEN(path) request read-only from firmware. */
-static int s5xxx_rfs_open_path(struct s5xxx_modem *sm, struct s5xxx_rfs_file *e,
-			       const u8 *path, u32 plen)
-{
-	char name[256], fw[288];
-	const char *rel;
-	int ret;
-
-	if (plen >= sizeof(name))
-		return -ENAMETOOLONG;
-	memcpy(name, path, plen);
-	name[plen] = '\0';
-
-	/* Whitelist: carrier config only, no path traversal (like rfsd). */
-	if (strstr(name, "..") ||
-	    (!strstr(name, "carrierconfig") && !strstr(name, "confpack")))
-		return -EPERM;
-	rel = strstr(name, "carrierconfig/");
-	if (!rel)
-		return -EINVAL;
-	rel += strlen("carrierconfig/");
-	scnprintf(fw, sizeof(fw), "google/%s/%s/%s", sm->var->fw_dir,
-		  S5XXX_CC_DIR, rel);
-	ret = request_firmware_direct(&e->fw, fw, sm->dev);
-	/*
-	 * A carrier configuration the CP asked for and did not get leaves it
-	 * with no policy at all, which it reports only in a status indication
-	 * nothing is obliged to read -- so say it here, once, where it is
-	 * actionable. Success stays at debug level: there are two dozen of
-	 * these per boot.
-	 */
-	if (ret)
-		dev_warn(sm->dev, "RFS serve %s failed: %d\n", fw, ret);
-	else
-		dev_dbg(sm->dev, "RFS serve %s\n", fw);
-	return ret;
-}
-
-/* NV files served read-only from the staged efs partition. */
-static const char *s5xxx_rfs_nv_name(u32 fid)
-{
-	switch (fid) {
-	case 1:	return "efs/nv_normal.bin";
-	case 2:	return "efs/nv_protected.bin";
-	case 3:	return "efs/nv_user.bin";
-	default: return NULL;
-	}
-}
-
-static void s5xxx_rfs_open_nv(struct s5xxx_modem *sm, struct s5xxx_rfs_file *e,
-			      u32 fid)
-{
-	const char *name = s5xxx_rfs_nv_name(fid);
-	char path[S5XXX_FW_PATH_MAX];
-
-	e->used = true;
-	if (!name)
-		return;
-	s5xxx_fw_path(sm, path, sizeof(path), name);
-	if (!request_firmware_direct(&e->fw, path, sm->dev))
-		e->size = e->fw->size;
-}
-
-/* Handle one CP RFS request (process context, single-threaded via rfs_work). */
-static void s5xxx_rfs_handle(struct s5xxx_modem *sm, const u8 *f, u32 n)
-{
-	u16 cmd = get_unaligned_le16(f), token = get_unaligned_le16(f + 2);
-	u32 fid, off, iolen, iotype, clen, plen;
-	struct s5xxx_rfs_file *e;
-
-	/*
-	 * Whether the CP uses this channel at all is the first thing anyone
-	 * debugging a missing carrier configuration needs to know, and it is
-	 * not otherwise observable: only the OPEN-by-path arm logs, so a CP
-	 * that asks for nothing and a CP that asks for an NV file look
-	 * identical from user space. Once per boot, at the first frame.
-	 */
-	dev_info_once(sm->dev, "CP started using RFS (first cmd %#x)\n", cmd);
-	dev_dbg(sm->dev, "RFS rx cmd %#x token %#x len %u\n", cmd, token, n);
-
-	switch (cmd) {
-	case S5XXX_RFS_C_OPEN:			/* 4: open a path */
-		if (n < 0x10)
-			return;
-		fid = get_unaligned_le32(f + 8);
-		plen = get_unaligned_le32(f + 0xc);
-		if (fid >= S5XXX_RFS_MAXFID)
-			return;
-		if (0x10 + plen > n)
-			plen = n - 0x10;
-		e = &sm->rfs_files[fid];
-		s5xxx_rfs_close_file(e);
-		e->used = true;
-		if (!s5xxx_rfs_open_path(sm, e, f + 0x10, plen) && e->fw)
-			e->size = e->fw->size;
-		s5xxx_rfs_op_status(sm, token, fid, e->size);
-		return;
-	case S5XXX_RFS_C_OPEN_FID:		/* 7: open an NV file by id */
-		fid = get_unaligned_le32(f + 8);
-		if (fid >= S5XXX_RFS_MAXFID)
-			return;
-		e = &sm->rfs_files[fid];
-		s5xxx_rfs_close_file(e);
-		s5xxx_rfs_open_nv(sm, e, fid);
-		s5xxx_rfs_op_status(sm, token, fid, e->size);
-		return;
-	case S5XXX_RFS_C_IO:			/* 6: start a read or write */
-		if (n < 0x18)
-			return;
-		fid = get_unaligned_le32(f + 8);
-		off = get_unaligned_le32(f + 0xc);
-		iolen = get_unaligned_le32(f + 0x10);
-		iotype = get_unaligned_le32(f + 0x14);
-		if (fid >= S5XXX_RFS_MAXFID)
-			return;
-		e = &sm->rfs_files[fid];
-		/* NV files may be IO_REQUEST'd without a preceding OPEN_FID. */
-		if (!e->used && s5xxx_rfs_nv_name(fid))
-			s5xxx_rfs_open_nv(sm, e, fid);
-		if (!e->used) {			/* never leave a request unanswered */
-			s5xxx_rfs_op_status(sm, token, fid, 0);
-			return;
-		}
-		e->token = token;
-		if (iotype == S5XXX_RFS_IO_READ) {
-			e->roff = off;
-			e->rremain = iolen;
-			s5xxx_rfs_read_step(sm, fid);
-		} else if (iotype == S5XXX_RFS_IO_WRITE) {
-			e->woff = off;
-			e->wremain = iolen;
-			s5xxx_rfs_write_req(sm, fid);
-		} else {
-			s5xxx_rfs_op_status(sm, token, fid, 0);
-		}
-		return;
-	case S5XXX_RFS_C_READ:			/* 1: CP ack -> next chunk */
-		if (n < 0x10)
-			return;
-		fid = get_unaligned_le32(f + 0xc);
-		if (fid >= S5XXX_RFS_MAXFID || !sm->rfs_files[fid].used)
-			return;
-		e = &sm->rfs_files[fid];
-		if (e->rremain)
-			s5xxx_rfs_read_step(sm, fid);
-		else
-			s5xxx_rfs_op_status(sm, e->token, fid, 0);
-		return;
-	case S5XXX_RFS_C_WRITE:			/* 2: CP data -> discard */
-		if (n < 0x14)
-			return;
-		fid = get_unaligned_le32(f + 0xc);
-		if (fid >= S5XXX_RFS_MAXFID || !sm->rfs_files[fid].used)
-			return;
-		clen = get_unaligned_le32(f + 0x10);
-		e = &sm->rfs_files[fid];
-		e->woff += clen;
-		e->wremain = e->wremain > clen ? e->wremain - clen : 0;
-		if (e->wremain)
-			s5xxx_rfs_write_req(sm, fid);
-		else
-			s5xxx_rfs_op_status(sm, e->token, fid, 0);
-		return;
-	case S5XXX_RFS_C_CLOSE:			/* 5: close + ack */
-		fid = get_unaligned_le32(f + 8);
-		if (fid >= S5XXX_RFS_MAXFID)
-			return;
-		s5xxx_rfs_close_file(&sm->rfs_files[fid]);
-		s5xxx_rfs_op_status(sm, token, fid, 0);
-		return;
-	case S5XXX_RFS_C_STATUS:		/* 3: CP ack -- consume */
-		return;
-	default:
-		dev_dbg(sm->dev, "RFS unknown cmd %#x\n", cmd);
-		return;
-	}
-}
-
-static void s5xxx_rfs_work(struct work_struct *work)
-{
-	struct s5xxx_modem *sm = container_of(work, struct s5xxx_modem, rfs_work);
-	struct s5xxx_rfs_frame *fr;
-	unsigned long flags;
-
-	for (;;) {
-		spin_lock_irqsave(&sm->rfs_lock, flags);
-		fr = list_first_entry_or_null(&sm->rfs_rxq,
-					      struct s5xxx_rfs_frame, node);
-		if (fr)
-			list_del(&fr->node);
-		spin_unlock_irqrestore(&sm->rfs_lock, flags);
-		if (!fr)
-			break;
-		s5xxx_rfs_handle(sm, fr->data, fr->len);
-		kfree(fr);
-	}
-}
-
-/* Copy a CP RFS request off the ring (hard IRQ) and queue it for rfs_work. */
-static void s5xxx_rfs_enqueue(struct s5xxx_modem *sm, void __iomem *buff,
-			      u32 off, u32 plen)
-{
-	struct s5xxx_rfs_frame *fr;
-	unsigned long flags;
-
-	if (plen < 8)
-		return;
-	fr = kmalloc(sizeof(*fr) + plen, GFP_ATOMIC);
-	if (!fr)
-		return;
-	fr->len = plen;
-	s5xxx_circ_read(fr->data, buff, S5XXX_RAW_RXQ_SIZE, off, plen);
-	spin_lock_irqsave(&sm->rfs_lock, flags);
-	list_add_tail(&fr->node, &sm->rfs_rxq);
-	spin_unlock_irqrestore(&sm->rfs_lock, flags);
-	queue_work(sm->rfs_wq, &sm->rfs_work);
-}
-
-/* Drop any queued RFS requests and release cached files (teardown). */
-static void s5xxx_rfs_cleanup(struct s5xxx_modem *sm)
-{
-	struct s5xxx_rfs_frame *fr, *tmp;
-	int i;
-
-	list_for_each_entry_safe(fr, tmp, &sm->rfs_rxq, node) {
-		list_del(&fr->node);
-		kfree(fr);
-	}
-	for (i = 0; i < S5XXX_RFS_MAXFID; i++)
-		s5xxx_rfs_close_file(&sm->rfs_files[i]);
-}
 
 /*
  * Drain the NORM_RAW rx ring and demux each 12-byte-framed message on its header
@@ -2774,32 +2519,19 @@ static void s5xxx_drain_raw_rxq(struct s5xxx_modem *sm, u32 intval)
 		if (ch == S5XXX_CH_RFS) {
 			had_raw = true;
 			/*
-			 * User space owns this protocol when it is listening.
-			 * It has to: the CP writes its NV back over this
-			 * channel, and a driver cannot write files -- the
-			 * in-kernel server acks those writes and drops them,
-			 * so a CP served from here believes it has persisted
-			 * state that does not exist.
+			 * User space owns this protocol.  It has to: the CP writes
+			 * its NV back over this channel and a driver cannot write
+			 * files, and it pulls its carrier configuration over it as
+			 * ordinary paths, which is policy the kernel has no business
+			 * resolving.  The driver is transport only, like the OEM and
+			 * GNSS channels.
 			 *
-			 * The in-kernel server stays as the fallback for a
-			 * system with no daemon, because every RFS request
-			 * must be answered or the CP stalls its IPC.
+			 * With no daemon listening the frames are dropped and the CP
+			 * stalls its IPC, the same way it would for any other port
+			 * nothing has opened.
 			 */
-			if (READ_ONCE(sm->rfs_port_open) && sm->rfs_port) {
-				port = sm->rfs_port;
-				max = S5XXX_RFS_MAX;
-			} else if (plen <= S5XXX_RFS_MAX) {
-				/* Serve the request in-kernel, not via the port. */
-				s5xxx_rfs_enqueue(sm, buff,
-						  (out + S5XXX_SIT_HDR) %
-							  S5XXX_RAW_RXQ_SIZE,
-						  plen);
-				port = NULL;
-				max = 0;
-			} else {
-				port = sm->rfs_port;
-				max = S5XXX_RFS_MAX;
-			}
+			port = sm->rfs_port;
+			max = S5XXX_RFS_MAX;
 		} else if (ch == S5XXX_CH_AT) {
 			port = sm->at_port;
 			max = SZ_2K;
@@ -2863,7 +2595,28 @@ static void s5xxx_drain_raw_rxq(struct s5xxx_modem *sm, u32 intval)
 			}
 			port = NULL;
 			max = 0;
+		} else if (s5xxx_raw_lookup(sm, ch)) {
+			/*
+			 * The other raw char channels downstream publishes --
+			 * dm0, loopback, rcs1, wfc1, oem_test.  Transport only,
+			 * like the OEM ones.
+			 */
+			struct s5xxx_oem_ch *rc = s5xxx_raw_lookup(sm, ch);
+
+			had_raw = true;
+			port = rc->port;
+			max = S5XXX_RFS_MAX;
 		} else {
+			/*
+			 * Nothing claims this channel.  Say so once in a while:
+			 * a CP that is told something about the AP it does not
+			 * get back -- a second SIM, say -- starts using channels
+			 * this driver never published, and a silent drop here
+			 * looks like a CP fault rather than a missing port.
+			 */
+			dev_warn_ratelimited(sm->dev,
+					     "raw rx: no port for ch %#x payload %u\n",
+					     ch, plen);
 			port = NULL;
 			max = 0;
 		}
@@ -3525,8 +3278,23 @@ static void s5xxx_online(struct s5xxx_modem *sm)
 			continue;
 		}
 		oc->port = port;
-		dev_info(sm->dev, "OEM/GEMS port up (oem_ipc%d, ch %#x)\n",
-			 oc->ch - S5XXX_CH_OEM0, oc->ch);
+		dev_info(sm->dev, "CP char port up (%s, ch %#x, FMT)\n",
+			 oc->name, oc->ch);
+	}
+	for (i = 0; i < S5XXX_RAW_PORTS; i++) {
+		struct s5xxx_oem_ch *rc = &sm->raw[i];
+		struct wwan_port *port;
+
+		port = wwan_create_port(sm->dev, WWAN_PORT_OEM,
+					&s5xxx_raw_port_ops, NULL, rc);
+		if (IS_ERR(port)) {
+			dev_err(sm->dev, "failed to create raw port %#x: %ld\n",
+				rc->ch, PTR_ERR(port));
+			continue;
+		}
+		rc->port = port;
+		dev_info(sm->dev, "CP char port up (%s, ch %#x, RAW)\n",
+			 rc->name, rc->ch);
 	}
 
 	/*
@@ -5024,17 +4792,43 @@ static int s5xxx_probe(struct platform_device *pdev)
 	init_completion(&sm->gnss_rsp);
 	INIT_WORK(&sm->boot_work, s5xxx_boot_work);
 	INIT_WORK(&sm->pm_work, s5xxx_pm_work);
-	INIT_WORK(&sm->rfs_work, s5xxx_rfs_work);
-	INIT_LIST_HEAD(&sm->rfs_rxq);
-	spin_lock_init(&sm->rfs_lock);
 	init_waitqueue_head(&sm->fmt_tx_wq);
 	for (i = 0; i < S5XXX_OEM_PORTS; i++) {
-		static const u8 oem_chs[S5XXX_OEM_PORTS] = {
-			S5XXX_CH_OEM0, S5XXX_CH_OEM, S5XXX_CH_OEM3,
+		static const struct {
+			u8 ch;
+			const char *name;
+		} fmt_chs[S5XXX_OEM_PORTS] = {
+			{ S5XXX_CH_OEM0 + 0, "oem_ipc0" },
+			{ S5XXX_CH_OEM0 + 1, "oem_ipc1" },
+			{ S5XXX_CH_OEM0 + 2, "oem_ipc2" },
+			{ S5XXX_CH_OEM0 + 3, "oem_ipc3" },
+			{ S5XXX_CH_OEM0 + 4, "oem_ipc4" },
+			{ S5XXX_CH_OEM0 + 5, "oem_ipc5" },
+			{ S5XXX_CH_OEM0 + 6, "oem_ipc6" },
+			{ S5XXX_CH_OEM0 + 7, "oem_ipc7" },
+			{ S5XXX_CH_RCS0,     "rcs0" },
+			{ S5XXX_CH_WFS0,     "wfc0" },
 		};
 
 		sm->oem[i].sm = sm;
-		sm->oem[i].ch = oem_chs[i];
+		sm->oem[i].ch = fmt_chs[i].ch;
+		sm->oem[i].name = fmt_chs[i].name;
+	}
+	for (i = 0; i < S5XXX_RAW_PORTS; i++) {
+		static const struct {
+			u8 ch;
+			const char *name;
+		} raw_chs[S5XXX_RAW_PORTS] = {
+			{ S5XXX_CH_CPLOG,    "dm0" },
+			{ S5XXX_CH_LOOPBACK, "loopback" },
+			{ S5XXX_CH_RCS1,     "rcs1" },
+			{ S5XXX_CH_WFS1,     "wfc1" },
+			{ S5XXX_CH_OEM_TEST, "oem_test" },
+		};
+
+		sm->raw[i].sm = sm;
+		sm->raw[i].ch = raw_chs[i].ch;
+		sm->raw[i].name = raw_chs[i].name;
 	}
 	for (i = 0; i < S5XXX_SIT_PORTS; i++) {
 		sm->sit[i].sm = sm;
@@ -5306,27 +5100,17 @@ static int s5xxx_probe(struct platform_device *pdev)
 		goto err_irq;
 	}
 	/* Ordered wq for the in-kernel RFS server; stateful ack ping-pong. */
-	sm->rfs_wq = alloc_ordered_workqueue("s5xxx-rfs", 0);
-	if (!sm->rfs_wq) {
-		ret = -ENOMEM;
-		goto err_wq;
-	}
-	sm->rfs_txbuf = devm_kmalloc(dev, 0x14 + S5XXX_RFS_CHUNK, GFP_KERNEL);
-	if (!sm->rfs_txbuf) {
-		ret = -ENOMEM;
-		goto err_rfs;
-	}
 	sm->cp2ap_irq = gpiod_to_irq(sm->cp2ap_wakeup);
 	if (sm->cp2ap_irq < 0) {
 		ret = dev_err_probe(dev, sm->cp2ap_irq, "CP2AP_WAKEUP to irq\n");
-		goto err_rfs;
+		goto err_wq;
 	}
 	ret = request_irq(sm->cp2ap_irq, s5xxx_cp2ap_wakeup_irq,
 			  IRQF_TRIGGER_RISING | IRQF_TRIGGER_FALLING |
 			  IRQF_NO_AUTOEN, "s5xxx-cp2ap-wakeup", sm);
 	if (ret) {
 		dev_err(dev, "CP2AP_WAKEUP request_irq: %d\n", ret);
-		goto err_rfs;
+		goto err_wq;
 	}
 
 	/*
@@ -5369,8 +5153,6 @@ static int s5xxx_probe(struct platform_device *pdev)
 
 err_cp2ap_irq:
 	free_irq(sm->cp2ap_irq, sm);
-err_rfs:
-	destroy_workqueue(sm->rfs_wq);
 err_wq:
 	destroy_workqueue(sm->pm_wq);
 err_irq:
@@ -5418,9 +5200,6 @@ static void s5xxx_remove(struct platform_device *pdev)
 	for (i = 0; i < S5XXX_PDP_CH_COUNT; i++)
 		if (sm->ndev[i])
 			unregister_netdev(sm->ndev[i]); /* needs_free_netdev frees it */
-	cancel_work_sync(&sm->rfs_work);
-	destroy_workqueue(sm->rfs_wq);
-	s5xxx_rfs_cleanup(sm);
 	if (sm->gnss_dump_port)
 		wwan_remove_port(sm->gnss_dump_port);
 	if (sm->gnss_port)
@@ -5428,6 +5207,9 @@ static void s5xxx_remove(struct platform_device *pdev)
 	for (i = 0; i < S5XXX_OEM_PORTS; i++)
 		if (sm->oem[i].port)
 			wwan_remove_port(sm->oem[i].port);
+	for (i = 0; i < S5XXX_RAW_PORTS; i++)
+		if (sm->raw[i].port)
+			wwan_remove_port(sm->raw[i].port);
 	if (sm->rfs_port)
 		wwan_remove_port(sm->rfs_port);
 	for (i = 0; i < S5XXX_SIT_PORTS; i++)
@@ -5534,7 +5316,6 @@ static void s5xxx_shutdown(struct platform_device *pdev)
 	if (sm->nvec > 1)
 		free_irq(pci_irq_vector(sm->pdev, 1), sm);
 	free_irq(pci_irq_vector(sm->pdev, 0), sm);
-	cancel_work_sync(&sm->rfs_work);
 	dev_info(sm->dev, "quiesced for shutdown\n");
 }
 
