@@ -75,6 +75,15 @@ properties:
     description:
       Optional power-enable (WLAN_EN / REG_ON) GPIO for a Wi-Fi endpoint.
 
+  "#reset-cells":
+    const: 1
+    description:
+      The controller offers reset lines to the endpoint it hosts - the PCIe
+      link itself, and, where the endpoint is a baseband, its power-cycle and
+      dump-mode resets. Only the endpoint knows when these are wanted, so it
+      names them rather than the controller applying them on its own. See
+      include/dt-bindings/reset/google,zuma-pcie.h.
+
 required:
   - compatible
   - reg
