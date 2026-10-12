@@ -3841,6 +3841,18 @@
 		usbdrd31: usb@11210000 {
 			compatible = "google,zuma-dwusb3", "google,gs101-dwusb3";
 			ranges = <0x0 0x11210000 0x10000>;
+
+			/*
+			 * The USB31DRD PHY isolates the link when it exits,
+			 * which the controller does on the way into suspend, so
+			 * on resume the PHY has to be back before the core
+			 * reads its GUSB* registers -- otherwise that first
+			 * read never completes and the core soft reset times
+			 * out.  Needed on the controller's own side because an
+			 * aborted suspend can resume it without resuming the
+			 * PHY.
+			 */
+			samsung,phy-init-before-setup;
 			clocks = <&cmu_hsi0 CLK_GOUT_HSI0_USB31DRD_BUS_CLK_EARLY>,
 				 <&cmu_hsi0 CLK_GOUT_HSI0_USB31DRD_I_USB31DRD_SUSPEND_CLK_26>,
 				 <&cmu_hsi0 CLK_GOUT_HSI0_UASC_HSI0_LINK_ACLK>,
