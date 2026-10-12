@@ -1287,6 +1287,24 @@ static int exynos_ufs_pre_link(struct ufs_hba *hba)
 	if (ufs->opts & EXYNOS_UFS_OPT_RESTORE_MPHY_APBCLK)
 		exynos_ufs_restore_link_clk_ctrl(ufs);
 
+	/*
+	 * Everything the attached device needs in order to answer
+	 * DME_LINKSTARTUP is now programmed, so report it once.  The three
+	 * registers say whether the device has a reference clock
+	 * (REFCLKOUT_STOP in HCI_CLKSTOP_CTRL), whether it is out of reset
+	 * (bit 0 of HCI_GPIO_OUT is its RESET_N) and which link clocks are
+	 * under automatic control (HCI_MISC).  A device that is unclocked or
+	 * still in reset cannot reply, and link startup then fails with the
+	 * peer attributes erroring out and zero connected lanes.
+	 */
+	dev_dbg(hba->dev,
+		"pre-link: HCI_MISC %#010x CLKSTOP_CTRL %#010x GPIO_OUT %#010x (dev RESET_N %s, refclk %s)\n",
+		hci_readl(ufs, HCI_MISC), hci_readl(ufs, HCI_CLKSTOP_CTRL),
+		hci_readl(ufs, HCI_GPIO_OUT),
+		hci_readl(ufs, HCI_GPIO_OUT) & 1 ? "released" : "ASSERTED",
+		hci_readl(ufs, HCI_CLKSTOP_CTRL) & REFCLKOUT_STOP ?
+			"STOPPED" : "running");
+
 	return 0;
 }
 
