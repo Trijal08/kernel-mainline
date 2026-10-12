@@ -713,10 +713,13 @@ static void zuma_dsim_configure(struct zuma_dsim *dsim)
 	 * that is still running -- a mode change, a resume that kept the PHY
 	 * alive -- reprogram the link registers and leave the PHY alone.
 	 */
-	if (zuma_dsim_pll_is_stable(dsim))
+	if (zuma_dsim_pll_is_stable(dsim)) {
+		dev_dbg(dsim->dev, "link up, reconfiguring over it\n");
 		zuma_dsim_set_config(dsim);
-	else
+	} else {
+		dev_dbg(dsim->dev, "link down, bringing the DCPHY up\n");
 		zuma_dsim_cold_init(dsim);
+	}
 
 	/*
 	 * Command-mode transfer TE timing (vendor dsim_reg_set_config subset).
