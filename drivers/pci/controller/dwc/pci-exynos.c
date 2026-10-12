@@ -97,11 +97,11 @@
 #define PCIE_ZUMA_APP_LTSSM_ENABLE	0x0054
 #define   LTSSM_ENABLE			BIT(0)
 #define PCIE_ZUMA_RDLH_LINKUP		0x02c8
+/*
+ * The state field mirrors SMLH_LTSSM_STATE, so the values are the DWC ones --
+ * see enum dw_pcie_ltssm, which this driver uses rather than redefining them.
+ */
 #define   LTSSM_STATE_MASK		0x3f
-#define   LTSSM_STATE_RCVRY_LOCK	0x0d
-#define   LTSSM_STATE_L0		0x11
-#define   LTSSM_STATE_L1_IDLE		0x14
-#define   LTSSM_STATE_L2_IDLE		0x15
 /* Orderly-L2 power-down handshake (modem runtime PM; downstream poweroff_pcie) */
 #define PCIE_APP_REQ_EXIT_L1		0x006c	/* L1-exit request trigger */
 #define PCIE_XMIT_PME_TURNOFF		0x0118
@@ -621,11 +621,22 @@ static int exynos_zuma_pcie_start_link(struct dw_pcie *pci)
 	return 0;
 }
 
-static bool exynos_zuma_pcie_link_up(struct dw_pcie *pci)
+/*
+ * The DWC core reads the LTSSM state out of PCIE_PORT_DEBUG0 by default, which
+ * is a DBI register and so goes through the sideband access this controller
+ * needs; the ELBI mirror is both cheaper and the one the vendor code trusts.
+ * Reporting it here is what lets dw_pcie_suspend_noirq() wait for L2.
+ */
+static enum dw_pcie_ltssm exynos_zuma_pcie_get_ltssm(struct dw_pcie *pci)
 {
 	u32 val = exynos_pcie_readl(pci->elbi_base, PCIE_ZUMA_RDLH_LINKUP);
 
-	return (val & LTSSM_STATE_MASK) == LTSSM_STATE_L0;
+	return (enum dw_pcie_ltssm)(val & LTSSM_STATE_MASK);
+}
+
+static bool exynos_zuma_pcie_link_up(struct dw_pcie *pci)
+{
+	return exynos_zuma_pcie_get_ltssm(pci) == DW_PCIE_LTSSM_L0;
 }
 
 static const struct dw_pcie_host_ops exynos_zuma_pcie_host_ops = {
@@ -674,6 +685,7 @@ static const struct dw_pcie_ops exynos_zuma_dw_pcie_ops = {
 	.read_dbi = exynos_pcie_read_dbi,
 	.write_dbi = exynos_pcie_write_dbi,
 	.link_up = exynos_zuma_pcie_link_up,
+	.get_ltssm = exynos_zuma_pcie_get_ltssm,
 	.start_link = exynos_zuma_pcie_start_link,
 };
 
@@ -998,9 +1010,9 @@ static int exynos_zuma_modem_wait_link(struct exynos_pcie *ep)
 	return readl_poll_timeout(ep->pci.elbi_base + PCIE_ZUMA_RDLH_LINKUP,
 				  state,
 				  (state & LTSSM_STATE_MASK) >=
-				  LTSSM_STATE_RCVRY_LOCK &&
+				  DW_PCIE_LTSSM_RCVRY_LOCK &&
 				  (state & LTSSM_STATE_MASK) <=
-				  LTSSM_STATE_L1_IDLE,
+				  DW_PCIE_LTSSM_L1_IDLE,
 				  PCIE_LINK_WAIT_STEP_US, PCIE_LINK_WAIT_US);
 }
 
@@ -1049,7 +1061,7 @@ int zumapro_pcie_modem_link_down(struct device *rc_dev)
 	 */
 	val = exynos_pcie_readl(elbi, PCIE_ZUMA_RDLH_LINKUP) & LTSSM_STATE_MASK;
 	dev_dbg(ep->pci.dev, "link_down: entry ltssm %#x\n", val);
-	if (val >= LTSSM_STATE_RCVRY_LOCK && val <= LTSSM_STATE_L1_IDLE) {
+	if (val >= DW_PCIE_LTSSM_RCVRY_LOCK && val <= DW_PCIE_LTSSM_L1_IDLE) {
 		/* PCIE_IRQ_PULSE is write-1-to-clear; clear any stale PM_TO_ACK. */
 		val = exynos_pcie_readl(elbi, PCIE_IRQ_PULSE);
 		exynos_pcie_writel(elbi, val, PCIE_IRQ_PULSE);
@@ -1073,7 +1085,7 @@ int zumapro_pcie_modem_link_down(struct device *rc_dev)
 
 		ret = readl_poll_timeout(elbi + PCIE_ZUMA_RDLH_LINKUP, val,
 					 (val & LTSSM_STATE_MASK) ==
-					 LTSSM_STATE_L2_IDLE,
+					 DW_PCIE_LTSSM_L2_IDLE,
 					 PCIE_L2_ENTER_WAIT_STEP_US,
 					 PCIE_L2_ENTER_WAIT_US);
 		if (ret)
@@ -1474,7 +1486,7 @@ int zumapro_pcie_wifi_link_up(struct device *rc_dev)
 	val = exynos_pcie_readl(pci->elbi_base, PCIE_ZUMA_RDLH_LINKUP) &
 	      LTSSM_STATE_MASK;
 	if (!ep->wifi_phy_off &&
-	    val >= LTSSM_STATE_RCVRY_LOCK && val <= LTSSM_STATE_L1_IDLE)
+	    val >= DW_PCIE_LTSSM_RCVRY_LOCK && val <= DW_PCIE_LTSSM_L1_IDLE)
 		return 0;
 
 	/*
@@ -1611,7 +1623,7 @@ int zumapro_pcie_wifi_link_down(struct device *rc_dev)
 	 */
 	val = exynos_pcie_readl(elbi, PCIE_ZUMA_RDLH_LINKUP) & LTSSM_STATE_MASK;
 	dev_info(ep->pci.dev, "wifi link_down: entry ltssm %#x\n", val);
-	if (val >= LTSSM_STATE_RCVRY_LOCK && val <= LTSSM_STATE_L1_IDLE) {
+	if (val >= DW_PCIE_LTSSM_RCVRY_LOCK && val <= DW_PCIE_LTSSM_L1_IDLE) {
 		/* PCIE_IRQ_PULSE is write-1-to-clear; clear stale PM_TO_ACK. */
 		val = exynos_pcie_readl(elbi, PCIE_IRQ_PULSE);
 		exynos_pcie_writel(elbi, val, PCIE_IRQ_PULSE);
@@ -1635,7 +1647,7 @@ int zumapro_pcie_wifi_link_down(struct device *rc_dev)
 
 		ret = readl_poll_timeout(elbi + PCIE_ZUMA_RDLH_LINKUP, val,
 					 (val & LTSSM_STATE_MASK) ==
-					 LTSSM_STATE_L2_IDLE,
+					 DW_PCIE_LTSSM_L2_IDLE,
 					 PCIE_L2_ENTER_WAIT_STEP_US,
 					 PCIE_L2_ENTER_WAIT_US);
 		if (ret) {
@@ -1930,7 +1942,7 @@ int zumapro_pcie_wifi_l1_exit(struct device *rc_dev)
 		while (count < MAX_L1_EXIT_TIMEOUT) {
 			val = exynos_pcie_readl(elbi, PCIE_ZUMA_RDLH_LINKUP) &
 			      LTSSM_STATE_MASK;
-			if (val == LTSSM_STATE_L0)
+			if (val == DW_PCIE_LTSSM_L0)
 				break;
 			count++;
 			udelay(10);
@@ -2010,7 +2022,7 @@ int zumapro_pcie_modem_link_speed(struct device *rc_dev)
 		return -ENOLINK;
 	ltssm = exynos_pcie_readl(ep->pci.elbi_base, PCIE_ZUMA_RDLH_LINKUP) &
 		LTSSM_STATE_MASK;
-	if (ltssm < LTSSM_STATE_RCVRY_LOCK || ltssm > LTSSM_STATE_L1_IDLE)
+	if (ltssm < DW_PCIE_LTSSM_RCVRY_LOCK || ltssm > DW_PCIE_LTSSM_L1_IDLE)
 		return -ENOLINK;
 	exp = dw_pcie_find_capability(&ep->pci, PCI_CAP_ID_EXP);
 	return dw_pcie_readw_dbi(&ep->pci, exp + PCI_EXP_LNKSTA) &
