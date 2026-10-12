@@ -65,11 +65,6 @@ properties:
       - const: cp-cold
       - const: cp-dump
 
-  samsung,doorbell-addr:
-    $ref: /schemas/types.yaml#/definitions/uint32
-    description: PCI bus address programmed into the endpoint's BAR0; the
-      doorbell register decodes there in both boot phases.
-
   cp2ap-wakeup-gpios:
     maxItems: 1
     description: CP-driven line signalling the CP is awake / ready to
@@ -93,7 +88,6 @@ required:
   - reg
   - resets
   - reset-names
-  - samsung,doorbell-addr
   - cp2ap-wakeup-gpios
 
 additionalProperties: false
@@ -127,7 +121,6 @@ examples:
                          <&pcie0 ZUMA_PCIE_RESET_CP_COLD>,
                          <&pcie0 ZUMA_PCIE_RESET_CP_DUMP>;
                 reset-names = "link", "cp-cold", "cp-dump";
-                samsung,doorbell-addr = <0x14e60000>;
                 cp2ap-wakeup-gpios = <&gpa5 1 GPIO_ACTIVE_HIGH>;
             };
         };
