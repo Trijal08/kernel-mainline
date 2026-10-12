@@ -890,25 +890,24 @@ static int exynos_pcie_probe(struct platform_device *pdev)
 	if (ret < 0)
 		goto fail_probe;
 
-	ret = exynos_add_pcie_port(ep, pdev);
-	if (ret < 0)
-		goto fail_probe;
-
 	/*
-	 * Only once the host is up: the reset lines act on a live controller,
-	 * and publishing the provider is what releases an endpoint driver that
-	 * is waiting on it.
+	 * Before the host comes up, because that is when the endpoint is
+	 * enumerated and its driver binds -- and that driver asks for these
+	 * lines in its probe.  Publishing them afterwards would make every
+	 * boot take the deferred-probe path.  Nothing can act on a line before
+	 * then: the only consumer is an endpoint that does not exist yet.
 	 */
 	if (ep->drvdata->zuma) {
 		ret = exynos_zuma_pcie_add_reset_controller(ep);
 		if (ret < 0)
-			goto fail_host;
+			goto fail_probe;
 	}
 
-	return 0;
+	ret = exynos_add_pcie_port(ep, pdev);
+	if (ret < 0)
+		goto fail_probe;
 
-fail_host:
-	dw_pcie_host_deinit(&ep->pci.pp);
+	return 0;
 
 fail_probe:
 	/*
