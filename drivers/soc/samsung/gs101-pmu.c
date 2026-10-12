@@ -367,10 +367,17 @@ int tensor_sec_reg_write(void *context, unsigned int reg, unsigned int val)
 	arm_smccc_smc(TENSOR_SMC_PMU_SEC_REG, pmu_base + reg,
 		      TENSOR_PMUREG_WRITE, val, 0, 0, 0, 0, &res);
 
-	/* returns -EINVAL if access isn't allowed or 0 */
+	/*
+	 * The firmware returns -EINVAL for a register its policy does not let
+	 * the kernel write, and 0 otherwise.  A denial is a property of the
+	 * platform rather than of this write, so it repeats every time the
+	 * caller tries -- EINT_WAKEUP_MASK is rewritten on each suspend -- and
+	 * warning every time buries everything else in the log.  Report it once
+	 * and let the caller act on the returned error.
+	 */
 	if (res.a0)
-		pr_warn("%s(): reg 0x%x val 0x%x SMC failed: %d\n", __func__,
-			reg, val, (int)res.a0);
+		pr_warn_once("%s(): reg 0x%x val 0x%x SMC failed: %d\n",
+			     __func__, reg, val, (int)res.a0);
 
 	return (int)res.a0;
 }
