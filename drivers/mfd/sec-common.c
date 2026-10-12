@@ -14,6 +14,8 @@
 #include <linux/mfd/core.h>
 #include <linux/mfd/samsung/core.h>
 #include <linux/mfd/samsung/irq.h>
+#include <linux/mfd/samsung/s2mpg14.h>
+#include <linux/mfd/samsung/s2mpg15.h>
 #include <linux/mfd/samsung/s2mps11.h>
 #include <linux/mfd/samsung/s2mps13.h>
 #include <linux/mfd/samsung/s2mu005.h>
@@ -56,10 +58,14 @@ static const struct mfd_cell s2mpg11_devs[] = {
 	MFD_CELL_OF("s2mpg11-gpio", NULL, NULL, 0, 0, "samsung,s2mpg11-gpio"),
 };
 
+static const struct resource s2mpg14_rtc_resources[] = {
+	DEFINE_RES_IRQ_NAMED(S2MPG14_IRQ_RTCA0, "alarm"),
+};
+
 static const struct mfd_cell s2mpg14_devs[] = {
 	MFD_CELL_NAME("s2mpg14-meter"),
 	MFD_CELL_NAME("s2mpg14-regulator"),
-	MFD_CELL_RES("s2mpg10-rtc", s2mpg10_rtc_resources),
+	MFD_CELL_RES("s2mpg10-rtc", s2mpg14_rtc_resources),
 	MFD_CELL_OF("s2mpg10-clk", NULL, NULL, 0, 0, "samsung,s2mpg10-clk"),
 	MFD_CELL_OF("s2mpg14-gpio", NULL, NULL, 0, 0, "samsung,s2mpg14-gpio"),
 };
@@ -142,7 +148,15 @@ static void sec_pmic_dump_rev(struct sec_pmic_dev *sec_pmic)
 		/* For s2mpg1x, the revision is in a different regmap */
 		return;
 	case S2MPG14:
-	case S2MPG15:
+	case S2MPG15: {
+		/* These keep their revision in the common block, as CHIPID */
+		struct regmap *regmap_common = dev_get_regmap(sec_pmic->dev, "common");
+
+		if (regmap_common &&
+		    !regmap_read(regmap_common, S2MPG14_COMMON_CHIPID, &val))
+			dev_dbg(sec_pmic->dev, "Revision: 0x%x\n", val);
+		return;
+	}
 	case S2MU005:
 		reg = S2MU005_REG_ID;
 		mask = S2MU005_ID_MASK;
