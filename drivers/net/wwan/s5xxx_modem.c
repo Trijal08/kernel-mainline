@@ -649,7 +649,12 @@ struct s5xxx_modem {
 	resource_size_t		pktproc_size;
 	void __iomem		*pktproc;
 
-	u32			db_bus_addr;
+	/*
+	 * The root port.  Its memory window is what forwards the AOC's and the
+	 * AP's accesses down to the CP, and a relink's controller reset drops
+	 * it, so its config is saved once and restored after every bounce.
+	 */
+	struct pci_dev		*bridge;
 	void __iomem		*doorbell;
 
 	const struct firmware	*pbl;
@@ -772,163 +777,8 @@ static const char *s5xxx_fw_path(struct s5xxx_modem *sm, char *buf,
 	return buf;
 }
 
-/*
- * Where the AOC expects to find the CP.
- *
- * The AOC's SysMMU table is baked into aoc.bin and maps two 512K windows at
- * *CPU* addresses 0x40000000 and 0x40400000.  Those are inside pcie_0's
- * outbound window, which this SoC's DT translates
- *
- *	CPU 0x40000000 + n  <->  PCI 0x14e00000 + n	(size 0xff0000)
- *
- * so the CP's BARs -- which hold PCI bus addresses, not CPU ones -- have to be
- * placed at the translated addresses.  Taking the layout the PCI core assigns
- * on a stock device and converting it:
- *
- *	BAR2  1M   CPU 0x40000000  ->  PCI 0x14e00000   CP memory; the AOC
- *	                                                reads CallInfo here
- *	BAR3  1M   CPU 0x40100000  ->  PCI 0x14f00000
- *	BAR4  1M   CPU 0x40200000  ->  PCI 0x15000000
- *	BAR5  1M   CPU 0x40300000  ->  PCI 0x15100000
- *	BAR0  64K  CPU 0x40400000  ->  PCI 0x15200000   the doorbell page
- *
- * We used to put BAR0 at PCI 0x14e60000 -- inside what should be BAR2's window
- * -- and leave every other BAR unassigned.  That is enough for the AP, which
- * only rings the doorbell and DMAs through DRAM, but it leaves both of the
- * AOC's windows decoding to nothing: every read it makes of them returns
- * all-ones.  Hence a call that connects, carries RTP and clocks voice frames
- * while the AOC logs "PCIe Modem Configuration: Unknown codec type
- * (0xffffffff)" for its whole duration with the speaker silent.
- *
- * Only BAR0 and BAR2 are programmed; BAR3-5 are not mapped by the AOC and
- * nothing on the AP reaches them.
- */
-#define S5XXX_CP_BAR0_BUS	0x15200000u	/* AOC sees CPU 0x40400000 */
-#define S5XXX_CP_BAR2_BUS	0x14e00000u	/* AOC sees CPU 0x40000000 */
-#define S5XXX_CP_WIN_BASE	0x14e00000u
-#define S5XXX_CP_WIN_LIMIT	0x152fffffu
 
-/*
- * Program the doorbell BAR and read it back, like downstream does (it
- * computes the doorbell offset from what actually landed, and its restore
- * path runs a "BAR0 value correction" rewrite).  The ROM-phase BAR is 1M
- * so the hardware aligns the programmed address down; any base that still
- * decodes the doorbell bus address is fine.
- */
-static int s5xxx_program_doorbell_bar(struct s5xxx_modem *sm)
-{
-	u32 val = 0, base;
-	int try;
 
-	for (try = 0; try < 10; try++) {
-		pci_write_config_dword(sm->pdev, PCI_BASE_ADDRESS_0,
-				       S5XXX_CP_BAR0_BUS);
-		pci_write_config_dword(sm->pdev, PCI_BASE_ADDRESS_1, 0);
-		pci_read_config_dword(sm->pdev, PCI_BASE_ADDRESS_0, &val);
-		base = val & PCI_BASE_ADDRESS_MEM_MASK;
-		if (base && base <= S5XXX_CP_BAR0_BUS &&
-		    S5XXX_CP_BAR0_BUS - base < SZ_1M) {
-			if (try)
-				dev_warn(sm->dev,
-					 "doorbell BAR stuck after %d retries (%#x)\n",
-					 try, val);
-			/*
-			 * The doorbell sits at the base of this BAR, so it
-			 * moves with it; the DT address named the same page
-			 * in the CP's own space.
-			 */
-			if (sm->db_bus_addr != base) {
-				dev_info(sm->dev,
-					 "doorbell bus address %#x -> %#x (AOC-visible BAR layout)\n",
-					 sm->db_bus_addr, base);
-				sm->db_bus_addr = base;
-			}
-
-			/*
-			 * BAR2 is the window the AOC reads CallInfo through.
-			 * Nothing on the AP touches it, so it is write-only
-			 * housekeeping -- but without it the AOC is blind.
-			 */
-			pci_write_config_dword(sm->pdev, PCI_BASE_ADDRESS_2,
-					       S5XXX_CP_BAR2_BUS);
-			pci_read_config_dword(sm->pdev, PCI_BASE_ADDRESS_2,
-					      &val);
-			if ((val & PCI_BASE_ADDRESS_MEM_MASK) !=
-			    S5XXX_CP_BAR2_BUS)
-				dev_warn(sm->dev,
-					 "CP BAR2 won't hold %#x (reads %#010x); the AOC will not see the CP\n",
-					 S5XXX_CP_BAR2_BUS, val);
-			return 0;
-		}
-		udelay(100);
-	}
-
-	dev_err(sm->dev, "doorbell BAR won't hold %#x (reads %#x)\n",
-		S5XXX_CP_BAR0_BUS, val);
-	return -EIO;
-}
-
-/*
- * Memory TLPs are address-routed: the root port only forwards them
- * downstream inside its type-1 memory window, and because the doorbell BAR
- * is programmed behind the PCI core's back (no child resource was ever
- * assigned) the core leaves that window closed -- every doorbell access
- * dies at the root port with the EP config-reachable but memory-dead.
- * Downstream opens it implicitly by routing its 4K BAR through
- * pci_assign_resource(); open it explicitly over the doorbell's 1M-aligned
- * range instead.  The root port is the RC's own DBI, not the flaky ROM, so
- * a single verified write suffices.
- */
-static int s5xxx_open_bridge_window(struct s5xxx_modem *sm)
-{
-	struct pci_dev *bridge = pci_upstream_bridge(sm->pdev);
-	u32 base = S5XXX_CP_WIN_BASE;
-	u32 limit = S5XXX_CP_WIN_LIMIT;
-	u32 want = (((limit >> 16) & 0xfff0) << 16) | ((base >> 16) & 0xfff0);
-	u32 val;
-	u16 cmd;
-
-	if (!bridge)
-		return -ENODEV;
-
-	pci_read_config_dword(bridge, PCI_MEMORY_BASE, &val);
-	if (val != want) {
-		dev_dbg(sm->dev,
-			"opening root-port memory window %#x-%#x (was %#010x)\n",
-			base, limit, val);
-		pci_write_config_dword(bridge, PCI_MEMORY_BASE, want);
-		pci_read_config_dword(bridge, PCI_MEMORY_BASE, &val);
-		if (val != want) {
-			dev_err(sm->dev,
-				"root-port window won't hold (%#010x)\n", val);
-			return -EIO;
-		}
-	}
-
-	/*
-	 * The core re-assigns the root port's own (dummy, dw_pcie_setup_rc
-	 * zeroes it) BAR0 into the bottom of the translation window at
-	 * enumeration; TLPs matching an RP BAR are consumed by the port,
-	 * not forwarded, so evict it from the doorbell range.
-	 */
-	pci_read_config_dword(bridge, PCI_BASE_ADDRESS_0, &val);
-	if ((val & PCI_BASE_ADDRESS_MEM_MASK) >= base &&
-	    (val & PCI_BASE_ADDRESS_MEM_MASK) <= limit) {
-		dev_info(sm->dev,
-			 "evicting root-port BAR0 (%#010x) from the doorbell window\n",
-			 val);
-		pci_write_config_dword(bridge, PCI_BASE_ADDRESS_0, 0);
-		pci_write_config_dword(bridge, PCI_BASE_ADDRESS_1, 0);
-	}
-
-	pci_read_config_word(bridge, PCI_COMMAND, &cmd);
-	if ((cmd & (PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER)) !=
-	    (PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER))
-		pci_write_config_word(bridge, PCI_COMMAND, cmd |
-				      PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER);
-
-	return 0;
-}
 
 /*
  * Ring the doorbell with the downstream retry shape: right after a (re)train
@@ -962,8 +812,8 @@ static bool s5xxx_send_doorbell(struct s5xxx_modem *sm, u32 val)
 			pci_write_config_word(sm->pdev, PCI_COMMAND, cmd |
 					      PCI_COMMAND_MEMORY |
 					      PCI_COMMAND_MASTER);
-		s5xxx_program_doorbell_bar(sm);
-		s5xxx_open_bridge_window(sm);
+		pci_restore_state(sm->pdev);
+		pci_restore_state(sm->bridge);
 		udelay(100);
 	}
 
@@ -1070,8 +920,7 @@ static void s5xxx_relink_restore(struct s5xxx_modem *sm)
 	pci_restore_state(sm->pdev);
 	pci_set_master(sm->pdev);
 	zumapro_pcie_set_msi_target(sm->rc_dev, sm->msi_phys);
-	s5xxx_program_doorbell_bar(sm);
-	s5xxx_open_bridge_window(sm);
+	pci_restore_state(sm->bridge);
 	s5xxx_verify_msi_target(sm);
 }
 
@@ -3467,53 +3316,30 @@ static irqreturn_t s5xxx_irq_handler(int irq, void *data)
  * back (the core saw unassignable ROM BARs anyway); the modem never runs
  * with core-managed BARs downstream either.
  */
+/*
+ * Map the doorbell page.
+ *
+ * BAR0 is where it lives, and the PCI core has assigned and programmed it like
+ * any other BAR -- see quirk_samsung_s5xxx_modem_bars(), which supplies the
+ * sizes the mask ROM declines to report.  Nothing here may choose an address:
+ * the audio coprocessor reaches this device through a translation table baked
+ * into its signed firmware, so the layout is fixed platform ABI and the quirk
+ * exists to reproduce it.
+ */
 static int s5xxx_setup_doorbell(struct s5xxx_modem *sm)
 {
-	struct pci_bus_region region;
-	/*
-	 * pcibios_bus_to_resource() matches host-bridge windows by the
-	 * resource type of the passed-in res, so it must be pre-typed MEM --
-	 * zero flags match no window and the bus address comes back
-	 * untranslated (seen on hardware as "cpu [??? 0x14e60000...]").
-	 */
-	struct resource res = { .flags = IORESOURCE_MEM };
-	int i, ret;
+	struct pci_dev *pdev = sm->pdev;
 
-	/*
-	 * The mask ROM endpoint exposes no sizeable BARs: the PCI core sizes
-	 * BAR0 (a 64-bit memory BAR the ROM leaves at address 0) to nothing and
-	 * assigns no resources or bridge window at all.  Clear the (empty)
-	 * resources so pci_enable_device() has nothing unclaimed to trip over,
-	 * then program BAR0 to the fixed doorbell bus address directly
-	 * (downstream s51xx_pcie_probe() does the same).
-	 */
-	for (i = 0; i < PCI_STD_NUM_BARS; i++) {
-		sm->pdev->resource[i].start = 0;
-		sm->pdev->resource[i].end = 0;
-		sm->pdev->resource[i].flags = 0;
-	}
-	ret = s5xxx_program_doorbell_bar(sm);
-	if (ret)
-		return ret;
+	if (!pci_resource_len(pdev, 0))
+		return dev_err_probe(sm->dev, -ENXIO,
+				     "no doorbell BAR; is the PCI quirk present?\n");
 
-	ret = s5xxx_open_bridge_window(sm);
-	if (ret)
-		return ret;
-
-	region.start = sm->db_bus_addr;
-	region.end = sm->db_bus_addr + SZ_4K - 1;
-	pcibios_bus_to_resource(sm->pdev->bus, &res, &region);
-	if (!res.start)
-		return dev_err_probe(sm->dev, -EINVAL,
-				     "doorbell bus address %#x maps to no CPU window\n",
-				     sm->db_bus_addr);
-
-	sm->doorbell = devm_ioremap(sm->dev, res.start, SZ_4K);
+	sm->doorbell = devm_ioremap(sm->dev, pci_resource_start(pdev, 0),
+				    SZ_4K);
 	if (!sm->doorbell)
 		return -ENOMEM;
 
-	dev_info(sm->dev, "doorbell at bus %#x, cpu %pR\n", sm->db_bus_addr,
-		 &res);
+	dev_info(sm->dev, "doorbell at %pR\n", pci_resource_n(pdev, 0));
 
 	return 0;
 }
@@ -4322,7 +4148,7 @@ static int s5xxx_boot_bootloader(struct s5xxx_modem *sm)
 		pci_set_power_state(pdev, PCI_D0);
 		pci_restore_state(pdev);
 		pci_set_master(pdev);
-		s5xxx_open_bridge_window(sm);
+		pci_restore_state(sm->bridge);
 		zumapro_pcie_set_msi_target(sm->rc_dev, sm->msi_phys);
 		s5xxx_verify_msi_target(sm);
 	}
@@ -4415,7 +4241,7 @@ static int s5xxx_dump_boot(struct s5xxx_modem *sm)
 	}
 	pci_restore_state(sm->pdev);
 	pci_set_master(sm->pdev);
-	s5xxx_open_bridge_window(sm);
+	pci_restore_state(sm->bridge);
 	zumapro_pcie_set_msi_target(sm->rc_dev, sm->msi_phys);
 	s5xxx_link_diag(sm, "after-dump-reset");
 
@@ -4466,7 +4292,7 @@ static int s5xxx_dump_boot(struct s5xxx_modem *sm)
 	pci_restore_state(sm->pdev);
 	pci_set_master(sm->pdev);
 	zumapro_pcie_set_msi_target(sm->rc_dev, sm->msi_phys);
-	s5xxx_open_bridge_window(sm);
+	pci_restore_state(sm->bridge);
 	s5xxx_verify_msi_target(sm);
 
 	buf = kmalloc(S5XXX_SRINFO_DUMP_MAX, GFP_KERNEL);
@@ -4619,7 +4445,7 @@ static void s5xxx_boot_work(struct work_struct *work)
 	 * re-open the bridge window and re-arm the endpoint-side MSI target.
 	 */
 	zumapro_pcie_set_msi_target(sm->rc_dev, sm->msi_phys);
-	s5xxx_open_bridge_window(sm);
+	pci_restore_state(sm->bridge);
 	s5xxx_verify_msi_target(sm);
 
 	/*
@@ -4870,6 +4696,17 @@ static int s5xxx_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	sm->rc_dev = bridge->dev.parent;
 
 	/*
+	 * The root port forwards everything the AP and the audio coprocessor
+	 * send to this device, and a relink's controller reset drops its
+	 * config.  Keep a copy of the state the core set up so each bounce can
+	 * put it back, rather than rebuilding the window by hand.
+	 */
+	sm->bridge = pci_upstream_bridge(pdev);
+	if (!sm->bridge)
+		return dev_err_probe(dev, -ENODEV, "no upstream bridge\n");
+	pci_save_state(sm->bridge);
+
+	/*
 	 * The root complex publishes these once its host is up, so asking for
 	 * them is also how this driver waits for a controller that can carry
 	 * the CP's mid-boot relink.
@@ -4893,12 +4730,6 @@ static int s5xxx_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 		goto err_out;
 	}
 
-	ret = of_property_read_u32(dev->of_node, "samsung,doorbell-addr",
-				   &sm->db_bus_addr);
-	if (ret) {
-		dev_err_probe(dev, ret, "missing samsung,doorbell-addr\n");
-		goto err_out;
-	}
 
 	sm->cp2ap_wakeup = devm_gpiod_get(dev, "cp2ap-wakeup", GPIOD_IN);
 	if (IS_ERR(sm->cp2ap_wakeup)) {
