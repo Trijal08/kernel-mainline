@@ -106,7 +106,7 @@
 #define UFS_GS101_RD_SHARABLE		BIT(0)
 #define UFS_GS101_SHARABLE		(UFS_GS101_WR_SHARABLE | \
 					 UFS_GS101_RD_SHARABLE)
-#define UFS_ZUMAPRO_BUS_COMPONENT_DRCG_EN	0x104
+#define UFS_ZUMA_BUS_COMPONENT_DRCG_EN	0x104
 #define UFS_SHAREABILITY_OFFSET		0x710
 
 /* Multi-host registers */
@@ -269,16 +269,16 @@ static int gs101_ufs_drv_init(struct exynos_ufs *ufs)
  * and is therefore not rebuilt by the core's reset_and_restore on resume:
  * the Zuma BUS_COMPONENT_DRCG_EN gate and the IO-coherency shareability bits.
  */
-static int zumapro_ufs_config_externals(struct exynos_ufs *ufs)
+static int zuma_ufs_config_externals(struct exynos_ufs *ufs)
 {
 	if (ufs->sysreg)
-		regmap_write(ufs->sysreg, UFS_ZUMAPRO_BUS_COMPONENT_DRCG_EN,
+		regmap_write(ufs->sysreg, UFS_ZUMA_BUS_COMPONENT_DRCG_EN,
 			     0xffffffff);
 
 	return exynos_ufs_shareability(ufs);
 }
 
-static int zumapro_ufs_drv_init(struct exynos_ufs *ufs)
+static int zuma_ufs_drv_init(struct exynos_ufs *ufs)
 {
 	struct ufs_hba *hba = ufs->hba;
 	u32 reg;
@@ -312,12 +312,12 @@ static int zumapro_ufs_drv_init(struct exynos_ufs *ufs)
 	 */
 	exynos_ufs_mphy_apbclk_ctrl(ufs, false);
 
-	return zumapro_ufs_config_externals(ufs);
+	return zuma_ufs_config_externals(ufs);
 }
 
-static int zumapro_ufs_resume(struct exynos_ufs *ufs)
+static int zuma_ufs_resume(struct exynos_ufs *ufs)
 {
-	return zumapro_ufs_config_externals(ufs);
+	return zuma_ufs_config_externals(ufs);
 }
 
 static int exynosauto_ufs_drv_init(struct exynos_ufs *ufs)
@@ -1143,7 +1143,7 @@ static int exynos_ufs_phy_init(struct exynos_ufs *ufs)
 	if (ret)
 		goto out_exit_phy;
 
-	/* Zumapro must not calibrate during the earlier resume power-on. */
+	/* Zuma must not calibrate during the earlier resume power-on. */
 	if (ufs->opts & EXYNOS_UFS_OPT_EXPLICIT_PHY_CAL) {
 		ret = phy_calibrate(generic_phy);
 		if (ret) {
@@ -2233,7 +2233,7 @@ static int gs101_ufs_pre_link(struct exynos_ufs *ufs)
 	return 0;
 }
 
-static int zumapro_ufs_pre_link(struct exynos_ufs *ufs)
+static int zuma_ufs_pre_link(struct exynos_ufs *ufs)
 {
 	struct ufs_hba *hba = ufs->hba;
 	int i;
@@ -2249,7 +2249,7 @@ static int zumapro_ufs_pre_link(struct exynos_ufs *ufs)
 	ufshcd_dme_set(hba, UIC_ARG_MIB(0x200), 0x40);
 
 	/*
-	 * Zumapro M-PHY OSC = 38.4 MHz; downstream init_cfg_evt1 sets
+	 * Zuma M-PHY OSC = 38.4 MHz; downstream init_cfg_evt1 sets
 	 * PCS_COMN 0x202 = 0x22 with the PCS configuration gate open.
 	 * Restore it after power loss as well as at boot. GS101 does not
 	 * write 0x202 because its OSC is 24.5 MHz.
@@ -2545,7 +2545,7 @@ static const struct exynos_ufs_drv_data exynosautov920_ufs_drvs = {
 	.pre_pwr_change         = exynosautov920_ufs_pre_pwr_change,
 };
 
-static const struct exynos_ufs_drv_data zumapro_ufs_drvs = {
+static const struct exynos_ufs_drv_data zuma_ufs_drvs = {
 	.uic_attr		= &gs101_uic_attr,
 	.quirks			= UFSHCI_QUIRK_SKIP_MANUAL_WB_FLUSH_CTRL |
 				  UFSHCD_QUIRK_SKIP_DEF_UNIPRO_TIMEOUT_SETTING,
@@ -2558,19 +2558,19 @@ static const struct exynos_ufs_drv_data zumapro_ufs_drvs = {
 				  EXYNOS_UFS_OPT_RESTORE_MPHY_APBCLK |
 				  EXYNOS_UFS_OPT_EXPLICIT_PHY_CAL,
 	.iocc_mask		= UFS_GS101_SHARABLE,
-	.drv_init		= zumapro_ufs_drv_init,
-	.pre_link		= zumapro_ufs_pre_link,
+	.drv_init		= zuma_ufs_drv_init,
+	.pre_link		= zuma_ufs_pre_link,
 	.post_link		= gs101_ufs_post_link,
 	.pre_pwr_change		= gs101_ufs_pre_pwr_change,
 	.suspend		= gs101_ufs_suspend,
-	.resume			= zumapro_ufs_resume,
+	.resume			= zuma_ufs_resume,
 };
 
 static const struct of_device_id exynos_ufs_of_match[] = {
 	{ .compatible = "google,gs101-ufs",
 	  .data	      = &gs101_ufs_drvs },
-	{ .compatible = "google,zumapro-ufs",
-	  .data	      = &zumapro_ufs_drvs },
+	{ .compatible = "google,zuma-ufs",
+	  .data	      = &zuma_ufs_drvs },
 	{ .compatible = "samsung,exynos7-ufs",
 	  .data	      = &exynos_ufs_drvs },
 	{ .compatible = "samsung,exynosautov9-ufs",
