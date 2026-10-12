@@ -48,6 +48,22 @@ properties:
     $ref: /schemas/types.yaml#/definitions/phandle
     description: PCIe root complex the modem is attached to.
 
+  resets:
+    items:
+      - description: The PCIe link. The CP bootloader drops the link part way
+          through its boot and re-requests it over CP2AP_WAKEUP, so asserting
+          and deasserting are driven separately with a wait in between.
+      - description: Cold power cycle of the CP, so a crashed or self-reset
+          baseband is back in its boot ROM.
+      - description: Warm reset of the CP with its dump-notify line latched, so
+          it comes back running its minidump agent.
+
+  reset-names:
+    items:
+      - const: link
+      - const: cp-cold
+      - const: cp-dump
+
   samsung,doorbell-addr:
     $ref: /schemas/types.yaml#/definitions/uint32
     description: PCI bus address programmed into the endpoint's BAR0; the
@@ -74,6 +90,8 @@ required:
   - memory-region
   - memory-region-names
   - google,pcie
+  - resets
+  - reset-names
   - samsung,doorbell-addr
   - cp2ap-wakeup-gpios
 
@@ -82,6 +100,7 @@ additionalProperties: false
 examples:
   - |
     #include <dt-bindings/gpio/gpio.h>
+    #include <dt-bindings/reset/google,zuma-pcie.h>
 
     modem {
         compatible = "samsung,s5400-modem";
@@ -89,6 +108,10 @@ examples:
         memory-region-names = "ipc", "msi";
         firmware-name = "tegu/cp_pbl.bin";
         google,pcie = <&pcie0>;
+        resets = <&pcie0 ZUMA_PCIE_RESET_LINK>,
+                 <&pcie0 ZUMA_PCIE_RESET_CP_COLD>,
+                 <&pcie0 ZUMA_PCIE_RESET_CP_DUMP>;
+        reset-names = "link", "cp-cold", "cp-dump";
         samsung,doorbell-addr = <0x14e60000>;
         cp2ap-wakeup-gpios = <&gpa5 1 GPIO_ACTIVE_HIGH>;
     };
