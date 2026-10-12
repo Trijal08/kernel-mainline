@@ -126,8 +126,6 @@
 				 <&pcie_0 ZUMA_PCIE_RESET_CP_DUMP>;
 			reset-names = "link", "cp-cold", "cp-dump";
 
-			samsung,doorbell-addr = <0x14e60000>;
-
 			cp2ap-wakeup-gpios = <&gpa5 1 GPIO_ACTIVE_HIGH>;
 			/*
 			 * CP2AP_PHONE_ACTIVE (../fdt.dts
