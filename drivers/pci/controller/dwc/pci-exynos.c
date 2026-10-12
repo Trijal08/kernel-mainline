@@ -678,7 +678,6 @@ static void exynos_zuma_pcie_stop_link(struct dw_pcie *pci)
 static void exynos_zuma_pcie_pme_turn_off(struct dw_pcie_rp *pp)
 {
 	struct dw_pcie *pci = to_dw_pcie_from_pp(pp);
-	struct exynos_pcie *ep = to_exynos_pcie(pci);
 	void __iomem *elbi = pci->elbi_base;
 	enum dw_pcie_ltssm ltssm;
 	u32 val;
@@ -912,36 +911,57 @@ static void exynos_pcie_remove(struct platform_device *pdev)
 		regulator_bulk_disable(ARRAY_SIZE(ep->supplies), ep->supplies);
 }
 
+/*
+ * exynos5433 cannot use the DWC suspend path: it has neither a PME_Turn_Off
+ * trigger of its own nor the outbound message window the core's generic
+ * broadcast needs, so dw_pcie_suspend_noirq() would fail it with -ENOSPC.
+ * Park it the way it has always been parked instead -- the endpoint takes a
+ * surprise power-down, which is what it got before as well.
+ */
+static int exynos5433_pcie_suspend_noirq(struct exynos_pcie *ep)
+{
+	exynos_pcie_host_exit(&ep->pci.pp);
+	regulator_bulk_disable(ARRAY_SIZE(ep->supplies), ep->supplies);
+
+	return 0;
+}
+
+static int exynos5433_pcie_resume_noirq(struct exynos_pcie *ep)
+{
+	struct dw_pcie *pci = &ep->pci;
+	struct dw_pcie_rp *pp = &pci->pp;
+	int ret;
+
+	ret = regulator_bulk_enable(ARRAY_SIZE(ep->supplies), ep->supplies);
+	if (ret)
+		return ret;
+
+	/* the host_init callback controls ep->phy */
+	pp->ops->init(pp);
+	dw_pcie_setup_rc(pp);
+	pci->ops->start_link(pci);
+
+	return dw_pcie_wait_for_link(pci);
+}
+
 static int exynos_pcie_suspend_noirq(struct device *dev)
 {
 	struct exynos_pcie *ep = dev_get_drvdata(dev);
 
-	exynos_pcie_host_exit(&ep->pci.pp);
 	if (!ep->drvdata->zuma)
-		regulator_bulk_disable(ARRAY_SIZE(ep->supplies), ep->supplies);
+		return exynos5433_pcie_suspend_noirq(ep);
 
-	return 0;
+	return dw_pcie_suspend_noirq(&ep->pci);
 }
 
 static int exynos_pcie_resume_noirq(struct device *dev)
 {
 	struct exynos_pcie *ep = dev_get_drvdata(dev);
-	struct dw_pcie *pci = &ep->pci;
-	struct dw_pcie_rp *pp = &pci->pp;
-	int ret;
 
-	if (!ep->drvdata->zuma) {
-		ret = regulator_bulk_enable(ARRAY_SIZE(ep->supplies),
-					    ep->supplies);
-		if (ret)
-			return ret;
-	}
+	if (!ep->drvdata->zuma)
+		return exynos5433_pcie_resume_noirq(ep);
 
-	/* the host_init callback controls ep->phy */
-	ep->drvdata->host_ops->init(pp);
-	dw_pcie_setup_rc(pp);
-	ep->drvdata->dw_pcie_ops->start_link(pci);
-	return dw_pcie_wait_for_link(pci);
+	return dw_pcie_resume_noirq(&ep->pci);
 }
 
 static const struct dev_pm_ops exynos_pcie_pm_ops = {
