@@ -73,6 +73,7 @@ struct zuma_dsim {
 	unsigned int hactive;		/* active width (from mode_set) */
 	unsigned int vactive;		/* active height (from mode_set) */
 	unsigned int vrefresh;		/* active refresh rate (from mode_set) */
+	bool link_owned;		/* this driver brought the DCPHY up */
 	const struct drm_dsc_config *dsc;	/* DSC config (from the panel) */
 };
 
@@ -708,17 +709,30 @@ static void zuma_dsim_configure(struct zuma_dsim *dsim)
 		return;
 
 	/*
-	 * Own the link, but bring it up from scratch only when it is down: a
-	 * cold boot, or a resume that took the PHY's power with it.  Over a link
-	 * that is still running -- a mode change, a resume that kept the PHY
-	 * alive -- reprogram the link registers and leave the PHY alone.
+	 * Reprogramming the link registers over a running link, and leaving the
+	 * PHY alone, is only right for a link this driver configured: a mode
+	 * change, or a resume that kept the PHY alive, where relocking the PLL
+	 * underneath it would leave the lanes unable to push a command packet.
+	 *
+	 * A locked PLL on its own does not mean that.  At cold boot the
+	 * bootloader hands the panel over still streaming, with the PHY set up
+	 * for its own configuration, and zuma_dsim_set_config() touches no PHY
+	 * or PLL register -- so taking that path would run the panel at whatever
+	 * rate the bootloader chose instead of the one the panel driver asked
+	 * for.  The DDIC then never recognises the stream, never raises TE, and
+	 * DECON's command-mode trigger never latches: a black panel with the
+	 * shadow update stuck pending.
+	 *
+	 * So bring the DCPHY up from scratch until we have done it once.
 	 */
-	if (zuma_dsim_pll_is_stable(dsim)) {
+	if (dsim->link_owned && zuma_dsim_pll_is_stable(dsim)) {
 		dev_dbg(dsim->dev, "link up, reconfiguring over it\n");
 		zuma_dsim_set_config(dsim);
 	} else {
-		dev_dbg(dsim->dev, "link down, bringing the DCPHY up\n");
+		dev_dbg(dsim->dev, "link %s, bringing the DCPHY up\n",
+			dsim->link_owned ? "down" : "not ours yet");
 		zuma_dsim_cold_init(dsim);
+		dsim->link_owned = true;
 	}
 
 	/*
