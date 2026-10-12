@@ -1078,6 +1078,10 @@ struct dwc3_glue_ops {
  * @num_usb2_ports: number of USB2 ports
  * @num_usb3_ports: number of USB3 ports
  * @phys_ready: flag to indicate that PHYs are ready
+ * @phys_initialized: flag to indicate that dwc3_phy_init() has run and not yet
+ *			been balanced by dwc3_phy_exit(); used to keep the
+ *			refcounted phy_init()/phy_exit() balanced when the resume
+ *			path initialises the PHY(s) early (phy_init_before_setup)
  * @ulpi: pointer to ulpi interface
  * @ulpi_ready: flag to indicate that ULPI is initialized
  * @u2sel: parameter from Set SEL request.
@@ -1135,6 +1139,9 @@ struct dwc3_glue_ops {
  * @usb2_gadget_lpm_disable: set to disable usb2 lpm for gadget
  * @needs_full_reinit: set to indicate the core may lose power and need full
  *			initialization during system pm
+ * @phy_init_before_setup: set if the PHY/link gates access to the DWC3 global
+ *			register block, so the resume path must initialise the
+ *			PHY(s) before dwc3_phy_setup() reads GUSB* registers
  * @disable_scramble_quirk: set if we enable the disable scramble quirk
  * @u2exit_lfps_quirk: set if we enable u2exit lfps quirk
  * @u2ss_inp3_quirk: set if we enable P3 OK for U2/SS Inactive quirk
@@ -1251,6 +1258,7 @@ struct dwc3 {
 	u8			num_usb3_ports;
 
 	bool			phys_ready;
+	bool			phys_initialized;
 
 	struct ulpi		*ulpi;
 	bool			ulpi_ready;
@@ -1403,6 +1411,7 @@ struct dwc3 {
 	unsigned		usb2_lpm_disable:1;
 	unsigned		usb2_gadget_lpm_disable:1;
 	unsigned		needs_full_reinit:1;
+	unsigned		phy_init_before_setup:1;
 
 	unsigned		disable_scramble_quirk:1;
 	unsigned		u2exit_lfps_quirk:1;

@@ -50,6 +50,16 @@ properties:
   '#size-cells':
     const: 1
 
+  samsung,phy-init-before-setup:
+    type: boolean
+    description:
+      On this integration the USBDRD PHY/link gates access to the child DWC3
+      core's global register block. The PHY's exit path (run when the controller
+      suspends) isolates the link, so on system resume the PHY must be
+      initialised before the DWC3 core reads its GUSB* registers. Set this when
+      the controller's register access must not happen before the PHY is
+      re-initialised on resume.
+
   vdd10-supply:
     description: 1.0V power supply
 
