@@ -3333,6 +3333,9 @@ static int s5xxx_setup_doorbell(struct s5xxx_modem *sm)
 	if (!pci_resource_len(pdev, 0))
 		return dev_err_probe(sm->dev, -ENXIO,
 				     "no doorbell BAR; is the PCI quirk present?\n");
+	if (!pci_resource_start(pdev, 0))
+		return dev_err_probe(sm->dev, -ENXIO,
+				     "doorbell BAR sized but never assigned\n");
 
 	sm->doorbell = devm_ioremap(sm->dev, pci_resource_start(pdev, 0),
 				    SZ_4K);
