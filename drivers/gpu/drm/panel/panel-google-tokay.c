@@ -106,8 +106,19 @@ static inline struct tokay_panel *to_tokay_panel(struct drm_panel *panel)
 	}
 
 /* Keep 60 Hz preferred to match the bootloader-selected TK4C mode. */
+/*
+ * Which refresh rate to hand out as the preferred mode.  The vendor prefers 60
+ * because that is what the bootloader leaves the panel in, but the two rates
+ * take different paths through the DDIC's init -- the LTPS select at 0x83 and
+ * the FFC tuning differ -- so being able to boot the other one without a
+ * rebuild is worth a parameter.
+ */
+static int tokay_preferred_hz = 60;
+module_param_named(preferred_hz, tokay_preferred_hz, int, 0444);
+MODULE_PARM_DESC(preferred_hz, "preferred refresh rate, 60 or 120");
+
 static const struct drm_display_mode tokay_modes[] = {
-	TOKAY_MODE(60, DRM_MODE_TYPE_PREFERRED),
+	TOKAY_MODE(60, 0),
 	TOKAY_MODE(120, 0),
 };
 
@@ -238,6 +249,9 @@ static int tokay_panel_get_modes(struct drm_panel *panel,
 		mode = drm_mode_duplicate(connector->dev, &tokay_modes[i]);
 		if (!mode)
 			return i ? i : -ENOMEM;
+
+		if (drm_mode_vrefresh(mode) == tokay_preferred_hz)
+			mode->type |= DRM_MODE_TYPE_PREFERRED;
 
 		drm_mode_set_name(mode);
 		drm_mode_probed_add(connector, mode);
