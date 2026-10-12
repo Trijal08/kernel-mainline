@@ -74,6 +74,77 @@
 	google,cp-wakeup-gpios = <&gpp16 0 GPIO_ACTIVE_HIGH>;
 	/* CP rails + CP PMIC/S5910 (SPMI) sequencing live in the cp-power node. */
 	google,cp-power = <&cp_power>;
+
+	/*
+	 * The CP endpoint, described where it lives: devfn 0 behind the root
+	 * port.  The PCI core attaches this node to the enumerated device,
+	 * which is how the driver reaches the carveouts, the firmware name,
+	 * the sideband GPIOs and the controller's reset lines -- no phandle
+	 * back to the controller, and no scanning the bus for an ID.
+	 *
+	 * The root port is spelled out because a child bus takes its DT node
+	 * from the bridge above it; without a node for the port there is
+	 * nothing for the endpoint to be a child of.
+	 */
+	pcie@0,0 {
+		reg = <0x0 0x0 0x0 0x0 0x0>;
+		#address-cells = <3>;
+		#size-cells = <2>;
+		device_type = "pci";
+		ranges;
+
+		modem@0,0 {
+			compatible = "samsung,s5400-modem";
+			reg = <0x0 0x0 0x0 0x0 0x0>;
+			memory-region = <&cp_rmem_reserved>,
+					<&cp_msi_rmem_reserved>,
+					<&cp_pktproc_rmem_reserved>;
+			memory-region-names = "ipc", "msi", "pktproc";
+
+			/*
+			 * The unmodified vendor CP image (ntn_modem/modem.bin);
+			 * the driver parses its TOC and stages the BOOT
+			 * section.  Keyed on the modem part (s5400), not the
+			 * board - komodo and caiman ship byte-identical
+			 * images.  Mirror the on-device modem partition layout
+			 * under /lib/firmware/google/s5400/.
+			 */
+			firmware-name = "google/s5400/modem/images/default/modem.bin";
+
+			/*
+			 * The CP's bootloader drops the PCIe link part way
+			 * through its boot and re-requests it over
+			 * CP2AP_WAKEUP, so the park and the retrain are driven
+			 * as the two halves of one reset with a wait in
+			 * between.  The two baseband resets are pulses: a cold
+			 * power cycle to put a crashed CP back in its boot
+			 * ROM, and a warm one that latches dump-notify so it
+			 * comes back running its minidump agent.
+			 */
+			resets = <&pcie_0 ZUMA_PCIE_RESET_LINK>,
+				 <&pcie_0 ZUMA_PCIE_RESET_CP_COLD>,
+				 <&pcie_0 ZUMA_PCIE_RESET_CP_DUMP>;
+			reset-names = "link", "cp-cold", "cp-dump";
+
+			samsung,doorbell-addr = <0x14e60000>;
+
+			cp2ap-wakeup-gpios = <&gpa5 1 GPIO_ACTIVE_HIGH>;
+			/*
+			 * CP2AP_PHONE_ACTIVE (../fdt.dts
+			 * gpio_cp2ap_phone_active): high while the CP runs; a
+			 * falling edge after ONLINE means the CP crashed.
+			 */
+			cp2ap-active-gpios = <&gpa5 2 GPIO_ACTIVE_HIGH>;
+			/*
+			 * AP2CP_PARTIAL_RST_N (../fdt.dts
+			 * gpio_ap2cp_pmu_reset, gpp21-6): active-low
+			 * partial-reset request MAIN samples; the driver holds
+			 * it high (deasserted) or MAIN self-resets ~200 ms
+			 * after ONLINE.
+			 */
+			cp-partial-rst-gpios = <&gpp21 6 GPIO_ACTIVE_HIGH>;
+		};
+	};
 };
 
 / {
@@ -104,45 +175,6 @@
 		};
 	};
 
-	modem {
-		compatible = "samsung,s5400-modem";
-		memory-region = <&cp_rmem_reserved>, <&cp_msi_rmem_reserved>,
-				<&cp_pktproc_rmem_reserved>;
-		memory-region-names = "ipc", "msi", "pktproc";
-		/*
-		 * The unmodified vendor CP image (ntn_modem/modem.bin); the
-		 * driver parses its TOC and stages the BOOT section. Keyed on
-		 * the modem part (s5400), not the board - komodo and caiman
-		 * ship byte-identical images.  Mirror the on-device modem
-		 * partition layout under /lib/firmware/google/s5400/.
-		 */
-		firmware-name = "google/s5400/modem/images/default/modem.bin";
-		google,pcie = <&pcie_0>;
-		/*
-		 * The CP's bootloader drops the PCIe link part way through its
-		 * boot and re-requests it over CP2AP_WAKEUP, so the park and
-		 * the retrain are driven as the two halves of one reset with a
-		 * wait in between.  The two baseband resets are pulses: a cold
-		 * power cycle to put a crashed CP back in its boot ROM, and a
-		 * warm one that latches dump-notify so it comes back running
-		 * its minidump agent.
-		 */
-		resets = <&pcie_0 ZUMA_PCIE_RESET_LINK>,
-			 <&pcie_0 ZUMA_PCIE_RESET_CP_COLD>,
-			 <&pcie_0 ZUMA_PCIE_RESET_CP_DUMP>;
-		reset-names = "link", "cp-cold", "cp-dump";
-		samsung,doorbell-addr = <0x14e60000>;
-		cp2ap-wakeup-gpios = <&gpa5 1 GPIO_ACTIVE_HIGH>;
-		/* CP2AP_PHONE_ACTIVE (../fdt.dts gpio_cp2ap_phone_active): high
-		 * while the CP runs; falling edge after ONLINE = CP crash. */
-		cp2ap-active-gpios = <&gpa5 2 GPIO_ACTIVE_HIGH>;
-		/*
-		 * AP2CP_PARTIAL_RST_N (../fdt.dts gpio_ap2cp_pmu_reset, gpp21-6):
-		 * active-low partial-reset request MAIN samples; the driver holds
-		 * it high (deasserted) or MAIN self-resets ~200 ms after ONLINE.
-		 */
-		cp-partial-rst-gpios = <&gpp21 6 GPIO_ACTIVE_HIGH>;
-	};
 };
 
 /*
