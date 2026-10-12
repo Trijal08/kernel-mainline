@@ -23,10 +23,12 @@
 #include <linux/platform_device.h>
 #include <linux/phy/phy.h>
 #include <linux/regmap.h>
+#include <linux/reset-controller.h>
 #include <linux/regulator/consumer.h>
 #include <linux/soc/samsung/exynos-cp-power.h>
 #include <linux/module.h>
 
+#include <dt-bindings/reset/google,zuma-pcie.h>
 #include <linux/pcie-zumapro.h>
 
 #include "pcie-designware.h"
@@ -171,6 +173,8 @@ struct exynos_pcie {
 	 */
 	struct gpio_desc		*cp_wakeup;
 	struct exynos_cp_power		*cp_power;
+	/* link/baseband reset lines offered to the hosted endpoint */
+	struct reset_controller_dev	rcdev;
 	/* modem runtime-relink state (downstream establish_link) */
 	bool				cp_phy_off;	/* PHY left powered off by link_down */
 	bool				dump_relink;	/* relink at x1 for the minidump agent (vs x2 for MAIN) */
@@ -519,6 +523,8 @@ static int exynos_zuma_pcie_host_init(struct dw_pcie_rp *pp)
 }
 
 static void exynos_zuma_pcie_gen3(struct dw_pcie *pci);
+/* defined next to the link bounce it exposes */
+static int exynos_zuma_pcie_add_reset_controller(struct exynos_pcie *ep);
 static bool exynos_zuma_pcie_link_up(struct dw_pcie *pci);
 
 static int exynos_zuma_pcie_start_link(struct dw_pcie *pci)
@@ -888,7 +894,21 @@ static int exynos_pcie_probe(struct platform_device *pdev)
 	if (ret < 0)
 		goto fail_probe;
 
+	/*
+	 * Only once the host is up: the reset lines act on a live controller,
+	 * and publishing the provider is what releases an endpoint driver that
+	 * is waiting on it.
+	 */
+	if (ep->drvdata->zuma) {
+		ret = exynos_zuma_pcie_add_reset_controller(ep);
+		if (ret < 0)
+			goto fail_host;
+	}
+
 	return 0;
+
+fail_host:
+	dw_pcie_host_deinit(&ep->pci.pp);
 
 fail_probe:
 	/*
@@ -1112,16 +1132,11 @@ static int exynos_zuma_modem_wait_link(struct exynos_pcie *ep)
 				  PCIE_LINK_WAIT_STEP_US, PCIE_LINK_WAIT_US);
 }
 
-int zumapro_pcie_modem_link_down(struct device *rc_dev)
+static int exynos_zuma_pcie_link_park(struct exynos_pcie *ep)
 {
-	struct exynos_pcie *ep = zumapro_pcie_from_dev(rc_dev);
-	void __iomem *elbi;
+	void __iomem *elbi = ep->pci.elbi_base;
 	u32 val;
 	int ret;
-
-	if (!ep)
-		return -ENODEV;
-	elbi = ep->pci.elbi_base;
 
 	/*
 	 * Keep the CP's PCIe refclk alive across the bounce: the PMA lanes are
@@ -1210,7 +1225,6 @@ int zumapro_pcie_modem_link_down(struct device *rc_dev)
 	usleep_range(1000, 2000);
 	return 0;
 }
-EXPORT_SYMBOL_GPL(zumapro_pcie_modem_link_down);
 
 /*
  * The CP mask ROM links CH0 at Gen1; its second-stage bootloader runs the link
@@ -1257,15 +1271,10 @@ static void exynos_zuma_pcie_gen3(struct dw_pcie *pci)
 			"Gen3" : "not Gen3", reg16);
 }
 
-int zumapro_pcie_modem_link_up(struct device *rc_dev)
+static int exynos_zuma_pcie_link_retrain(struct exynos_pcie *ep)
 {
-	struct exynos_pcie *ep = zumapro_pcie_from_dev(rc_dev);
-	struct dw_pcie *pci;
+	struct dw_pcie *pci = &ep->pci;
 	int ret = -ETIMEDOUT, try;
-
-	if (!ep)
-		return -ENODEV;
-	pci = &ep->pci;
 
 	/* AP2CP_WAKEUP high: the CP gates its link participation on it. */
 	gpiod_set_value_cansleep(ep->cp_wakeup, 1);
@@ -1438,7 +1447,6 @@ int zumapro_pcie_modem_link_up(struct device *rc_dev)
 	exynos_pcie_writel(pci->elbi_base, 0, PCIE_ZUMA_APP_XFER_PENDING);
 	return 0;
 }
-EXPORT_SYMBOL_GPL(zumapro_pcie_modem_link_up);
 
 /*
  * L1SS substate mask applied to BOTH the RC 0x19c and EP 0x248 enable fields
@@ -2020,7 +2028,7 @@ EXPORT_SYMBOL_GPL(zumapro_pcie_wifi_l1_exit);
  * Nudge AP2CP_WAKEUP so a parked CP raises CP2AP_WAKEUP and the modem driver's
  * wakeup IRQ can relink (downstream s5100_try_gpio_cp_wakeup(), the AP-initiated
  * half of pcie_send_ap2cp_irq()).  Only the GPIO edge is driven here -- the
- * actual relink runs from zumapro_pcie_modem_link_up() once the CP answers --
+ * actual relink runs from exynos_zuma_pcie_link_retrain() once the CP answers --
  * so this is a cheap, non-blocking poke the modem send path can issue while the
  * link is parked.  Uses the non-sleeping accessor: the send path reaches this
  * from the MSI hard-IRQ handler and cp_wakeup is a memory-mapped SoC GPIO.
@@ -2055,11 +2063,9 @@ EXPORT_SYMBOL_GPL(zumapro_pcie_modem_wake);
  * Delays and ordering are byte-for-byte the vendor's (mif_gpio_set_value's
  * post-set msleep).
  */
-int zumapro_pcie_modem_power_cycle(struct device *rc_dev)
+static int exynos_zuma_pcie_cp_power_cycle(struct exynos_pcie *ep)
 {
-	struct exynos_pcie *ep = zumapro_pcie_from_dev(rc_dev);
-
-	if (!ep || !ep->cp_power)
+	if (!ep->cp_power)
 		return -ENODEV;
 
 	/*
@@ -2069,7 +2075,7 @@ int zumapro_pcie_modem_power_cycle(struct device *rc_dev)
 	 * full re-init retrain.  Skip if the previous instance already parked it.
 	 */
 	if (!ep->cp_phy_off)
-		zumapro_pcie_modem_link_down(rc_dev);
+		exynos_zuma_pcie_link_park(ep);
 
 	/*
 	 * Pulse AP2CP_WAKEUP (the RC-owned link signal) then delegate the rail
@@ -2081,9 +2087,8 @@ int zumapro_pcie_modem_power_cycle(struct device *rc_dev)
 	gpiod_set_value_cansleep(ep->cp_wakeup, 0);
 	exynos_cp_power_cold_cycle(ep->cp_power);
 
-	return zumapro_pcie_modem_link_up(rc_dev);
+	return exynos_zuma_pcie_link_retrain(ep);
 }
-EXPORT_SYMBOL_GPL(zumapro_pcie_modem_power_cycle);
 
 /*
  * Carry the AP's sleep state to the CP.  The line itself belongs to the CP
@@ -2117,11 +2122,9 @@ EXPORT_SYMBOL_GPL(zumapro_pcie_modem_set_ap_active);
  * baseband is pulsed, then we wait for the Gen1 boot-ROM link to re-train; the
  * caller reprograms the endpoint's config (MSI target, doorbell BAR) afterwards.
  */
-static int zumapro_pcie_modem_reset_mode(struct device *rc_dev, bool dump)
+static int exynos_zuma_pcie_cp_reset(struct exynos_pcie *ep, bool dump)
 {
-	struct exynos_pcie *ep = zumapro_pcie_from_dev(rc_dev);
-
-	if (!ep || !ep->cp_power)
+	if (!ep->cp_power)
 		return -ENODEV;
 
 	/* Dump relink stays at the CP's x1 (see modem_link_up); normal boot is x2. */
@@ -2142,19 +2145,86 @@ static int zumapro_pcie_modem_reset_mode(struct device *rc_dev, bool dump)
 		dev_warn(ep->pci.dev,
 			 "post-reset light retrain failed; full relink\n");
 	}
-	return zumapro_pcie_modem_link_up(rc_dev);
+	return exynos_zuma_pcie_link_retrain(ep);
 }
 
 /*
- * Same warm reset, but with AP2CP_DUMP_NOTI latched so the ROM boots its
- * minidump agent: the caller then re-runs the PBL download and reads the
- * decoded crash record out of srinfo.
+ * The reset lines this root complex offers the endpoint it hosts.
+ *
+ * All three act on the link, which is the controller's own business, but only
+ * the endpoint knows when they are wanted: a baseband whose bootloader
+ * re-links part way through its boot has to ask for the bounce at exactly the
+ * right point in a sequence the root complex knows nothing about.  Describing
+ * them in the device tree is what lets it ask without either driver having to
+ * reach into the other.
+ *
+ * ZUMA_PCIE_RESET_LINK is the only one that can be held: asserting it parks
+ * the link and leaves it parked.  The two baseband resets are pulses -- there
+ * is no meaningful state to hold a chip in half a power cycle -- so they
+ * implement .reset only.
  */
-int zumapro_pcie_modem_dump_reset(struct device *rc_dev)
+static struct exynos_pcie *rcdev_to_exynos_pcie(struct reset_controller_dev *rcdev)
 {
-	return zumapro_pcie_modem_reset_mode(rc_dev, true);
+	return container_of(rcdev, struct exynos_pcie, rcdev);
 }
-EXPORT_SYMBOL_GPL(zumapro_pcie_modem_dump_reset);
+
+static int exynos_zuma_pcie_reset_assert(struct reset_controller_dev *rcdev,
+					 unsigned long id)
+{
+	if (id != ZUMA_PCIE_RESET_LINK)
+		return -EOPNOTSUPP;
+
+	return exynos_zuma_pcie_link_park(rcdev_to_exynos_pcie(rcdev));
+}
+
+static int exynos_zuma_pcie_reset_deassert(struct reset_controller_dev *rcdev,
+					   unsigned long id)
+{
+	if (id != ZUMA_PCIE_RESET_LINK)
+		return -EOPNOTSUPP;
+
+	return exynos_zuma_pcie_link_retrain(rcdev_to_exynos_pcie(rcdev));
+}
+
+static int exynos_zuma_pcie_reset(struct reset_controller_dev *rcdev,
+				  unsigned long id)
+{
+	struct exynos_pcie *ep = rcdev_to_exynos_pcie(rcdev);
+	int ret;
+
+	switch (id) {
+	case ZUMA_PCIE_RESET_LINK:
+		ret = exynos_zuma_pcie_link_park(ep);
+		if (ret)
+			return ret;
+		return exynos_zuma_pcie_link_retrain(ep);
+	case ZUMA_PCIE_RESET_CP_COLD:
+		return exynos_zuma_pcie_cp_power_cycle(ep);
+	case ZUMA_PCIE_RESET_CP_DUMP:
+		return exynos_zuma_pcie_cp_reset(ep, true);
+	default:
+		return -EINVAL;
+	}
+}
+
+static const struct reset_control_ops exynos_zuma_pcie_reset_ops = {
+	.assert = exynos_zuma_pcie_reset_assert,
+	.deassert = exynos_zuma_pcie_reset_deassert,
+	.reset = exynos_zuma_pcie_reset,
+};
+
+static int exynos_zuma_pcie_add_reset_controller(struct exynos_pcie *ep)
+{
+	struct device *dev = ep->pci.dev;
+
+	ep->rcdev.ops = &exynos_zuma_pcie_reset_ops;
+	ep->rcdev.owner = THIS_MODULE;
+	ep->rcdev.dev = dev;
+	ep->rcdev.of_node = dev->of_node;
+	ep->rcdev.nr_resets = ZUMA_PCIE_RESET_CP_DUMP + 1;
+
+	return devm_reset_controller_register(dev, &ep->rcdev);
+}
 
 static struct platform_driver exynos_pcie_driver = {
 	.probe		= exynos_pcie_probe,
