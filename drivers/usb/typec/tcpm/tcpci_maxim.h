@@ -56,9 +56,17 @@
 #define TCPC_VENDOR_SBUSW_CTRL                  0x94
 #define SBUSW_OFF                               0x0
 #define SBUSW_PATH_1                            0x9
+/* Routes the SBU pair to the SoC's debug UART instead of to DP AUX. */
+#define SBUSW_SERIAL_UART                       0x12
 
 /* What DP AUX wants on the SBU pull-up rail while the switch is closed. */
 #define SBU_PULLUP_UV                           3300000
+
+/*
+ * Set from the command line to keep the connector's SBU pair on the debug
+ * UART.  Nothing in the driver may move the SBU switch while this is set.
+ */
+extern bool max_tcpci_conf_sbu;
 
 enum contamiant_state {
 	NOT_DETECTED,
