@@ -927,7 +927,6 @@ static int max_tcpci_probe(struct i2c_client *client)
 	return 0;
 }
 
-#ifdef CONFIG_PM_SLEEP
 static int max_tcpci_resume(struct device *dev)
 {
 	struct i2c_client *client = to_i2c_client(dev);
@@ -965,9 +964,9 @@ static int max_tcpci_suspend(struct device *dev)
 
 	return ret;
 }
-#endif /* CONFIG_PM_SLEEP */
 
-static SIMPLE_DEV_PM_OPS(max_tcpci_pm_ops, max_tcpci_suspend, max_tcpci_resume);
+static DEFINE_SIMPLE_DEV_PM_OPS(max_tcpci_pm_ops, max_tcpci_suspend,
+				max_tcpci_resume);
 
 static const struct i2c_device_id max_tcpci_id[] = {
 	{ .name = "maxtcpc" },
@@ -986,7 +985,7 @@ static struct i2c_driver max_tcpci_i2c_driver = {
 		.name = "maxtcpc",
 		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
 		.of_match_table = max_tcpci_of_match,
-		.pm = &max_tcpci_pm_ops,
+		.pm = pm_sleep_ptr(&max_tcpci_pm_ops),
 	},
 	.probe = max_tcpci_probe,
 	.id_table = max_tcpci_id,
