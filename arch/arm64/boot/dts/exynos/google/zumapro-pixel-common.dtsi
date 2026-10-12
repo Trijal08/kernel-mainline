@@ -137,20 +137,14 @@
 &acpm_ipc {
 	pmic-1 {
 		compatible = "samsung,s2mpg14-pmic";
-		interrupt-parent = <&gic>;
 		/*
-		 * SPI 74, per the vendor device tree (interrupts = <0 0x4a 4 0>,
-		 * parent the GIC).  Nothing is delivered here yet whatever the
-		 * number: this PMIC raises an I3C in-band interrupt that the
-		 * SoC's VGPIO2AP block aggregates, and the handler has to demux
-		 * it out of that block's pending register.  Mainline has no
-		 * VGPIO support and sec-irq does not open the chip's IBIM1
-		 * in-band mask, so no PMIC event -- including the RTC alarm --
-		 * can arrive.  Match the vendor anyway, so the number is not
-		 * also wrong once that path exists.
+		 * The in-band interrupt, demultiplexed out of the shared I3C
+		 * line by the VGPIO2AP controller; slave index 0 is the main
+		 * PMIC.  The GIC line itself (SPI 74) belongs to that
+		 * controller, not here.
 		 */
-		interrupts = <GIC_SPI 74 IRQ_TYPE_LEVEL_HIGH 0>;
-		// interrupts-extended = <&gpa0 75 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-parent = <&vgpio2ap>;
+		interrupts = <0 IRQ_TYPE_LEVEL_HIGH>;
 		gpios = <&gpa9 4 GPIO_ACTIVE_LOW>,		/* SMPL_WARN_R_L */
 			<&gpa10 0 GPIO_ACTIVE_HIGH>,		/* OCP_WARN_CPUCL1_R */
 			<&gpa10 1 GPIO_ACTIVE_HIGH>,		/* OCP_WARN_CPUCL2_R */
