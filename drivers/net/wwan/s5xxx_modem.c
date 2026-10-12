@@ -47,6 +47,7 @@
 #include <linux/of_reserved_mem.h>
 #include <linux/pci.h>
 #include <linux/pcie-zumapro.h>
+#include <linux/pm_wakeirq.h>
 #include <linux/reset.h>
 #include <linux/sizes.h>
 #include <linux/skbuff.h>
@@ -4997,11 +4998,19 @@ static int s5xxx_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	/*
 	 * The CP asks for the link on this line, and it has to be able to do so
 	 * while the AP is asleep -- otherwise an incoming call or SMS waits for
-	 * something else to wake us.
+	 * something else to wake us.  Hand the line to the PM core as this
+	 * device's wake IRQ so it is armed and disarmed around each suspend,
+	 * and so a level arriving mid-suspend aborts it, rather than arming it
+	 * once at probe and leaving it armed for the lifetime of the driver.
 	 */
-	ret = enable_irq_wake(sm->cp2ap_irq);
+	ret = devm_device_init_wakeup(dev);
 	if (ret) {
-		dev_err(dev, "CP2AP_WAKEUP enable_irq_wake: %d\n", ret);
+		dev_err(dev, "CP2AP_WAKEUP init_wakeup: %d\n", ret);
+		goto err_cp2ap_irq;
+	}
+	ret = devm_pm_set_wake_irq(dev, sm->cp2ap_irq);
+	if (ret) {
+		dev_err(dev, "CP2AP_WAKEUP set_wake_irq: %d\n", ret);
 		goto err_cp2ap_irq;
 	}
 
@@ -5112,14 +5121,29 @@ static void s5xxx_remove(struct pci_dev *pdev)
  * in-kernel notion of call state; there is none here, so reject every high
  * level and let the suspend be retried once the CP parks.
  */
-static int s5xxx_suspend_noirq(struct device *dev)
+static int s5xxx_prepare(struct device *dev)
 {
 	struct s5xxx_modem *sm = dev_get_drvdata(dev);
 
-	if (gpiod_get_value(sm->cp2ap_wakeup)) {
-		dev_info(dev, "CP requests PCIe, aborting system suspend\n");
-		return -EBUSY;
-	}
+	if (!gpiod_get_value(sm->cp2ap_wakeup))
+		return 0;
+
+	/*
+	 * Report it as a wakeup event rather than failing a later callback:
+	 * the core then aborts at its next checkpoint, before anything has
+	 * suspended, and the count userspace reads reflects that the CP is why.
+	 * Failing suspend_noirq() instead would abort only after every device
+	 * had suspended and unwind all of them again.
+	 */
+	dev_dbg(dev, "CP requests PCIe, aborting system suspend\n");
+	pm_wakeup_event(dev, 0);
+
+	return -EBUSY;
+}
+
+static int s5xxx_suspend_noirq(struct device *dev)
+{
+	struct s5xxx_modem *sm = dev_get_drvdata(dev);
 
 	s5xxx_publish_kernel_time(sm);
 	return zumapro_pcie_modem_set_ap_active(sm->rc_dev, false);
@@ -5147,8 +5171,10 @@ static int s5xxx_resume_noirq(struct device *dev)
 	return ret;
 }
 
-static DEFINE_NOIRQ_DEV_PM_OPS(s5xxx_pm_ops, s5xxx_suspend_noirq,
-			       s5xxx_resume_noirq);
+static const struct dev_pm_ops s5xxx_pm_ops = {
+	.prepare = s5xxx_prepare,
+	NOIRQ_SYSTEM_SLEEP_PM_OPS(s5xxx_suspend_noirq, s5xxx_resume_noirq)
+};
 
 static const struct of_device_id s5xxx_of_match[] = {
 	{ .compatible = "samsung,s5300-modem", .data = &s5xxx_variant_s5300 },
