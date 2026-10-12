@@ -23,6 +23,7 @@
 #include <drm/drm_blend.h>
 #include <drm/drm_fourcc.h>
 #include <drm/drm_atomic.h>
+#include <drm/drm_connector.h>
 #include <drm/drm_framebuffer.h>
 #include <drm/drm_print.h>
 #include <video/videomode.h>
@@ -1658,6 +1659,32 @@ static void decon_set_mode(struct exynos_drm_crtc *crtc)
 	ctx->config.out_type = out_type;
 }
 
+/*
+ * The output bit depth comes from whatever is attached, and only a panel knows
+ * it -- there is no EDID on DSI.  decon_reg_set_bpc() and zuma_reg_set_bpc()
+ * both act only on 10 and treat everything else as 8, so an undeclared depth is
+ * 8 either way; reporting it is what lets a 10-bit panel select TEN_BPC_MODE.
+ */
+static unsigned int decon_connector_bpc(struct decon_context *ctx,
+					struct exynos_drm_crtc *crtc)
+{
+	struct drm_connector_list_iter iter;
+	struct drm_connector *connector;
+	unsigned int bpc = 8;
+
+	drm_connector_list_iter_begin(ctx->drm_dev, &iter);
+	drm_for_each_connector_iter(connector, &iter) {
+		if (!connector->state || connector->state->crtc != &crtc->base)
+			continue;
+		if (connector->display_info.bpc)
+			bpc = connector->display_info.bpc;
+		break;
+	}
+	drm_connector_list_iter_end(&iter);
+
+	return bpc;
+}
+
 static void decon_enable(struct exynos_drm_crtc *crtc)
 {
 	struct decon_context *ctx = crtc->ctx;
@@ -1690,6 +1717,7 @@ static void decon_enable(struct exynos_drm_crtc *crtc)
 	ctx->config.image_width = ctx->v_mode.hactive;
 	ctx->config.image_height = ctx->v_mode.vactive;
 	ctx->config.fps = drm_mode_vrefresh(&crtc->base.mode);
+	ctx->config.out_bpc = decon_connector_bpc(ctx, crtc);
 	ctx->config.dsc = crtc->dsc;
 
 	decon_set_mode(crtc);
