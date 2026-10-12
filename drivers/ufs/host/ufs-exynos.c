@@ -215,14 +215,18 @@ static inline void exynos_ufs_ungate_clks(struct exynos_ufs *ufs)
 	exynos_ufs_ctrl_clkstop(ufs, false);
 }
 
-static void exynos_ufs_mphy_apbclk_ctrl(struct exynos_ufs *ufs, bool en)
+/*
+ * Force the UniPro MCLK and M-PHY APB clocks on by taking them out of
+ * automatic control, so CAL can reach the M-PHY.  Downstream brackets CAL
+ * this way; exynos_ufs_restore_link_clk_ctrl() hands both back to automatic
+ * control once CAL has completed.
+ */
+static void exynos_ufs_force_cal_clks(struct exynos_ufs *ufs)
 {
 	u32 reg = hci_readl(ufs, HCI_MISC);
 
-	if (en)
-		hci_writel(ufs, reg | MPHY_APBCLK_CTRL_EN, HCI_MISC);
-	else
-		hci_writel(ufs, reg & ~MPHY_APBCLK_CTRL_EN, HCI_MISC);
+	reg &= ~(UNIPRO_MCLK_CTRL_EN | MPHY_APBCLK_CTRL_EN);
+	hci_writel(ufs, reg, HCI_MISC);
 }
 
 static void exynos_ufs_restore_link_clk_ctrl(struct exynos_ufs *ufs)
@@ -310,7 +314,7 @@ static int zuma_ufs_drv_init(struct exynos_ufs *ufs)
 	 * while runtime PM is disabled for bring-up; bracket this around CAL
 	 * if runtime PM is re-enabled later.
 	 */
-	exynos_ufs_mphy_apbclk_ctrl(ufs, false);
+	exynos_ufs_force_cal_clks(ufs);
 
 	return zuma_ufs_config_externals(ufs);
 }
@@ -1986,6 +1990,19 @@ static int exynos_ufs_resume(struct ufs_hba *hba, enum ufs_pm_op pm_op)
 	int ret;
 
 	if (!ufshcd_is_link_active(hba)) {
+		/*
+		 * HCI_MISC is lost with the UFS block.  After a real system
+		 * sleep the block has actually been powered down, so the UniPro
+		 * MCLK and M-PHY APB clocks have to be forced on again before
+		 * phy_power_on() replays the pre-link CAL -- otherwise CAL
+		 * cannot reach the M-PHY, its attribute reads come back as zero
+		 * and link startup fails with a lane-count mismatch.
+		 * exynos_ufs_pre_link() restores automatic clock control once
+		 * CAL has completed.
+		 */
+		if (ufs->opts & EXYNOS_UFS_OPT_RESTORE_MPHY_APBCLK)
+			exynos_ufs_force_cal_clks(ufs);
+
 		ret = phy_power_on(ufs->phy);
 		if (ret)
 			return ret;
