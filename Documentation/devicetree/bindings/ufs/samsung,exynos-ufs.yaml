@@ -16,7 +16,7 @@ properties:
   compatible:
     enum:
       - google,gs101-ufs
-      - google,zumapro-ufs
+      - google,zuma-ufs
       - samsung,exynos7-ufs
       - samsung,exynosautov9-ufs
       - samsung,exynosautov9-ufs-vh
@@ -93,7 +93,7 @@ allOf:
           contains:
             enum:
               - google,gs101-ufs
-              - google,zumapro-ufs
+              - google,zuma-ufs
 
     then:
       properties:
