@@ -1,0 +1,75 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/interrupt-controller/google,zuma-vgpio2ap.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Google Tensor VGPIO2AP interrupt demultiplexer
+
+maintainers:
+  - Trijal Saha <trijalsaha2012@gmail.com>
+
+description: >
+  The PMICs on Google Tensor boards sit on an I3C bus and raise in-band
+  interrupts rather than driving a wire. The SoC presents those to the AP as a
+  single shared interrupt together with two registers: a latch, which says that
+  an in-band interrupt arrived and is cleared by writing it back, and a monitor
+  word in the I3C block, whose first byte carries one bit per slave and so says
+  which of them raised it.
+
+  Despite the name nothing here is a GPIO - there is no line to read a level
+  from and none to drive - so this is described as what it is, an interrupt
+  controller that demultiplexes one parent interrupt into one child per slave.
+
+properties:
+  compatible:
+    enum:
+      - google,zuma-vgpio2ap
+
+  reg:
+    items:
+      - description: the pending latch, in the VGPIO2AP sysreg block
+      - description: the receive monitor, in the I3C block
+
+  reg-names:
+    items:
+      - const: ipend
+      - const: monitor
+
+  interrupts:
+    maxItems: 1
+    description: the shared in-band interrupt from the I3C bus
+
+  interrupt-controller: true
+
+  "#interrupt-cells":
+    const: 2
+    description:
+      The slave index, and the trigger flags. Index 0 is the main PMIC and
+      index 1 the sub PMIC; the flags are accepted for consistency with other
+      controllers and otherwise unused, since the trigger is a property of the
+      bus rather than of anything programmable here.
+
+required:
+  - compatible
+  - reg
+  - reg-names
+  - interrupts
+  - interrupt-controller
+  - "#interrupt-cells"
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/interrupt-controller/arm-gic.h>
+
+    interrupt-controller@15090290 {
+        compatible = "google,zuma-vgpio2ap";
+        reg = <0x15090290 0x4>, <0x15501704 0x4>;
+        reg-names = "ipend", "monitor";
+        interrupt-controller;
+        #interrupt-cells = <2>;
+        interrupt-parent = <&gic>;
+        interrupts = <GIC_SPI 74 IRQ_TYPE_LEVEL_HIGH 0>;
+    };
