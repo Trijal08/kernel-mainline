@@ -210,10 +210,12 @@
 
 	pmic-2 {
 		compatible = "samsung,s2mpg15-pmic";
-		interrupt-parent = <&gpa0>;
-		interrupts = <1 0 0>, // OCP_WARN_GPU
-			     <1 0 1>; // SOFT_OCP_WARN_GPU
-		// interrupts-extended = <&gpa0 76 IRQ_TYPE_LEVEL_HIGH>;
+		/*
+		 * As for the main PMIC, the in-band interrupt demultiplexed out
+		 * of the shared I3C line; slave index 1 is the sub PMIC.
+		 */
+		interrupt-parent = <&vgpio2ap>;
+		interrupts = <1 IRQ_TYPE_LEVEL_HIGH>;
 		gpios = <&gpp17 0 GPIO_ACTIVE_HIGH>,
 			<&gpp17 1 GPIO_ACTIVE_HIGH>;
 		pinctrl-names = "default";
