@@ -8,6 +8,7 @@
 
 #include <dt-bindings/gpio/gpio.h>
 #include <dt-bindings/spmi/spmi.h>
+#include <dt-bindings/reset/google,zuma-pcie.h>
 
 / {
 	/*
@@ -117,6 +118,19 @@
 		 */
 		firmware-name = "google/s5400/modem/images/default/modem.bin";
 		google,pcie = <&pcie_0>;
+		/*
+		 * The CP's bootloader drops the PCIe link part way through its
+		 * boot and re-requests it over CP2AP_WAKEUP, so the park and
+		 * the retrain are driven as the two halves of one reset with a
+		 * wait in between.  The two baseband resets are pulses: a cold
+		 * power cycle to put a crashed CP back in its boot ROM, and a
+		 * warm one that latches dump-notify so it comes back running
+		 * its minidump agent.
+		 */
+		resets = <&pcie_0 ZUMA_PCIE_RESET_LINK>,
+			 <&pcie_0 ZUMA_PCIE_RESET_CP_COLD>,
+			 <&pcie_0 ZUMA_PCIE_RESET_CP_DUMP>;
+		reset-names = "link", "cp-cold", "cp-dump";
 		samsung,doorbell-addr = <0x14e60000>;
 		cp2ap-wakeup-gpios = <&gpa5 1 GPIO_ACTIVE_HIGH>;
 		/* CP2AP_PHONE_ACTIVE (../fdt.dts gpio_cp2ap_phone_active): high
