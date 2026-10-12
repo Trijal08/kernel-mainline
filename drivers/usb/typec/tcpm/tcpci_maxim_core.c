@@ -492,6 +492,13 @@ static int max_tcpci_sbu_switch(struct max_tcpci_chip *chip, bool dp)
 	return ret;
 }
 
+/* Route the SBU pair to the debug UART.  Only called when conf_sbu is set. */
+static int max_tcpci_sbu_uart(struct max_tcpci_chip *chip)
+{
+	return max_tcpci_write8(chip, TCPC_VENDOR_SBUSW_CTRL,
+				SBUSW_SERIAL_UART);
+}
+
 static int max_tcpci_mux_set(struct typec_mux_dev *mux,
 			     struct typec_mux_state *state)
 {
@@ -870,12 +877,11 @@ static int max_tcpci_probe(struct i2c_client *client)
 	}
 
 	/*
-	 * Put the pair on the UART once, here, rather than trusting whatever the
-	 * bootloader left: the switch survives a detach, but not a reprobe.
+	 * Put the pair on the UART, rather than trusting whatever the bootloader
+	 * left: the switch survives a detach, but not a reprobe or a suspend.
 	 */
 	if (max_tcpci_conf_sbu) {
-		ret = max_tcpci_write8(chip, TCPC_VENDOR_SBUSW_CTRL,
-				       SBUSW_SERIAL_UART);
+		ret = max_tcpci_sbu_uart(chip);
 		if (ret < 0)
 			return dev_err_probe(&client->dev, ret,
 					     "Failed to route SBU to the debug UART\n");
@@ -929,6 +935,22 @@ static int max_tcpci_resume(struct device *dev)
 
 	if (client->irq && device_may_wakeup(dev))
 		ret = disable_irq_wake(client->irq);
+
+	/*
+	 * The SBU switch does not survive suspend, and with the pair carrying a
+	 * console the first thing lost is the log that would say so.  Put it
+	 * back before anything else gets a chance to want it.
+	 */
+	if (max_tcpci_conf_sbu) {
+		int sbu_ret = max_tcpci_sbu_uart(i2c_get_clientdata(client));
+
+		if (sbu_ret < 0) {
+			dev_err(dev, "Failed to restore SBU to the debug UART: %d\n",
+				sbu_ret);
+			if (!ret)
+				ret = sbu_ret;
+		}
+	}
 
 	return ret;
 }
