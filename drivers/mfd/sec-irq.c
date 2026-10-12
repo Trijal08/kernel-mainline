@@ -12,6 +12,8 @@
 #include <linux/mfd/samsung/irq.h>
 #include <linux/mfd/samsung/s2mpg10.h>
 #include <linux/mfd/samsung/s2mpg11.h>
+#include <linux/mfd/samsung/s2mpg14.h>
+#include <linux/mfd/samsung/s2mpg15.h>
 #include <linux/mfd/samsung/s2mps11.h>
 #include <linux/mfd/samsung/s2mps14.h>
 #include <linux/mfd/samsung/s2mpu02.h>
@@ -344,6 +346,103 @@ static const struct regmap_irq_chip s2mpg11_irq_chip_pmic = {
 	.num_irqs = ARRAY_SIZE(s2mpg11_pmic_irqs),
 };
 
+/*
+ * S2MPG14 and S2MPG15 have no top-level interrupt register to read: they raise
+ * in-band interrupts on the I3C bus, the SoC latches which slave spoke, and an
+ * irqchip there demultiplexes that into one interrupt per PMIC.  So unlike
+ * S2MPG10 and S2MPG11 there is nothing to chain beneath -- the PMIC block's
+ * own interrupts hang directly off the interrupt the SoC hands us.
+ */
+static const struct regmap_irq s2mpg14_pmic_irqs[] = {
+	REGMAP_IRQ_REG(S2MPG14_IRQ_PWRONF, 0, S2MPG14_IRQ_PWRONF_MASK),
+	REGMAP_IRQ_REG(S2MPG14_IRQ_PWRONR, 0, S2MPG14_IRQ_PWRONR_MASK),
+	REGMAP_IRQ_REG(S2MPG14_IRQ_JIGONBF, 0, S2MPG14_IRQ_JIGONBF_MASK),
+	REGMAP_IRQ_REG(S2MPG14_IRQ_JIGONBR, 0, S2MPG14_IRQ_JIGONBR_MASK),
+	REGMAP_IRQ_REG(S2MPG14_IRQ_ACOKBF, 0, S2MPG14_IRQ_ACOKBF_MASK),
+	REGMAP_IRQ_REG(S2MPG14_IRQ_ACOKBR, 0, S2MPG14_IRQ_ACOKBR_MASK),
+	REGMAP_IRQ_REG(S2MPG14_IRQ_PWRON1S, 0, S2MPG14_IRQ_PWRON1S_MASK),
+	REGMAP_IRQ_REG(S2MPG14_IRQ_MRB, 0, S2MPG14_IRQ_MRB_MASK),
+
+	REGMAP_IRQ_REG(S2MPG14_IRQ_RTC60S, 1, S2MPG14_IRQ_RTC60S_MASK),
+	REGMAP_IRQ_REG(S2MPG14_IRQ_RTCA1, 1, S2MPG14_IRQ_RTCA1_MASK),
+	REGMAP_IRQ_REG(S2MPG14_IRQ_RTCA0, 1, S2MPG14_IRQ_RTCA0_MASK),
+	REGMAP_IRQ_REG(S2MPG14_IRQ_RTC1S, 1, S2MPG14_IRQ_RTC1S_MASK),
+	REGMAP_IRQ_REG(S2MPG14_IRQ_WTSR_COLDRST, 1, S2MPG14_IRQ_WTSR_COLDRST_MASK),
+	REGMAP_IRQ_REG(S2MPG14_IRQ_WTSR, 1, S2MPG14_IRQ_WTSR_MASK),
+	REGMAP_IRQ_REG(S2MPG14_IRQ_WRST, 1, S2MPG14_IRQ_WRST_MASK),
+	REGMAP_IRQ_REG(S2MPG14_IRQ_SMPL, 1, S2MPG14_IRQ_SMPL_MASK),
+
+	REGMAP_IRQ_REG(S2MPG14_IRQ_120C, 2, S2MPG14_IRQ_INT120C_MASK),
+	REGMAP_IRQ_REG(S2MPG14_IRQ_140C, 2, S2MPG14_IRQ_INT140C_MASK),
+	REGMAP_IRQ_REG(S2MPG14_IRQ_TSD, 2, S2MPG14_IRQ_TSD_MASK),
+	REGMAP_IRQ_REG(S2MPG14_IRQ_SCL_SOFTRST, 2, S2MPG14_IRQ_SCL_SOFTRST_MASK),
+	REGMAP_IRQ_REG(S2MPG14_IRQ_WLWP_ACC, 2, S2MPG14_IRQ_WLWP_ACC_MASK),
+
+	REGMAP_IRQ_REG(S2MPG14_IRQ_OCP_B1M, 3, S2MPG14_IRQ_OCP_B1M_MASK),
+	REGMAP_IRQ_REG(S2MPG14_IRQ_OCP_B2M, 3, S2MPG14_IRQ_OCP_B2M_MASK),
+	REGMAP_IRQ_REG(S2MPG14_IRQ_OCP_B3M, 3, S2MPG14_IRQ_OCP_B3M_MASK),
+	REGMAP_IRQ_REG(S2MPG14_IRQ_OCP_B4M, 3, S2MPG14_IRQ_OCP_B4M_MASK),
+	REGMAP_IRQ_REG(S2MPG14_IRQ_OCP_B5M, 3, S2MPG14_IRQ_OCP_B5M_MASK),
+	REGMAP_IRQ_REG(S2MPG14_IRQ_OCP_B6M, 3, S2MPG14_IRQ_OCP_B6M_MASK),
+	REGMAP_IRQ_REG(S2MPG14_IRQ_OCP_B7M, 3, S2MPG14_IRQ_OCP_B7M_MASK),
+	REGMAP_IRQ_REG(S2MPG14_IRQ_OCP_B8M, 3, S2MPG14_IRQ_OCP_B8M_MASK),
+
+	REGMAP_IRQ_REG(S2MPG14_IRQ_OCP_B9M, 4, S2MPG14_IRQ_OCP_B9M_MASK),
+	REGMAP_IRQ_REG(S2MPG14_IRQ_SMPL_TIMEOUT, 4, S2MPG14_IRQ_SMPL_TIMEOUT_MASK),
+	REGMAP_IRQ_REG(S2MPG14_IRQ_WTSR_TIMEOUT, 4, S2MPG14_IRQ_WTSR_TIMEOUT_MASK),
+};
+
+static const struct regmap_irq_chip s2mpg14_irq_chip = {
+	.name = "s2mpg14",
+	.status_base = S2MPG14_PMIC_INT1,
+	.mask_base = S2MPG14_PMIC_INT1M,
+	.num_regs = 5,
+	.irqs = s2mpg14_pmic_irqs,
+	.num_irqs = ARRAY_SIZE(s2mpg14_pmic_irqs),
+};
+
+static const struct regmap_irq s2mpg15_pmic_irqs[] = {
+	REGMAP_IRQ_REG(S2MPG15_IRQ_PWR_OFF, 0, S2MPG15_IRQ_PWR_OFF_MASK),
+	REGMAP_IRQ_REG(S2MPG15_IRQ_PWR_ON, 0, S2MPG15_IRQ_PWR_ON_MASK),
+	REGMAP_IRQ_REG(S2MPG15_IRQ_120C, 0, S2MPG15_IRQ_INT120C_MASK),
+	REGMAP_IRQ_REG(S2MPG15_IRQ_140C, 0, S2MPG15_IRQ_INT140C_MASK),
+	REGMAP_IRQ_REG(S2MPG15_IRQ_TSD, 0, S2MPG15_IRQ_TSD_MASK),
+	REGMAP_IRQ_REG(S2MPG15_IRQ_WRST, 0, S2MPG15_IRQ_WRST_MASK),
+	REGMAP_IRQ_REG(S2MPG15_IRQ_WTSR, 0, S2MPG15_IRQ_WTSR_MASK),
+
+	REGMAP_IRQ_REG(S2MPG15_IRQ_SCL_SOFTRST, 1, S2MPG15_IRQ_SCL_SOFTRST_MASK),
+	REGMAP_IRQ_REG(S2MPG15_IRQ_UV_BB, 1, S2MPG15_IRQ_UV_BB_MASK),
+	REGMAP_IRQ_REG(S2MPG15_IRQ_BB_NTR_DET, 1, S2MPG15_IRQ_BB_NTR_DET_MASK),
+	REGMAP_IRQ_REG(S2MPG15_IRQ_WLWP_ACC, 1, S2MPG15_IRQ_WLWP_ACC_MASK),
+
+	REGMAP_IRQ_REG(S2MPG15_IRQ_OCP_B1S, 2, S2MPG15_IRQ_OCP_B1S_MASK),
+	REGMAP_IRQ_REG(S2MPG15_IRQ_OCP_B2S, 2, S2MPG15_IRQ_OCP_B2S_MASK),
+	REGMAP_IRQ_REG(S2MPG15_IRQ_OCP_B3S, 2, S2MPG15_IRQ_OCP_B3S_MASK),
+	REGMAP_IRQ_REG(S2MPG15_IRQ_OCP_B4S, 2, S2MPG15_IRQ_OCP_B4S_MASK),
+	REGMAP_IRQ_REG(S2MPG15_IRQ_OCP_B5S, 2, S2MPG15_IRQ_OCP_B5S_MASK),
+	REGMAP_IRQ_REG(S2MPG15_IRQ_OCP_B6S, 2, S2MPG15_IRQ_OCP_B6S_MASK),
+	REGMAP_IRQ_REG(S2MPG15_IRQ_OCP_B7S, 2, S2MPG15_IRQ_OCP_B7S_MASK),
+	REGMAP_IRQ_REG(S2MPG15_IRQ_OCP_B8S, 2, S2MPG15_IRQ_OCP_B8S_MASK),
+
+	REGMAP_IRQ_REG(S2MPG15_IRQ_OCP_B9S, 3, S2MPG15_IRQ_OCP_B9S_MASK),
+	REGMAP_IRQ_REG(S2MPG15_IRQ_OCP_B10S, 3, S2MPG15_IRQ_OCP_B10S_MASK),
+	REGMAP_IRQ_REG(S2MPG15_IRQ_OCP_B11S, 3, S2MPG15_IRQ_OCP_B11S_MASK),
+	REGMAP_IRQ_REG(S2MPG15_IRQ_OCP_B12S, 3, S2MPG15_IRQ_OCP_B12S_MASK),
+	REGMAP_IRQ_REG(S2MPG15_IRQ_OCP_BDS, 3, S2MPG15_IRQ_OCP_BDS_MASK),
+	REGMAP_IRQ_REG(S2MPG15_IRQ_OCP_BAS, 3, S2MPG15_IRQ_OCP_BAS_MASK),
+	REGMAP_IRQ_REG(S2MPG15_IRQ_OCP_BCS, 3, S2MPG15_IRQ_OCP_BCS_MASK),
+	REGMAP_IRQ_REG(S2MPG15_IRQ_OCP_BBS, 3, S2MPG15_IRQ_OCP_BBS_MASK),
+};
+
+static const struct regmap_irq_chip s2mpg15_irq_chip = {
+	.name = "s2mpg15",
+	.status_base = S2MPG15_PMIC_INT1,
+	.mask_base = S2MPG15_PMIC_INT1M,
+	.num_regs = 4,
+	.irqs = s2mpg15_pmic_irqs,
+	.num_irqs = ARRAY_SIZE(s2mpg15_pmic_irqs),
+};
+
 static const struct regmap_irq_chip s2mps11_irq_chip = {
 	.name = "s2mps11",
 	.irqs = s2mps11_irqs,
@@ -438,6 +537,60 @@ s2mpg1x_add_chained_pmic(struct sec_pmic_dev *sec_pmic, int pirq,
 	return data;
 }
 
+/*
+ * The in-band interrupt a S2MPG14 or S2MPG15 raises only leaves the chip if the
+ * matching source is enabled in COMMON_IBIM1, which resets masked.  Enabling it
+ * is all the setup these chips need; the SoC side has already worked out which
+ * slave spoke by the time the interrupt arrives here.
+ */
+static struct regmap_irq_chip_data *sec_irq_init_s2mpg1415(struct sec_pmic_dev *sec_pmic)
+{
+	const struct regmap_irq_chip *irq_chip;
+	struct regmap_irq_chip_data *irq_data;
+	unsigned int ibim1, src_pmic;
+	struct regmap *regmap_common;
+	int ret;
+
+	switch (sec_pmic->device_type) {
+	case S2MPG14:
+		irq_chip = &s2mpg14_irq_chip;
+		ibim1 = S2MPG14_COMMON_IBIM1;
+		src_pmic = S2MPG14_COMMON_INT_SRC_PMIC;
+		break;
+	case S2MPG15:
+		irq_chip = &s2mpg15_irq_chip;
+		ibim1 = S2MPG15_COMMON_IBIM1;
+		src_pmic = S2MPG15_COMMON_INT_SRC_PMIC;
+		break;
+	default:
+		return dev_err_ptr_probe(sec_pmic->dev, -EINVAL, "Unsupported device type %d\n",
+					 sec_pmic->device_type);
+	}
+
+	regmap_common = dev_get_regmap(sec_pmic->dev, "common");
+	if (!regmap_common)
+		return dev_err_ptr_probe(sec_pmic->dev, -EINVAL, "No 'common' regmap %d\n",
+					 sec_pmic->device_type);
+
+	/*
+	 * Only the PMIC block's source is enabled.  The meter block has its own
+	 * source bit, but none of its interrupts are claimed here, and an
+	 * in-band interrupt that nobody acknowledges is simply raised again.
+	 */
+	ret = regmap_clear_bits(regmap_common, ibim1, src_pmic);
+	if (ret)
+		return dev_err_ptr_probe(sec_pmic->dev, ret,
+					 "Failed to enable in-band interrupts\n");
+
+	ret = devm_regmap_add_irq_chip(sec_pmic->dev, sec_pmic->regmap_pmic, sec_pmic->irq,
+				       IRQF_ONESHOT, 0, irq_chip, &irq_data);
+	if (ret)
+		return dev_err_ptr_probe(sec_pmic->dev, ret, "Failed to add %s IRQ chip\n",
+					 irq_chip->name);
+
+	return irq_data;
+}
+
 static struct regmap_irq_chip_data *sec_irq_init_s2mpg1x(struct sec_pmic_dev *sec_pmic)
 {
 	const struct regmap_irq_chip *irq_chip, *chained_irq_chip;
@@ -453,16 +606,6 @@ static struct regmap_irq_chip_data *sec_irq_init_s2mpg1x(struct sec_pmic_dev *se
 		chained_pirq = S2MPG10_COMMON_IRQ_PMIC;
 		break;
 	case S2MPG11:
-		irq_chip = &s2mpg11_irq_chip;
-		chained_irq_chip = &s2mpg11_irq_chip_pmic;
-		chained_pirq = S2MPG11_COMMON_IRQ_PMIC;
-		break;
-	case S2MPG14:
-		irq_chip = &s2mpg10_irq_chip;
-		chained_irq_chip = &s2mpg10_irq_chip_pmic;
-		chained_pirq = S2MPG10_COMMON_IRQ_PMIC;
-		break;
-	case S2MPG15:
 		irq_chip = &s2mpg11_irq_chip;
 		chained_irq_chip = &s2mpg11_irq_chip_pmic;
 		chained_pirq = S2MPG11_COMMON_IRQ_PMIC;
@@ -503,9 +646,10 @@ struct regmap_irq_chip_data *sec_irq_init(struct sec_pmic_dev *sec_pmic)
 		break;
 	case S2MPG10:
 	case S2MPG11:
+		return sec_irq_init_s2mpg1x(sec_pmic);
 	case S2MPG14:
 	case S2MPG15:
-		return sec_irq_init_s2mpg1x(sec_pmic);
+		return sec_irq_init_s2mpg1415(sec_pmic);
 	case S2MPS11X:
 		sec_irq_chip = &s2mps11_irq_chip;
 		break;
