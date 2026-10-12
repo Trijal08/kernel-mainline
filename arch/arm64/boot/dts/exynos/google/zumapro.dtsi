@@ -4385,6 +4385,22 @@
 			reg = <0x15470000 0x10000>;
 		};
 
+		/*
+		 * The PMICs raise I3C in-band interrupts, which arrive as one
+		 * shared line plus a register saying which slave asserted.  The
+		 * two regs live in different blocks: the latch in the VGPIO2AP
+		 * sysreg, the receive monitor in the I3C block.
+		 */
+		vgpio2ap: interrupt-controller@15090290 {
+			compatible = "google,zuma-vgpio2ap";
+			reg = <0x15090290 0x4>, <0x15501704 0x4>;
+			reg-names = "ipend", "monitor";
+			interrupt-controller;
+			#interrupt-cells = <2>;
+			interrupt-parent = <&gic>;
+			interrupts = <GIC_SPI 74 IRQ_TYPE_LEVEL_HIGH 0>;
+		};
+
 		pinctrl_gpio_alive: pinctrl@154d0000 {
 			compatible = "google,zuma-pinctrl";
 			reg = <0x154d0000 0x00001000>;
