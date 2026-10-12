@@ -1073,7 +1073,17 @@ static struct iommu_domain *exynos_iommu_domain_alloc_paging(struct device *dev)
 	domain->domain.pgsize_bitmap = SECT_SIZE | LPAGE_SIZE | SPAGE_SIZE;
 
 	domain->domain.geometry.aperture_start = 0;
-	domain->domain.geometry.aperture_end   = ~0UL;
+	/*
+	 * The first-level table has NUM_LV1ENTRIES entries of SECT_SIZE each,
+	 * so it can only describe the first 4 GiB, and sysmmu_iova_t is u32 --
+	 * an address above that is truncated on its way into lv1ent_offset()
+	 * and aliases onto some other buffer's entry.  ~0UL was the same 4 GiB
+	 * back when this driver was 32-bit only; on 64-bit it claims an
+	 * aperture 4 billion times larger than the table, and the DMA-IOMMU
+	 * allocator will happily hand out an IOVA from up there.
+	 */
+	domain->domain.geometry.aperture_end   =
+		(dma_addr_t)NUM_LV1ENTRIES * SECT_SIZE - 1;
 	domain->domain.geometry.force_aperture = true;
 
 	return &domain->domain;
