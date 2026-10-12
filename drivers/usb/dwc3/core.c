@@ -864,6 +864,8 @@ static int dwc3_phy_init(struct dwc3 *dwc)
 	if (!DWC3_VER_IS_WITHIN(DWC3, ANY, 194A))
 		dwc3_enable_susphy(dwc, true);
 
+	dwc->phys_initialized = true;
+
 	return 0;
 
 err_exit_usb3_phy:
@@ -892,6 +894,8 @@ static void dwc3_phy_exit(struct dwc3 *dwc)
 
 	usb_phy_shutdown(dwc->usb3_phy);
 	usb_phy_shutdown(dwc->usb2_phy);
+
+	dwc->phys_initialized = false;
 }
 
 static int dwc3_phy_power_on(struct dwc3 *dwc)
@@ -1380,9 +1384,18 @@ int dwc3_core_init(struct dwc3 *dwc)
 		dwc->phys_ready = true;
 	}
 
-	ret = dwc3_phy_init(dwc);
-	if (ret)
-		goto err_exit_ulpi;
+	/*
+	 * On platforms where the PHY/link gates access to the DWC3 global
+	 * register block, dwc3_core_init_for_resume() initialises the PHY(s)
+	 * before this point so that dwc3_phy_setup() above can read the GUSB*
+	 * registers. The phy framework refcounts init, so skip the redundant
+	 * call here to keep phy_init()/phy_exit() balanced.
+	 */
+	if (!dwc->phys_initialized) {
+		ret = dwc3_phy_init(dwc);
+		if (ret)
+			goto err_exit_ulpi;
+	}
 
 	ret = dwc3_core_soft_reset(dwc);
 	if (ret)
@@ -1693,6 +1706,20 @@ static void dwc3_get_software_properties(struct dwc3 *dwc,
 
 	if (properties->needs_full_reinit)
 		dwc->needs_full_reinit = true;
+
+	/*
+	 * Platform integration quirk (e.g. Samsung/Google USBDRD): the PHY/link
+	 * gates access to the DWC3 global register block, so on system resume
+	 * the PHY must be initialised before dwc3_phy_setup() reads GUSB*. The
+	 * property lives on the Exynos glue (parent) node, so walk the parents.
+	 */
+	for (tmpdev = dwc->dev; tmpdev; tmpdev = tmpdev->parent) {
+		if (device_property_read_bool(tmpdev,
+					      "samsung,phy-init-before-setup")) {
+			dwc->phy_init_before_setup = true;
+			break;
+		}
+	}
 
 	dwc->gsbuscfg0_reqinfo = DWC3_GSBUSCFG0_REQINFO_UNSPECIFIED;
 
@@ -2525,12 +2552,31 @@ static int dwc3_core_init_for_resume(struct dwc3 *dwc)
 	if (ret)
 		goto assert_reset;
 
+	/*
+	 * On platforms such as Zumapro the USBDRD PHY/link gates access to the
+	 * DWC3 global register block: suspend ran dwc3_core_exit() ->
+	 * phy_exit(), which isolates the link, and dwc3_core_init() ->
+	 * dwc3_phy_setup() reads GUSB* registers before dwc3_phy_init() restores
+	 * it, which hangs. This also has to be balanced by the consumer itself,
+	 * because an aborted suspend can resume the (already suspended) DWC3
+	 * without resuming the PHY provider. Re-initialise the PHY(s) up front;
+	 * dwc3_core_init() then skips its own dwc3_phy_init() (phys_initialized).
+	 */
+	if (dwc->phy_init_before_setup) {
+		ret = dwc3_phy_init(dwc);
+		if (ret)
+			goto disable_clks;
+	}
+
 	ret = dwc3_core_init(dwc);
 	if (ret)
-		goto disable_clks;
+		goto exit_phys;
 
 	return 0;
 
+exit_phys:
+	if (dwc->phys_initialized)
+		dwc3_phy_exit(dwc);
 disable_clks:
 	dwc3_clk_disable(dwc);
 assert_reset:
