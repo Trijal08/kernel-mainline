@@ -683,6 +683,21 @@ static int zuma_dsim_cold_init(struct zuma_dsim *dsim)
 }
 
 
+/*
+ * Is the D-PHY PLL already locked?  That means the link is live: either the
+ * bootloader left it streaming, or this is a re-entry on a link we brought up
+ * ourselves.  Relocking the PLL and resetting the PHY underneath a live link
+ * leaves the lanes unable to push a command packet, so every panel DCS times
+ * out and the DDIC is never programmed for the stream -- a glitching or black
+ * panel.  The full bring-up therefore has to be reserved for a link that is
+ * actually down.
+ */
+static bool zuma_dsim_pll_is_stable(struct zuma_dsim *dsim)
+{
+	return readl(dsim->phy_regs + DSIM_PHY_PLL_STAT0) &
+	       DSIM_PHY_PLL_STAT0_PLL_LOCK;
+}
+
 static void zuma_dsim_configure(struct zuma_dsim *dsim)
 {
 	u32 stable_vfp, te_protect, te_tout, hs_ready;
@@ -692,8 +707,16 @@ static void zuma_dsim_configure(struct zuma_dsim *dsim)
 	if (!dsim->regs || !hs_mbps || !dsim->hactive)
 		return;
 
-	/* Own the link: always bring the DCPHY/PLL/lanes up from scratch. */
-	zuma_dsim_cold_init(dsim);
+	/*
+	 * Own the link, but bring it up from scratch only when it is down: a
+	 * cold boot, or a resume that took the PHY's power with it.  Over a link
+	 * that is still running -- a mode change, a resume that kept the PHY
+	 * alive -- reprogram the link registers and leave the PHY alone.
+	 */
+	if (zuma_dsim_pll_is_stable(dsim))
+		zuma_dsim_set_config(dsim);
+	else
+		zuma_dsim_cold_init(dsim);
 
 	/*
 	 * Command-mode transfer TE timing (vendor dsim_reg_set_config subset).
