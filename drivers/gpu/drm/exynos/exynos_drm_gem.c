@@ -20,7 +20,15 @@
 #include "exynos_drm_drv.h"
 #include "exynos_drm_gem.h"
 
-static bool dumb_contig = true;
+/*
+ * Kept so the old behaviour can be restored without a rebuild, now that the
+ * corruption it worked around is understood: the IOMMU domain claimed an
+ * aperture far wider than its page table could describe, so a scattered
+ * buffer's mapping could be installed against a truncated IOVA and alias
+ * onto an unrelated buffer.  With that fixed, scattered buffers map
+ * correctly and there is no reason to spend CMA on scanout.
+ */
+static bool dumb_contig;
 module_param(dumb_contig, bool, 0644);
 MODULE_PARM_DESC(dumb_contig, "allocate dumb buffers physically contiguous");
 
