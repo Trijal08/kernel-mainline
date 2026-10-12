@@ -145,6 +145,16 @@ static int max_contaminant_read_resistance_kohm(struct max_tcpci_chip *chip,
 		return mv;
 	}
 
+	/*
+	 * Measuring the SBU pair means driving a current source onto it and
+	 * closing the switches that select it, which would corrupt a console
+	 * running on those pins.  Report the pair clean instead: detection needs
+	 * both the CC and the SBU side to read low, so the CC measurement below
+	 * still decides, it just can no longer be confirmed by SBU.
+	 */
+	if (max_tcpci_conf_sbu)
+		return CONTAMINANT_THRESHOLD_SBU_K;
+
 	ret = regmap_update_bits(regmap, TCPC_VENDOR_CC_CTRL2, SBUOVPDIS, SBUOVPDIS);
 	if (ret < 0)
 		return ret;
