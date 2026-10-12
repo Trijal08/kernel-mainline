@@ -661,9 +661,62 @@ static void exynos_zuma_pcie_stop_link(struct dw_pcie *pci)
 	exynos_pcie_writel(pci->elbi_base, 0, PCIE_ZUMA_APP_LTSSM_ENABLE);
 }
 
+/*
+ * Broadcast PME_Turn_Off and wait for the ack, mirroring the vendor
+ * exynos_pcie_rc_send_pme_turn_off().  The DWC core's generic version sends the
+ * message through an outbound ATU window, which this controller does not set
+ * up; it has a dedicated ELBI trigger instead.
+ *
+ * Only run while the link is really up.  The endpoint still drives CLKREQ# in
+ * that window so the ELBI access is safe, and an orderly L2 entry is what lets
+ * an endpoint keep state across the power-down -- the modem's bootloader keeps
+ * its inbound doorbell decode armed through an L2 park but not through a
+ * surprise PERST at L1.  Proceed on a timeout, as downstream does, but say so.
+ *
+ * The core waits for L2 afterwards, via dw_pcie_ops.get_ltssm.
+ */
+static void exynos_zuma_pcie_pme_turn_off(struct dw_pcie_rp *pp)
+{
+	struct dw_pcie *pci = to_dw_pcie_from_pp(pp);
+	struct exynos_pcie *ep = to_exynos_pcie(pci);
+	void __iomem *elbi = pci->elbi_base;
+	enum dw_pcie_ltssm ltssm;
+	u32 val;
+	int ret;
+
+	ltssm = exynos_zuma_pcie_get_ltssm(pci);
+	if (ltssm < DW_PCIE_LTSSM_RCVRY_LOCK || ltssm > DW_PCIE_LTSSM_L1_IDLE) {
+		dev_dbg(pci->dev, "link not up (ltssm %#x); no PME_Turn_Off\n",
+			ltssm);
+		return;
+	}
+
+	/* PCIE_IRQ_PULSE is write-1-to-clear; drop any stale PM_TO_ACK. */
+	val = exynos_pcie_readl(elbi, PCIE_IRQ_PULSE);
+	exynos_pcie_writel(elbi, val, PCIE_IRQ_PULSE);
+
+	/* Bring the link out of L1 and keep it out, so the message gets sent. */
+	exynos_pcie_writel(elbi, 1, PCIE_APP_REQ_EXIT_L1);
+	val = exynos_pcie_readl(elbi, PCIE_ZUMA_APP_REQ_EXIT_L1);
+	val &= ~APP_REQ_EXIT_L1_MODE;
+	val |= L1_REQ_NAK_CTRL_MASTER;
+	exynos_pcie_writel(elbi, val, PCIE_ZUMA_APP_REQ_EXIT_L1);
+
+	exynos_pcie_writel(elbi, 1, PCIE_XMIT_PME_TURNOFF);
+	ret = readl_poll_timeout(elbi + PCIE_IRQ_PULSE, val,
+				 val & IRQ_RADM_PM_TO_ACK,
+				 PCIE_L2_ENTER_WAIT_STEP_US,
+				 PCIE_L2_ENTER_WAIT_US);
+	if (ret)
+		dev_warn(pci->dev, "no PM_TO_ACK (irq %#x)\n", val);
+	udelay(10);
+	exynos_pcie_writel(elbi, 0, PCIE_XMIT_PME_TURNOFF);
+}
+
 static const struct dw_pcie_host_ops exynos_zuma_pcie_host_ops = {
 	.init = exynos_zuma_pcie_host_init,
 	.deinit = exynos_pcie_host_exit,
+	.pme_turn_off = exynos_zuma_pcie_pme_turn_off,
 };
 
 static int exynos_add_pcie_port(struct exynos_pcie *ep,
@@ -1043,7 +1096,7 @@ int zumapro_pcie_modem_link_down(struct device *rc_dev)
 {
 	struct exynos_pcie *ep = zumapro_pcie_from_dev(rc_dev);
 	void __iomem *elbi;
-	u32 val, mode;
+	u32 val;
 	int ret;
 
 	if (!ep)
@@ -1073,51 +1126,23 @@ int zumapro_pcie_modem_link_down(struct device *rc_dev)
 	usleep_range(5000, 6000);
 
 	/*
-	 * Orderly L2 power-down BEFORE PERST: PME_Turn_Off -> wait PM_TO_ACK ->
-	 * wait for the link to reach L2_IDLE, mirroring the vendor
-	 * exynos_pcie_rc_send_pme_turn_off().  At runtime (CP-driven PM) the CP's
-	 * inbound doorbell decode survives an orderly L2 entry but NOT a surprise
-	 * PERST-at-L1, so MAIN keeps its runtime IPC armed across the relink; a
-	 * bare PERST here would drop MAIN.  Only run it while the link is up (LTSSM
-	 * in the recovery..L1 range); ELBI access is safe -- the EP still drives
-	 * CLKREQ#.  Proceed on timeout (like downstream) but log the reached state.
+	 * Orderly L2 power-down BEFORE PERST, or MAIN does not survive the
+	 * relink: at runtime the CP keeps its inbound doorbell decode armed
+	 * through an L2 park but not through a surprise PERST at L1.  The wait
+	 * for L2_IDLE is what dw_pcie_suspend_noirq() does after the same call.
 	 */
-	val = exynos_pcie_readl(elbi, PCIE_ZUMA_RDLH_LINKUP) & LTSSM_STATE_MASK;
-	dev_dbg(ep->pci.dev, "link_down: entry ltssm %#x\n", val);
-	if (val >= DW_PCIE_LTSSM_RCVRY_LOCK && val <= DW_PCIE_LTSSM_L1_IDLE) {
-		/* PCIE_IRQ_PULSE is write-1-to-clear; clear any stale PM_TO_ACK. */
-		val = exynos_pcie_readl(elbi, PCIE_IRQ_PULSE);
-		exynos_pcie_writel(elbi, val, PCIE_IRQ_PULSE);
-
-		exynos_pcie_writel(elbi, 1, PCIE_APP_REQ_EXIT_L1);
-		mode = exynos_pcie_readl(elbi, PCIE_ZUMA_APP_REQ_EXIT_L1);
-		mode &= ~APP_REQ_EXIT_L1_MODE;
-		mode |= L1_REQ_NAK_CTRL_MASTER;
-		exynos_pcie_writel(elbi, mode, PCIE_ZUMA_APP_REQ_EXIT_L1);
-
-		exynos_pcie_writel(elbi, 1, PCIE_XMIT_PME_TURNOFF);
-		ret = readl_poll_timeout(elbi + PCIE_IRQ_PULSE, val,
-					 val & IRQ_RADM_PM_TO_ACK,
-					 PCIE_L2_ENTER_WAIT_STEP_US,
-					 PCIE_L2_ENTER_WAIT_US);
-		if (ret)
-			dev_warn(ep->pci.dev,
-				 "no PM_TO_ACK from CP (irq %#x)\n", val);
-		udelay(10);
-		exynos_pcie_writel(elbi, 0, PCIE_XMIT_PME_TURNOFF);
-
-		ret = readl_poll_timeout(elbi + PCIE_ZUMA_RDLH_LINKUP, val,
-					 (val & LTSSM_STATE_MASK) ==
-					 DW_PCIE_LTSSM_L2_IDLE,
-					 PCIE_L2_ENTER_WAIT_STEP_US,
-					 PCIE_L2_ENTER_WAIT_US);
-		if (ret)
-			dev_info(ep->pci.dev,
-				 "link_down: did NOT reach L2_IDLE (ltssm %#x)\n",
-				 val & LTSSM_STATE_MASK);
-		else
-			dev_dbg(ep->pci.dev, "link_down: reached L2_IDLE\n");
-	}
+	exynos_zuma_pcie_pme_turn_off(&ep->pci.pp);
+	ret = readl_poll_timeout(elbi + PCIE_ZUMA_RDLH_LINKUP, val,
+				 (val & LTSSM_STATE_MASK) ==
+				 DW_PCIE_LTSSM_L2_IDLE,
+				 PCIE_L2_ENTER_WAIT_STEP_US,
+				 PCIE_L2_ENTER_WAIT_US);
+	if (ret)
+		dev_info(ep->pci.dev,
+			 "link_down: did NOT reach L2_IDLE (ltssm %#x)\n",
+			 val & LTSSM_STATE_MASK);
+	else
+		dev_dbg(ep->pci.dev, "link_down: reached L2_IDLE\n");
 
 	/*
 	 * Snapshot the integrated-MSI receiver before the controller reset zeroes
