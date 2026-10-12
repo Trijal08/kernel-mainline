@@ -2231,7 +2231,7 @@ static struct platform_driver exynos_pcie_driver = {
 	.driver = {
 		.name	= "exynos-pcie",
 		.of_match_table = exynos_pcie_of_match,
-		.pm		= &exynos_pcie_pm_ops,
+		.pm		= pm_sleep_ptr(&exynos_pcie_pm_ops),
 	},
 };
 module_platform_driver(exynos_pcie_driver);
