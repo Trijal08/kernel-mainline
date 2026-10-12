@@ -1678,6 +1678,19 @@ static int exynos2200_usbdrd_phy_exit(struct phy *phy)
 	int ret;
 
 	/*
+	 * Balance the phy_init() that exynos2200_usbdrd_utmi_init() runs on the
+	 * separate high-speed PHY.  phy_init() only runs the provider's .init
+	 * while the init count is zero, so leaving this unbalanced pins that
+	 * count above zero forever: the eUSB2 PHY is initialised exactly once,
+	 * and every later init -- including the one on every system resume --
+	 * silently does nothing to the hardware.  The controller then comes
+	 * back without the UTMI clock its soft reset is synchronised to, and
+	 * that reset never completes.
+	 */
+	if (inst->phy_cfg->id == EXYNOS5_DRDPHY_UTMI)
+		phy_exit(phy_drd->hs_phy);
+
+	/*
 	 * With pipe3_clk_always_on the bulk is still enabled from init(); the
 	 * unconditional disable below then balances that init() enable. Without
 	 * it, re-enable here just for the register access in this function.
