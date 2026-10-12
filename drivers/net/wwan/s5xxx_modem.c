@@ -1182,7 +1182,7 @@ static irqreturn_t s5xxx_cp2ap_wakeup_irq(int irq, void *data)
 	int up = gpiod_get_value(sm->cp2ap_wakeup);
 
 	WRITE_ONCE(sm->cp_wants_up, up);
-	dev_dbg(sm->dev, "CP2AP_WAKEUP irq: level %d\n", up);
+	dev_dbg_ratelimited(sm->dev, "CP2AP_WAKEUP irq: level %d\n", up);
 	queue_work(sm->pm_wq, &sm->pm_work);
 	return IRQ_HANDLED;
 }
@@ -2606,8 +2606,9 @@ static void s5xxx_drain_fmt_rxq(struct s5xxx_modem *sm, u32 intval)
 			 */
 			struct wwan_port *port = READ_ONCE(sc->port);
 
-			dev_dbg(sm->dev, "fmt rxq SIT ch %#x payload %u\n",
-				 hdr[8], plen);
+			dev_dbg_ratelimited(sm->dev,
+					    "fmt rxq SIT ch %#x payload %u\n",
+					    hdr[8], plen);
 			if (port)
 				s5xxx_fmt_deliver(port, buff, out, plen);
 		}
