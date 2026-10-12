@@ -604,6 +604,8 @@ struct exynos5_usbdrd_phy_config {
 	u32 id;
 	void (*phy_isol)(struct phy_usb_instance *inst, bool isolate);
 	void (*phy_init)(struct exynos5_usbdrd_phy *phy_drd);
+	/* Quiesce what phy_init() started, before the block is isolated. */
+	void (*phy_deinit)(struct exynos5_usbdrd_phy *phy_drd);
 	unsigned int (*set_refclk)(struct phy_usb_instance *inst);
 };
 
@@ -1700,6 +1702,15 @@ static int exynos2200_usbdrd_phy_exit(struct phy *phy)
 					      phy_drd->clks);
 		if (ret)
 			return ret;
+	}
+
+	/*
+	 * The SuperSpeed half has its own teardown, and it shares the PMA and
+	 * TCA registers with the mode switch, so take the same lock that does.
+	 */
+	scoped_guard(mutex, &phy_drd->phy_mutex) {
+		if (inst->phy_cfg->phy_deinit)
+			inst->phy_cfg->phy_deinit(phy_drd);
 	}
 
 	reg = readl(regs_base + EXYNOS2200_DRD_UTMI);
@@ -3825,6 +3836,34 @@ static void zuma_usbdrd_pipe3_init(struct exynos5_usbdrd_phy *phy_drd)
 }
 
 /*
+ * Undo zuma_usbdrd_pipe3_init() far enough that the block can be isolated:
+ * the lanes and the PHY back into reset, the PCS powered down and the analog
+ * supply released.  The vendor's phy_disable() does exactly this, and does it
+ * before the PMU cuts the block off rather than after -- leaving a running
+ * PHY to be isolated underneath itself is what makes the next bring-up find
+ * the TCA in a state it cannot be talked out of.
+ */
+static void zuma_usbdrd_pipe3_exit(struct exynos5_usbdrd_phy *phy_drd)
+{
+	void __iomem *base = phy_drd->reg_pma;
+	u32 reg;
+
+	if (!base || !phy_drd->reg_tca)
+		return;
+
+	zuma_ss_lane0_reset(phy_drd, 1);
+	zuma_ss_phy_reset(phy_drd, 1);
+
+	reg = readl(base + ZUMA_USBDP_PHY_CONFIG2);
+	reg |= ZUMA_USBDP_PHY_CONFIG2_TEST_POWERDOWN;
+	writel(reg, base + ZUMA_USBDP_PHY_CONFIG2);
+
+	reg = readl(base + EXYNOSAUTOV920_USB31DRD_PHY_CONFIG0);
+	reg &= ~PHY_CONFIG0_PHY0_ANA_PWR_EN;
+	writel(reg, base + EXYNOSAUTOV920_USB31DRD_PHY_CONFIG0);
+}
+
+/*
  * DisplayPort alt mode on the combo PHY.
  *
  * The DP transmitter at 0x110f0000 drives the link layer, but the lanes it
@@ -4260,6 +4299,7 @@ static const struct exynos5_usbdrd_phy_config phy_cfg_zuma[] = {
 		.id		= EXYNOS5_DRDPHY_PIPE3,
 		.phy_isol	= exynos5_usbdrd_phy_isol,
 		.phy_init	= zuma_usbdrd_pipe3_init,
+		.phy_deinit	= zuma_usbdrd_pipe3_exit,
 	},
 };
 
