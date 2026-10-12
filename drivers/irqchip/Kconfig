@@ -660,6 +660,18 @@ config RISCV_RPMI_SYSMSI
 	select GENERIC_MSI_IRQ
 	default RISCV
 
+config GOOGLE_VGPIO2AP_IRQ
+	bool "Google Tensor VGPIO2AP interrupt demultiplexer"
+	depends on ARCH_EXYNOS || COMPILE_TEST
+	default ARCH_EXYNOS
+	select IRQ_DOMAIN
+	help
+	  The PMICs on Google Tensor boards sit on an I3C bus and raise in-band
+	  interrupts, which the SoC presents as one shared interrupt plus a
+	  register saying which slave asserted. Say Y to demultiplex it, without
+	  which no PMIC event -- battery, thermal, the RTC alarm, the power key --
+	  is ever delivered.
+
 config SIFIVE_PLIC
 	bool
 	depends on RISCV
