@@ -639,6 +639,11 @@ static bool exynos_zuma_pcie_link_up(struct dw_pcie *pci)
 	return exynos_zuma_pcie_get_ltssm(pci) == DW_PCIE_LTSSM_L0;
 }
 
+static void exynos_zuma_pcie_stop_link(struct dw_pcie *pci)
+{
+	exynos_pcie_writel(pci->elbi_base, 0, PCIE_ZUMA_APP_LTSSM_ENABLE);
+}
+
 static const struct dw_pcie_host_ops exynos_zuma_pcie_host_ops = {
 	.init = exynos_zuma_pcie_host_init,
 };
@@ -687,6 +692,7 @@ static const struct dw_pcie_ops exynos_zuma_dw_pcie_ops = {
 	.link_up = exynos_zuma_pcie_link_up,
 	.get_ltssm = exynos_zuma_pcie_get_ltssm,
 	.start_link = exynos_zuma_pcie_start_link,
+	.stop_link = exynos_zuma_pcie_stop_link,
 };
 
 static const struct exynos_pcie_drvdata exynos5433_pcie_drvdata = {
@@ -1118,7 +1124,7 @@ int zumapro_pcie_modem_link_down(struct device *rc_dev)
 	 */
 	exynos_pcie_phy_safe_clk(ep->phy, true);
 
-	exynos_pcie_writel(elbi, 0, PCIE_ZUMA_APP_LTSSM_ENABLE);
+	dw_pcie_stop_link(&ep->pci);
 
 	/*
 	 * Controller soft reset (downstream link_down): pulse SOFT_RESET with the
@@ -1676,7 +1682,7 @@ int zumapro_pcie_wifi_link_down(struct device *rc_dev)
 	 */
 	exynos_pcie_phy_safe_clk(ep->phy, true);
 
-	exynos_pcie_writel(elbi, 0, PCIE_ZUMA_APP_LTSSM_ENABLE);
+	dw_pcie_stop_link(&ep->pci);
 
 	/* Controller soft reset: clears the (possibly armed/half-dead) MAC
 	 * state so the next link_up re-config trains cleanly. */
