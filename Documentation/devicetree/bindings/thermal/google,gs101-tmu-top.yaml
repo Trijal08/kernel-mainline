@@ -9,7 +9,7 @@ title: Samsung Exynos ACPM Thermal Management Unit (TMU)
 maintainers:
   - Tudor Ambarus <tudor.ambarus@linaro.org>
 
-description:
+description: >
   The Samsung Exynos ACPM TMU is a thermal sensor block found on Exynos
   based platforms (such as Google GS101 and Exynos850). It supports
   both direct register-level access and firmware-mediated management
