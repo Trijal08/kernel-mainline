@@ -4707,6 +4707,17 @@ static int s5xxx_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	sm->bridge = pci_upstream_bridge(pdev);
 	if (!sm->bridge)
 		return dev_err_probe(dev, -ENODEV, "no upstream bridge\n");
+
+	/*
+	 * Take a copy of both ends while the core's assignment is still live in
+	 * the hardware.  Everything from here on resets one or both: the CP
+	 * power cycle below clears the endpoint's config space, and the relink
+	 * inside it soft-resets the controller and takes the root port's window
+	 * with it.  Restoring is how the assignment survives; nothing in this
+	 * driver may reinvent it, because the audio coprocessor reaches the CP
+	 * through the same addresses.
+	 */
+	pci_save_state(pdev);
 	pci_save_state(sm->bridge);
 
 	/*
@@ -4810,6 +4821,14 @@ static int s5xxx_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	ret = reset_control_reset(sm->cp_cold_rst);
 	if (ret)
 		dev_warn(dev, "CP power cycle: no link (%d); continuing\n", ret);
+
+	/*
+	 * The cycle reset both ends.  Put the root port's window back before
+	 * the endpoint's BARs, so that by the time anything is decoding there
+	 * is something to forward it.
+	 */
+	pci_restore_state(sm->bridge);
+	pci_restore_state(pdev);
 
 	/*
 	 * Downstream keeps every form of link PM off for the whole CP boot
