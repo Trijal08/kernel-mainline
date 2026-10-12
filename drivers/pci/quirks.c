@@ -3359,6 +3359,21 @@ static void quirk_samsung_s5xxx_modem_bars(struct pci_dev *dev)
 	if (pci_pcie_type(dev) != PCI_EXP_TYPE_ENDPOINT)
 		return;
 
+	/*
+	 * The ROM reports no class at all, and pdev_resources_assignable()
+	 * declines to allocate anything for a classless device -- so without
+	 * this the BAR sizes below are read, sized, and then never assigned an
+	 * address, and pci_enable_device() fails with "not claimed".
+	 *
+	 * Call it a network device: that is what it presents once its firmware
+	 * is up, and unlike PCI_CLASS_COMMUNICATION_MODEM nothing claims
+	 * PCI_CLASS_NETWORK_OTHER by class alone (8250_pci binds modems).
+	 */
+	if (dev->class >> 8 == PCI_CLASS_NOT_DEFINED) {
+		pci_info(dev, "mask ROM reports no class; calling it a network device\n");
+		dev->class = (PCI_CLASS_NETWORK_OTHER << 8) | (dev->class & 0xff);
+	}
+
 	for (i = 0; i < ARRAY_SIZE(rom_bars); i++) {
 		res = pci_resource_n(dev, rom_bars[i].bar);
 
