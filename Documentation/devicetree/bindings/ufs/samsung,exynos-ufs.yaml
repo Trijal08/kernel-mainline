@@ -14,14 +14,17 @@ description: |
 
 properties:
   compatible:
-    enum:
-      - google,gs101-ufs
-      - google,zuma-ufs
-      - samsung,exynos7-ufs
-      - samsung,exynosautov9-ufs
-      - samsung,exynosautov9-ufs-vh
-      - samsung,exynosautov920-ufs
-      - tesla,fsd-ufs
+    oneOf:
+      - enum:
+          - google,gs101-ufs
+          - samsung,exynos7-ufs
+          - samsung,exynosautov9-ufs
+          - samsung,exynosautov9-ufs-vh
+          - samsung,exynosautov920-ufs
+          - tesla,fsd-ufs
+      - items:
+          - const: google,zuma-ufs
+          - const: google,gs101-ufs
 
   reg:
     items:
