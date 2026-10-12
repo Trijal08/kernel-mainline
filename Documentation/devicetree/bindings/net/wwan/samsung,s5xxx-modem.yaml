@@ -97,11 +97,11 @@ examples:
     #include <dt-bindings/gpio/gpio.h>
     #include <dt-bindings/reset/google,zuma-pcie.h>
 
-    pcie0: pcie {
+    pcie0: pcie@12100000 {
         #address-cells = <3>;
         #size-cells = <2>;
         device_type = "pci";
-        ranges;
+        ranges = <0x82000000 0 0x14e00000  0x40000000  0 0x00ff0000>;
         #reset-cells = <1>;
 
         pcie@0,0 {
