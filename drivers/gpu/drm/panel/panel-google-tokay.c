@@ -111,17 +111,22 @@ static int tokay_panel_unprepare(struct drm_panel *panel)
 	return 0;
 }
 
+static void tokay_reset(struct tokay_panel *ctx)
+{
+	gpiod_set_value_cansleep(ctx->reset_gpio, 1);
+	usleep_range(5000, 5100);
+	gpiod_set_value_cansleep(ctx->reset_gpio, 0);
+	usleep_range(5000, 5100);
+	gpiod_set_value_cansleep(ctx->reset_gpio, 1);
+	usleep_range(10000, 10100);
+}
+
 static int tokay_panel_prepare(struct drm_panel *panel)
 {
 	struct tokay_panel *ctx = to_tokay_panel(panel);
 
-	/* Downstream TK4C reset timing: low 1 ms, high 1 ms. */
-	if (ctx->reset_gpio) {
-		gpiod_set_value_cansleep(ctx->reset_gpio, 0);
-		usleep_range(1000, 1100);
-		gpiod_set_value_cansleep(ctx->reset_gpio, 1);
-		usleep_range(1000, 1100);
-	}
+	if (ctx->reset_gpio)
+		tokay_reset(ctx);
 
 	return 0;
 }
@@ -221,6 +226,7 @@ static int tokay_panel_get_modes(struct drm_panel *panel,
 		drm_mode_probed_add(connector, mode);
 	}
 
+	connector->display_info.bpc = 8;
 	connector->display_info.width_mm = tokay_modes[0].width_mm;
 	connector->display_info.height_mm = tokay_modes[0].height_mm;
 
