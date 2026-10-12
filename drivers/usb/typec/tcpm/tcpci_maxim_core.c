@@ -25,6 +25,34 @@
 
 #define PD_ACTIVITY_TIMEOUT_MS				10000
 
+/*
+ * On these boards the connector's SBU pair is shared between DP AUX and the
+ * SoC's debug UART, and the switch inside the TCPC can only be on one of them.
+ * The driver's job is DP, so it parks the switch whenever DP is not up -- which
+ * silently disconnects a serial console the bootloader had working.
+ *
+ * Setting this keeps the pair on the UART and stops the driver touching the
+ * switch at all, giving up DP AUX in exchange for a console that survives into
+ * userspace.  That is the right trade while bringing up suspend, where the
+ * console is the only way to see a hang, and the wrong one otherwise, so it is
+ * off by default and deliberately not writable at runtime: nothing re-routes
+ * the switch on a later change.
+ */
+bool max_tcpci_conf_sbu;
+module_param_named(conf_sbu, max_tcpci_conf_sbu, bool, 0444);
+MODULE_PARM_DESC(conf_sbu, "Keep the SBU pair on the debug UART (disables DP AUX)");
+
+/*
+ * Accept the name the vendor driver used for the same knob, so a command line
+ * written for it keeps working.  Only built-in builds see this; a modular build
+ * takes tcpci_maxim.conf_sbu.
+ */
+static int __init max_tcpci_conf_sbu_setup(char *str)
+{
+	return kstrtobool(str, &max_tcpci_conf_sbu) ? 0 : 1;
+}
+__setup("tcpci_max77759.conf_sbu=", max_tcpci_conf_sbu_setup);
+
 #define TCPC_VENDOR_ALERT				0x80
 #define TCPC_VENDOR_USBSW_CTRL				0x93
 #define TCPC_VENDOR_USBSW_CTRL_ENABLE_USB_DATA		0x9
@@ -432,6 +460,13 @@ static int max_tcpci_sbu_switch(struct max_tcpci_chip *chip, bool dp)
 {
 	int ret;
 
+	/*
+	 * The pair belongs to the debug UART, so there is nothing to route here:
+	 * leave both the switch and the AUX pull-up exactly as they are.
+	 */
+	if (max_tcpci_conf_sbu)
+		return 0;
+
 	if (chip->sbu_reg && dp != chip->sbu_reg_enabled) {
 		if (dp) {
 			regulator_set_voltage(chip->sbu_reg, SBU_PULLUP_UV,
@@ -832,6 +867,21 @@ static int max_tcpci_probe(struct i2c_client *client)
 		if (PTR_ERR(chip->sbu_reg) == -EPROBE_DEFER)
 			return -EPROBE_DEFER;
 		chip->sbu_reg = NULL;
+	}
+
+	/*
+	 * Put the pair on the UART once, here, rather than trusting whatever the
+	 * bootloader left: the switch survives a detach, but not a reprobe.
+	 */
+	if (max_tcpci_conf_sbu) {
+		ret = max_tcpci_write8(chip, TCPC_VENDOR_SBUSW_CTRL,
+				       SBUSW_SERIAL_UART);
+		if (ret < 0)
+			return dev_err_probe(&client->dev, ret,
+					     "Failed to route SBU to the debug UART\n");
+
+		dev_info(&client->dev,
+			 "SBU pinned to the debug UART, DP AUX disabled\n");
 	}
 
 	chip->tcpci = tcpci_register_port(chip->dev, &chip->data);
