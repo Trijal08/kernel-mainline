@@ -14,15 +14,20 @@ description: >
   Google Tensor boards: the s5300 (e.g. tegu) and the s5400 (e.g. komodo).
   The AP stages the first-stage CP bootloader in a DRAM carveout, publishes it
   through a second carveout that doubles as the PCIe MSI target, and completes
-  a shared-memory command handshake.  Bring-up binding; the PCIe root-complex
-  phandle and doorbell address will move behind generic abstractions as the
-  driver grows up.
+  a shared-memory command handshake.
+
+  The modem is a PCI endpoint, so its node goes under the root port it sits
+  behind, per pci-bus.yaml. The driver binds to the enumerated device and the
+  PCI core attaches this node to it.
 
 properties:
   compatible:
     enum:
       - samsung,s5300-modem
       - samsung,s5400-modem
+
+  reg:
+    maxItems: 1
 
   memory-region:
     minItems: 2
@@ -43,10 +48,6 @@ properties:
     maxItems: 1
     description: First-stage CP bootloader (the BOOT entry of the vendor
       modem image TOC).
-
-  google,pcie:
-    $ref: /schemas/types.yaml#/definitions/phandle
-    description: PCIe root complex the modem is attached to.
 
   resets:
     items:
@@ -89,7 +90,7 @@ required:
   - compatible
   - memory-region
   - memory-region-names
-  - google,pcie
+  - reg
   - resets
   - reset-names
   - samsung,doorbell-addr
@@ -102,16 +103,32 @@ examples:
     #include <dt-bindings/gpio/gpio.h>
     #include <dt-bindings/reset/google,zuma-pcie.h>
 
-    modem {
-        compatible = "samsung,s5400-modem";
-        memory-region = <&cp_rmem>, <&cp_msi_rmem>;
-        memory-region-names = "ipc", "msi";
-        firmware-name = "tegu/cp_pbl.bin";
-        google,pcie = <&pcie0>;
-        resets = <&pcie0 ZUMA_PCIE_RESET_LINK>,
-                 <&pcie0 ZUMA_PCIE_RESET_CP_COLD>,
-                 <&pcie0 ZUMA_PCIE_RESET_CP_DUMP>;
-        reset-names = "link", "cp-cold", "cp-dump";
-        samsung,doorbell-addr = <0x14e60000>;
-        cp2ap-wakeup-gpios = <&gpa5 1 GPIO_ACTIVE_HIGH>;
+    pcie0: pcie {
+        #address-cells = <3>;
+        #size-cells = <2>;
+        device_type = "pci";
+        ranges;
+        #reset-cells = <1>;
+
+        pcie@0,0 {
+            reg = <0x0 0x0 0x0 0x0 0x0>;
+            #address-cells = <3>;
+            #size-cells = <2>;
+            device_type = "pci";
+            ranges;
+
+            modem@0,0 {
+                compatible = "samsung,s5400-modem";
+                reg = <0x0 0x0 0x0 0x0 0x0>;
+                memory-region = <&cp_rmem>, <&cp_msi_rmem>;
+                memory-region-names = "ipc", "msi";
+                firmware-name = "tegu/cp_pbl.bin";
+                resets = <&pcie0 ZUMA_PCIE_RESET_LINK>,
+                         <&pcie0 ZUMA_PCIE_RESET_CP_COLD>,
+                         <&pcie0 ZUMA_PCIE_RESET_CP_DUMP>;
+                reset-names = "link", "cp-cold", "cp-dump";
+                samsung,doorbell-addr = <0x14e60000>;
+                cp2ap-wakeup-gpios = <&gpa5 1 GPIO_ACTIVE_HIGH>;
+            };
+        };
     };
