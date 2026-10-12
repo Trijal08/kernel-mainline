@@ -392,6 +392,22 @@ static bool exynos_pcie_link_up(struct dw_pcie *pci)
 	return val & PCIE_ELBI_XMLH_LINKUP;
 }
 
+/*
+ * Undo what host_init() brought up.  The core calls this from
+ * dw_pcie_host_init()'s error path, from dw_pcie_host_deinit() and from
+ * dw_pcie_suspend_noirq(), which between them are every place this driver
+ * used to repeat the sequence by hand.
+ */
+static void exynos_pcie_host_exit(struct dw_pcie_rp *pp)
+{
+	struct dw_pcie *pci = to_dw_pcie_from_pp(pp);
+	struct exynos_pcie *ep = to_exynos_pcie(pci);
+
+	exynos_pcie_assert_core_reset(ep);
+	phy_power_off(ep->phy);
+	phy_exit(ep->phy);
+}
+
 static int exynos_pcie_host_init(struct dw_pcie_rp *pp)
 {
 	struct dw_pcie *pci = to_dw_pcie_from_pp(pp);
@@ -412,6 +428,7 @@ static int exynos_pcie_host_init(struct dw_pcie_rp *pp)
 
 static const struct dw_pcie_host_ops exynos_pcie_host_ops = {
 	.init = exynos_pcie_host_init,
+	.deinit = exynos_pcie_host_exit,
 };
 
 /* Google Tensor (zuma/zumapro) controller -------------------------------- */
@@ -646,6 +663,7 @@ static void exynos_zuma_pcie_stop_link(struct dw_pcie *pci)
 
 static const struct dw_pcie_host_ops exynos_zuma_pcie_host_ops = {
 	.init = exynos_zuma_pcie_host_init,
+	.deinit = exynos_pcie_host_exit,
 };
 
 static int exynos_add_pcie_port(struct exynos_pcie *ep,
@@ -821,7 +839,11 @@ static int exynos_pcie_probe(struct platform_device *pdev)
 	return 0;
 
 fail_probe:
-	phy_exit(ep->phy);
+	/*
+	 * Nothing to undo for the PHY: it is only brought up from host_init(),
+	 * and dw_pcie_host_init() runs the matching deinit on every path that
+	 * got that far.
+	 */
 	if (!ep->drvdata->zuma)
 		regulator_bulk_disable(ARRAY_SIZE(ep->supplies), ep->supplies);
 
@@ -833,9 +855,6 @@ static void exynos_pcie_remove(struct platform_device *pdev)
 	struct exynos_pcie *ep = platform_get_drvdata(pdev);
 
 	dw_pcie_host_deinit(&ep->pci.pp);
-	exynos_pcie_assert_core_reset(ep);
-	phy_power_off(ep->phy);
-	phy_exit(ep->phy);
 	if (!ep->drvdata->zuma)
 		regulator_bulk_disable(ARRAY_SIZE(ep->supplies), ep->supplies);
 }
@@ -844,9 +863,7 @@ static int exynos_pcie_suspend_noirq(struct device *dev)
 {
 	struct exynos_pcie *ep = dev_get_drvdata(dev);
 
-	exynos_pcie_assert_core_reset(ep);
-	phy_power_off(ep->phy);
-	phy_exit(ep->phy);
+	exynos_pcie_host_exit(&ep->pci.pp);
 	if (!ep->drvdata->zuma)
 		regulator_bulk_disable(ARRAY_SIZE(ep->supplies), ep->supplies);
 
