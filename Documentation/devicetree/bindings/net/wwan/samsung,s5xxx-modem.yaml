@@ -9,7 +9,7 @@ title: Samsung Exynos s5300/s5400 Modem (PCIe)
 maintainers:
   - Steffen Deusch <steffen@deusch.me>
 
-description:
+description: >
   Discrete Samsung Exynos modem companion chip attached over PCIe, as found on
   Google Tensor boards: the s5300 (e.g. tegu) and the s5400 (e.g. komodo).
   The AP stages the first-stage CP bootloader in a DRAM carveout, publishes it
