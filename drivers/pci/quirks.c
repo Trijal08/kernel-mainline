@@ -3272,6 +3272,117 @@ static void quirk_hotplug_bridge(struct pci_dev *dev)
 DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_HINT, 0x0020, quirk_hotplug_bridge);
 
 /*
+ * The Samsung Exynos s5xxx modem (s5300/s5400), as found behind a dedicated
+ * DesignWare root complex on Google Tensor SoCs.
+ *
+ * Its mask ROM answers a BAR sizing probe with zero, so __pci_read_base()
+ * takes its failure path and clears the resource.  The core then allocates
+ * nothing and programs nothing, even though the BAR registers themselves are
+ * perfectly writable and the device decodes five windows once it is running.
+ *
+ * That matters beyond this driver.  The on-SoC audio coprocessor reaches the
+ * modem over the same link, through a translation table baked into its signed
+ * firmware, so where these BARs land is fixed platform ABI rather than
+ * something an OS may choose: the addresses below are the ones Linux's own
+ * allocator produces on a stock device, which is what that firmware was built
+ * against.  Supplying the sizes the ROM declines to report is enough to
+ * reproduce that layout exactly, because resources are assigned in descending
+ * alignment order and, within one alignment, in BAR order:
+ *
+ *	BAR2  1M   bus 0x14e00000   CP memory; the coprocessor reads call
+ *	                            state here
+ *	BAR3  1M   bus 0x14f00000
+ *	BAR4  1M   bus 0x15000000
+ *	BAR5  1M   bus 0x15100000   also holds the MSI-X table and PBA
+ *	BAR0  64K  bus 0x15200000   the doorbell page
+ *
+ * The coprocessor's table maps the CPU addresses that the host bridge's
+ * outbound window translates to the first and last of those.  Getting it wrong
+ * is not a probe failure: the device works, and calls connect and carry RTP,
+ * while the coprocessor reads all-ones out of both of its windows and no audio
+ * ever reaches the speaker.
+ *
+ * The root port's BAR is a DesignWare artifact (dw_pcie_setup_rc() gives it a
+ * type but no purpose).  It is a resource of the root bus, so it would be
+ * allocated from the bottom of the same window and would swallow the address
+ * the first endpoint BAR has to have -- and a TLP matching a root port's BAR
+ * is consumed by the port instead of being forwarded.  Drop it.
+ */
+#define PCI_DEVICE_ID_SAMSUNG_S5XXX_MODEM	0xa5a5
+
+static void quirk_samsung_s5xxx_modem_bars(struct pci_dev *dev)
+{
+	static const struct {
+		unsigned int	bar;
+		resource_size_t	size;
+		unsigned long	flags;
+	} rom_bars[] = {
+		/* the doorbell page; 64-bit, so it also consumes BAR1 */
+		{ 0, SZ_64K, IORESOURCE_MEM | IORESOURCE_MEM_64 },
+		/* CP memory, where the audio coprocessor reads call state */
+		{ 2, SZ_1M,  IORESOURCE_MEM },
+		{ 3, SZ_1M,  IORESOURCE_MEM },
+		{ 4, SZ_1M,  IORESOURCE_MEM },
+		{ 5, SZ_1M,  IORESOURCE_MEM },
+	};
+	struct resource *res;
+	unsigned int i;
+
+	if (pci_pcie_type(dev) == PCI_EXP_TYPE_ROOT_PORT) {
+		/*
+		 * Standard BARs only: the forwarding windows live further up
+		 * in resource[PCI_BRIDGE_RESOURCES..] and are this port's
+		 * entire purpose.
+		 */
+		for (i = 0; i < PCI_STD_NUM_BARS; i++) {
+			res = pci_resource_n(dev, i);
+			if (!res->flags)
+				continue;
+			pci_info(dev, "%pR: DWC root port BAR has no function; releasing it\n",
+				 res);
+			memset(res, 0, sizeof(*res));
+		}
+		return;
+	}
+
+	if (pci_pcie_type(dev) != PCI_EXP_TYPE_ENDPOINT)
+		return;
+
+	for (i = 0; i < ARRAY_SIZE(rom_bars); i++) {
+		res = pci_resource_n(dev, rom_bars[i].bar);
+
+		if (res->flags) {
+			/* A ROM that sizes its BARs needs none of this. */
+			pci_info(dev, "BAR %u already sized; leaving the quirk alone\n",
+				 rom_bars[i].bar);
+			return;
+		}
+
+		/*
+		 * Same shape __pci_read_base() builds for a BAR that is
+		 * sizeable but not yet placed, so the core assigns and
+		 * programs it in the ordinary way.
+		 */
+		res->flags = rom_bars[i].flags | IORESOURCE_SIZEALIGN |
+			     IORESOURCE_UNSET;
+		res->start = 0;
+		res->end = rom_bars[i].size - 1;
+	}
+
+	pci_info(dev, "mask ROM does not size its BARs; declared 4x1M + 64K\n");
+}
+
+/*
+ * Header phase, not early: an early fixup runs from pci_setup_device() before
+ * pci_read_bases(), which would promptly overwrite everything set here.  The
+ * header phase runs from pci_device_add(), after the BARs have been read and
+ * long before anything is assigned.
+ */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_SAMSUNG,
+			 PCI_DEVICE_ID_SAMSUNG_S5XXX_MODEM,
+			 quirk_samsung_s5xxx_modem_bars);
+
+/*
  * This is a quirk for the Ricoh MMC controller found as a part of some
  * multifunction chips.
  *
