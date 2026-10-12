@@ -29,6 +29,11 @@ struct tokay_panel {
 	struct mipi_dsi_device *dsi;
 	struct drm_connector *connector;
 	struct gpio_desc *reset_gpio;
+	/*
+	 * TK4C blanks with ALL_PIXELS_OFF rather than a brightness of zero, and
+	 * that state latches: only ENTER_NORMAL_MODE or a panel reset leaves it.
+	 */
+	bool pixel_off;
 };
 
 /* Production TK4C PPS configuration (DSC 1.2a, two 540-pixel slices). */
@@ -137,6 +142,13 @@ static int tokay_panel_disable(struct drm_panel *panel)
 	return 0;
 }
 
+/*
+ * ALL_PIXELS_OFF.  Not in the kernel's DCS list, which skips from
+ * ENTER_INVERT_MODE (0x21) to SET_GAMMA_CURVE (0x26); the vendor driver sends
+ * it as a raw 0x22 too.  MIPI_DCS_ENTER_NORMAL_MODE (0x13) is what leaves it.
+ */
+#define TK4C_DCS_ALL_PIXELS_OFF		0x22
+
 #define tk4c_cmd(dsi, seq...)						\
 	mipi_dsi_dcs_write_buffer((dsi), (const u8[]){ seq },		\
 				  sizeof((const u8[]){ seq }))
@@ -163,6 +175,16 @@ static int tokay_panel_enable(struct drm_panel *panel)
 	if (ret < 0)
 		return ret;
 	msleep(120);
+
+	/*
+	 * The bootloader blanks this panel with ALL_PIXELS_OFF, and that state
+	 * survives sleep-out: the DDIC keeps running and keeps raising TE, so
+	 * the link and DECON's trigger look healthy while the panel emits
+	 * nothing whatever is scanned out to it.  Take it out of that state
+	 * before anything else; it is a no-op if we were never in it.
+	 */
+	tk4c_cmd(dsi, MIPI_DCS_ENTER_NORMAL_MODE);
+	ctx->pixel_off = false;
 
 	/* TK4C normal-mode init, retaining MTP-programmed TE/FGZ values. */
 	tk4c_cmd(dsi, MIPI_DCS_SET_TEAR_ON);
@@ -243,6 +265,25 @@ static int tokay_bl_update_status(struct backlight_device *bl)
 {
 	struct tokay_panel *ctx = bl_get_data(bl);
 	u16 brightness = backlight_get_brightness(bl);
+
+	/*
+	 * Blank with ALL_PIXELS_OFF instead of a brightness of zero, as the
+	 * vendor driver does, and take the panel back out of it on the way up --
+	 * the state latches, so writing a non-zero brightness while in it would
+	 * leave the panel dark with nothing to say why.
+	 */
+	if (!brightness) {
+		if (!ctx->pixel_off) {
+			tk4c_cmd(ctx->dsi, TK4C_DCS_ALL_PIXELS_OFF);
+			ctx->pixel_off = true;
+		}
+		return 0;
+	}
+
+	if (ctx->pixel_off) {
+		tk4c_cmd(ctx->dsi, MIPI_DCS_ENTER_NORMAL_MODE);
+		ctx->pixel_off = false;
+	}
 
 	return mipi_dsi_dcs_set_display_brightness_large(ctx->dsi, brightness);
 }
