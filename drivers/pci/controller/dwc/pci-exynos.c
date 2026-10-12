@@ -617,7 +617,7 @@ static int exynos_zuma_pcie_start_link(struct dw_pcie *pci)
 	 * Wi-Fi armed a directed speed change to Gen3 above, so the link
 	 * upshifts during initial training. Wait for L0, let the speed change
 	 * settle, and report where it landed. (The modem channel defers its
-	 * upshift to zumapro_pcie_modem_gen3(), gated on the CP bootloader.)
+	 * upshift until the CP bootloader has run.)
 	 */
 	if (!ep->cp_power) {
 		for (i = 0; i < 100; i++) {
@@ -1256,26 +1256,6 @@ static void exynos_zuma_pcie_gen3(struct dw_pcie *pci)
 		 (reg16 & PCI_EXP_LNKSTA_CLS) == PCI_EXP_LNKSTA_CLS_8_0GB ?
 			"Gen3" : "not Gen3", reg16);
 }
-
-/*
- * Retrain CH0 to Gen3 on the LIVE link (no PHY teardown).  The CP's mask ROM
- * links at Gen1; its second-stage bootloader runs the link at Gen3 and its
- * doorbell stays dead until the retrain, so the modem driver calls this once
- * the bootloader is up.  The vendor never bounces the link -- mainline's
- * inbound path is already 1:1 passthrough (the HSI1 PCIe SysMMU is unmanaged =
- * bypass), so the CP can DMA the IPC ring and raise INIT_START in place.
- */
-int zumapro_pcie_modem_gen3(struct device *rc_dev)
-{
-	struct exynos_pcie *ep = zumapro_pcie_from_dev(rc_dev);
-
-	if (!ep)
-		return -ENODEV;
-
-	exynos_zuma_pcie_gen3(&ep->pci);
-	return 0;
-}
-EXPORT_SYMBOL_GPL(zumapro_pcie_modem_gen3);
 
 int zumapro_pcie_modem_link_up(struct device *rc_dev)
 {
@@ -2059,46 +2039,6 @@ int zumapro_pcie_modem_wake(struct device *rc_dev)
 EXPORT_SYMBOL_GPL(zumapro_pcie_modem_wake);
 
 /*
- * Warm-reset the CP back into its boot ROM and wait for its endpoint to
- * re-link, so the modem driver can (re-)run its boot sequence from scratch.
- *
- * At cold boot the controller probe already reset the CP (exynos_cp_power_warm_reset()
- * before link training).  But on a bare modem-module reload (rmmod/insmod with no
- * reboot) nothing else resets it, so BL1 would land on a still-running MAIN and
- * boot_stage never advances.  The modem driver calls this at the top of its probe
- * -- after it has found the (already-enumerated) endpoint but before it programs
- * MSI/BAR0 -- so both the cold and the reload path continue against a fresh boot
- * ROM.  cp_pwr stays on (MAIN survives in the CP's self-powered DRAM), only the
- * baseband is pulsed, then we wait for the Gen1 boot-ROM link to re-train; the
- * caller reprograms the endpoint's config (MSI target, doorbell BAR) afterwards.
- */
-/*
- * Report the CP link state so the modem driver can decide between ADOPTING a
- * live MAIN (Gen3 endpoint after a bare module reload) and warm-resetting into
- * the boot ROM.  Returns the PCI_EXP_LNKSTA_CLS speed (1 = Gen1 boot ROM,
- * 3 = Gen3 running MAIN) or -ENOLINK when the link is parked or down.
- */
-int zumapro_pcie_modem_link_speed(struct device *rc_dev)
-{
-	struct exynos_pcie *ep = zumapro_pcie_from_dev(rc_dev);
-	u32 ltssm;
-	u8 exp;
-
-	if (!ep)
-		return -ENODEV;
-	if (ep->cp_phy_off)
-		return -ENOLINK;
-	ltssm = exynos_pcie_readl(ep->pci.elbi_base, PCIE_ZUMA_RDLH_LINKUP) &
-		LTSSM_STATE_MASK;
-	if (ltssm < DW_PCIE_LTSSM_RCVRY_LOCK || ltssm > DW_PCIE_LTSSM_L1_IDLE)
-		return -ENOLINK;
-	exp = dw_pcie_find_capability(&ep->pci, PCI_CAP_ID_EXP);
-	return dw_pcie_readw_dbi(&ep->pci, exp + PCI_EXP_LNKSTA) &
-	       PCI_EXP_LNKSTA_CLS;
-}
-EXPORT_SYMBOL_GPL(zumapro_pcie_modem_link_speed);
-
-/*
  * FULL CP cold power cycle -- a faithful port of the downstream power_on_cp()'s
  * gpio_power_offon_cp() (non-WRESET_WA).  Unlike the warm reset
  * (exynos_cp_power_warm_reset(), a CP_WRST pulse that leaves CP_PWR asserted so a
@@ -2178,6 +2118,20 @@ int zumapro_pcie_modem_set_ap_active(struct device *rc_dev, bool active)
 }
 EXPORT_SYMBOL_GPL(zumapro_pcie_modem_set_ap_active);
 
+/*
+ * Warm-reset the CP back into its boot ROM and wait for its endpoint to
+ * re-link, so the modem driver can (re-)run its boot sequence from scratch.
+ *
+ * At cold boot the controller probe already reset the CP (exynos_cp_power_warm_reset()
+ * before link training).  But on a bare modem-module reload (rmmod/insmod with no
+ * reboot) nothing else resets it, so BL1 would land on a still-running MAIN and
+ * boot_stage never advances.  The modem driver calls this at the top of its probe
+ * -- after it has found the (already-enumerated) endpoint but before it programs
+ * MSI/BAR0 -- so both the cold and the reload path continue against a fresh boot
+ * ROM.  cp_pwr stays on (MAIN survives in the CP's self-powered DRAM), only the
+ * baseband is pulsed, then we wait for the Gen1 boot-ROM link to re-train; the
+ * caller reprograms the endpoint's config (MSI target, doorbell BAR) afterwards.
+ */
 static int zumapro_pcie_modem_reset_mode(struct device *rc_dev, bool dump)
 {
 	struct exynos_pcie *ep = zumapro_pcie_from_dev(rc_dev);
@@ -2205,12 +2159,6 @@ static int zumapro_pcie_modem_reset_mode(struct device *rc_dev, bool dump)
 	}
 	return zumapro_pcie_modem_link_up(rc_dev);
 }
-
-int zumapro_pcie_modem_reset(struct device *rc_dev)
-{
-	return zumapro_pcie_modem_reset_mode(rc_dev, false);
-}
-EXPORT_SYMBOL_GPL(zumapro_pcie_modem_reset);
 
 /*
  * Same warm reset, but with AP2CP_DUMP_NOTI latched so the ROM boots its
