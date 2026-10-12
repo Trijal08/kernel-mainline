@@ -884,12 +884,20 @@ static int aoc_mic_switch_put(struct snd_kcontrol *kc,
  * a mono one over the left, with the right kept silent.
  *
  * Each tops out where its route was tuned to sit rather than where the
- * hardware ends, so full scale is the level the route had before it had a
- * volume at all and the amplifiers' +12 dB is not reachable through either.
+ * hardware ends, so the amplifiers' +12 dB is not reachable through either.
+ *
+ * The earpiece's ceiling is 8 dB above the -22 dB this started at, which was
+ * inherited from tegu's tuning and measured too quiet to hold a call outdoors.
+ * There is no separate receiver on this phone -- the "earpiece" is the top
+ * loudspeaker driven quietly -- so the backoff is a tuning choice rather than
+ * a limit of the part, and the remaining 14 dB still keeps it well short of
+ * what the same amplifier does for media. The scale is 0.125 dB a step from
+ * 817 = 0 dB, so each 8 counts is 1 dB if this wants moving again; the TLV
+ * maximum below has to move with it or the reported dB stops matching.
  * UCM names whichever control belongs to the device, and the dialler's volume
  * keys then land on hardware that is in the path.
  */
-#define AOC_AMP_VOL_EARPIECE_MAX	641	/* -22 dB, the near-field backoff */
+#define AOC_AMP_VOL_EARPIECE_MAX	705	/* -14 dB, the near-field backoff */
 #define AOC_AMP_VOL_SPEAKER_MAX		817	/* 0 dB, unity */
 
 static const char * const aoc_amp_vol_ctl[] = {
@@ -900,7 +908,7 @@ static const char * const aoc_amp_vol_ctl[] = {
 /* Both mirror the amplifiers' own scale, which is 0 to mute and 0.125 dB a step. */
 static const DECLARE_TLV_DB_RANGE(aoc_earpiece_tlv,
 		0, 0, TLV_DB_SCALE_ITEM(TLV_DB_GAIN_MUTE, 0, 1),
-		1, AOC_AMP_VOL_EARPIECE_MAX, TLV_DB_MINMAX_ITEM(-10200, -2200));
+		1, AOC_AMP_VOL_EARPIECE_MAX, TLV_DB_MINMAX_ITEM(-10200, -1400));
 static const DECLARE_TLV_DB_RANGE(aoc_speaker_tlv,
 		0, 0, TLV_DB_SCALE_ITEM(TLV_DB_GAIN_MUTE, 0, 1),
 		1, AOC_AMP_VOL_SPEAKER_MAX, TLV_DB_MINMAX_ITEM(-10200, 0));
