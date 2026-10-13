@@ -4,7 +4,6 @@
  *
  * Copyright (C) 2018 Samsung Electronics Co.Ltd
  */
-#include <linux/console.h>
 #include <linux/component.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
@@ -32,7 +31,6 @@
 #include "exynos_drm_crtc.h"
 #include "exynos_drm_dp.h"
 
-// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright (C) 2019 Samsung Electronics Co.Ltd
  */
@@ -3290,66 +3288,18 @@ struct dp_dev_data {
 	const enum chip_version version;
 };
 
-// static void __exynos910_drm_dp_dump_sfr(struct exynos_dp_subdev *subdev)
-// {
-// 	struct device *dev = subdev->dev;
-// 	struct dp_regs *regs = &subdev->regs;
-// 	int i;
-
-// 	if (regs->link_addr) {
-// 		print_dump_info("DP_LINK BASE(%s) +", dev_name(dev));
-// 		print_hexdump(regs->link_addr,		0x210);
-// 		print_hexdump(regs->link_addr + 0x1000,	0x60);
-// 		print_hexdump(regs->link_addr + 0x1100,	0x20);
-// 		print_hexdump(regs->link_addr + 0x2000,	0x80);
-// 		print_hexdump(regs->link_addr + 0x3000,	0x120);
-// 		/* TODO: Should be added SSTx SFR */
-// 		print_dump_info("DP_LINK BASE(%s) -", dev_name(dev));
-// 		for (i = 0; i < DP_SST_MAX; i++) {
-// 			struct exynos_dp_video_info *vi = &subdev->vi[i];
-// 			print_dump_info("DP_LINK SST%d +", i + 1);
-// 			print_hexdump(regs->link_addr + 0x5000 + (0x1000 * i), 0x108);
-// 			print_hexdump(regs->link_addr + 0x5400 + (0x1000 * i), 0x110);
-// 			if (vi->dsc.enable) {
-// 				print_hexdump(regs->link_addr + 0x5C20 + (0x1000 * i), 0x4);
-// 				print_hexdump(regs->link_addr + 0x5D00 + (0x1000 * i), 0x80);
-// 			}
-
-// 			print_dump_info("DP_LINK SST%d -", i + 1);
-// 		}
-// 	}
-
-// 	if (regs->phy_addr) {
-// 		print_dump_info("DP__PHY BASE(%s) +", dev_name(dev));
-// 		print_hexdump(regs->phy_addr,		0x428);
-// 		print_hexdump(regs->phy_addr + 0x800,	0x4D4);
-// 		print_hexdump(regs->phy_addr + 0x1000,	0xD0);
-// 		print_hexdump(regs->phy_addr + 0x10D4,	0x4);
-// 		print_hexdump(regs->phy_addr + 0x1800,	0x4D4);
-// 		print_hexdump(regs->phy_addr + 0x2000,	0xD0);
-// 		print_hexdump(regs->phy_addr + 0x20D4,	0x4);
-// 		print_dump_info("DP__PHY BASE(%s) -", dev_name(dev));
-// 	}
-// }
-
 int exynos_drm_dp_dump_sfr(struct exynos_dp_subdev *subdev)
 {
-	int acquired;
-
 	if (!subdev || !subdev->dev)
 		return -ENXIO;
 
 	if (subdev->state == DP_STATE_OFF)
 		return -EBUSY;
 
-	acquired = console_trylock();
-
-	if (subdev->version == V910)
-		// __exynos910_drm_dp_dump_sfr(subdev);
-
-	if (acquired)
-		console_unlock();
-
+	/*
+	 * The per-version register dump this used to call was never ported, so
+	 * there is nothing here to serialise against the console.
+	 */
 	return 0;
 }
 
@@ -3662,8 +3612,8 @@ static int exynos_drm_dp_init_resources(struct exynos_dp_subdev *dp, struct plat
 	return 0;
 }
 
-static ssize_t exynos_drm_dp_show_sfr(struct device *dev,
-				    struct device_attribute *attr, char *buf)
+static ssize_t dump_sfr_show(struct device *dev,
+			     struct device_attribute *attr, char *buf)
 {
 	struct exynos_drm_dp *dp = dev_get_drvdata(dev);
 
@@ -3672,7 +3622,7 @@ static ssize_t exynos_drm_dp_show_sfr(struct device *dev,
 	return 0;
 }
 
-static DEVICE_ATTR(dump_sfr, S_IRUGO, exynos_drm_dp_show_sfr, NULL);
+static DEVICE_ATTR_RO(dump_sfr);
 
 static ssize_t exynos_drm_dp_show_link_lane(struct device *dev,
 				    struct device_attribute *attr, char *buf)
