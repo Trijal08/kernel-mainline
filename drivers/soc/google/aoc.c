@@ -277,7 +277,7 @@ static int aoc_request_on(struct aoc_data *aoc)
 /* Write the boot parameter block the AOC reads at ipc_offset. */
 static void aoc_write_params(struct aoc_data *aoc)
 {
-	volatile u32 *p = (volatile u32 *)((u8 *)aoc->carveout + aoc->ipc_offset);
+	__le32 *p = (__le32 *)((u8 *)aoc->carveout + aoc->ipc_offset);
 	/* Heaps are carved from the end of the carveout, in the AOC's view. */
 	u32 sensor_heap = AOC_DRAM_BASE + aoc->carveout_size - AOC_SENSOR_HEAP_SIZE;
 	u32 playback_heap = sensor_heap - AOC_PLAYBACK_HEAP_SIZE;
@@ -306,15 +306,21 @@ static void aoc_write_params(struct aoc_data *aoc)
 		{ kAOCChipProductId,		aoc->chip_product_id },
 		{ kAOCWifiChip,			aoc->wifi_chip },
 	};
-	unsigned int i, n = ARRAY_SIZE(tbl);
+	unsigned int i, w = 0, n = ARRAY_SIZE(tbl);
 
-	*p++ = AOC_PARAMETER_MAGIC;
-	*p++ = n;
-	*p++ = 12 + n * 12;			/* header + n * (key,len,val) */
+	/*
+	 * The carveout is write-combining and the AOC is not coherent with us,
+	 * so store through WRITE_ONCE as the IPC accessors below do rather than
+	 * letting the compiler merge or sink these.
+	 */
+	WRITE_ONCE(p[w++], cpu_to_le32(AOC_PARAMETER_MAGIC));
+	WRITE_ONCE(p[w++], cpu_to_le32(n));
+	/* header + n * (key,len,val) */
+	WRITE_ONCE(p[w++], cpu_to_le32(12 + n * 12));
 	for (i = 0; i < n; i++) {
-		*p++ = tbl[i].key;
-		*p++ = sizeof(u32);
-		*p++ = tbl[i].val;
+		WRITE_ONCE(p[w++], cpu_to_le32(tbl[i].key));
+		WRITE_ONCE(p[w++], cpu_to_le32(sizeof(u32)));
+		WRITE_ONCE(p[w++], cpu_to_le32(tbl[i].val));
 	}
 	wmb();					/* land before the core starts */
 }
