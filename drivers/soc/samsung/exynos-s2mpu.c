@@ -184,7 +184,9 @@ static int exynos_s2mpu_probe(struct platform_device *pdev)
 	 * counts a device with runtime PM disabled as not-suspended, so leaving
 	 * it off vetoed every power-off for the whole domain.
 	 */
-	pm_runtime_enable(dev);
+	ret = devm_pm_runtime_enable(dev);
+	if (ret)
+		return ret;
 
 	dev_info(dev, "v9 allow-all installed (version %#x, %u contexts)\n",
 		 version, s2mpu->num_ctx);
