@@ -1101,9 +1101,9 @@ static int decon_reg_set_config(u32 decon_idx, struct decon_config config)
 	  *
 	  * TODO : if DSC feature added, code must be modified like this.
 	  * if((config->out_type & DECON_OUT_DSI) && (DSC==DISABLE))
-	  * 	rgb_order = DECON_BGR;
+	  *	rgb_order = DECON_BGR;
 	  * else
-	  * 	rgb_order = DECON_RGB;
+	  *	rgb_order = DECON_RGB;
 	 */
 	if (config.out_type & DECON_OUT_DSI)
 		rgb_order = DECON_BGR;
@@ -1133,7 +1133,7 @@ static int decon_reg_set_enable(u32 decon_idx, struct decon_config config)
 
 	decon_reg_set_config(decon_idx, config);
 	// if (config.dsc.enable)
-	// 	decon_reg_set_dsc(decon_idx, config.dsc);
+	//	decon_reg_set_dsc(decon_idx, config.dsc);
 	// else
 	decon_reg_set_dsc_path(decon_idx, DECON_DSC_NONE);
 	__decon_reg_set_enable(decon_idx);
@@ -1912,7 +1912,7 @@ static int decon_bind(struct device *dev, struct device *master, void *data)
 		if (win->plane_config.type == DRM_PLANE_TYPE_PRIMARY)
 			primary_plane = &win->plane.base;
 		// if (win->plane_config.type == DRM_PLANE_TYPE_CURSOR)
-		// 	cursor_plane = &win->plane.base;
+		//	cursor_plane = &win->plane.base;
 	}
 
 	ctx->crtc = exynos_drm_crtc_create(drm_dev, primary_plane,
