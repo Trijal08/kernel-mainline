@@ -108,6 +108,8 @@ static void exynos_s2mpu_install(struct exynos_s2mpu *s2mpu)
 
 	/* Flush the MPT cache and make all of the above visible. */
 	writel_relaxed(S2MPU_ALL_INVALIDATION_GO, base + S2MPU_ALL_INVALIDATION);
+
+	/* The unit must be open before the masters it guards are released. */
 	wmb();
 }
 
