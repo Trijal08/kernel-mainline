@@ -334,7 +334,7 @@ static inline void __cal_dump_regs(struct cal_regs_desc *desc, bool shadow)
 			print_dump_info("%s: %s %s(+0x%X)", desc->name,
 					dps->name, shadow ? "SHADOW " : "",
 					shdw_offs);
-		// print_hexdump(desc->regs + dps->offs + shdw_offs, dps->size);
+		/* The register data itself is not dumped. */
 	}
 }
 
