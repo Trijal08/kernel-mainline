@@ -365,6 +365,19 @@ struct s5xxx_variant {
 #define S5XXX_IPC_AP_STATUS_ONLINE	(1u << 1)		/* 0x2 */
 #define S5XXX_IPC_PDA_ACTIVE		(1u << 5)		/* 0x20 */
 
+/*
+ * The CP's boot log: plain text the bootloader leaves in shared memory, as a
+ * 4-byte little-endian length followed by the string.  It is the only log this
+ * CP produces that needs nothing else to be working -- the DM channel is
+ * silent, SELFLOG is refused while the CP's DM state is 0, and the vendor
+ * logging HAL is not on this build at all (its AIDL stub has no service behind
+ * it), so none of the usual routes exist.  Offsets are the vendor driver's
+ * SHMEM_BOOTLOG_* (link_device_memory.h): base 0xc00, 0x1ff bytes, text at +4.
+ */
+#define S5XXX_IPC_BOOTLOG_OFFSET	0xc00
+#define S5XXX_IPC_BOOTLOG_SIZE		0x1ff
+#define S5XXX_IPC_BOOTLOG_TEXT		0x4
+
 #define S5XXX_IPC_SRINFO_OFFSET		0x400000
 #define S5XXX_IPC_SRINFO_SIZE		0x300000
 #define S5XXX_IPC_MAGIC_VALUE		0xaa	/* SIT protocol magic */
@@ -4334,6 +4347,38 @@ out:
 }
 
 /*
+ * The CP boot log as text.  The length word is written by the CP, so treat it
+ * as untrusted: anything that does not fit the buffer means "nothing useful
+ * here" rather than a read past the region.
+ */
+static ssize_t s5xxx_bootlog_read(struct file *file, char __user *ubuf,
+				  size_t count, loff_t *ppos)
+{
+	struct s5xxx_modem *sm = file->private_data;
+	char buf[S5XXX_IPC_BOOTLOG_SIZE];
+	u32 len;
+
+	if (sm->ipc_size < S5XXX_IPC_BOOTLOG_OFFSET + S5XXX_IPC_BOOTLOG_SIZE)
+		return -ENODEV;
+
+	len = readl(sm->ipc + S5XXX_IPC_BOOTLOG_OFFSET);
+	if (!len || len > S5XXX_IPC_BOOTLOG_SIZE - S5XXX_IPC_BOOTLOG_TEXT)
+		return 0;
+
+	memcpy_fromio(buf, sm->ipc + S5XXX_IPC_BOOTLOG_OFFSET +
+			   S5XXX_IPC_BOOTLOG_TEXT, len);
+
+	return simple_read_from_buffer(ubuf, count, ppos, buf, len);
+}
+
+static const struct file_operations s5xxx_bootlog_fops = {
+	.owner	= THIS_MODULE,
+	.open	= simple_open,
+	.read	= s5xxx_bootlog_read,
+	.llseek	= default_llseek,
+};
+
+/*
  * The whole srinfo region, raw, so it can be pulled off and searched without a
  * kernel build per hypothesis: the minidump agent's decoded record carries an
  * 8-byte magic somewhere in these 3 MB and is not necessarily at offset 0.
@@ -5034,6 +5079,7 @@ static int s5xxx_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	sm->dbgfs = debugfs_create_dir("s5xxx-modem", NULL);
 	debugfs_create_file("dump_boot", 0200, sm->dbgfs, sm,
 			    &s5xxx_dump_boot_fops);
+	debugfs_create_file("bootlog", 0400, sm->dbgfs, sm, &s5xxx_bootlog_fops);
 	debugfs_create_file("srinfo", 0400, sm->dbgfs, sm, &s5xxx_srinfo_fops);
 
 	/* The oem/GEMS port (ch 0x82) comes up with the other CP channels at ONLINE. */
