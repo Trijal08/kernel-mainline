@@ -102,8 +102,12 @@
 
 #define DSIM_PAYLOAD			0x005c
 
+/* Read-response FIFO: one word per pop, header first (vendor DSIM_RXFIFO) */
+#define DSIM_RXFIFO			0x0060
+
 #define DSIM_FIFOCTRL			0x0068
 #define DSIM_FIFOCTRL_EMPTY_PH_SFR		(1 << 10)
+#define DSIM_FIFOCTRL_EMPTY_RX			(1 << 12)
 #define DSIM_FIFOCTRL_EMPTY_PL_SFR		(1 << 8)
 
 #define DSIM_SFR_CTRL			0x0064
@@ -129,6 +133,7 @@
 #define DSIM_CMD_TE_CTRL1_TIME_TE_TOUT(x)	((x) << 0)
 
 #define DSIM_INTSRC_PLL_STABLE			(1 << 31)
+#define DSIM_INTSRC_RX_DATA_DONE		(1 << 18)
 
 #define DSIM_SLICE23			0x007c
 #define DSIM_SLICE23_SIZE_OF_SLICE3(x)		((x) << 16)

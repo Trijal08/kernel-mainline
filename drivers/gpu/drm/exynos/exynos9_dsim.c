@@ -35,6 +35,8 @@
 #include <drm/drm_probe_helper.h>
 #include <drm/drm_simple_kms_helper.h>
 
+#include <video/mipi_display.h>
+
 #include "exynos_drm_crtc.h"
 #include "exynos_drm_drv.h"
 #include "regs-dsim-zuma.h"
@@ -916,10 +918,114 @@ static int zuma_dsim_host_detach(struct mipi_dsi_host *host,
  * the transfer), then wait for the PH/PL FIFOs to drain. The vendor waits on an
  * IRQ completion; we poll the FIFO-empty status, which needs no DSIM IRQ.
  */
+/*
+ * The response FIFO holds (64 * 4) bytes including the 4-byte packet header,
+ * so that is the most a single read can return (vendor MAX_RX_FIFO).
+ */
+#define DSIM_MAX_RX_LEN		((64 * 4) - 4)
+
+/* Pop the whole response FIFO, so a stale word cannot be read as a header. */
+static void zuma_dsim_drain_rxfifo(struct zuma_dsim *dsim)
+{
+	unsigned int i;
+
+	for (i = 0; i < 64; i++) {
+		if (readl(dsim->regs + DSIM_FIFOCTRL) & DSIM_FIFOCTRL_EMPTY_RX)
+			return;
+		readl(dsim->regs + DSIM_RXFIFO);
+	}
+	dev_warn(dsim->dev, "rx fifo would not drain\n");
+}
+
+/*
+ * Parse one read response.  The first word is the packet header: the low byte
+ * is the data type, and for a short response the payload is in the next one or
+ * two bytes, while a long response carries a 16-bit length and its payload in
+ * the words that follow.  Returns the number of bytes handed back.
+ */
+static int zuma_dsim_read_rxfifo(struct zuma_dsim *dsim,
+				 const struct mipi_dsi_msg *msg)
+{
+	u8 *rx = msg->rx_buf;
+	u32 hdr, type, len, i;
+	size_t avail;
+	int ret;
+
+	/*
+	 * Busy-wait like the transmit path above: this is reached with
+	 * interrupts possibly off, so it must not sleep.  A response that has
+	 * not arrived in 20 ms is not coming.
+	 */
+	ret = readl_poll_timeout_atomic(dsim->regs + DSIM_INTSRC, hdr,
+					hdr & DSIM_INTSRC_RX_DATA_DONE,
+					10, 20000);
+	if (ret) {
+		dev_warn(dsim->dev,
+			 "no read response (type 0x%02x, intsrc 0x%08x fifoctrl 0x%08x)\n",
+			 msg->type, readl(dsim->regs + DSIM_INTSRC),
+			 readl(dsim->regs + DSIM_FIFOCTRL));
+		return -ETIMEDOUT;
+	}
+	writel(DSIM_INTSRC_RX_DATA_DONE, dsim->regs + DSIM_INTSRC);
+
+	hdr = readl(dsim->regs + DSIM_RXFIFO);
+	type = hdr & 0xff;
+
+	switch (type) {
+	case MIPI_DSI_RX_ACKNOWLEDGE_AND_ERROR_REPORT:
+		dev_warn(dsim->dev, "panel error report 0x%04x\n",
+			 (hdr >> 8) & 0xffff);
+		ret = -EPROTO;
+		goto drain;
+	case MIPI_DSI_RX_DCS_SHORT_READ_RESPONSE_1BYTE:
+	case MIPI_DSI_RX_GENERIC_SHORT_READ_RESPONSE_1BYTE:
+	case MIPI_DSI_RX_DCS_SHORT_READ_RESPONSE_2BYTE:
+	case MIPI_DSI_RX_GENERIC_SHORT_READ_RESPONSE_2BYTE:
+		/* The payload is in the header word; report only what it holds. */
+		avail = (type == MIPI_DSI_RX_DCS_SHORT_READ_RESPONSE_2BYTE ||
+			 type == MIPI_DSI_RX_GENERIC_SHORT_READ_RESPONSE_2BYTE) ? 2 : 1;
+		len = min_t(size_t, avail, msg->rx_len);
+		if (len > 0)
+			rx[0] = (hdr >> 8) & 0xff;
+		if (len > 1)
+			rx[1] = (hdr >> 16) & 0xff;
+		ret = len;
+		goto drain;
+	case MIPI_DSI_RX_DCS_LONG_READ_RESPONSE:
+	case MIPI_DSI_RX_GENERIC_LONG_READ_RESPONSE:
+		break;
+	default:
+		dev_warn(dsim->dev, "unexpected response type 0x%02x\n", type);
+		ret = -EPROTO;
+		goto drain;
+	}
+
+	len = (hdr >> 8) & 0xffff;
+	if (len > msg->rx_len) {
+		dev_warn(dsim->dev, "response truncated (%u > %zu)\n",
+			 len, msg->rx_len);
+		len = msg->rx_len;
+	}
+
+	for (i = 0; i < len; i += 4) {
+		u32 word = readl(dsim->regs + DSIM_RXFIFO);
+		unsigned int b;
+
+		for (b = 0; b < 4 && i + b < len; b++)
+			rx[i + b] = (word >> (8 * b)) & 0xff;
+	}
+	ret = len;
+
+drain:
+	zuma_dsim_drain_rxfifo(dsim);
+	return ret;
+}
+
 static ssize_t zuma_dsim_host_transfer(struct mipi_dsi_host *host,
 				       const struct mipi_dsi_msg *msg)
 {
 	struct zuma_dsim *dsim = host_to_dsim(host);
+	bool read = msg->rx_len && msg->rx_buf;
 	struct mipi_dsi_packet packet;
 	const u8 *pl;
 	size_t i;
@@ -929,6 +1035,9 @@ static ssize_t zuma_dsim_host_transfer(struct mipi_dsi_host *host,
 	if (!dsim->regs)
 		return -ENODEV;
 
+	if (read && msg->rx_len > DSIM_MAX_RX_LEN)
+		return -EINVAL;
+
 	ret = mipi_dsi_create_packet(&packet, msg);
 	if (ret < 0)
 		return ret;
@@ -937,6 +1046,31 @@ static ssize_t zuma_dsim_host_transfer(struct mipi_dsi_host *host,
 	ret = pm_runtime_resume_and_get(dsim->dev);
 	if (ret < 0)
 		return ret;
+
+	if (read) {
+		/*
+		 * Leave nothing of a previous response behind, then bound what
+		 * the panel may send back.  Without this the DDIC is free to
+		 * return more than the FIFO holds.
+		 */
+		writel(DSIM_INTSRC_RX_DATA_DONE, dsim->regs + DSIM_INTSRC);
+		zuma_dsim_drain_rxfifo(dsim);
+
+		writel(DSIM_PKTHDR_ID(MIPI_DSI_SET_MAXIMUM_RETURN_PACKET_SIZE) |
+			       DSIM_PKTHDR_DATA0(msg->rx_len & 0xff) |
+			       DSIM_PKTHDR_DATA1((msg->rx_len >> 8) & 0xff),
+		       dsim->regs + DSIM_PKTHDR);
+
+		ret = readl_poll_timeout_atomic(dsim->regs + DSIM_FIFOCTRL, val,
+						val & DSIM_FIFOCTRL_EMPTY_PH_SFR,
+						10, 20000);
+		if (ret) {
+			dev_warn(dsim->dev,
+				 "max-return-size tx timeout (FIFOCTRL=0x%08x)\n",
+				 val);
+			goto out;
+		}
+	}
 
 	/* long-packet payload first, packed little-endian 4 bytes per word */
 	pl = packet.payload;
@@ -961,8 +1095,12 @@ static ssize_t zuma_dsim_host_transfer(struct mipi_dsi_host *host,
 		writel(val, dsim->regs + DSIM_PAYLOAD);
 	}
 
-	/* header kicks the transfer */
-	writel(DSIM_PKTHDR_ID(packet.header[0]) |
+	/*
+	 * Header kicks the transfer.  A read also has to ask for the bus
+	 * turnaround, or the link never reverses and no response arrives.
+	 */
+	writel(DSIM_PKTHDR_BTA_TYPE(read) |
+		       DSIM_PKTHDR_ID(packet.header[0]) |
 		       DSIM_PKTHDR_DATA0(packet.header[1]) |
 		       DSIM_PKTHDR_DATA1(packet.header[2]),
 	       dsim->regs + DSIM_PKTHDR);
@@ -994,7 +1132,7 @@ static ssize_t zuma_dsim_host_transfer(struct mipi_dsi_host *host,
 		goto out;
 	}
 
-	ret = msg->tx_len;
+	ret = read ? zuma_dsim_read_rxfifo(dsim, msg) : msg->tx_len;
 out:
 	pm_runtime_put_sync(dsim->dev);
 
