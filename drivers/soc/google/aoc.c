@@ -970,7 +970,9 @@ static int aoc_ring_read(struct aoc_data *aoc, void *svc, void *buf, size_t max)
 	if (!avail)
 		return -ENODATA;
 
-	to_read = min(avail, (u32)max);
+	to_read = min_t(u32, avail, max);
+
+	/* Order the index reads above against the ring copy below. */
 	rmb();
 	if (rp + to_read <= size) {
 		memcpy(buf, ring + rp, to_read);
