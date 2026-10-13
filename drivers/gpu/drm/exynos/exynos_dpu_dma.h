@@ -1,9 +1,11 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 #ifndef _EXYNOSAUTO_DPU_DMA_H_
 #define _EXYNOSAUTO_DPU_DMA_H_
 
 #include "exynos_drm_drv.h"
 
 struct exynos_dpu_dma_context {
+	struct device *dev;
 	struct clk *aclk;
 	int irq;
 	void __iomem *regs;
