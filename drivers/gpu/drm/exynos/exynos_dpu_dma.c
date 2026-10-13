@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
+#define pr_fmt(fmt) "exynos-dpu: " fmt
+
 #include <linux/bits.h>
 #include <linux/clk.h>
 #include <linux/component.h>
 #include <linux/io.h>
 #include <linux/iopoll.h>
 #include <linux/of.h>
+#include <linux/of_address.h>
 #include <linux/of_reserved_mem.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
@@ -366,8 +369,7 @@ static const struct component_ops dma_component_ops = {
 	.bind = dma_bind,
 };
 
-/* DECON0 GLOBAL_CON, see regs-decon-zuma.h. */
-#define QUIESCE_DECON0_MAIN	0x19470000
+/* DECON GLOBAL_CON, see regs-decon-zuma.h. */
 #define QUIESCE_GLOBAL_CON	0x0020
 #define QUIESCE_DECON_EN_F	BIT(0)
 #define QUIESCE_DECON_EN	BIT(1)
@@ -380,36 +382,33 @@ module_param(quiesce_boot_decon, bool, 0444);
 MODULE_PARM_DESC(quiesce_boot_decon,
 		 "stop the bootloader's DECON before powering the DPU SysMMU");
 
+static const struct of_device_id quiesce_decon_match[] = {
+	{ .compatible = "samsung,exynos910-decon" },
+	{ .compatible = "google,zuma-decon" },
+	{ /* sentinel */ }
+};
+
 /*
- * The bootloader hands the panel over with DECON0 still fetching, and enabling
- * SysMMU translation under a live DMA master resets the SoC. Stop the fetch
- * first. Done with a bare mapping rather than through the DECON driver, which
- * probes later and does not own the hardware until it binds.
- *
- * Called from exynos_drm_init(), NOT from dpu_dma_probe(): the "iommus" link
- * makes the SysMMU a supplier of this device, so really_probe() runs
- * pm_runtime_get_suppliers() -- and with it __sysmmu_enable() -- before .probe
- * is entered. Quiescing inside the probe is 100ms too late, which is exactly
- * what the first version of this patch did.
+ * Stop one DECON fetching. Mapped straight from its DT node rather than
+ * through the DECON driver, which probes later and does not own the hardware
+ * until it binds.
  */
-void dpu_dma_quiesce_boot_decon(void)
+static void dpu_dma_quiesce_decon(struct device_node *np)
 {
 	void __iomem *main;
+	int idx, ret;
 	u32 val;
-	int ret;
 
-	if (!quiesce_boot_decon)
-		return;
-
-	main = ioremap(QUIESCE_DECON0_MAIN, 0x100);
+	idx = of_property_match_string(np, "reg-names", "main");
+	main = of_iomap(np, idx < 0 ? 0 : idx);
 	if (!main) {
-		pr_warn("exynos-dpu: quiesce: cannot map DECON0\n");
+		pr_warn("quiesce: cannot map %pOFn\n", np);
 		return;
 	}
 
 	val = readl(main + QUIESCE_GLOBAL_CON);
 	if (!(val & QUIESCE_RUN_STATUS)) {
-		pr_info("exynos-dpu: quiesce: DECON0 already idle (%#x)\n", val);
+		pr_debug("quiesce: %pOFn already idle (%#x)\n", np, val);
 		goto out;
 	}
 
@@ -426,11 +425,11 @@ void dpu_dma_quiesce_boot_decon(void)
 	ret = readl_poll_timeout(main + QUIESCE_GLOBAL_CON, val,
 				 !(val & QUIESCE_RUN_STATUS), 100, 100000);
 	if (!ret) {
-		pr_info("exynos-dpu: quiesce: DECON0 stopped (%#x)\n", val);
+		pr_info("quiesce: %pOFn stopped (%#x)\n", np, val);
 		goto out;
 	}
 
-	pr_warn("exynos-dpu: quiesce: DECON0 still running (%#x), SRESET\n", val);
+	pr_warn("quiesce: %pOFn still running (%#x), SRESET\n", np, val);
 
 	/*
 	 * Only SRESET between frames. Resetting mid-frame -- IDLE_STATUS clear,
@@ -442,21 +441,42 @@ void dpu_dma_quiesce_boot_decon(void)
 	ret = readl_poll_timeout(main + QUIESCE_GLOBAL_CON, val,
 				 val & QUIESCE_IDLE_STATUS, 100, 100000);
 	if (ret)
-		pr_warn("exynos-dpu: quiesce: DECON0 never idle (%#x), SRESET anyway\n",
-			val);
-	else
-		pr_info("exynos-dpu: quiesce: DECON0 idle (%#x)\n", val);
+		pr_warn("quiesce: %pOFn never idle (%#x), SRESET anyway\n",
+			np, val);
 
 	writel(val | QUIESCE_SRESET, main + QUIESCE_GLOBAL_CON);
 	ret = readl_poll_timeout(main + QUIESCE_GLOBAL_CON, val,
 				 !(val & (QUIESCE_SRESET | QUIESCE_RUN_STATUS)),
 				 100, 100000);
 	if (ret)
-		pr_warn("exynos-dpu: quiesce: SRESET did not settle (%#x)\n", val);
+		pr_warn("quiesce: %pOFn SRESET did not settle (%#x)\n", np, val);
 	else
-		pr_info("exynos-dpu: quiesce: DECON0 reset (%#x)\n", val);
+		pr_info("quiesce: %pOFn reset (%#x)\n", np, val);
 out:
 	iounmap(main);
+}
+
+/*
+ * The bootloader hands the panel over with a DECON still fetching, and
+ * enabling SysMMU translation under a live DMA master resets the SoC. Stop
+ * every DECON the bootloader may have left running.
+ *
+ * Called from exynos_drm_init(), NOT from dpu_dma_probe(): the "iommus" link
+ * makes the SysMMU a supplier of this device, so really_probe() runs
+ * pm_runtime_get_suppliers() -- and with it __sysmmu_enable() -- before .probe
+ * is entered. Quiescing inside the probe is 100ms too late, which is exactly
+ * what the first version of this patch did.
+ */
+void dpu_dma_quiesce_boot_decon(void)
+{
+	struct device_node *np;
+
+	if (!quiesce_boot_decon)
+		return;
+
+	for_each_matching_node(np, quiesce_decon_match)
+		if (of_device_is_available(np))
+			dpu_dma_quiesce_decon(np);
 }
 
 static int dpu_dma_probe(struct platform_device *pdev)
