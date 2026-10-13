@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#include <linux/of.h>
-#include <linux/of_device.h>
-#include <linux/platform_device.h>
+#include <linux/clk.h>
 #include <linux/component.h>
 #include <linux/irq.h>
+#include <linux/module.h>
+#include <linux/of.h>
+#include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
 
 #include <drm/drm_atomic.h>
@@ -36,8 +37,9 @@
 
 static const struct of_device_id dpp_of_match[] = {
 	{ .compatible = "samsung,exynosauto-dpp" },
-	{},
+	{ /* sentinel */ }
 };
+MODULE_DEVICE_TABLE(of, dpp_of_match);
 
 void dpp_update(struct exynos_dpp_context *dpp,
 		const struct exynos_drm_plane_state *state)
@@ -89,9 +91,9 @@ static int dpp_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct exynos_dpp_context *dpp;
-	struct resource *res;
+	int ret;
 
-	dpp = devm_kzalloc(dev, sizeof(struct exynos_dpp_context), GFP_KERNEL);
+	dpp = devm_kzalloc(dev, sizeof(*dpp), GFP_KERNEL);
 	if (!dpp)
 		return -ENOMEM;
 
@@ -109,18 +111,19 @@ static int dpp_probe(struct platform_device *pdev)
 
 	dpp->aclk = devm_clk_get_enabled(dpp->dev, "aclk");
 	if (IS_ERR(dpp->aclk))
-		pr_err("failed to get clock");
+		return dev_err_probe(dev, PTR_ERR(dpp->aclk),
+				     "cannot get aclk\n");
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	if (!res)
-		return -EINVAL;
-
-	dpp->regs = devm_ioremap_resource(dev, res);
+	dpp->regs = devm_platform_ioremap_resource(pdev, 0);
+	if (IS_ERR(dpp->regs))
+		return PTR_ERR(dpp->regs);
 
 	platform_set_drvdata(pdev, dpp);
 
 	/* Taken around the register writes in dpp_update(). */
-	pm_runtime_enable(dev);
+	ret = devm_pm_runtime_enable(dev);
+	if (ret)
+		return ret;
 
 	return component_add(dev, &dpp_component_ops);
 }
@@ -128,7 +131,7 @@ static int dpp_probe(struct platform_device *pdev)
 struct platform_driver dpp_driver = {
 	.probe = dpp_probe,
 	.driver = {
-		   .name = "dpp",
-		   .of_match_table = dpp_of_match,
+		.name = "exynos-dpp",
+		.of_match_table = dpp_of_match,
 	},
 };
