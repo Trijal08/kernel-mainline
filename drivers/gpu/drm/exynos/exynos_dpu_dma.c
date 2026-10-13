@@ -483,12 +483,9 @@ static int dpu_dma_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct exynos_dpu_dma_context *ctx;
-	struct resource *res;
-
 	int ret;
 
-	ctx = devm_kzalloc(dev, sizeof(struct exynos_dpu_dma_context),
-			   GFP_KERNEL);
+	ctx = devm_kzalloc(dev, sizeof(*ctx), GFP_KERNEL);
 	if (!ctx)
 		return -ENOMEM;
 
@@ -514,7 +511,12 @@ static int dpu_dma_probe(struct platform_device *pdev)
 	ctx->aclk = devm_clk_get_enabled(dev, "aclk");
 	if (IS_ERR(ctx->aclk))
 		return dev_err_probe(dev, PTR_ERR(ctx->aclk),
-				     "Cannot get aclk\n");
+				     "cannot get aclk\n");
+
+	/* Map before the handler is installed: it reads ctx->regs. */
+	ctx->regs = devm_platform_ioremap_resource(pdev, 0);
+	if (IS_ERR(ctx->regs))
+		return PTR_ERR(ctx->regs);
 
 	ctx->irq = platform_get_irq(pdev, 0);
 	if (ctx->irq < 0)
@@ -525,37 +527,29 @@ static int dpu_dma_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	if (!res)
-		return -EINVAL;
-
-	ctx->regs = devm_ioremap_resource(dev, res);
-	if (!ctx->regs)
-		return -ENOMEM;
-
 	/*
 	 * No reference is taken here. The SysMMU is a supplier of this device,
 	 * so a resume pulls it up with us -- and holding one from probe pinned
 	 * pd-dpuf0, and through it pd-dpub, for the lifetime of the driver. The
 	 * CRTC takes the reference across its enable window instead.
 	 */
-	pm_runtime_enable(dev);
+	ret = devm_pm_runtime_enable(dev);
+	if (ret)
+		return ret;
 
-	component_add(dev, &dma_component_ops);
-
-	return 0;
+	return component_add(dev, &dma_component_ops);
 }
 
 static const struct of_device_id dpu_dma_of_match[] = {
 	{ .compatible = "samsung,exynosauto-dpu-dma" },
-	{},
+	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(of, dpu_dma_of_match);
 
 struct platform_driver dpu_dma_driver = {
-    .probe          = dpu_dma_probe,
-    .driver         = {
-        .name   = "dpu_dma_driver",
-        .of_match_table = of_match_ptr(dpu_dma_of_match),
-    },
+	.probe = dpu_dma_probe,
+	.driver = {
+		.name = "exynos-dpu-dma",
+		.of_match_table = dpu_dma_of_match,
+	},
 };
