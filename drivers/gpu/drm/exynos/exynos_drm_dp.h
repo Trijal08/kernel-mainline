@@ -644,7 +644,7 @@ enum hotplug_state {
 	HPD_PLUG	= BIT(0),
 	HPD_IRQ		= BIT(1),
 	HPD_CHECK	= BIT(2),
-	HPD_LT_FAILED 	= BIT(3),
+	HPD_LT_FAILED	= BIT(3),
 };
 
 typedef enum exynos_dp_sst_index {
