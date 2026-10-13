@@ -1830,8 +1830,8 @@ static const struct wwan_port_ops s5xxx_wwan_ops = {
 #define S5XXX_GNSS_STATE_RESET		2
 
 /* BLC pairs: start the staged image, and tear a running receiver down. */
-#define S5XXX_GNSS_BLC_START		0x00020020, 0x60000001
-#define S5XXX_GNSS_BLC_TEARDOWN		0x01020000, 0
+#define s5xxx_gnss_blc_start(sm)	s5xxx_gnss_blc((sm), 0x00020020, 0x60000001)
+#define s5xxx_gnss_blc_teardown(sm)	s5xxx_gnss_blc((sm), 0x01020000, 0)
 
 /*
  * Smallest header block the configuration below fits in.  The s5300 packages a
@@ -1978,7 +1978,7 @@ static void s5xxx_gnss_codeload(struct s5xxx_modem *sm, const u8 *fw,
 	 * straight away.
 	 */
 	if (state == S5XXX_GNSS_STATE_RUNNING) {
-		s5xxx_gnss_blc(sm, S5XXX_GNSS_BLC_TEARDOWN);
+		s5xxx_gnss_blc_teardown(sm);
 		s5xxx_gnss_op(sm, S5XXX_GNSS_ASSERT_RESET);
 		s5xxx_gnss_op(sm, S5XXX_GNSS_RELEASE_RESET);
 		s5xxx_gnss_op(sm, S5XXX_GNSS_INIT);
@@ -2003,7 +2003,7 @@ static void s5xxx_gnss_codeload(struct s5xxx_modem *sm, const u8 *fw,
 	s5xxx_gnss_load(sm, 4, hdr4);
 
 	/* Start the image, then the status reads that follow it in stock. */
-	s5xxx_gnss_blc(sm, S5XXX_GNSS_BLC_START);
+	s5xxx_gnss_blc_start(sm);
 	for (i = 0; i < 2; i++) {
 		s5xxx_gnss_blc(sm, 0x00240000, 0);
 		s5xxx_gnss_blc(sm, 0x00230000, 0);
