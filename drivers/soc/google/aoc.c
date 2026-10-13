@@ -1166,7 +1166,7 @@ static irqreturn_t aoc_mbox_isr(int irq, void *dev_id)
 		status &= ~(1U << bit);
 		for (i = 0; i < aoc->n_services; i++) {
 			struct aoc_service *svc = &aoc->svc_tbl[i];
-			void (*h)(struct aoc_service *, void *);
+			void (*h)(struct aoc_service *svc, void *ctx);
 
 			if (svc->mbox != channel)
 				continue;
@@ -1288,7 +1288,7 @@ static void aoc_ipc_selftest(struct aoc_data *aoc)
 	for (i = 0; i < 100; i++) {			/* up to ~1s */
 		if (aoc_service_can_read(ctrl))
 			break;
-		msleep(10);
+		usleep_range(10000, 11000);
 	}
 
 	ret = aoc_service_read(ctrl, &cmd, sizeof(cmd));
