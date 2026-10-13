@@ -40,40 +40,10 @@
 #include <linux/math64.h>
 #include <linux/timekeeping.h>
 #include <linux/regulator/consumer.h>
-#include <linux/trusty/trusty_ipc.h>
 #include <asm/arch_timer.h>
 #include <clocksource/arm_arch_timer.h>
 
-/*
- * The AOC's secure setup (its SysMMU's secure context and the reset release)
- * is done by a Trusty app, the GSA hardware manager for the AOC, reached over
- * tipc.  The GSA authenticates the image over its mailbox (gsa_load_aoc_fw_image)
- * but only this app can start the core.
- */
-#define AOC_HWMGR_PORT		"com.android.trusty.gsa.hwmgr.aoc"
-
-/* Sub-commands of the hwmgr STATE command (enum gsa_aoc_cmd). */
-#define AOC_TZ_GET_STATE	0
-#define AOC_TZ_START		1
-
-/* GSA hwmgr tipc protocol (from the vendor hwmgr-ipc.h). */
-#define HWMGR_CMD_RESP		(1U << 31)
-#define HWMGR_CMD_STATE_CMD	1
-
-struct hwmgr_state_req {
-	u32 hdr_cmd;			/* HWMGR_CMD_STATE_CMD */
-	u32 state_cmd;			/* AOC_TZ_START / AOC_TZ_GET_STATE */
-};
-
-struct hwmgr_state_rsp {
-	u32 hdr_cmd;			/* HWMGR_CMD_STATE_CMD | HWMGR_CMD_RESP */
-	u32 hdr_err;
-	u32 state;
-};
-
-#define AOC_TZ_CONNECT_TIMEOUT_MS	5000
-#define AOC_TZ_MSG_TIMEOUT_MS		10000
-#define AOC_TZ_BUF_TIMEOUT_MS		10000
+#include "aoc-boot.h"
 
 #define AOC_FIRMWARE_NAME	"google/zumapro/aoc.bin"
 
@@ -205,14 +175,9 @@ struct aoc_data {
 	struct delayed_work log_work;
 	struct dentry *dbgfs;		/* service-table dump */
 
-	/* Trusty channel to the GSA AOC hardware manager. */
-	struct tipc_chan *tz_chan;
-	struct completion tz_reply;
-	struct mutex tz_req_lock;	/* serialises requests */
-	struct mutex tz_rsp_lock;	/* protects the response buffer */
-	void *tz_rsp;
-	size_t tz_rsp_size;
-	int tz_rsp_res;
+	/* How the core gets out of reset; NULL if no backend is built in. */
+	const struct aoc_boot_backend *boot;
+	void *boot_priv;
 };
 
 /* Read the SoC chip-id the (chip-specific) AOC firmware validates at boot. */
@@ -493,139 +458,56 @@ static void aoc_dump_control_block(struct aoc_data *aoc, const void *cb)
 	}
 }
 
-/* Trusty channel: a reply arrived - copy it out and wake the waiter. */
-static struct tipc_msg_buf *aoc_tz_handle_msg(void *data,
-					      struct tipc_msg_buf *rxbuf)
+/*
+ * ---------------------------------------------------------------------------
+ * Bringing the core up.
+ *
+ * Everything secure about the AOC - its SysMMU's secure context and the reset
+ * release - is behind a boot backend (see aoc-boot.h).  The GSA authenticates
+ * the image over its mailbox, but no mailbox command starts the core.
+ * ---------------------------------------------------------------------------
+ */
+
+static int aoc_boot_attach(struct aoc_data *aoc)
 {
-	struct aoc_data *aoc = data;
+	void *priv;
 
-	mutex_lock(&aoc->tz_rsp_lock);
-	if (aoc->tz_rsp) {
-		size_t len = mb_avail_data(rxbuf);
+	if (IS_ENABLED(CONFIG_GOOGLE_AOC_TRUSTY))
+		aoc->boot = &aoc_boot_trusty;
 
-		if (len <= aoc->tz_rsp_size) {
-			memcpy(aoc->tz_rsp, mb_get_data(rxbuf, len), len);
-			aoc->tz_rsp_res = len;
-		} else {
-			aoc->tz_rsp_res = -EMSGSIZE;
-		}
-	}
-	mutex_unlock(&aoc->tz_rsp_lock);
-	complete(&aoc->tz_reply);
-
-	return rxbuf;
-}
-
-/* Trusty channel: connect/disconnect events also wake the waiter. */
-static void aoc_tz_handle_event(void *data, int event)
-{
-	struct aoc_data *aoc = data;
-
-	complete(&aoc->tz_reply);
-}
-
-static const struct tipc_chan_ops aoc_tz_ops = {
-	.handle_msg = aoc_tz_handle_msg,
-	.handle_event = aoc_tz_handle_event,
-};
-
-/* Open the tipc channel to the GSA AOC hardware manager and wait for it. */
-static int aoc_tz_connect(struct aoc_data *aoc)
-{
-	struct tipc_chan *chan;
-	long left;
-	int ret;
-
-	chan = tipc_create_channel(NULL, &aoc_tz_ops, aoc);
-	if (IS_ERR(chan))
-		return PTR_ERR(chan);
-
-	reinit_completion(&aoc->tz_reply);
-	ret = tipc_chan_connect(chan, AOC_HWMGR_PORT);
-	if (ret) {
-		tipc_chan_destroy(chan);
-		return ret;
+	if (!aoc->boot) {
+		dev_warn(aoc->dev,
+			 "no boot backend; firmware will be staged but the core cannot be started\n");
+		return 0;
 	}
 
-	left = wait_for_completion_timeout(&aoc->tz_reply,
-					   msecs_to_jiffies(AOC_TZ_CONNECT_TIMEOUT_MS));
-	if (left <= 0) {
-		tipc_chan_shutdown(chan);
-		tipc_chan_destroy(chan);
-		return -ETIMEDOUT;
-	}
-
-	aoc->tz_chan = chan;
+	priv = aoc->boot->attach(aoc->dev);
+	if (IS_ERR(priv))
+		return dev_err_probe(aoc->dev, PTR_ERR(priv),
+				     "%s boot backend: attach failed\n",
+				     aoc->boot->name);
+	aoc->boot_priv = priv;
 	return 0;
 }
 
-/*
- * Send an AOC hardware-manager state command over Trusty and return the AOC
- * state the GSA reports.  This is the path that programs the AOC's secure
- * SysMMU context and releases the core from reset - the mailbox cannot.
- */
-static int aoc_tz_state_cmd(struct aoc_data *aoc, u32 cmd)
+static void aoc_boot_detach(struct aoc_data *aoc)
 {
-	struct hwmgr_state_req req = {
-		.hdr_cmd = HWMGR_CMD_STATE_CMD,
-		.state_cmd = cmd,
-	};
-	struct hwmgr_state_rsp rsp = { };
-	struct tipc_msg_buf *txbuf;
-	long left;
-	int ret;
+	if (aoc->boot && aoc->boot_priv)
+		aoc->boot->detach(aoc->boot_priv);
+}
 
-	mutex_lock(&aoc->tz_req_lock);
+static int aoc_boot_get_state(struct aoc_data *aoc)
+{
+	if (!aoc->boot)
+		return -ENODEV;
+	return aoc->boot->get_state(aoc->boot_priv);
+}
 
-	if (!aoc->tz_chan) {
-		ret = aoc_tz_connect(aoc);
-		if (ret) {
-			dev_err(aoc->dev, "cannot reach %s: %d\n",
-				AOC_HWMGR_PORT, ret);
-			goto out;
-		}
-		dev_info(aoc->dev, "connected to %s\n", AOC_HWMGR_PORT);
-	}
-
-	txbuf = tipc_chan_get_txbuf_timeout(aoc->tz_chan, AOC_TZ_BUF_TIMEOUT_MS);
-	if (IS_ERR(txbuf)) {
-		ret = PTR_ERR(txbuf);
-		goto out;
-	}
-	memcpy(mb_put_data(txbuf, sizeof(req)), &req, sizeof(req));
-
-	mutex_lock(&aoc->tz_rsp_lock);
-	aoc->tz_rsp = &rsp;
-	aoc->tz_rsp_size = sizeof(rsp);
-	aoc->tz_rsp_res = -ENOMSG;
-	mutex_unlock(&aoc->tz_rsp_lock);
-
-	reinit_completion(&aoc->tz_reply);
-	ret = tipc_chan_queue_msg(aoc->tz_chan, txbuf);
-	if (ret) {
-		tipc_chan_put_txbuf(aoc->tz_chan, txbuf);
-		goto out_detach;
-	}
-
-	left = wait_for_completion_timeout(&aoc->tz_reply,
-					   msecs_to_jiffies(AOC_TZ_MSG_TIMEOUT_MS));
-	ret = (left <= 0) ? -ETIMEDOUT : aoc->tz_rsp_res;
-
-out_detach:
-	mutex_lock(&aoc->tz_rsp_lock);
-	aoc->tz_rsp = NULL;
-	aoc->tz_rsp_size = 0;
-	mutex_unlock(&aoc->tz_rsp_lock);
-out:
-	mutex_unlock(&aoc->tz_req_lock);
-
-	if (ret < 0)
-		return ret;
-	if (ret < (int)sizeof(rsp) ||
-	    rsp.hdr_cmd != (HWMGR_CMD_STATE_CMD | HWMGR_CMD_RESP) || rsp.hdr_err)
-		return -EIO;
-
-	return rsp.state;
+static int aoc_boot_start(struct aoc_data *aoc)
+{
+	if (!aoc->boot)
+		return -ENODEV;
+	return aoc->boot->start(aoc->boot_priv);
 }
 
 /* Poll the AOC state + control block over a few seconds; log the trajectory. */
@@ -647,7 +529,7 @@ static bool aoc_check_alive(struct aoc_data *aoc)
 		msleep(delays_ms[i]);
 		elapsed += delays_ms[i];
 
-		state = aoc_tz_state_cmd(aoc, AOC_TZ_GET_STATE);
+		state = aoc_boot_get_state(aoc);
 		magic = cb_rd(cb, 0);
 		dev_dbg(aoc->dev, "+%ums: AOC state %d, control-block magic %#x\n",
 			elapsed, state, magic);
@@ -1444,11 +1326,12 @@ static int aoc_probe(struct platform_device *pdev)
 	if (!aoc)
 		return -ENOMEM;
 	aoc->dev = dev;
-	mutex_init(&aoc->tz_req_lock);
 	INIT_DELAYED_WORK(&aoc->log_work, aoc_log_work);
-	mutex_init(&aoc->tz_rsp_lock);
-	init_completion(&aoc->tz_reply);
 	platform_set_drvdata(pdev, aoc);
+
+	ret = aoc_boot_attach(aoc);
+	if (ret)
+		return ret;
 
 	ret = aoc_enable_sensor_rails(dev);
 	if (ret)
@@ -1549,14 +1432,15 @@ static int aoc_probe(struct platform_device *pdev)
 		/*
 		 * The core's reset and its SysMMU secure context are in the
 		 * secure domain - the AP cannot touch them and the GSA mailbox
-		 * will not - so ask the GSA AOC hardware manager, over Trusty,
-		 * to set the AOC up and take it out of reset.
+		 * will not - so the boot backend has to take it out of reset.
 		 */
-		ret = aoc_tz_state_cmd(aoc, AOC_TZ_START);
+		ret = aoc_boot_start(aoc);
 		if (ret < 0) {
-			dev_err(dev, "Trusty failed to start the AOC: %d\n", ret);
+			dev_err(dev, "%s backend failed to start the AOC: %d\n",
+				aoc->boot ? aoc->boot->name : "no", ret);
 		} else {
-			dev_info(dev, "AOC started via Trusty (state now %d)\n", ret);
+			dev_info(dev, "AOC started via %s (state now %d)\n",
+				 aoc->boot->name, ret);
 			if (aoc_check_alive(aoc)) {
 				ret = aoc_ipc_init(aoc, pdev);
 				if (ret)
@@ -1582,10 +1466,7 @@ static void aoc_remove(struct platform_device *pdev)
 
 	debugfs_remove_recursive(aoc->dbgfs);
 	cancel_delayed_work_sync(&aoc->log_work);
-	if (aoc->tz_chan) {
-		tipc_chan_shutdown(aoc->tz_chan);
-		tipc_chan_destroy(aoc->tz_chan);
-	}
+	aoc_boot_detach(aoc);
 	if (aoc->domain) {
 		iommu_detach_device(aoc->domain, aoc->dev);
 		iommu_domain_free(aoc->domain);
