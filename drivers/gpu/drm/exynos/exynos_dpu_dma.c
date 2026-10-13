@@ -175,27 +175,31 @@
 #define IDMA_S_CFG_ERR_SRC_OFFSET_Y BIT(0)
 #define IDMA_S_CFG_ERR_GET(_v) (((_v) >> 0) & 0x7FF)
 
-static inline uint32_t dma_read(struct exynos_dpu_dma_context *ctx, u32 idx,
+static inline u32 dma_read(struct exynos_dpu_dma_context *ctx, u32 idx,
 				u32 offset)
 {
 	return readl(ctx->regs + 0x1000 * idx + offset);
 }
-static inline uint32_t dma_read_mask(struct exynos_dpu_dma_context *ctx,
-				     u32 idx, u32 offset, u32 mask)
+
+static inline u32 dma_read_mask(struct exynos_dpu_dma_context *ctx,
+				u32 idx, u32 offset, u32 mask)
 {
-	uint32_t val = readl(ctx->regs + 0x1000 * idx + offset);
-	val &= (mask);
-	return val;
+	u32 val = readl(ctx->regs + 0x1000 * idx + offset);
+
+	return val & mask;
 }
+
 static inline void dma_write(struct exynos_dpu_dma_context *ctx, u32 idx,
 			     u32 offset, u32 val)
 {
 	writel(val, ctx->regs + 0x1000 * idx + offset);
 }
+
 static inline void dma_write_mask(struct exynos_dpu_dma_context *ctx, u32 idx,
 				  u32 offset, u32 val, u32 mask)
 {
-	uint32_t old = dma_read(ctx, idx, offset);
+	u32 old = dma_read(ctx, idx, offset);
+
 	val = (val & mask) | (old & ~mask);
 	dma_write(ctx, idx, offset, val);
 }
@@ -213,38 +217,31 @@ static u32 idma_reg_get_irq_and_clear(struct exynos_dpu_dma_context *ctx,
 
 	val = dma_read_mask(ctx, id, IDMA_IRQ, IDMA_ALL_IRQ);
 
-	if (val & IDMA_AFBC_CONFLICT_IRQ) {
-		pr_err("AFBC conflict occur\n");
-	}
+	if (val & IDMA_AFBC_CONFLICT_IRQ)
+		dev_err_ratelimited(ctx->dev, "AFBC conflict\n");
 
-	if (val & IDMA_VR_CONFLICT_IRQ) {
-		pr_err("VR conflict occur\n");
-	}
+	if (val & IDMA_VR_CONFLICT_IRQ)
+		dev_err_ratelimited(ctx->dev, "VR conflict\n");
 
-	if (val & IDMA_RECOVERY_START_IRQ) {
-		pr_err("recovery start occur\n");
-	}
+	if (val & IDMA_RECOVERY_START_IRQ)
+		dev_err_ratelimited(ctx->dev, "recovery started\n");
 
 	if (val & IDMA_CONFIG_ERROR) {
 		cfg_err = dma_read(ctx, id, IDMA_S_CFG_ERR_STATE);
-		pr_err("config error occur(0x%x)\n", cfg_err);
+		dev_err_ratelimited(ctx->dev, "config error (%#x)\n", cfg_err);
 	}
 
-	if (val & IDMA_LOCAL_HW_RESET_DONE) {
-		pr_err("local hw reset done\n");
-	}
+	if (val & IDMA_LOCAL_HW_RESET_DONE)
+		dev_err_ratelimited(ctx->dev, "local hw reset done\n");
 
-	if (val & IDMA_READ_SLAVE_ERROR) {
-		pr_err("read slave error occur\n");
-	}
+	if (val & IDMA_READ_SLAVE_ERROR)
+		dev_err_ratelimited(ctx->dev, "read slave error\n");
 
-	if (val & IDMA_STATUS_DEADLOCK_IRQ) {
-		pr_err("status deadlock occur\n");
-	}
+	if (val & IDMA_STATUS_DEADLOCK_IRQ)
+		dev_err_ratelimited(ctx->dev, "status deadlock\n");
 
-	if (val & IDMA_STATUS_FRAMEDONE_IRQ) {
-		pr_debug("frame done occur\n");
-	}
+	if (val & IDMA_STATUS_FRAMEDONE_IRQ)
+		dev_dbg(ctx->dev, "frame done\n");
 
 	dma_reg_clear_irq(ctx, id, val);
 
@@ -488,6 +485,8 @@ static int dpu_dma_probe(struct platform_device *pdev)
 	ctx = devm_kzalloc(dev, sizeof(*ctx), GFP_KERNEL);
 	if (!ctx)
 		return -ENOMEM;
+
+	ctx->dev = dev;
 
 	platform_set_drvdata(pdev, ctx);
 
