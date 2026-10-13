@@ -147,17 +147,6 @@ struct hwmgr_state_rsp {
 #define SSMT_NS_READ_PID(n)		(0x4000 + 4 * (n))
 #define SSMT_NS_WRITE_PID(n)		(0x4200 + 4 * (n))
 
-/*
- * The AOC's SysMMU non-secure VM0 context, for reading back fault state after a
- * start attempt (base 0x19090000; see exynos-iommu v9 register map).
- */
-#define AOC_SYSMMU_PHYS			0x19090000
-#define AOC_SYSMMU_SIZE			0x10000
-#define REG_V9_CTRL_VM			0x8000
-#define REG_V9_FLPT_BASE_VM		0x8404
-#define REG_V9_FAULT_VA_VM		0x8070
-#define REG_V9_FAULT_INFO0_VM		0x8074
-
 /* SoC chip-id (OTP) block - zumapro uses the zuma layout (product_ver 1). */
 #define AOC_CHIPID_PHYS			0x10000000
 #define CHIPID_PRODUCT_ID_MASK		0xfffff000
@@ -661,34 +650,21 @@ static bool aoc_check_alive(struct aoc_data *aoc)
 	}
 
 	if (magic != AOC_MAGIC) {
-		/* Not up.  Dump the first control-block words: the AOC may have
-		 * left a crash signature even though it never published.
+		/*
+		 * Not up. Dump the first control-block words: the AOC may have
+		 * left a crash signature even though it never published. If it
+		 * ran and faulted, exynos-iommu has already reported the fault
+		 * address for this master -- the SysMMU is its hardware, named
+		 * by our "iommus" property, and reading that unit's registers
+		 * from here races its interrupt handler.
 		 */
 		const __le32 *w = cb;
-		void __iomem *mmu;
 
 		dev_info(aoc->dev,
 			 "AOC did not publish (magic %#x); cb dump: %#x %#x %#x %#x %#x %#x %#x %#x\n",
 			 magic, le32_to_cpu(w[0]), le32_to_cpu(w[1]),
 			 le32_to_cpu(w[2]), le32_to_cpu(w[3]), le32_to_cpu(w[4]),
 			 le32_to_cpu(w[5]), le32_to_cpu(w[6]), le32_to_cpu(w[7]));
-
-		/*
-		 * Read the SysMMU's VM0 state.  A non-zero fault VA means the AOC
-		 * executed and faulted (in the non-secure context) at that
-		 * address - proof the core ran.  CTRL/FLPT confirm translation
-		 * was still live for the attempt.
-		 */
-		mmu = ioremap(AOC_SYSMMU_PHYS, AOC_SYSMMU_SIZE);
-		if (mmu) {
-			dev_info(aoc->dev,
-				 "sysmmu VM0: ctrl %#x flpt %#x fault_va %#x fault_info %#x\n",
-				 readl(mmu + REG_V9_CTRL_VM),
-				 readl(mmu + REG_V9_FLPT_BASE_VM),
-				 readl(mmu + REG_V9_FAULT_VA_VM),
-				 readl(mmu + REG_V9_FAULT_INFO0_VM));
-			iounmap(mmu);
-		}
 		return false;
 	}
 
