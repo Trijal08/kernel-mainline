@@ -131,6 +131,9 @@ static int tokay_panel_prepare(struct drm_panel *panel)
 {
 	struct tokay_panel *ctx = to_tokay_panel(panel);
 
+	dev_info(&ctx->dsi->dev, "prepare: reset-gpio %s\n",
+		 ctx->reset_gpio ? "yes" : "none");
+
 	/* Downstream TK4C reset timing: low 1 ms, high 1 ms. */
 	if (ctx->reset_gpio) {
 		gpiod_set_value_cansleep(ctx->reset_gpio, 0);
@@ -175,12 +178,44 @@ static int tokay_cur_vrefresh(struct tokay_panel *ctx)
 	return 60;
 }
 
+/*
+ * Read the DDIC's own view of its state (DCS 0x0A).  Everything else this
+ * driver knows is inferred from writes, which DSI does not acknowledge -- so a
+ * panel that is dark while the link and DECON look healthy cannot be told
+ * apart from one that never came out of blanking.  This asks it directly.
+ *
+ * Diagnostic only: a controller without a read path returns an error, which is
+ * logged and otherwise ignored.
+ */
+static void tokay_report_power_mode(struct tokay_panel *ctx)
+{
+	struct device *dev = &ctx->dsi->dev;
+	u8 mode = 0;
+	int ret;
+
+	ret = mipi_dsi_dcs_get_power_mode(ctx->dsi, &mode);
+	if (ret < 0) {
+		dev_info(dev, "power mode unreadable (%d)\n", ret);
+		return;
+	}
+
+	/*
+	 * Only bit 2 has a constant in the DSI core, and the meaning of the
+	 * rest moved between DCS revisions, so report the byte and decode the
+	 * one bit that matters here.
+	 */
+	dev_info(dev, "power mode 0x%02x (display %s)\n", mode,
+		 mode & MIPI_DSI_DCS_POWER_MODE_DISPLAY ? "ON" : "OFF");
+}
+
 static int tokay_panel_enable(struct drm_panel *panel)
 {
 	struct tokay_panel *ctx = to_tokay_panel(panel);
 	struct mipi_dsi_device *dsi = ctx->dsi;
 	struct drm_dsc_picture_parameter_set pps;
 	int ret;
+
+	dev_info(&dsi->dev, "enable: %d Hz\n", tokay_cur_vrefresh(ctx));
 
 	ret = mipi_dsi_dcs_exit_sleep_mode(dsi);
 	if (ret < 0)
@@ -232,7 +267,13 @@ static int tokay_panel_enable(struct drm_panel *panel)
 	tk4c_cmd(dsi, 0x9D, 0x01);
 	tk4c_cmd(dsi, MIPI_DCS_WRITE_CONTROL_DISPLAY, 0x20);
 
-	return mipi_dsi_dcs_set_display_on(dsi);
+	ret = mipi_dsi_dcs_set_display_on(dsi);
+	if (ret < 0)
+		return ret;
+
+	tokay_report_power_mode(ctx);
+
+	return 0;
 }
 
 static int tokay_panel_get_modes(struct drm_panel *panel,
