@@ -1983,7 +1983,7 @@ static int decon_probe(struct platform_device *pdev)
 	const struct decon_dev_data *drv_data;
 	struct device_node *dsi_np;
 
-	ctx = devm_kzalloc(dev, sizeof(struct decon_context), GFP_KERNEL);
+	ctx = devm_kzalloc(dev, sizeof(*ctx), GFP_KERNEL);
 	if (!ctx)
 		return -ENOMEM;
 
@@ -2008,17 +2008,20 @@ static int decon_probe(struct platform_device *pdev)
 	ctx->aclk = devm_clk_get_enabled(dev, "aclk");
 	if (IS_ERR(ctx->aclk))
 		return dev_err_probe(dev, PTR_ERR(ctx->aclk),
-				     "Cannot get aclk\n");
+				     "cannot get aclk\n");
 
 	timer_setup(&ctx->vblank_timer, decon_vblank_timeout, 0);
 
 	ctx->irq_fd = platform_get_irq(pdev, 0);
+	if (ctx->irq_fd < 0)
+		return ctx->irq_fd;
+
 	irq_set_status_flags(ctx->irq_fd, IRQ_NOAUTOEN);
 	ret = devm_request_irq(dev, ctx->irq_fd, decon_irq_handler,
 			       0, dev_name(dev), ctx);
 	if (ret)
-		return dev_err_probe(&pdev->dev, ret,
-				     "Failed to register interrupt handler\n");
+		return dev_err_probe(dev, ret,
+				     "cannot request the frame-done irq\n");
 
 	/*
 	 * Command-mode vblank source: the panel's hardware TE.  The te-gpio lives
@@ -2042,7 +2045,7 @@ static int decon_probe(struct platform_device *pdev)
 				       IRQF_TRIGGER_RISING, "decon-te", ctx);
 		if (ret)
 			return dev_err_probe(dev, ret,
-					     "Failed to request TE irq\n");
+					     "cannot request the TE irq\n");
 	}
 
 	ctx->type = 0;
@@ -2050,7 +2053,7 @@ static int decon_probe(struct platform_device *pdev)
 
 	ctx->win_cnt = 1;
 
-	ctx->win = devm_kzalloc(ctx->dev, sizeof(struct decon_win) * 8,
+	ctx->win = devm_kcalloc(dev, ctx->win_max, sizeof(*ctx->win),
 				GFP_KERNEL);
 	if (!ctx->win)
 		return -ENOMEM;
@@ -2062,7 +2065,9 @@ static int decon_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, ctx);
 
 	/* Taken in decon_enable(), dropped in decon_disable(). */
-	pm_runtime_enable(dev);
+	ret = devm_pm_runtime_enable(dev);
+	if (ret)
+		return ret;
 
 	return component_add(dev, &decon_component_ops);
 }
