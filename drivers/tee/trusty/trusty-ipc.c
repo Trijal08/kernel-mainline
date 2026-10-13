@@ -844,7 +844,8 @@ int tipc_chan_connect(struct tipc_chan *chan, const char *name)
 	switch (chan->state) {
 	case TIPC_DISCONNECTED:
 		/* save service name we are connecting to */
-		strcpy(chan->srv_name, body->name);
+		strscpy(chan->srv_name, body->name,
+			sizeof(chan->srv_name));
 
 		fill_msg_hdr(txbuf, chan->local, TIPC_CTRL_ADDR);
 		err = vds_queue_txbuf(chan->vds, txbuf);
