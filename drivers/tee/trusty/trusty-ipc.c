@@ -186,9 +186,9 @@ static struct virtio_device *default_vdev;
 static DEFINE_IDR(tipc_devices);
 static DEFINE_MUTEX(tipc_devices_lock);
 
-static u64 (*dma_buf_get_ffa_tag)(struct dma_buf *dma_buf) = NULL;
+static u64 (*dma_buf_get_ffa_tag)(struct dma_buf *dma_buf);
 static int (*dma_buf_get_shared_mem_id)(struct dma_buf *dma_buf,
-	trusty_shared_mem_id_t *id) = NULL;
+					trusty_shared_mem_id_t *id);
 
 static inline u64 trusty_dma_buf_get_ffa_tag(struct dma_buf *dma_buf)
 {
@@ -198,7 +198,7 @@ static inline u64 trusty_dma_buf_get_ffa_tag(struct dma_buf *dma_buf)
 static int trusty_dma_buf_get_shared_mem_id(struct dma_buf *dma_buf,
 					    trusty_shared_mem_id_t *id)
 {
-	return  dma_buf_get_shared_mem_id ?
+	return dma_buf_get_shared_mem_id ?
 		dma_buf_get_shared_mem_id(dma_buf, id) : -ENODATA;
 }
 
