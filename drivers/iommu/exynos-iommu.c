@@ -1083,7 +1083,7 @@ static struct iommu_domain *exynos_iommu_domain_alloc_paging(struct device *dev)
 	 * allocator will happily hand out an IOVA from up there.
 	 */
 	domain->domain.geometry.aperture_end   =
-		(dma_addr_t)NUM_LV1ENTRIES * SECT_SIZE - 1;
+		(u64)NUM_LV1ENTRIES * SECT_SIZE - 1;
 	domain->domain.geometry.force_aperture = true;
 
 	return &domain->domain;
