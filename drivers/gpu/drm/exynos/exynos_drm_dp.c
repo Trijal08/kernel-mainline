@@ -4536,8 +4536,8 @@ void exynos_drm_dp_to_videoinfo(struct drm_encoder *encoder,
 	 * DRM:	DRM_MODE_FLAG_PHSYNC -> DISPLAY_FLAGS_HSYNC_HIGH
 	 *	DRM_MODE_FLAG_PVSYNC -> DISPLAY_FLAGS_VSYNC_HIGH
 	 * DisplayPort: H/VSyncPolarity in HSP, VSP
-	 * 	0 = Active high pulse.
-	 * 	1 = Active low pulse.
+	 *	0 = Active high pulse.
+	 *	1 = Active low pulse.
 	 */
 	if (mode->flags & DRM_MODE_FLAG_PHSYNC)
 		vi->hsync_pol = false;
