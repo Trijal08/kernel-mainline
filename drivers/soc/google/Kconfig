@@ -6,14 +6,29 @@
 config GOOGLE_AOC
 	tristate "Google AOC (Always-On Compute) coprocessor"
 	depends on EXYNOS_GSA
-	depends on TRUSTY
 	help
 	  The AOC is an always-on coprocessor on Google Tensor SoCs that owns
 	  Bluetooth, audio and the sensor hub.  The GSA security core
-	  authenticates its firmware, and a Trusty application brings the core
-	  out of reset, so the driver needs both.
+	  authenticates its firmware, so the driver needs it.
+
+	  Releasing the core from reset is secure and needs one of the boot
+	  backends below.  Without one the driver stages and authenticates the
+	  image but cannot start the core.
 
 	  This can be built as a module, which will be called aoc.
+
+config GOOGLE_AOC_TRUSTY
+	bool "Start the AOC through the Trusty GSA hardware manager"
+	depends on GOOGLE_AOC
+	depends on TRUSTY = y || TRUSTY = GOOGLE_AOC
+	default y
+	help
+	  Bring the AOC out of reset with the GSA hardware-manager Trusty
+	  application, which programs the core's secure SysMMU context and
+	  then releases it.  This is how a stock device starts the AOC, and
+	  the mailbox the GSA authenticates the image over cannot do it.
+
+	  Say Y unless you have another way to start the core.
 
 config GOOGLE_AOC_CHANNEL
 	tristate "AoC channelized comms (AOCC) in-kernel client"
