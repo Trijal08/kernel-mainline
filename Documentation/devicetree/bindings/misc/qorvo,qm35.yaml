@@ -1,0 +1,82 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/misc/qorvo,qm35.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Qorvo QM35 Ultra-Wideband transceiver
+
+maintainers:
+  - Marcus Ramberg <marcus.ramberg@gmail.com>
+
+description:
+  The QM35 is an IEEE 802.15.4z UWB transceiver controlled over SPI with the
+  FiRa UCI protocol.  It signals the host over two lines, SS_READY (it can
+  accept a transfer) and SS_IRQ (it has data to deliver), and is woken by the
+  host through a WAKEUP line.
+
+allOf:
+  - $ref: /schemas/spi/spi-peripheral-props.yaml#
+
+properties:
+  compatible:
+    const: qorvo,qm35
+
+  reg:
+    maxItems: 1
+
+  reset-gpios:
+    maxItems: 1
+
+  ready-gpios:
+    maxItems: 1
+    description: SS_READY, driven by the chip when it can accept a transfer
+
+  irq-gpios:
+    maxItems: 1
+    description:
+      SS_IRQ, driven by the chip when it has data for the host.  The host
+      both takes an interrupt from it and polls its level, hence a GPIO.
+
+  exton-gpios:
+    maxItems: 1
+    description: EXTON, driven high by the chip while it is powered and running
+
+  wakeup-gpios:
+    maxItems: 1
+    description: WAKEUP, driven by the host to bring the chip out of sleep
+
+  vdd1-supply: true
+  vdd2-supply: true
+  vdd3-supply: true
+  vdd4-supply: true
+
+required:
+  - compatible
+  - reg
+  - ready-gpios
+  - irq-gpios
+
+unevaluatedProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/gpio/gpio.h>
+
+    spi {
+        #address-cells = <1>;
+        #size-cells = <0>;
+
+        uwb@0 {
+            compatible = "qorvo,qm35";
+            reg = <0>;
+            spi-max-frequency = <20000000>;
+            reset-gpios = <&gpp14 0 GPIO_ACTIVE_LOW>;
+            ready-gpios = <&gpn4 0 GPIO_ACTIVE_HIGH>;
+            irq-gpios = <&gpn5 0 GPIO_ACTIVE_HIGH>;
+            exton-gpios = <&gpp13 1 GPIO_ACTIVE_HIGH>;
+            wakeup-gpios = <&gpp15 1 GPIO_ACTIVE_HIGH>;
+            vdd1-supply = <&uwb_1v8>;
+            vdd2-supply = <&uwb_rf>;
+        };
+    };
