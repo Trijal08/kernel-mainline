@@ -34,6 +34,12 @@ void samsung_ufs_phy_config(struct samsung_ufs_phy *phy,
 {
 	enum {LANE_0, LANE_1}; /* lane index */
 
+	if (cfg->id == PHY_WAIT_BLK) {
+		if (lane == LANE_0)
+			udelay(cfg->val);
+		return;
+	}
+
 	switch (lane) {
 	case LANE_0:
 		writel(cfg->val, (phy)->reg_pma + cfg->off_0);
