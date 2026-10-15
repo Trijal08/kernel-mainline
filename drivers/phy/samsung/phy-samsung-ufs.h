@@ -15,6 +15,7 @@
 
 #define PHY_COMN_BLK	1
 #define PHY_TRSV_BLK	2
+#define PHY_WAIT_BLK	3
 #define END_UFS_PHY_CFG { 0 }
 #define PHY_TRSV_CH_OFFSET	0x30
 #define PHY_APB_ADDR(off)	((off) << 2)
@@ -37,6 +38,13 @@
 
 #define PHY_TRSV_REG_CFG(o, v, d)	\
 	PHY_TRSV_REG_CFG_OFFSET(o, v, d, PHY_TRSV_CH_OFFSET)
+
+/* Delay of (us) microseconds between register writes. */
+#define PHY_WAIT_CFG(us, d) {		\
+	.val = (us),		\
+	.desc = (d),		\
+	.id = PHY_WAIT_BLK,	\
+}
 
 /* UFS PHY registers */
 #define PHY_PLL_LOCK_STATUS	0x1e
