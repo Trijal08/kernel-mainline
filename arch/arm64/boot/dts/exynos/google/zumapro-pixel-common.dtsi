@@ -367,6 +367,9 @@
 };
 
 &hsi2c_9 {
+	/* Vendor runs this bus at 950 kHz; fast mode is plenty for NCI. */
+	clock-frequency = <400000>;
+
 	pack_bee: m24c08@50 {
 		compatible = "atmel,24c08";
 		reg = <0x50>;
@@ -382,7 +385,8 @@
 	 * The in-kernel st-nci driver speaks NCI over ST's NDLC framing, so no
 	 * vendor firmware path is required. IRQ_N (active-high, level-triggered
 	 * read-request) and RESET_N are routed to the always-on (ALIVE) GPIO
-	 * banks gpa7/gph1 so the controller can wake the AP out of suspend.
+	 * banks gpa7/gph1 so the controller can wake the AP out of suspend;
+	 * wakeup-source makes the I2C core arm IRQ_N as the wake IRQ.
 	 */
 	nfc: nfc@8 {
 		compatible = "st,st54l-i2c";
@@ -390,6 +394,7 @@
 
 		interrupt-parent = <&gpa7>;
 		interrupts = <5 IRQ_TYPE_LEVEL_HIGH>;
+		wakeup-source;
 
 		reset-gpios = <&gph1 6 GPIO_ACTIVE_HIGH>;
 
