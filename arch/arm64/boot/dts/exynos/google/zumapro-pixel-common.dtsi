@@ -335,6 +335,15 @@
 				regulator-name = "L7S_SENSORS";
 				regulator-always-on;
 			};
+
+			/* UWB rails, switched by the QM35 driver.  Enable-only, as above. */
+			s_ldo16_reg: ldo16s {
+				regulator-name = "L16S_UWB";
+			};
+
+			s_ldo17_reg: ldo17s {
+				regulator-name = "L17S_UWB";
+			};
 		};
 
 		s2mpg15_gpio: gpio {
@@ -998,8 +1007,31 @@
 	};
 };
 
+/*
+ * Qorvo QM35 UWB transceiver on HSI0's USI0, whose pins are dedicated (no
+ * mux, hence no pinctrl).  SS_IRQ and SS_READY sit on the ALIVE banks so the
+ * chip can wake the AP.
+ */
 &spi_18 {
 	status = "okay";
+
+	uwb: uwb@0 {
+		compatible = "qorvo,qm35";
+		reg = <0>;
+		spi-max-frequency = <20000000>;
+		spi-cs-setup-delay-ns = <10000>;
+
+		vdd1-supply = <&s_bucka_reg>;
+		vdd2-supply = <&s_ldo16_reg>;
+		vdd3-supply = <&s_bucka_reg>;
+		vdd4-supply = <&s_ldo17_reg>;
+
+		reset-gpios = <&gpp14 0 GPIO_ACTIVE_LOW>;
+		exton-gpios = <&gpp13 1 GPIO_ACTIVE_HIGH>;
+		ready-gpios = <&gpn4 0 (GPIO_ACTIVE_HIGH | GPIO_PULL_DOWN)>;
+		irq-gpios = <&gpn5 0 (GPIO_ACTIVE_HIGH | GPIO_PULL_DOWN)>;
+		wakeup-gpios = <&gpp15 1 GPIO_ACTIVE_HIGH>;
+	};
 };
 
 &spi_19 {
