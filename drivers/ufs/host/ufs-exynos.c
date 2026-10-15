@@ -304,6 +304,8 @@ static int zuma_ufs_drv_init(struct exynos_ufs *ufs)
 	 * HIBERN8-across-suspend POST_CHANGE clock path.
 	 */
 	hba->spm_lvl = UFS_PM_LVL_5;
+	/* Same for runtime: suspend powers the PHY off, so hibern8 cannot be exited. */
+	hba->rpm_lvl = UFS_PM_LVL_5;
 
 	/* set ACG to be controlled by UFS_ACG_DISABLE */
 	reg = hci_readl(ufs, HCI_IOP_ACG_DISABLE);
