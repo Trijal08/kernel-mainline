@@ -960,8 +960,42 @@
 	status = "okay";
 };
 
+/*
+ * The ST54L's embedded secure element (it hosts the eSIM) hangs off its own
+ * SPI port on usi15.  There is no in-kernel protocol for it: the secure
+ * element HAL exchanges raw APDUs over spidev.  Its RESET_N (gph1-5) and
+ * chip-enable (gpa0-1) lines have no runtime use from Linux and are held in
+ * the running state by the hogs below.
+ */
 &spi_15 {
 	status = "okay";
+	pinctrl-0 = <&spi15_bus &spi15_cs>;
+	cs-gpios = <&gpp22 3 GPIO_ACTIVE_HIGH>;
+
+	ese: secure-element@0 {
+		compatible = "st,st54spi";
+		reg = <0>;
+		spi-max-frequency = <8000000>;
+		spi-cs-setup-delay-ns = <18000>;
+	};
+};
+
+&gph1 {
+	ese-reset-hog {
+		gpio-hog;
+		gpios = <5 GPIO_ACTIVE_HIGH>;
+		output-high;
+		line-name = "ESE_RST_N";
+	};
+};
+
+&gpa0 {
+	ese-enable-hog {
+		gpio-hog;
+		gpios = <1 GPIO_ACTIVE_HIGH>;
+		output-high;
+		line-name = "ESE_CHIP_EN";
+	};
 };
 
 &spi_18 {
