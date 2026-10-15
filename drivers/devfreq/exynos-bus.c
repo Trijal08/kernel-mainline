@@ -18,6 +18,7 @@
 #include <linux/of.h>
 #include <linux/pm_opp.h>
 #include <linux/platform_device.h>
+#include <linux/property.h>
 #include <linux/regulator/consumer.h>
 
 #define DEFAULT_SATURATION_RATIO	40
@@ -347,16 +348,19 @@ static int exynos_bus_profile_init_passive(struct exynos_bus *bus,
 	profile->target = exynos_bus_target;
 	profile->exit = exynos_bus_passive_exit;
 
-	/* Get the instance of parent devfreq device */
-	parent_devfreq = devfreq_get_devfreq_by_phandle(dev, "devfreq", 0);
-	if (IS_ERR(parent_devfreq))
-		return -EPROBE_DEFER;
-
 	passive_data = devm_kzalloc(dev, sizeof(*passive_data), GFP_KERNEL);
 	if (!passive_data)
 		return -ENOMEM;
 
-	passive_data->parent = parent_devfreq;
+	if (device_get_match_data(dev)) {
+		passive_data->parent_type = CPUFREQ_PARENT_DEV;
+	} else {
+		/* Get the instance of parent devfreq device */
+		parent_devfreq = devfreq_get_devfreq_by_phandle(dev, "devfreq", 0);
+		if (IS_ERR(parent_devfreq))
+			return -EPROBE_DEFER;
+		passive_data->parent = parent_devfreq;
+	}
 
 	/* Add devfreq device for exynos bus with passive governor */
 	bus->devfreq = devm_devfreq_add_device(dev, profile, DEVFREQ_GOV_PASSIVE,
@@ -399,6 +403,8 @@ static int exynos_bus_probe(struct platform_device *pdev)
 	node = of_parse_phandle(dev->of_node, "devfreq", 0);
 	if (node) {
 		of_node_put(node);
+		passive = true;
+	} else if (device_get_match_data(dev)) {
 		passive = true;
 	} else {
 		ret = exynos_bus_parent_parse_of(np, bus);
@@ -487,6 +493,8 @@ static DEFINE_SIMPLE_DEV_PM_OPS(exynos_bus_pm,
 
 static const struct of_device_id exynos_bus_of_match[] = {
 	{ .compatible = "samsung,exynos-bus", },
+	/* Passive on cpufreq: ACPM DVFS domains with no bus counters. */
+	{ .compatible = "google,zuma-acpm-bus", .data = (void *)1 },
 	{ /* sentinel */ },
 };
 MODULE_DEVICE_TABLE(of, exynos_bus_of_match);
