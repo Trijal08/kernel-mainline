@@ -1978,6 +1978,9 @@ static const struct regulator_desc s2mpg15_regulators[] = {
 	/* AoC sensor rails; see s2mpg15_reg_enable_only_ops above */
 	regulator_desc_s2mpg15_ldo_en(5),
 	regulator_desc_s2mpg15_ldo_en(7),
+	/* UWB rails (L16S_UWB, L17S_UWB): OTP-set levels, switched only */
+	regulator_desc_s2mpg15_ldo_en(16),
+	regulator_desc_s2mpg15_ldo_en(17),
 };
 
 static int s2mps14_pmic_enable_ext_control(struct s2mps11_info *s2mps11,
