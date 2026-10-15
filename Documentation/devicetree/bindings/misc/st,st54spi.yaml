@@ -1,0 +1,45 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/misc/st,st54spi.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: STMicroelectronics ST54 embedded secure element, SPI host interface
+
+maintainers:
+  - Marcus Ramberg <marcus.ramberg@gmail.com>
+
+description:
+  The ST54 NFC controllers carry an embedded secure element with its own SPI
+  slave port.  The host exchanges ISO 7816 APDUs with it over that port; no
+  kernel protocol is involved, so the device is used through spidev.
+
+allOf:
+  - $ref: /schemas/spi/spi-peripheral-props.yaml#
+
+properties:
+  compatible:
+    const: st,st54spi
+
+  reg:
+    maxItems: 1
+
+required:
+  - compatible
+  - reg
+
+unevaluatedProperties: false
+
+examples:
+  - |
+    spi {
+        #address-cells = <1>;
+        #size-cells = <0>;
+
+        secure-element@0 {
+            compatible = "st,st54spi";
+            reg = <0>;
+            spi-max-frequency = <8000000>;
+            spi-cs-setup-delay-ns = <18000>;
+        };
+    };
