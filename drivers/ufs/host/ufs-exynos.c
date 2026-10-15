@@ -1822,6 +1822,9 @@ static void exynos_ufs_pre_hibern8(struct ufs_hba *hba, enum uic_cmd_dme cmd)
 		if (ufs->opts & EXYNOS_UFS_OPT_BROKEN_AUTO_CLK_CTRL)
 			exynos_ufs_disable_auto_ctrl_hcc(ufs);
 		exynos_ufs_ungate_clks(ufs);
+		/* Auto-controlled M-PHY APB stays stopped in hibern8; CAL needs it. */
+		if (ufs->opts & EXYNOS_UFS_OPT_RESTORE_MPHY_APBCLK)
+			exynos_ufs_force_cal_clks(ufs);
 
 		phy_notify_state(ufs->phy, phystate);
 
@@ -1855,13 +1858,18 @@ static void exynos_ufs_post_hibern8(struct ufs_hba *hba, enum uic_cmd_dme cmd)
 		.ufs_state = PHY_UFS_HIBERN8_ENTER
 	};
 
+	if (cmd == UIC_CMD_DME_HIBER_EXIT &&
+	    ufs->opts & EXYNOS_UFS_OPT_RESTORE_MPHY_APBCLK)
+		exynos_ufs_restore_link_clk_ctrl(ufs);
+
 	if (cmd == UIC_CMD_DME_HIBER_ENTER) {
+		/* Park the PMA while its APB clock still runs, as downstream does. */
+		phy_notify_state(ufs->phy, phystate);
+
 		ufs->entry_hibern8_t = ktime_get();
 		exynos_ufs_gate_clks(ufs);
 		if (ufs->opts & EXYNOS_UFS_OPT_BROKEN_AUTO_CLK_CTRL)
 			exynos_ufs_enable_auto_ctrl_hcc(ufs);
-
-		phy_notify_state(ufs->phy, phystate);
 	}
 }
 
