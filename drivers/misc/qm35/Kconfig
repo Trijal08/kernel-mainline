@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: GPL-2.0-only
+config QM35_SPI
+	tristate "Qorvo QM35 UWB transceiver (HSSPI, UCI char device)"
+	depends on SPI && GPIOLIB
+	help
+	  Transport driver for the Qorvo QM35xx UWB transceiver attached over
+	  SPI. It exposes the chip's UCI (UWB Command Interface) as /dev/uci
+	  and handles firmware flashing, logging and coredump retrieval.
+
+	  Say M here to build this driver as a module named qm35.
