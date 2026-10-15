@@ -434,10 +434,16 @@ void brcmf_netif_rx(struct brcmf_if *ifp, struct sk_buff *skb)
 	/* Coalesce via GRO when available (see struct brcmf_if::gcells): fewer,
 	 * larger segments up the stack -> far fewer TCP ACKs on TX, which keeps
 	 * the dongle's TX A-MSDU/alfrag pool from starving (txq_hw_fill trap). */
-	if (ifp->gcells_ok)
+	if (ifp->gcells_ok) {
+		/* gro_cells_receive() needs BH disabled: its per-CPU queue is
+		 * lockless, and we are on the threaded PCIe ISR. Preempted here,
+		 * the cell fills to max_backlog and drops every RX frame forever. */
+		local_bh_disable();
 		gro_cells_receive(&ifp->gcells, skb);
-	else
+		local_bh_enable();
+	} else {
 		netif_rx(skb);
+	}
 }
 
 void brcmf_netif_mon_rx(struct brcmf_if *ifp, struct sk_buff *skb)
