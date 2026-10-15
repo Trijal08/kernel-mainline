@@ -1066,7 +1066,7 @@ static int exynos_ufs_post_pwr_mode(struct ufs_hba *hba,
 			"SLOW", gear, lanes);
 	}
 
-	dev_info(hba->dev, "Power mode changed to : %s\n", pwr_str);
+	dev_dbg(hba->dev, "Power mode changed to : %s\n", pwr_str);
 
 	return 0;
 }
@@ -2269,6 +2269,8 @@ static int gs101_ufs_pre_link(struct exynos_ufs *ufs)
 
 	ufshcd_dme_set(hba, UIC_ARG_MIB(0x200), 0x0);
 	ufshcd_dme_set(hba, UIC_ARG_MIB(PA_LOCAL_TX_LCC_ENABLE), 0x0);
+	/* After a link re-train the CPort is still CONNECTED and rejects the IDs. */
+	ufshcd_dme_set(hba, UIC_ARG_MIB(T_CONNECTIONSTATE), CPORT_IDLE);
 	ufshcd_dme_set(hba, UIC_ARG_MIB(N_DEVICEID), 0x0);
 	ufshcd_dme_set(hba, UIC_ARG_MIB(N_DEVICEID_VALID), 0x1);
 	ufshcd_dme_set(hba, UIC_ARG_MIB(T_PEERDEVICEID), 0x1);
@@ -2333,6 +2335,8 @@ static int zuma_ufs_pre_link(struct exynos_ufs *ufs)
 
 	ufshcd_dme_set(hba, UIC_ARG_MIB(0x200), 0x0);
 	ufshcd_dme_set(hba, UIC_ARG_MIB(PA_LOCAL_TX_LCC_ENABLE), 0x0);
+	/* After a link re-train the CPort is still CONNECTED and rejects the IDs. */
+	ufshcd_dme_set(hba, UIC_ARG_MIB(T_CONNECTIONSTATE), CPORT_IDLE);
 	ufshcd_dme_set(hba, UIC_ARG_MIB(N_DEVICEID), 0x0);
 	ufshcd_dme_set(hba, UIC_ARG_MIB(N_DEVICEID_VALID), 0x1);
 	ufshcd_dme_set(hba, UIC_ARG_MIB(T_PEERDEVICEID), 0x1);
