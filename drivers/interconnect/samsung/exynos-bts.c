@@ -9,12 +9,14 @@
 
 #include <linux/bitfield.h>
 #include <linux/clk.h>
+#include <linux/devfreq.h>
 #include <linux/interconnect-provider.h>
 #include <linux/io.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/pm.h>
+#include <linux/pm_qos.h>
 #include <linux/slab.h>
 
 #include <dt-bindings/interconnect/google,zumapro.h>
@@ -102,11 +104,10 @@ struct exynos_bts {
 	struct device *dev;
 	/* Serializes shared clock floors and register profiles. */
 	struct mutex lock;
-	struct clk *mif_clk;
+	/* MIF is owned by its devfreq; the floor is a PM QoS vote on it. */
+	struct dev_pm_qos_request mif_qos;
 	struct clk *int_clk;
-	unsigned long saved_mif_rate;
 	unsigned long saved_int_rate;
-	unsigned long target_mif_rate;
 	unsigned long target_int_rate;
 	bool rates_saved;
 	bool active;
@@ -180,12 +181,7 @@ static const struct exynos_bts_master_data zumapro_masters[] = {
 	},
 };
 
-/* Live Android devfreq OPP ladders, in kHz, highest first. */
-static const u32 zumapro_mif_rates[] = {
-	3744000, 3172000, 2730000, 2288000, 2028000, 1716000, 1539000,
-	1352000, 1014000, 845000, 676000, 546000, 421000,
-};
-
+/* Live Android devfreq OPP ladder, in kHz, highest first. */
 static const u32 zumapro_int_rates[] = {
 	1066000, 799000, 664000, 533000, 356000, 200000, 178000,
 };
@@ -369,68 +365,47 @@ static int exynos_bts_set_active(struct exynos_bts *bts, u32 total_bw,
 				 u32 rt_bw, u32 peak_freq,
 				 u32 mif_floor, u32 int_floor)
 {
-	unsigned long old_mif, mif_rate, int_rate;
-	int rollback_ret, ret;
+	unsigned long int_rate;
+	int ret;
 
 	mif_floor = max(mif_floor, exynos_bts_mif_floor(total_bw, rt_bw));
 	int_floor = max(int_floor, exynos_bts_int_floor(total_bw, peak_freq));
-	mif_rate = (unsigned long)exynos_bts_ceil_rate(zumapro_mif_rates,
-				ARRAY_SIZE(zumapro_mif_rates), mif_floor) * 1000;
 	int_rate = (unsigned long)exynos_bts_ceil_rate(zumapro_int_rates,
 				ARRAY_SIZE(zumapro_int_rates), int_floor) * 1000;
 
 	if (!bts->rates_saved) {
-		bts->saved_mif_rate = clk_get_rate(bts->mif_clk);
 		bts->saved_int_rate = clk_get_rate(bts->int_clk);
-		if (!bts->saved_mif_rate || !bts->saved_int_rate)
+		if (!bts->saved_int_rate)
 			return -EIO;
 		bts->rates_saved = true;
 	}
-	mif_rate = max(mif_rate, bts->saved_mif_rate);
 	int_rate = max(int_rate, bts->saved_int_rate);
-	old_mif = bts->target_mif_rate ?: bts->saved_mif_rate;
 
-	ret = exynos_bts_set_rate(bts->mif_clk, mif_rate);
+	ret = exynos_bts_set_rate(bts->int_clk, int_rate);
 	if (ret)
 		return ret;
-	ret = exynos_bts_set_rate(bts->int_clk, int_rate);
-	if (ret) {
-		rollback_ret = exynos_bts_set_rate(bts->mif_clk, old_mif);
-		if (rollback_ret) {
-			dev_err(bts->dev, "cannot roll MIF back to %lu Hz: %d\n",
-				old_mif, rollback_ret);
-		}
+	ret = dev_pm_qos_update_request(&bts->mif_qos, mif_floor);
+	if (ret < 0)
 		return ret;
-	}
-	bts->target_mif_rate = mif_rate;
 	bts->target_int_rate = int_rate;
 	bts->active = true;
-	dev_dbg(bts->dev, "%u KB/s, peak %u kHz -> MIF %lu INT %lu Hz\n",
-		total_bw, peak_freq, mif_rate, int_rate);
+	dev_dbg(bts->dev, "%u KB/s, peak %u kHz -> MIF >= %u kHz, INT %lu Hz\n",
+		total_bw, peak_freq, mif_floor, int_rate);
 	return 0;
 }
 
 static int exynos_bts_set_idle(struct exynos_bts *bts)
 {
 	unsigned int i;
-	int rollback_ret, ret;
+	int ret;
 
 	if (bts->rates_saved) {
-		ret = exynos_bts_set_rate(bts->mif_clk, bts->saved_mif_rate);
+		ret = exynos_bts_set_rate(bts->int_clk, bts->saved_int_rate);
 		if (ret)
 			return ret;
-		ret = exynos_bts_set_rate(bts->int_clk, bts->saved_int_rate);
-		if (ret) {
-			if (bts->target_mif_rate) {
-				rollback_ret = exynos_bts_set_rate(bts->mif_clk,
-							bts->target_mif_rate);
-				if (rollback_ret)
-					dev_err(bts->dev, "cannot restore MIF: %d\n",
-						rollback_ret);
-			}
-			return ret;
-		}
 	}
+	dev_pm_qos_update_request(&bts->mif_qos,
+				  PM_QOS_MIN_FREQUENCY_DEFAULT_VALUE);
 
 	for (i = 0; i < bts->num_masters; i++)
 		bts->masters[i].active = false;
@@ -438,9 +413,7 @@ static int exynos_bts_set_idle(struct exynos_bts *bts)
 		exynos_bts_program_profiles(bts);
 	bts->rates_saved = false;
 	bts->active = false;
-	bts->saved_mif_rate = 0;
 	bts->saved_int_rate = 0;
-	bts->target_mif_rate = 0;
 	bts->target_int_rate = 0;
 	return 0;
 }
@@ -624,11 +597,8 @@ static int exynos_bts_resume(struct device *dev)
 
 	/* The BTS register state is lost independently of ACPM clock errors. */
 	exynos_bts_program_profiles(bts);
-	if (!ret && bts->active) {
-		ret = exynos_bts_set_rate(bts->mif_clk, bts->target_mif_rate);
-		if (!ret)
-			ret = exynos_bts_set_rate(bts->int_clk, bts->target_int_rate);
-	}
+	if (!ret && bts->active)
+		ret = exynos_bts_set_rate(bts->int_clk, bts->target_int_rate);
 	mutex_unlock(&bts->lock);
 
 	return ret;
@@ -636,10 +606,16 @@ static int exynos_bts_resume(struct device *dev)
 
 static DEFINE_SIMPLE_DEV_PM_OPS(exynos_bts_pm_ops, NULL, exynos_bts_resume);
 
+static void exynos_bts_remove_qos(void *data)
+{
+	dev_pm_qos_remove_request(data);
+}
+
 static int exynos_bts_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct exynos_bts *bts;
+	struct devfreq *mif;
 	unsigned int i;
 	int ret;
 
@@ -675,10 +651,17 @@ static int exynos_bts_probe(struct platform_device *pdev)
 					     "cannot map %s\n", name);
 	}
 
-	bts->mif_clk = devm_clk_get(dev, "mif");
-	if (IS_ERR(bts->mif_clk))
-		return dev_err_probe(dev, PTR_ERR(bts->mif_clk),
-				     "cannot get MIF clock\n");
+	mif = devfreq_get_devfreq_by_phandle(dev, "devfreq", 0);
+	if (IS_ERR(mif))
+		return dev_err_probe(dev, PTR_ERR(mif), "cannot get MIF devfreq\n");
+	ret = dev_pm_qos_add_request(mif->dev.parent, &bts->mif_qos,
+				     DEV_PM_QOS_MIN_FREQUENCY,
+				     PM_QOS_MIN_FREQUENCY_DEFAULT_VALUE);
+	if (ret < 0)
+		return dev_err_probe(dev, ret, "cannot add MIF QoS request\n");
+	ret = devm_add_action_or_reset(dev, exynos_bts_remove_qos, &bts->mif_qos);
+	if (ret)
+		return ret;
 	bts->int_clk = devm_clk_get(dev, "int");
 	if (IS_ERR(bts->int_clk))
 		return dev_err_probe(dev, PTR_ERR(bts->int_clk),
