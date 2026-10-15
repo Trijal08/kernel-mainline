@@ -653,7 +653,8 @@ static int exynos_bts_probe(struct platform_device *pdev)
 
 	mif = devfreq_get_devfreq_by_phandle(dev, "devfreq", 0);
 	if (IS_ERR(mif))
-		return dev_err_probe(dev, PTR_ERR(mif), "cannot get MIF devfreq\n");
+		return dev_err_probe(dev, PTR_ERR(mif) == -ENODEV ? -EPROBE_DEFER :
+				     PTR_ERR(mif), "cannot get MIF devfreq\n");
 	ret = dev_pm_qos_add_request(mif->dev.parent, &bts->mif_qos,
 				     DEV_PM_QOS_MIN_FREQUENCY,
 				     PM_QOS_MIN_FREQUENCY_DEFAULT_VALUE);
