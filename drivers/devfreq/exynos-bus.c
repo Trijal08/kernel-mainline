@@ -10,6 +10,7 @@
  */
 
 #include <linux/clk.h>
+#include <linux/cpufreq.h>
 #include <linux/devfreq.h>
 #include <linux/devfreq-event.h>
 #include <linux/device.h>
@@ -405,6 +406,16 @@ static int exynos_bus_probe(struct platform_device *pdev)
 		of_node_put(node);
 		passive = true;
 	} else if (device_get_match_data(dev)) {
+		int cpu;
+
+		/* The passive governor wants every policy; defer before touching OPPs. */
+		for_each_possible_cpu(cpu) {
+			struct cpufreq_policy *policy = cpufreq_cpu_get(cpu);
+
+			if (!policy)
+				return -EPROBE_DEFER;
+			cpufreq_cpu_put(policy);
+		}
 		passive = true;
 	} else {
 		ret = exynos_bus_parent_parse_of(np, bus);
