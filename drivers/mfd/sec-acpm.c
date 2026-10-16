@@ -37,6 +37,7 @@ struct sec_pmic_acpm_platform_data {
 	const struct regmap_config *regmap_cfg_pmic;
 	const struct regmap_config *regmap_cfg_rtc;
 	const struct regmap_config *regmap_cfg_meter;
+	const struct regmap_config *regmap_cfg_gpio;
 };
 
 static const struct regmap_range s2mpg10_common_registers[] = {
@@ -605,6 +606,15 @@ static const struct regmap_config s2mpg15_regmap_config_pmic = {
 	.cache_type = REGCACHE_FLAT,
 };
 
+/* GPIO block: a status byte (or two) then one control byte per pin. */
+static const struct regmap_config s2mpg1415_regmap_config_gpio = {
+	.name = "gpio",
+	.reg_bits = ACPM_ADDR_BITS,
+	.val_bits = 8,
+	.max_register = 0x1f,
+	.cache_type = REGCACHE_NONE,
+};
+
 struct sec_pmic_acpm_shared_bus_context {
 	struct acpm_handle *acpm;
 	unsigned int acpm_chan_id;
@@ -617,6 +627,7 @@ enum sec_pmic_acpm_accesstype {
 	SEC_PMIC_ACPM_ACCESSTYPE_RTC = 0x02,
 	SEC_PMIC_ACPM_ACCESSTYPE_METER = 0x0a,
 	SEC_PMIC_ACPM_ACCESSTYPE_WLWP = 0x0b,
+	SEC_PMIC_ACPM_ACCESSTYPE_GPIO = 0x0c,
 	SEC_PMIC_ACPM_ACCESSTYPE_TRIM = 0x0f,
 };
 
@@ -765,6 +776,13 @@ static int sec_pmic_acpm_probe(struct platform_device *pdev)
 	if (IS_ERR(regmap))
 		return PTR_ERR(regmap);
 
+	if (pdata->regmap_cfg_gpio) {
+		regmap = sec_pmic_acpm_regmap_init(dev, shared_ctx, SEC_PMIC_ACPM_ACCESSTYPE_GPIO,
+						   pdata->regmap_cfg_gpio, true);
+		if (IS_ERR(regmap))
+			return PTR_ERR(regmap);
+	}
+
 	ret = sec_pmic_probe(dev, pdata->device_type, irq, regmap_pmic, NULL);
 	if (ret)
 		return ret;
@@ -807,6 +825,7 @@ static const struct sec_pmic_acpm_platform_data s2mpg14_data = {
 	.regmap_cfg_pmic = &s2mpg14_regmap_config_pmic,
 	.regmap_cfg_rtc = &s2mpg10_regmap_config_rtc,
 	.regmap_cfg_meter = &s2mpg1415_regmap_config_meter,
+	.regmap_cfg_gpio = &s2mpg1415_regmap_config_gpio,
 };
 
 static const struct sec_pmic_acpm_platform_data s2mpg15_data = {
@@ -816,6 +835,7 @@ static const struct sec_pmic_acpm_platform_data s2mpg15_data = {
 	.regmap_cfg_common = &s2mpg1415_regmap_config_common,
 	.regmap_cfg_pmic = &s2mpg15_regmap_config_pmic,
 	.regmap_cfg_meter = &s2mpg1415_regmap_config_meter,
+	.regmap_cfg_gpio = &s2mpg1415_regmap_config_gpio,
 };
 
 static const struct of_device_id sec_pmic_acpm_of_match[] = {
