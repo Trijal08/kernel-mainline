@@ -209,6 +209,59 @@ static void tokay_report_power_mode(struct tokay_panel *ctx, const char *when)
 		 !!(mode & BIT(4)), !!(mode & BIT(3)), !!(mode & BIT(2)));
 }
 
+/*
+ * Which panel is actually fitted.
+ *
+ * Pixel 9 ships three different tokay panels -- tk4a, tk4b and tk4c -- each
+ * with its own init sequence downstream, and the board's connector node lists
+ * more than one of them. This driver knows only tk4c, so on a unit carrying
+ * another DDIC every vendor-specific register below lands somewhere else,
+ * which looks exactly like a healthy link driving a panel that never lights.
+ * Nothing had ever checked.
+ *
+ * 0xD6 is the Samsung DDIC id. Downstream reads it from its *common* code
+ * (gs_panel_read_slsi_ddic_id), not from any one panel's driver, so it is safe
+ * to ask before knowing what we are talking to -- it just needs the level-2
+ * key first. 0xDB is the build code; downstream does not read it over DCS at
+ * all, it takes the value the bootloader passes in panel_extinfo, and 0xDB is
+ * where the bootloader got it. tk4c's own init varies by the revision encoded
+ * there and this driver implements only one of them.
+ *
+ * Diagnostic: everything here is logged and then ignored.
+ */
+static void tokay_report_ddic_id(struct tokay_panel *ctx)
+{
+	struct mipi_dsi_device *dsi = ctx->dsi;
+	struct device *dev = &dsi->dev;
+	u8 id[5] = { };
+	u8 build = 0;
+	int ret;
+
+	tk4c_cmd(dsi, 0xF0, 0x5A, 0x5A);
+
+	ret = mipi_dsi_dcs_read(dsi, 0xD6, id, sizeof(id));
+	if (ret != (int)sizeof(id))
+		dev_info(dev, "DDIC id unreadable (%d)\n", ret);
+	else
+		dev_info(dev, "DDIC id %*phN\n", (int)sizeof(id), id);
+
+	ret = mipi_dsi_dcs_read(dsi, 0xDB, &build, sizeof(build));
+	if (ret != (int)sizeof(build)) {
+		dev_info(dev, "build code unreadable (%d)\n", ret);
+	} else {
+		/*
+		 * tk4c's own decode. A different panel may lay the field out
+		 * differently, so the raw byte is the thing to trust.
+		 */
+		u8 rev = ((build & 0xe0) >> 3) | ((build & 0x0c) >> 2);
+
+		dev_info(dev, "build code 0x%02x (tk4c decode: rev %u)\n",
+			 build, rev);
+	}
+
+	tk4c_cmd(dsi, 0xF0, 0xA5, 0xA5);
+}
+
 static int tokay_panel_enable(struct drm_panel *panel)
 {
 	struct tokay_panel *ctx = to_tokay_panel(panel);
@@ -225,6 +278,14 @@ static int tokay_panel_enable(struct drm_panel *panel)
 	if (ret < 0)
 		return ret;
 	msleep(120);
+
+	/*
+	 * Identify the panel before any tk4c-specific register goes out, so a
+	 * mismatched DDIC is named rather than guessed at. It has to come after
+	 * sleep-out: a read as the first command after the reset pulse gets no
+	 * answer and the DSIM never recovers from that BTA.
+	 */
+	tokay_report_ddic_id(ctx);
 
 	/*
 	 * The bootloader blanks this panel with ALL_PIXELS_OFF, and that state
