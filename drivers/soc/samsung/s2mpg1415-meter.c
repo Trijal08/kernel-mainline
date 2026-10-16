@@ -20,6 +20,7 @@
 
 #include <linux/bitfield.h>
 #include <linux/debugfs.h>
+#include <linux/delay.h>
 #include <linux/iopoll.h>
 #include <linux/math64.h>
 #include <linux/mfd/samsung/s2mpg14.h>
@@ -28,6 +29,7 @@
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
+#include <linux/thermal.h>
 
 #define S2MPG1415_METER_CHANNELS	12
 
@@ -73,6 +75,8 @@ struct s2mpg1415_rail {
 struct s2mpg1415_chip {
 	const char *name;
 	const struct s2mpg1415_rail *rails;
+	/* The thermistor engine and its NTC channels are S2MPG15-only. */
+	bool has_ntc;
 };
 
 /*
@@ -124,6 +128,7 @@ static const struct s2mpg1415_chip s2mpg14_chip = {
 static const struct s2mpg1415_chip s2mpg15_chip = {
 	.name = "s2mpg15",
 	.rails = s2mpg15_rails,
+	.has_ntc = true,
 };
 
 struct s2mpg1415_meter {
@@ -132,6 +137,196 @@ struct s2mpg1415_meter {
 	/* Serialises the latch-then-read sequence against concurrent readers. */
 	struct mutex lock;
 };
+
+/*
+ * ---------------------------------------------------------------------------
+ * NTC thermistors.
+ *
+ * The S2MPG15's meter block also drives eight NTC channels, which on this
+ * board are the thermistors scattered around it -- including the one next to
+ * the case that a skin-temperature policy wants to regulate on, rather than
+ * the die sensors inside the SoC.
+ *
+ * Each channel's filtered reading is a 12-bit code, little-endian in two
+ * bytes, that falls as the thermistor warms. The code is not linear in
+ * temperature, so it is interpolated through a calibration table.
+ * ---------------------------------------------------------------------------
+ */
+
+#define S2MPG1415_NTC_CHANNELS		8
+#define S2MPG1415_NTC_BUF		2	/* bytes per channel */
+#define S2MPG1415_NTC_CODE_MASK		GENMASK(11, 0)
+/* Writing this to a channel's LPF coefficient bypasses the filter. */
+#define S2MPG1415_NTC_LPF_BYPASS	0x80
+/* Reconfiguring the channels needs the meter engine reset first. */
+#define S2MPG1415_NTC_METER_RESET	0x4f
+#define S2MPG1415_NTC_SETTLE_US		100
+#define S2MPG1415_NTC_SETTLE_MAX_US	10000
+#define S2MPG1415_NTC_READY_MS		50
+
+/* Falling code, rising temperature in millidegrees Celsius. */
+struct s2mpg1415_ntc_pt {
+	u16 code;
+	int millic;
+};
+
+static const struct s2mpg1415_ntc_pt s2mpg15_ntc_map[] = {
+	{ 0xf8d, -26428 }, { 0xf6a, -21922 }, { 0xf29, -15958 },
+	{ 0xee4, -11060 }, { 0xe9d,  -6890 }, { 0xe3f,  -2264 },
+	{ 0xdbf,   2961 }, { 0xd33,   7818 }, { 0xc97,  12525 },
+	{ 0xbf5,  16945 }, { 0xb3a,  21623 }, { 0xa42,  27431 },
+	{ 0x7f1,  40631 }, { 0x734,  44960 }, { 0x66b,  49757 },
+	{ 0x5a3,  54854 }, { 0x4ee,  59898 }, { 0x446,  65076 },
+	{ 0x43a,  65779 }, { 0x430,  65856 }, { 0x3c3,  69654 },
+	{ 0x3bd,  69873 }, { 0x33b,  74910 }, { 0x2bb,  80691 },
+	{ 0x259,  85844 }, { 0x206,  90915 }, { 0x1ce,  94873 },
+	{ 0x191,  99720 }, { 0x160, 104216 }, { 0x12e, 109531 },
+	{ 0x0f9, 116445 }, { 0x0d7, 121600 }, { 0x09f, 131839 },
+};
+
+struct s2mpg1415_ntc {
+	struct s2mpg1415_meter *meter;
+	unsigned int chan;
+};
+
+/*
+ * Interpolate a code into the table. A linear scan is plenty: the table has a
+ * few dozen entries and a thermal zone reads at most a few times a second.
+ */
+static int s2mpg1415_ntc_millic(u16 code)
+{
+	const struct s2mpg1415_ntc_pt *t = s2mpg15_ntc_map;
+	size_t n = ARRAY_SIZE(s2mpg15_ntc_map);
+	size_t i;
+
+	/* Off either end of the calibration, report its limit. */
+	if (code >= t[0].code)
+		return t[0].millic;
+	if (code <= t[n - 1].code)
+		return t[n - 1].millic;
+
+	for (i = 1; i < n; i++)
+		if (code >= t[i].code)
+			break;
+
+	/* Between t[i] (hotter, lower code) and t[i - 1] (colder, higher). */
+	return t[i].millic + mult_frac(t[i - 1].millic - t[i].millic,
+				       code - t[i].code,
+				       t[i - 1].code - t[i].code);
+}
+
+static int s2mpg1415_ntc_get_temp(struct thermal_zone_device *tz, int *temp)
+{
+	struct s2mpg1415_ntc *ntc = thermal_zone_device_priv(tz);
+	u8 buf[S2MPG1415_NTC_BUF];
+	unsigned int reg;
+	u16 code;
+	int ret;
+
+	reg = S2MPG15_METER_LPF_DATA_NTC0_1 + S2MPG1415_NTC_BUF * ntc->chan;
+	ret = regmap_bulk_read(ntc->meter->regmap, reg, buf, sizeof(buf));
+	if (ret)
+		return ret;
+
+	code = (buf[0] | (buf[1] << 8)) & S2MPG1415_NTC_CODE_MASK;
+	/* The engine reads back all-zero until its first conversion lands. */
+	if (!code)
+		return -EAGAIN;
+
+	*temp = s2mpg1415_ntc_millic(code);
+	return 0;
+}
+
+static const struct thermal_zone_device_ops s2mpg1415_ntc_ops = {
+	.get_temp = s2mpg1415_ntc_get_temp,
+};
+
+/*
+ * Register a zone per thermistor the device tree actually reads, then enable
+ * exactly those channels.
+ *
+ * Changing the channel mask requires resetting the meter engine, which is why
+ * this runs before the caller configures and enables it: the vendor driver
+ * does the same work after ODPM is already running and so has to tear it down
+ * and put it back afterwards. CTRL5 is clobbered by the reset, and the
+ * caller's mode selection reprograms it.
+ */
+static int s2mpg1415_meter_init_ntc(struct device *dev,
+				    struct s2mpg1415_meter *meter)
+{
+	unsigned int chan, enabled = 0;
+	int ret;
+
+	if (!meter->chip->has_ntc)
+		return 0;
+
+	for (chan = 0; chan < S2MPG1415_NTC_CHANNELS; chan++) {
+		struct thermal_zone_device *tz;
+		struct s2mpg1415_ntc *ntc;
+
+		ntc = devm_kzalloc(dev, sizeof(*ntc), GFP_KERNEL);
+		if (!ntc)
+			return -ENOMEM;
+
+		ntc->meter = meter;
+		ntc->chan = chan;
+
+		tz = devm_thermal_of_zone_register(dev, chan, ntc,
+						   &s2mpg1415_ntc_ops);
+		if (IS_ERR(tz)) {
+			/*
+			 * -ENODEV: no zone names this channel, so nothing
+			 * reads that thermistor. -ENOTSUPP: the kernel has no
+			 * CONFIG_THERMAL_OF, so no zone can name it. Either
+			 * way leave the channel off rather than sample it for
+			 * nobody, and keep the power meter working.
+			 */
+			if (PTR_ERR(tz) == -ENODEV || PTR_ERR(tz) == -ENOTSUPP)
+				continue;
+			return dev_err_probe(dev, PTR_ERR(tz),
+					     "cannot register NTC%u\n", chan);
+		}
+		enabled |= BIT(chan);
+	}
+
+	if (!enabled)
+		return 0;
+
+	/* The filter has to be out of the way across the reset. */
+	for (chan = 0; chan < S2MPG1415_NTC_CHANNELS; chan++) {
+		ret = regmap_write(meter->regmap,
+				   S2MPG15_METER_NTC_LPF_C0_0 + chan,
+				   S2MPG1415_NTC_LPF_BYPASS);
+		if (ret)
+			return dev_err_probe(dev, ret,
+					     "cannot bypass NTC%u filter\n",
+					     chan);
+	}
+
+	usleep_range(S2MPG1415_NTC_SETTLE_US, S2MPG1415_NTC_SETTLE_MAX_US);
+	ret = regmap_write(meter->regmap, S2MPG15_METER_CTRL3, 0);
+	if (!ret) {
+		usleep_range(S2MPG1415_NTC_SETTLE_US,
+			     S2MPG1415_NTC_SETTLE_MAX_US);
+		ret = regmap_write(meter->regmap, S2MPG15_METER_CTRL5,
+				   S2MPG1415_NTC_METER_RESET);
+	}
+	if (!ret) {
+		usleep_range(S2MPG1415_NTC_SETTLE_US,
+			     S2MPG1415_NTC_SETTLE_MAX_US);
+		ret = regmap_write(meter->regmap, S2MPG15_METER_CTRL3, enabled);
+	}
+	if (ret)
+		return dev_err_probe(dev, ret,
+				     "cannot enable NTC channels %#x\n",
+				     enabled);
+
+	/* First conversions land a few tens of milliseconds later. */
+	msleep(S2MPG1415_NTC_READY_MS);
+
+	dev_info(dev, "thermistor channels %#x enabled\n", enabled);
+	return 0;
+}
 
 static u64 s2mpg1415_read_le(const u8 *buf, unsigned int bytes)
 {
@@ -247,6 +442,15 @@ static int s2mpg1415_meter_probe(struct platform_device *pdev)
 			return dev_err_probe(dev, ret,
 					     "cannot set MUXSEL%d\n", ch);
 	}
+
+	/*
+	 * Before the meter is configured: enabling the thermistor channels
+	 * resets the engine and clobbers CTRL5, which the mode selection
+	 * below then reprograms.
+	 */
+	ret = s2mpg1415_meter_init_ntc(dev, meter);
+	if (ret)
+		return ret;
 
 	ret = regmap_read(meter->regmap, S2MPG14_METER_CTRL4, &acc_mode);
 	if (!ret)
