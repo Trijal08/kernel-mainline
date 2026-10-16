@@ -1519,6 +1519,13 @@ config REGULATOR_SLG51000
 	  The SLG51000 is seven compact and customizable low dropout
 	  regulators.
 
+config REGULATOR_SLG51002
+	tristate "Dialog Semiconductor SLG51002 regulators"
+	depends on I2C
+	select REGMAP_I2C
+	help
+	  The SLG51002 camera PMIC: eight LDOs and four GPIO-switched outputs.
+
 config REGULATOR_SPACEMIT_P1
 	tristate "SpacemiT P1 regulators"
 	depends on ARCH_SPACEMIT || COMPILE_TEST
