@@ -201,10 +201,6 @@
 			gpio-controller;
 			#gpio-cells = <2>;
 			ngpios = <6>;
-			gpio-ranges = <&s2mpg14_pinctrl 0 0 6>;
-		};
-
-		s2mpg14_pinctrl: pinctrl {
 		};
 	};
 
@@ -336,6 +332,11 @@
 				regulator-always-on;
 			};
 
+			/* Camera VDDIO (L12S_CAMIO, 1.85 V).  Enable-only, as above. */
+			s_ldo12_reg: ldo12s {
+				regulator-name = "L12S_CAMIO";
+			};
+
 			/* UWB rails, switched by the QM35 driver.  Enable-only, as above. */
 			s_ldo16_reg: ldo16s {
 				regulator-name = "L16S_UWB";
@@ -351,10 +352,6 @@
 			gpio-controller;
 			#gpio-cells = <2>;
 			ngpios = <10>;
-			gpio-ranges = <&s2mpg15_pinctrl 0 0 10>;
-		};
-
-		s2mpg15_pinctrl: pinctrl {
 		};
 	};
 };
