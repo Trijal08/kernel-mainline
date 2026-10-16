@@ -1,0 +1,110 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * Camera power tree and sensors shared by the caimito boards.
+ *
+ * Rails: PP3200_CAM_BB (rt6160) and PP1350_CAM feed an SLG51002 that
+ * makes the per-sensor LDOs; VDDIO is the S2MPG15 LDO12S.  The front
+ * sensor is the first one wired up; the others follow the same shape.
+ */
+
+#include <dt-bindings/clock/google,zuma.h>
+
+/ {
+	cam_pp1350: regulator-cam-pp1350 {
+		compatible = "regulator-fixed";
+		regulator-name = "PP1350_CAM";
+		regulator-min-microvolt = <1350000>;
+		regulator-max-microvolt = <1350000>;
+		regulator-enable-ramp-delay = <2000>;
+		enable-active-high;
+		gpio = <&s2mpg15_gpio 2 GPIO_ACTIVE_HIGH>;
+	};
+};
+
+&hsi2c_4 {
+	cam_pp3200_bb: regulator@77 {
+		compatible = "richtek,rt6160";
+		reg = <0x77>;
+		enable-gpios = <&s2mpg15_gpio 1 GPIO_ACTIVE_HIGH>;
+		regulator-name = "PP3200_CAM_BB";
+		regulator-min-microvolt = <3200000>;
+		regulator-max-microvolt = <3200000>;
+		regulator-enable-ramp-delay = <2000>;
+	};
+
+	slg51002: pmic@75 {
+		compatible = "dlg,slg51002";
+		reg = <0x75>;
+		dlg,cs-gpios = <&s2mpg15_gpio 0 GPIO_ACTIVE_HIGH>;
+
+		regulators {
+			slg51002_ldo1: ldo1 {
+				regulator-name = "cam_ldo1";
+				vin1_2-supply = <&cam_pp3200_bb>;
+			};
+			slg51002_ldo2: ldo2 {
+				regulator-name = "cam_ldo2";
+				vin1_2-supply = <&cam_pp3200_bb>;
+			};
+			slg51002_ldo3: ldo3 {
+				regulator-name = "cam_ldo3";
+				vin3-supply = <&cam_pp3200_bb>;
+			};
+			slg51002_ldo4: ldo4 {
+				regulator-name = "cam_ldo4";
+				vin4-supply = <&cam_pp3200_bb>;
+			};
+			slg51002_ldo5: ldo5 {
+				regulator-name = "cam_ldo5";
+				vin5-supply = <&cam_pp3200_bb>;
+			};
+			slg51002_ldo6: ldo6 {
+				regulator-name = "cam_ldo6";
+				vin6-supply = <&cam_pp1350>;
+			};
+			slg51002_ldo7: ldo7 {
+				regulator-name = "cam_ldo7";
+				vin7-supply = <&cam_pp1350>;
+			};
+			slg51002_ldo8: ldo8 {
+				regulator-name = "cam_ldo8";
+			};
+			slg51002_gpio1: gpio1 {
+				regulator-name = "cam_gpio1";
+			};
+			slg51002_gpio2: gpio2 {
+				regulator-name = "cam_gpio2";
+			};
+			slg51002_gpio3: gpio3 {
+				regulator-name = "cam_gpio3";
+			};
+			slg51002_gpio4: gpio4 {
+				regulator-name = "cam_gpio4";
+			};
+		};
+	};
+};
+
+/* Front camera ("taotie", a Sony IMX part; model id still to be read) */
+&hsi2c_3 {
+	status = "okay";
+
+	front_camera: camera@1a {
+		compatible = "google,taotie-front";
+		reg = <0x1a>;
+		reset-gpios = <&gpp6 2 GPIO_ACTIVE_HIGH>;
+		clocks = <&cmu_top CLK_GOUT_CMU_CIS_CLK1>;
+		clock-names = "mclk";
+		assigned-clocks = <&cmu_top CLK_GOUT_CMU_CIS_CLK1>;
+		assigned-clock-rates = <24000000>;
+		pinctrl-0 = <&sensor_mclk2_fn>;
+		pinctrl-1 = <&sensor_mclk2_out>;
+		pinctrl-names = "default", "sleep";
+		/* power-up order from the vendor lwis sequence */
+		pp3200_bb-supply = <&cam_pp3200_bb>;
+		pp1350-supply = <&cam_pp1350>;
+		vdig-supply = <&slg51002_gpio1>;
+		vddio-supply = <&s_ldo12_reg>;
+		af-supply = <&slg51002_gpio2>;
+	};
+};
