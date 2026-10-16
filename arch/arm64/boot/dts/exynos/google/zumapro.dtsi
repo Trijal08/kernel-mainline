@@ -1674,6 +1674,33 @@
 			sysmmu,ap-read-implies-write;
 		};
 
+		/*
+		 * Stage-2 firewalls in front of the three ISPFE SysMMUs. They come
+		 * up blocking at every domain power-on; the driver opens them from
+		 * its genpd notifier. Without these the CSIS WDMA gets
+		 * axi_resp_err_status 3 and writes nothing.
+		 */
+		s2mpu_s0_ispfe: s2mpu@1C140000 {
+			compatible = "google,s2mpu-v9";
+			reg = <0x1C140000 0x10000>;
+			interrupts = <GIC_SPI 490 IRQ_TYPE_LEVEL_HIGH 0>;
+			power-domains = <&pd_ispfe>;
+		};
+
+		s2mpu_s1_ispfe: s2mpu@1C180000 {
+			compatible = "google,s2mpu-v9";
+			reg = <0x1C180000 0x10000>;
+			interrupts = <GIC_SPI 494 IRQ_TYPE_LEVEL_HIGH 0>;
+			power-domains = <&pd_ispfe>;
+		};
+
+		s2mpu_s2_ispfe: s2mpu@1C1C0000 {
+			compatible = "google,s2mpu-v9";
+			reg = <0x1C1C0000 0x10000>;
+			interrupts = <GIC_SPI 498 IRQ_TYPE_LEVEL_HIGH 0>;
+			power-domains = <&pd_ispfe>;
+		};
+
 		sysmmu_ispfe_s2: iommu@1C190000 {
 			compatible = "samsung,exynos-sysmmu";
 			reg = <0x1C190000 0x10000>;
