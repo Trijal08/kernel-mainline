@@ -85,6 +85,39 @@
 	};
 };
 
+/* Sensor I2C buses: usi1 tele, usi2 ultrawide, usi3 front, usi5 main */
+&usi1 {
+	samsung,mode = <USI_MODE_I2C>;
+	status = "okay";
+};
+
+&usi2 {
+	samsung,mode = <USI_MODE_I2C>;
+	status = "okay";
+};
+
+&usi3 {
+	samsung,mode = <USI_MODE_I2C>;
+	status = "okay";
+};
+
+&usi5 {
+	samsung,mode = <USI_MODE_I2C>;
+	status = "okay";
+};
+
+&hsi2c_1 {
+	status = "okay";
+};
+
+&hsi2c_2 {
+	status = "okay";
+};
+
+&hsi2c_5 {
+	status = "okay";
+};
+
 /* Front camera ("taotie", a Sony IMX part; model id still to be read) */
 &hsi2c_3 {
 	status = "okay";
