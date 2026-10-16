@@ -1007,10 +1007,26 @@ static int zuma_dsim_read_rxfifo(struct zuma_dsim *dsim,
 		len = msg->rx_len;
 	}
 
+	/*
+	 * RX_DATA_DONE goes up once the response has started, not once all of
+	 * it has landed, so a long payload has to be waited for word by word.
+	 * Reading ahead of the FIFO returns zeroes, which is indistinguishable
+	 * from a controller that answered with them.
+	 */
 	for (i = 0; i < len; i += 4) {
-		u32 word = readl(dsim->regs + DSIM_RXFIFO);
+		u32 word;
 		unsigned int b;
 
+		ret = readl_poll_timeout_atomic(dsim->regs + DSIM_FIFOCTRL, word,
+						!(word & DSIM_FIFOCTRL_EMPTY_RX),
+						10, 20000);
+		if (ret) {
+			dev_warn(dsim->dev,
+				 "read payload short at %u of %u bytes\n", i, len);
+			goto drain;
+		}
+
+		word = readl(dsim->regs + DSIM_RXFIFO);
 		for (b = 0; b < 4 && i + b < len; b++)
 			rx[i + b] = (word >> (8 * b)) & 0xff;
 	}
