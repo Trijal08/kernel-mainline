@@ -375,11 +375,13 @@ static const struct regmap_config s2mpg11_regmap_config_meter = {
 static const struct regmap_range s2mpg1415_meter_registers[] = {
 	regmap_reg_range(0x00, 0x3c), /* Meter config */
 	regmap_reg_range(0x63, 0xd3), /* ACC data, ACC count, LPF data, VBAT */
+	regmap_reg_range(0xd4, 0xe3), /* NTC thermistor LPF data */
 	regmap_reg_range(0xe4, 0xe5), /* External signed data */
 };
 
 static const struct regmap_range s2mpg1415_meter_ro_registers[] = {
 	regmap_reg_range(0x63, 0xd3), /* ACC data, ACC count, LPF data, VBAT */
+	regmap_reg_range(0xd4, 0xe3), /* NTC thermistor LPF data */
 	regmap_reg_range(0xe4, 0xe5), /* External signed data */
 };
 
@@ -402,6 +404,7 @@ static const struct regmap_access_table s2mpg1415_meter_rd_table = {
 static const struct regmap_range s2mpg1415_meter_volatile_registers[] = {
 	regmap_reg_range(S2MPG14_METER_CTRL2, S2MPG14_METER_CTRL2),
 	regmap_reg_range(0x63, 0xd3),
+	regmap_reg_range(0xd4, 0xe3),
 	regmap_reg_range(0xe4, 0xe5),
 };
 
