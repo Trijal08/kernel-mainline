@@ -1047,6 +1047,11 @@ static ssize_t zuma_dsim_host_transfer(struct mipi_dsi_host *host,
 	if (ret < 0)
 		return ret;
 
+	/* low-power (escape mode) transmission when the panel asks for it */
+	if (msg->flags & MIPI_DSI_MSG_USE_LPM)
+		dsim_rmw(dsim, DSIM_ESCMODE, DSIM_ESCMODE_CMD_LPDT,
+			 DSIM_ESCMODE_CMD_LPDT);
+
 	if (read) {
 		/*
 		 * Leave nothing of a previous response behind, then bound what
@@ -1134,6 +1139,8 @@ static ssize_t zuma_dsim_host_transfer(struct mipi_dsi_host *host,
 
 	ret = read ? zuma_dsim_read_rxfifo(dsim, msg) : msg->tx_len;
 out:
+	if (msg->flags & MIPI_DSI_MSG_USE_LPM)
+		dsim_rmw(dsim, DSIM_ESCMODE, 0, DSIM_ESCMODE_CMD_LPDT);
 	pm_runtime_put_sync(dsim->dev);
 
 	return ret;

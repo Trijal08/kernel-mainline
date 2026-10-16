@@ -187,7 +187,7 @@ static int tokay_cur_vrefresh(struct tokay_panel *ctx)
  * Diagnostic only: a controller without a read path returns an error, which is
  * logged and otherwise ignored.
  */
-static void tokay_report_power_mode(struct tokay_panel *ctx)
+static void tokay_report_power_mode(struct tokay_panel *ctx, const char *when)
 {
 	struct device *dev = &ctx->dsi->dev;
 	u8 mode = 0;
@@ -204,8 +204,9 @@ static void tokay_report_power_mode(struct tokay_panel *ctx)
 	 * rest moved between DCS revisions, so report the byte and decode the
 	 * one bit that matters here.
 	 */
-	dev_info(dev, "power mode 0x%02x (display %s)\n", mode,
-		 mode & MIPI_DSI_DCS_POWER_MODE_DISPLAY ? "ON" : "OFF");
+	dev_info(dev, "%s: power mode 0x%02x: booster %d idle %d partial %d sleep-out %d normal %d display %d\n",
+		 when, mode, !!(mode & BIT(7)), !!(mode & BIT(6)), !!(mode & BIT(5)),
+		 !!(mode & BIT(4)), !!(mode & BIT(3)), !!(mode & BIT(2)));
 }
 
 static int tokay_panel_enable(struct drm_panel *panel)
@@ -217,7 +218,10 @@ static int tokay_panel_enable(struct drm_panel *panel)
 
 	dev_info(&dsi->dev, "enable: %d Hz\n", tokay_cur_vrefresh(ctx));
 
+	/* bring-up: sleep-out sent in HS is ignored; try LP */
+	dsi->mode_flags |= MIPI_DSI_MODE_LPM;
 	ret = mipi_dsi_dcs_exit_sleep_mode(dsi);
+	dsi->mode_flags &= ~MIPI_DSI_MODE_LPM;
 	if (ret < 0)
 		return ret;
 	msleep(120);
@@ -271,7 +275,7 @@ static int tokay_panel_enable(struct drm_panel *panel)
 	if (ret < 0)
 		return ret;
 
-	tokay_report_power_mode(ctx);
+	tokay_report_power_mode(ctx, "after display-on");
 
 	return 0;
 }
