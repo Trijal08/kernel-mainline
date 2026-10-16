@@ -196,6 +196,15 @@
 			};
 		};
 
+		/*
+		 * The main PMIC's meter block has no thermistor engine -- that
+		 * is the sub PMIC -- but describing it keeps the two symmetric
+		 * and gives the power meter a node of its own.
+		 */
+		s2mpg14_meter: meter {
+			compatible = "samsung,s2mpg14-meter";
+		};
+
 		s2mpg14_gpio: gpio {
 			compatible = "samsung,s2mpg14-gpio";
 			gpio-controller;
