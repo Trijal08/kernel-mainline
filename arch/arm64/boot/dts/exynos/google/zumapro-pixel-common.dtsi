@@ -1155,6 +1155,40 @@
 		sustainable-power = <2500>;
 
 		trips {
+			/*
+			 * The lower of two passive trips is IPA's switch-on
+			 * point, and it is not optional. Below it the governor
+			 * calls reset_pid_controller() and allow_maximum_power()
+			 * and gets out of the way; with a single passive trip
+			 * get_governor_trips() leaves trip_switch_on NULL, that
+			 * branch never runs, and the governor controls at every
+			 * temperature.
+			 *
+			 * That is how this zone first shipped, and the failure
+			 * is worse than permanent mild control: integral_cutoff
+			 * defaults to 0, so the integral term accumulates only
+			 * while err < 0 -- above the control temperature. Once a
+			 * warm spell winds it negative nothing unwinds it, the
+			 * power budget stays clamped to zero, and every actor
+			 * sits at its maximum cooling state for good. Measured:
+			 * cpu0 pinned to 820 MHz, cpu4 to 357, cpu7 to 700 and
+			 * the GPU to its floor, at 42 C against a 45 C
+			 * set point, until the zone was disabled.
+			 *
+			 * The die zones in zumapro.dtsi have the same shape and
+			 * the same latent problem; they get away with it only by
+			 * sitting ~20 C below their set point, where the
+			 * proportional term swamps the integral.
+			 *
+			 * No cooling map here: IPA allocates across the
+			 * instances bound to the control trip below.
+			 */
+			skin_switch_on: switch-on {
+				temperature = <40000>;
+				hysteresis = <2000>;
+				type = "passive";
+			};
+
 			skin_alert: throttle {
 				temperature = <45000>;
 				hysteresis = <2000>;
