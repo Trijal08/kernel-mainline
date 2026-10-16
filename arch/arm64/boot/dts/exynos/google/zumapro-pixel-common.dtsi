@@ -346,6 +346,16 @@
 			};
 		};
 
+		/*
+		 * The sub PMIC's meter block drives the board's eight NTC
+		 * thermistors as well as the power meter. Only the channels a
+		 * thermal zone names are sampled.
+		 */
+		s2mpg15_meter: meter {
+			compatible = "samsung,s2mpg15-meter";
+			#thermal-sensor-cells = <1>;
+		};
+
 		s2mpg15_gpio: gpio {
 			compatible = "samsung,s2mpg15-gpio";
 			gpio-controller;
@@ -1095,4 +1105,85 @@
 &watchdog_cl0 {
 	timeout-sec = <30>;
 	status = "okay";
+};
+
+/*
+ * The skin zone, on the thermistor next to the case rather than a sensor
+ * inside the SoC. This is the one the vendor stack regulates on, and the
+ * reason it can run the silicon hotter than a die-temperature policy dares
+ * to: a die reading cannot tell a brief spike on a cold phone from sustained
+ * load on a hot one, so it has to assume the worst and throttle early.
+ *
+ * The die zones in zumapro.dtsi stay as they are. They protect the silicon,
+ * locally and quickly; this protects the user, globally and slowly. Where
+ * both name the same cooling device the thermal core takes the higher
+ * requested state, so the stricter of the two wins.
+ *
+ * Unlike those zones, this one budgets all four cooling devices together,
+ * which is what a skin measurement actually constrains -- total board power,
+ * however it is being spent.
+ */
+&{/thermal-zones} {
+	skin-thermal {
+		/* Skin temperature moves in seconds, not milliseconds. */
+		polling-delay = <1000>;
+		polling-delay-passive = <250>;
+		thermal-sensors = <&s2mpg15_meter 1>;	/* quiet_therm */
+
+		/*
+		 * Both numbers below are the tuning knobs, and neither came
+		 * from the vendor: its kernel delegates this zone to userspace
+		 * ("user_space" governor, polling disabled) and the real
+		 * control points live in the Android thermal HAL's config, not
+		 * in its device tree. What its DT does say is where it gives
+		 * up -- 56 C notify, 60 C shutdown, 65 C hardware shutdown --
+		 * so the safe operating range sits well below those.
+		 *
+		 * 45 C is a touch-temperature limit for a surface held
+		 * continuously, which is the thing a skin sensor is for.
+		 * Raise it for more sustained performance and a warmer phone.
+		 */
+		sustainable-power = <2500>;
+
+		trips {
+			skin_alert: throttle {
+				temperature = <45000>;
+				hysteresis = <2000>;
+				type = "passive";
+			};
+
+			/* Mirrors the vendor's backup-shutdown-sw. */
+			skin_crit: critical {
+				temperature = <60000>;
+				hysteresis = <2000>;
+				type = "critical";
+			};
+		};
+
+		cooling-maps {
+			map0 {
+				trip = <&skin_alert>;
+				cooling-device = <&cpu0 THERMAL_NO_LIMIT
+						  THERMAL_NO_LIMIT>;
+			};
+
+			map1 {
+				trip = <&skin_alert>;
+				cooling-device = <&cpu4 THERMAL_NO_LIMIT
+						  THERMAL_NO_LIMIT>;
+			};
+
+			map2 {
+				trip = <&skin_alert>;
+				cooling-device = <&cpu7 THERMAL_NO_LIMIT
+						  THERMAL_NO_LIMIT>;
+			};
+
+			map3 {
+				trip = <&skin_alert>;
+				cooling-device = <&gpu THERMAL_NO_LIMIT
+						  THERMAL_NO_LIMIT>;
+			};
+		};
+	};
 };
