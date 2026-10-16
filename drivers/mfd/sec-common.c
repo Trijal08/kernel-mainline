@@ -63,7 +63,7 @@ static const struct resource s2mpg14_rtc_resources[] = {
 };
 
 static const struct mfd_cell s2mpg14_devs[] = {
-	MFD_CELL_NAME("s2mpg14-meter"),
+	MFD_CELL_OF("s2mpg14-meter", NULL, NULL, 0, 0, "samsung,s2mpg14-meter"),
 	MFD_CELL_NAME("s2mpg14-regulator"),
 	MFD_CELL_RES("s2mpg10-rtc", s2mpg14_rtc_resources),
 	MFD_CELL_OF("s2mpg10-clk", NULL, NULL, 0, 0, "samsung,s2mpg10-clk"),
@@ -71,7 +71,7 @@ static const struct mfd_cell s2mpg14_devs[] = {
 };
 
 static const struct mfd_cell s2mpg15_devs[] = {
-	MFD_CELL_NAME("s2mpg15-meter"),
+	MFD_CELL_OF("s2mpg15-meter", NULL, NULL, 0, 0, "samsung,s2mpg15-meter"),
 	MFD_CELL_NAME("s2mpg15-regulator"),
 	MFD_CELL_OF("s2mpg15-gpio", NULL, NULL, 0, 0, "samsung,s2mpg15-gpio"),
 };
