@@ -335,6 +335,15 @@
 				regulator-name = "L7S_SENSORS";
 				regulator-always-on;
 			};
+
+			/* UWB rails, switched by the QM35 driver.  Enable-only, as above. */
+			s_ldo16_reg: ldo16s {
+				regulator-name = "L16S_UWB";
+			};
+
+			s_ldo17_reg: ldo17s {
+				regulator-name = "L17S_UWB";
+			};
 		};
 
 		s2mpg15_gpio: gpio {
@@ -367,6 +376,9 @@
 };
 
 &hsi2c_9 {
+	/* Vendor runs this bus at 950 kHz; fast mode is plenty for NCI. */
+	clock-frequency = <400000>;
+
 	pack_bee: m24c08@50 {
 		compatible = "atmel,24c08";
 		reg = <0x50>;
@@ -382,7 +394,8 @@
 	 * The in-kernel st-nci driver speaks NCI over ST's NDLC framing, so no
 	 * vendor firmware path is required. IRQ_N (active-high, level-triggered
 	 * read-request) and RESET_N are routed to the always-on (ALIVE) GPIO
-	 * banks gpa7/gph1 so the controller can wake the AP out of suspend.
+	 * banks gpa7/gph1 so the controller can wake the AP out of suspend;
+	 * wakeup-source makes the I2C core arm IRQ_N as the wake IRQ.
 	 */
 	nfc: nfc@8 {
 		compatible = "st,st54l-i2c";
@@ -390,6 +403,7 @@
 
 		interrupt-parent = <&gpa7>;
 		interrupts = <5 IRQ_TYPE_LEVEL_HIGH>;
+		wakeup-source;
 
 		reset-gpios = <&gph1 6 GPIO_ACTIVE_HIGH>;
 
@@ -955,12 +969,69 @@
 	status = "okay";
 };
 
+/*
+ * The ST54L's embedded secure element (it hosts the eSIM) hangs off its own
+ * SPI port on usi15.  There is no in-kernel protocol for it: the secure
+ * element HAL exchanges raw APDUs over spidev.  Its RESET_N (gph1-5) and
+ * chip-enable (gpa0-1) lines have no runtime use from Linux and are held in
+ * the running state by the hogs below.
+ */
 &spi_15 {
 	status = "okay";
+	pinctrl-0 = <&spi15_bus &spi15_cs>;
+	cs-gpios = <&gpp22 3 GPIO_ACTIVE_HIGH>;
+
+	ese: secure-element@0 {
+		compatible = "st,st54spi";
+		reg = <0>;
+		spi-max-frequency = <8000000>;
+		spi-cs-setup-delay-ns = <18000>;
+	};
 };
 
+&gph1 {
+	ese-reset-hog {
+		gpio-hog;
+		gpios = <5 GPIO_ACTIVE_HIGH>;
+		output-high;
+		line-name = "ESE_RST_N";
+	};
+};
+
+&gpa0 {
+	ese-enable-hog {
+		gpio-hog;
+		gpios = <1 GPIO_ACTIVE_HIGH>;
+		output-high;
+		line-name = "ESE_CHIP_EN";
+	};
+};
+
+/*
+ * Qorvo QM35 UWB transceiver on HSI0's USI0, whose pins are dedicated (no
+ * mux, hence no pinctrl).  SS_IRQ and SS_READY sit on the ALIVE banks so the
+ * chip can wake the AP.
+ */
 &spi_18 {
 	status = "okay";
+
+	uwb: uwb@0 {
+		compatible = "qorvo,qm35";
+		reg = <0>;
+		spi-max-frequency = <20000000>;
+		spi-cs-setup-delay-ns = <10000>;
+
+		vdd1-supply = <&s_bucka_reg>;
+		vdd2-supply = <&s_ldo16_reg>;
+		vdd3-supply = <&s_bucka_reg>;
+		vdd4-supply = <&s_ldo17_reg>;
+
+		reset-gpios = <&gpp14 0 GPIO_ACTIVE_LOW>;
+		exton-gpios = <&gpp13 1 GPIO_ACTIVE_HIGH>;
+		ready-gpios = <&gpn4 0 (GPIO_ACTIVE_HIGH | GPIO_PULL_DOWN)>;
+		irq-gpios = <&gpn5 0 (GPIO_ACTIVE_HIGH | GPIO_PULL_DOWN)>;
+		wakeup-gpios = <&gpp15 1 GPIO_ACTIVE_HIGH>;
+	};
 };
 
 &spi_19 {
