@@ -10,6 +10,15 @@
 #include <dt-bindings/clock/google,zuma.h>
 
 / {
+	/* Rear main sensor core rail, a buck switched by S2MPG14 gpio 0 (CAM_LVBUCK_EN) */
+	cam_vdig_main: regulator-cam-vdig-main {
+		compatible = "regulator-fixed";
+		regulator-name = "VDIG_RCAM";
+		regulator-enable-ramp-delay = <1000>;
+		enable-active-high;
+		gpio = <&s2mpg14_gpio 0 GPIO_ACTIVE_HIGH>;
+	};
+
 	cam_pp1350: regulator-cam-pp1350 {
 		compatible = "regulator-fixed";
 		regulator-name = "PP1350_CAM";
@@ -139,5 +148,29 @@
 		vdig-supply = <&slg51002_gpio1>;
 		vddio-supply = <&s_ldo12_reg>;
 		af-supply = <&slg51002_gpio2>;
+	};
+};
+
+/* Rear main camera ("boitata", a Samsung part; 4-lane D-PHY). OIS left off. */
+&hsi2c_5 {
+	rear_camera: camera@3d {
+		compatible = "google,boitata";
+		reg = <0x3d>;
+		reset-gpios = <&gpp10 2 GPIO_ACTIVE_HIGH>;
+		clocks = <&cmu_top CLK_GOUT_CMU_CIS_CLK3>;
+		clock-names = "mclk";
+		assigned-clocks = <&cmu_top CLK_GOUT_CMU_CIS_CLK3>;
+		assigned-clock-rates = <26000000>;
+		pinctrl-0 = <&sensor_mclk4_fn>;
+		pinctrl-1 = <&sensor_mclk4_out>;
+		pinctrl-names = "default", "sleep";
+		/* power-up order from the vendor lwis sequence */
+		pp3200_bb-supply = <&cam_pp3200_bb>;
+		pp1350-supply = <&cam_pp1350>;
+		ldo1-supply = <&slg51002_ldo1>;
+		vdig-supply = <&cam_vdig_main>;
+		vddio-supply = <&s_ldo12_reg>;
+		ldo5-supply = <&slg51002_ldo5>;
+		ldo4-supply = <&slg51002_ldo4>;
 	};
 };
