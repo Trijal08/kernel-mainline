@@ -714,33 +714,42 @@
 
 			trips {
 				/*
-				 * 70 C stands in for a skin measurement this port does
-				 * not have.  The vendor stack does not throttle on die
-				 * temperature at all -- its BIG/MID/LITTLE/G3D zones
-				 * carry no trips whatsoever -- and regulates a modelled
-				 * skin temperature instead, which on this board held
-				 * the big cluster's die to about 74 C at its hottest.
-				 * Holding 70 C keeps the case at least as cool without
-				 * a thermistor to aim at.
+				 * Switch-on and control temperatures taken from the
+				 * vendor device tree, which names these trips for
+				 * exactly this controller: big-switch-on at 70 C,
+				 * big-control-temp at 95 C, big-hot at 115 C. MID is
+				 * 75/95, LITTLE and G3D 80/100. Its governor string
+				 * says "user_space" because its HAL runs the loop, but
+				 * the shape it describes is the power allocator's.
 				 *
-				 * The cost is that a die reading cannot tell a brief
-				 * spike on a cold case from sustained load on a hot
-				 * one, so bursts throttle earlier than they need to.
-				 * Distinguishing them is precisely what skin
-				 * temperature is for.
+				 * Two earlier claims here were wrong and worth naming,
+				 * because the second one caused a bug. The vendor does
+				 * throttle on die temperature: these zones carry eight
+				 * trips each and a cooling map on the control trip. And
+				 * a single passive trip is not the safe choice. It
+				 * leaves get_governor_trips() with trip_switch_on NULL,
+				 * so the governor never reaches the branch that calls
+				 * reset_pid_controller() and allow_maximum_power() --
+				 * and since integral_cutoff defaults to 0, the integral
+				 * accumulates only above the control temperature and
+				 * nothing ever unwinds it. One warm spell then clamps
+				 * the budget to zero and pins the cluster at its lowest
+				 * OPP until reboot. The reset is the point of the
+				 * switch-on trip, not a hazard, and the vendor's 20-25 C
+				 * spacing keeps the band wide enough for gentle gains.
 				 *
-				 * Single passive trip = always-on IPA: the band is
-				 * the control temperature itself, which makes
-				 * estimate_pid_constants() derive gentle gains
-				 * (k_po~17).  A second "switch-on" passive trip would
-				 * narrow the band into steep gains AND reset the PID
-				 * integral every time the fast X4 dips below it, which
-				 * degrades the controller into a bang-bang relay
-				 * (HW-confirmed).  This is also step_wise's throttle
-				 * point when that fallback governor is selected.
+				 * Holding the die at 70 C as a stand-in for skin is no
+				 * longer needed either: there is a real skin zone now,
+				 * on the thermistor beside the case.
 				 */
-				big_alert: throttle {
+				big_switch_on: switch-on {
 					temperature = <70000>;
+					hysteresis = <5000>;
+					type = "passive";
+				};
+
+				big_alert: throttle {
+					temperature = <95000>;
 					hysteresis = <5000>;
 					type = "passive";
 				};
@@ -773,8 +782,14 @@
 
 			trips {
 				/* Always-on IPA, single passive trip; see big-thermal. */
+				mid_switch_on: switch-on {
+					temperature = <75000>;
+					hysteresis = <5000>;
+					type = "passive";
+				};
+
 				mid_alert: throttle {
-					temperature = <70000>;
+					temperature = <95000>;
 					hysteresis = <5000>;
 					type = "passive";
 				};
@@ -808,8 +823,14 @@
 
 			trips {
 				/* Always-on IPA, single passive trip; see big-thermal. */
+				little_switch_on: switch-on {
+					temperature = <80000>;
+					hysteresis = <5000>;
+					type = "passive";
+				};
+
 				little_alert: throttle {
-					temperature = <70000>;
+					temperature = <100000>;
 					hysteresis = <5000>;
 					type = "passive";
 				};
@@ -858,8 +879,14 @@
 
 			trips {
 				/* Always-on IPA, single passive trip; see big-thermal. */
+				g3d_switch_on: switch-on {
+					temperature = <80000>;
+					hysteresis = <5000>;
+					type = "passive";
+				};
+
 				g3d_alert: throttle {
-					temperature = <70000>;
+					temperature = <100000>;
 					hysteresis = <5000>;
 					type = "passive";
 				};
