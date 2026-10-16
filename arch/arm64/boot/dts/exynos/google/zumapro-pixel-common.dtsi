@@ -1148,9 +1148,22 @@
 		 * up -- 56 C notify, 60 C shutdown, 65 C hardware shutdown --
 		 * so the safe operating range sits well below those.
 		 *
-		 * 45 C is a touch-temperature limit for a surface held
-		 * continuously, which is the thing a skin sensor is for.
-		 * Raise it for more sustained performance and a warmer phone.
+		 * The switch-on has to sit above the temperature the phone
+		 * actually idles at, or the reset never fires and the integral
+		 * can stay latched -- see the trips below. This board idles at
+		 * 41-42 C skin with a compositor running, measured, so 43 C is
+		 * the floor for it, and the control point has to be far enough
+		 * above that for the derived gains to stay sane: a 45 C target
+		 * would leave a 2 C band and a near-relay k_po of 1280.
+		 *
+		 * 50 C is therefore a consequence of this board idling warm,
+		 * not a judgement that 50 C is a pleasant thing to hold. It
+		 * sits under the vendor's own 56 C notify point. The honest fix
+		 * is the idle temperature itself -- a phone with nothing to do
+		 * should be nearer 33 C than 42 C -- and that is a separate
+		 * problem: the panel runs at 120 Hz regardless, the GPU keeps
+		 * its clocks up, and there is no cluster or system idle state.
+		 * Lower this once those land.
 		 */
 		sustainable-power = <2500>;
 
@@ -1184,13 +1197,13 @@
 			 * instances bound to the control trip below.
 			 */
 			skin_switch_on: switch-on {
-				temperature = <40000>;
+				temperature = <43000>;
 				hysteresis = <2000>;
 				type = "passive";
 			};
 
 			skin_alert: throttle {
-				temperature = <45000>;
+				temperature = <50000>;
 				hysteresis = <2000>;
 				type = "passive";
 			};
