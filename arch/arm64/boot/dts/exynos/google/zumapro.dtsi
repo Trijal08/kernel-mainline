@@ -707,8 +707,23 @@
 
 	thermal-zones {
 		big-thermal {
-			polling-delay = <1000>;
-			polling-delay-passive = <25>;
+			/*
+			 * Interrupt-driven, no polling at all. acpm-tmu
+			 * implements .set_trips, which programs a hardware
+			 * low/high threshold pair around the current
+			 * temperature with their interrupt enables, and its
+			 * threaded handler clears the sensor and calls
+			 * thermal_zone_device_update(). There is nothing a poll
+			 * would discover that the window does not raise.
+			 *
+			 * This is what upstream Exynos already does --
+			 * exynos5433-tmu.dtsi and exynos7.dtsi run every zone,
+			 * g3d included, at 0/0 on top of the same .set_trips
+			 * pattern -- and what the vendor does across all forty
+			 * of its zones.
+			 */
+			polling-delay = <0>;
+			polling-delay-passive = <0>;
 			thermal-sensors = <&tmu_top 0>;
 			sustainable-power = <1200>;
 
@@ -770,8 +785,9 @@
 		};
 
 		mid-thermal {
-			polling-delay = <1000>;
-			polling-delay-passive = <25>;
+			/* Interrupt-driven; see big-thermal. */
+			polling-delay = <0>;
+			polling-delay-passive = <0>;
 			thermal-sensors = <&tmu_top 1>;
 			/*
 			 * Measured ~1500 mW full-tilt (ODPM, all-core load); MID
@@ -810,8 +826,9 @@
 		};
 
 		little-thermal {
-			polling-delay = <1000>;
-			polling-delay-passive = <25>;
+			/* Interrupt-driven; see big-thermal. */
+			polling-delay = <0>;
+			polling-delay-passive = <0>;
 			thermal-sensors = <&tmu_top 2>;
 			/*
 			 * Measured ~1000 mW full-tilt (ODPM, all-core load -- the
@@ -872,8 +889,9 @@
 		 * 48 C, 40 C below the trip.
 		 */
 		g3d-thermal {
-			polling-delay = <1000>;
-			polling-delay-passive = <25>;
+			/* Interrupt-driven; see big-thermal. */
+			polling-delay = <0>;
+			polling-delay-passive = <0>;
 			thermal-sensors = <&tmu_sub 0>;
 			sustainable-power = <473>;
 
