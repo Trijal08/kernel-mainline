@@ -15,6 +15,7 @@
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/types.h>
+#include <linux/units.h>
 
 struct acpm_clk {
 	u32 id;
@@ -22,6 +23,8 @@ struct acpm_clk {
 	unsigned int mbox_chan_id;
 	struct acpm_handle *handle;
 	const struct acpm_clk_driver_data *drv_data;
+	unsigned long rate;
+	bool cacheable;
 };
 
 struct acpm_clk_variant {
@@ -130,20 +133,48 @@ static unsigned long acpm_clk_recalc_rate(struct clk_hw *hw,
 {
 	struct acpm_clk *clk = to_acpm_clk(hw);
 
+	/* The SoC relies on parent topology; nothing to cache or query. */
 	if (clk->drv_data->get_rate)
 		return clk->drv_data->get_rate(hw, parent_rate);
 
-	return clk->handle->ops->dvfs.get_rate(clk->handle, clk->mbox_chan_id,
-					       clk->id);
+	/*
+	 * The clock framework recalculates the rate right after every
+	 * ->set_rate(), so on a domain that only ever moves when the kernel
+	 * asks it to, asking the firmware again costs a round trip per
+	 * frequency change to be told what was just written.  The domains the
+	 * firmware is free to move on its own are the ones already marked
+	 * CLK_GET_RATE_NOCACHE, and those keep querying it every time.
+	 */
+	if (clk->cacheable && clk->rate)
+		return clk->rate;
+
+	clk->rate = clk->handle->ops->dvfs.get_rate(clk->handle,
+						    clk->mbox_chan_id,
+						    clk->id);
+
+	return clk->rate;
 }
 
 static int acpm_clk_set_rate(struct clk_hw *hw, unsigned long rate,
 			     unsigned long parent_rate)
 {
 	struct acpm_clk *clk = to_acpm_clk(hw);
+	int ret;
 
-	return clk->handle->ops->dvfs.set_rate(clk->handle, clk->mbox_chan_id,
-					       clk->id, rate);
+	ret = clk->handle->ops->dvfs.set_rate(clk->handle, clk->mbox_chan_id,
+					      clk->id, rate);
+	if (ret)
+		return ret;
+
+	/*
+	 * The request is sent in kHz, which is also the granularity the
+	 * firmware reports back, so cache what it will have applied rather
+	 * than what was asked for.
+	 */
+	if (clk->cacheable)
+		clk->rate = rate - (rate % HZ_PER_KHZ);
+
+	return 0;
 }
 
 static const struct clk_ops acpm_clk_ops = {
@@ -224,6 +255,7 @@ static int acpm_clk_probe(struct platform_device *pdev)
 		aclk->id = i;
 		aclk->handle = acpm_handle;
 		aclk->mbox_chan_id = mbox_chan_id;
+		aclk->cacheable = !(drv_data->clks[i].flags & CLK_GET_RATE_NOCACHE);
 
 		hws[i] = &aclk->hw;
 
