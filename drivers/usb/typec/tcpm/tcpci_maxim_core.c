@@ -446,11 +446,26 @@ static void max_tcpci_set_partner_usb_comm_capable(struct tcpci *tcpci, struct t
  * attach and TYPEC_STATE_SAFE from tcpm_reset_port() on every detach,
  * independently of PD, which is the signal a non-PD port does get.
  */
+static u8 max_tcpci_sbusw_val(struct max_tcpci_chip *chip, bool dp)
+{
+	u8 ctrl = 0;
+
+	if (!dp)
+		return SBUSW_OFF;
+	if (chip->product_id != MAX77779_PRODUCT_ID)
+		return SBUSW_PATH_1;
+
+	/* tcpm has already written the plug orientation into TCPC_CTRL */
+	max_tcpci_read8(chip, TCPC_TCPC_CTRL, &ctrl);
+	return ctrl & TCPC_TCPC_CTRL_ORIENTATION ? SBUSW_XBAR_POL_REVERSE :
+						   SBUSW_XBAR_POL_NORMAL;
+}
+
 /*
  * Route the connector's SBU pair to the SoC's DP AUX lines, and raise the
  * pull-up rail to the 3.3V AUX wants while they are routed. The max77759 path
- * is already corrected for the plug orientation, so there is no polarity to
- * choose here.
+ * is already corrected for the plug orientation; the max77779 crossbar takes
+ * the polarity explicitly, see max_tcpci_sbusw_val().
  *
  * Without this AUX never reaches the sink, and a DP partner that is otherwise
  * fully negotiated -- mode entered, lanes muxed, HPD asserted -- can never be
@@ -484,7 +499,7 @@ static int max_tcpci_sbu_switch(struct max_tcpci_chip *chip, bool dp)
 	}
 
 	ret = max_tcpci_write8(chip, TCPC_VENDOR_SBUSW_CTRL,
-			       dp ? SBUSW_PATH_1 : SBUSW_OFF);
+			       max_tcpci_sbusw_val(chip, dp));
 	if (ret < 0)
 		dev_err(chip->dev, "Failed to %s the SBU switch: %d\n",
 			dp ? "close" : "open", ret);
@@ -869,6 +884,12 @@ static int max_tcpci_probe(struct i2c_client *client)
 	 * defers this port forever, taking PD and charging with it -- describe
 	 * the rail only once the PMIC driver actually has a descriptor for it.
 	 */
+	ret = regmap_raw_read(chip->data.regmap, TCPC_PRODUCT_ID,
+			      &chip->product_id, sizeof(chip->product_id));
+	if (ret < 0)
+		return ret;
+	chip->product_id = le16_to_cpu((__force __le16)chip->product_id);
+
 	chip->sbu_reg = devm_regulator_get_optional(chip->dev, "pullup");
 	if (IS_ERR(chip->sbu_reg)) {
 		if (PTR_ERR(chip->sbu_reg) == -EPROBE_DEFER)
