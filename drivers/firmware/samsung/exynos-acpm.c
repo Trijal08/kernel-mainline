@@ -226,10 +226,15 @@ static void acpm_get_saved_rx(struct acpm_chan *achan,
  * Every queued response is cached against its own sequence number and RX rear
  * is advanced to the sampled RX front, so the firmware always finds room to
  * append its next reply.  Ownership of a sequence number stays with the thread
- * that allocated it: the bitmap bit is cleared only once that thread has
- * copied the payload out, whether it drained the entry itself or found it
- * cached.  The channel's incoming mailbox status is acknowledged afterwards:
- * every channel's interrupt is masked, so nothing else ever clears it.
+ * that allocated it: a transfer expecting a payload clears its bitmap bit only
+ * once it has copied that payload out, whether it drained the entry itself or
+ * found it cached, while a transfer that requested no response releases its
+ * bit as soon as the request is published.  The reply to the latter is still
+ * drained here, into a sequence number slot no thread owns, and
+ * acpm_prepare_xfer() clears the completion flag again when that slot is next
+ * allocated.  The channel's incoming mailbox status is acknowledged
+ * afterwards: every channel's interrupt is masked, so nothing else ever clears
+ * it.
  *
  * Return: 0 on success, -errno otherwise.
  */
@@ -483,6 +488,24 @@ static int acpm_prepare_xfer(struct acpm_chan *achan,
 static int acpm_wait_for_message_response(struct acpm_chan *achan,
 					  const struct acpm_xfer *xfer)
 {
+	/*
+	 * A transfer that did not ask for a response has nothing to wait for.
+	 * The firmware still queues an acknowledgment, but with rxcnt zero
+	 * there is no payload to copy out of it, and the next transfer on this
+	 * channel drains the queue before publishing its own request, so the
+	 * reply never outlives the sequence number it belongs to.  Polling for
+	 * it here would only burn CPU, which on the DVFS channel is hot enough
+	 * to matter: schedutil changes CPU frequency hundreds of times a
+	 * second and each request takes the firmware hundreds of microseconds
+	 * to acknowledge.  Release the sequence number and return instead.
+	 */
+	if (!xfer->rxd) {
+		u32 seqnum = FIELD_GET(ACPM_PROTOCOL_SEQNUM, xfer->txd[0]);
+
+		clear_bit_unlock(seqnum - 1, achan->bitmap_seqnum);
+		return 0;
+	}
+
 	/* Just polling mode supported for now. */
 	return acpm_dequeue_by_polling(achan, xfer);
 }
