@@ -4194,7 +4194,8 @@ static void exynos_drm_dp_stop(struct exynos_dp_subdev *dp)
 
 	mutex_lock(&dp->pwlock);
 
-	if (dp->state != DP_STATE_LINKED) {
+	/* ON is a live stream: an unplug mid-stream still has to park the link */
+	if (dp->state == DP_STATE_OFF) {
 		mutex_unlock(&dp->pwlock);
 		return;
 	}
@@ -4463,8 +4464,13 @@ static void exynos_drm_dp_disable(struct drm_encoder *encoder)
 
 	mutex_lock(&subdev->pwlock);
 
-	if (subdev->state == DP_STATE_LINKED) {
-		dp_log_info(dev, "DP(%d), state : ON\n", dp->id);
+	/*
+	 * Only a live stream goes back to LINKED. After an unplug stop() has
+	 * already parked the link and gated its clocks: OFF stays OFF, or the
+	 * next plug skips start() and trains with AUX powered down.
+	 */
+	if (subdev->state != DP_STATE_ON) {
+		dp_log_info(dev, "DP(%d), state : %d\n", dp->id, subdev->state);
 		mutex_unlock(&subdev->pwlock);
 		return;
 	}
