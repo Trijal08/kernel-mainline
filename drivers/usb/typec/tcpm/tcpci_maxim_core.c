@@ -41,6 +41,9 @@
 bool max_tcpci_conf_sbu;
 module_param_named(conf_sbu, max_tcpci_conf_sbu, bool, 0444);
 MODULE_PARM_DESC(conf_sbu, "Keep the SBU pair on the debug UART (disables DP AUX)");
+static bool max_tcpci_contaminant = true;
+module_param_named(contaminant_detection, max_tcpci_contaminant, bool, 0444);
+MODULE_PARM_DESC(contaminant_detection, "Run the CC/SBU contaminant (water) check when CC looks open");
 
 /*
  * Accept the name the vendor driver used for the same knob, so a command line
@@ -632,7 +635,8 @@ static irqreturn_t _max_tcpci_irq(struct max_tcpci_chip *chip, u16 status)
 	if (status & TCPC_ALERT_CC_STATUS) {
 		bool cc_handled = false;
 
-		if (chip->contaminant_state == DETECTED || tcpm_port_is_toggling(chip->port)) {
+		if (max_tcpci_contaminant &&
+		    (chip->contaminant_state == DETECTED || tcpm_port_is_toggling(chip->port))) {
 			if (!max_contaminant_is_contaminant(chip, false, &cc_handled))
 				tcpm_port_clean(chip->port);
 		}
@@ -863,7 +867,8 @@ static int max_tcpci_probe(struct i2c_client *client)
 	chip->data.auto_discharge_disconnect = true;
 	chip->data.vbus_vsafe0v = true;
 	chip->data.set_partner_usb_comm_capable = max_tcpci_set_partner_usb_comm_capable;
-	chip->data.check_contaminant = max_tcpci_check_contaminant;
+	if (max_tcpci_contaminant)
+		chip->data.check_contaminant = max_tcpci_check_contaminant;
 	chip->data.cable_comm_capable = true;
 	chip->data.attempt_vconn_swap_discovery = max_tcpci_attempt_vconn_swap_discovery;
 
