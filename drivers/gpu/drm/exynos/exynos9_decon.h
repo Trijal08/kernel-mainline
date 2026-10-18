@@ -136,6 +136,7 @@ struct decon_context {
 	u32 irq_fd; /* frame done */
 	/* tracks irq_fd's masking, which disable_irq() nests */
 	bool enabled;
+	/* video mode: DECON_EN has been set once since enable */
 	int te_irq; /* panel hardware TE, drives vblank in command mode */
 	/* completes the vblank when a command-mode frame never starts */
 	struct timer_list vblank_timer;
@@ -184,5 +185,6 @@ struct decon_cal_ops {
 };
 
 extern const struct decon_cal_ops zuma_decon_cal_ops;
+
 
 #endif /* _EXYNOS9_DECON_H_ */
