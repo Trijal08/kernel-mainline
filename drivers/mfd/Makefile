@@ -91,6 +91,8 @@ obj-$(CONFIG_MFD_MADERA)	+= madera.o
 obj-$(CONFIG_MFD_MADERA_I2C)	+= madera-i2c.o
 obj-$(CONFIG_MFD_MADERA_SPI)	+= madera-spi.o
 
+obj-$(CONFIG_MFD_CS40L26_CORE)	+= cs40l26-core.o
+obj-$(CONFIG_MFD_CS40L26_I2C)	+= cs40l26-i2c.o
 obj-$(CONFIG_MFD_CS40L50_CORE)	+= cs40l50-core.o
 obj-$(CONFIG_MFD_CS40L50_I2C)	+= cs40l50-i2c.o
 obj-$(CONFIG_MFD_CS40L50_SPI)	+= cs40l50-spi.o
