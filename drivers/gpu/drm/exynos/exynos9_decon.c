@@ -32,6 +32,7 @@
 #include "exynos_dpp.h"
 #include "exynos_dpu_dma.h"
 #include "exynos_drm_crtc.h"
+#include "exynos_drm_dp.h"
 #include "exynos_drm_drv.h"
 #include "exynos_drm_plane.h"
 
