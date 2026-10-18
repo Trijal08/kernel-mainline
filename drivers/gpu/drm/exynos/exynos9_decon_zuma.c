@@ -21,6 +21,7 @@
 #include <linux/err.h>
 #include <linux/io.h>
 #include <linux/iopoll.h>
+#include <linux/ktime.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/unaligned.h>
@@ -29,6 +30,7 @@
 #include <drm/display/drm_dsc_helper.h>
 
 #include "exynos9_decon.h"
+#include "exynos_drm_dp.h"
 #include "regs-decon-zuma.h"
 
 #define ZD_MAX_DECON		3
@@ -898,6 +900,10 @@ static int zuma_decon_enable(struct decon_context *ctx)
 
 	/* init (vendor decon_reg_init) */
 	zuma_reg_set_clkgate_mode(id, false);
+	/* vendor decon_reg_set_qactive_pll_mode(1) for DP: keep the PLL request up */
+	if (cfg->out_type & DECON_OUT_DP)
+		zd_main_write_mask(id, ZD_CLOCK_CON(id), ~0,
+				   ZD_CLOCK_CON_QACTIVE_PLL_ON);
 	zuma_reg_set_sram_enable(id);
 	zuma_reg_set_operation_mode(id, cfg->mode.op_mode);
 	zuma_reg_set_blender_bg_size(id, bg_w, cfg->image_height);
@@ -916,6 +922,16 @@ static int zuma_decon_enable(struct decon_context *ctx)
 	}
 	zuma_reg_init_trigger(id, &cfg->mode);
 	zuma_reg_clear_int_all(id);
+
+	/*
+	 * Video mode (the DP) runs from the first flush instead, which comes
+	 * after the encoder enable; the vendor direct-ons a video-mode DECON in
+	 * every flush and never here.
+	 */
+	if (cfg->mode.op_mode == DECON_VIDEO_MODE) {
+		zuma_reg_set_interrupts(id, true);
+		return 0;
+	}
 
 	/* start (vendor decon_reg_start) */
 	zuma_reg_direct_on_off(id, true);
@@ -958,6 +974,8 @@ static int zuma_decon_disable(struct decon_context *ctx)
 	zuma_reg_update_req_global(id);
 	ret = zuma_reg_wait_run_is_off(id, timeout_us);
 	zuma_reg_clear_int_all(id);
+	/* a frame cut off mid-way leaves lines in the OUTFIFO; the next start would emit them first */
+	zuma_reg_reset(id);
 
 	return ret;
 }
@@ -1032,6 +1050,9 @@ static u32 zuma_decon_win_update_req_get(struct decon_context *ctx, u32 win)
 
 static void zuma_decon_update_req_global(struct decon_context *ctx)
 {
+	/* a video-mode DECON (the DP) runs from the flush, as the vendor's decon_atomic_flush */
+	if (ctx->config.mode.op_mode == DECON_VIDEO_MODE && ctx->enabled)
+		zuma_reg_direct_on_off(ctx->idx, true);
 	zuma_reg_update_req_global(ctx->idx);
 }
 
