@@ -263,6 +263,23 @@ config MFD_CROS_EC_DEV
 	  To compile this driver as a module, choose M here: the module will be
 	  called cros-ec-dev.
 
+config MFD_CS40L26_CORE
+	tristate
+	select MFD_CORE
+	select FW_CS_DSP
+
+config MFD_CS40L26_I2C
+	tristate "Cirrus Logic CS40L26 (I2C)"
+	select REGMAP_I2C
+	select MFD_CS40L26_CORE
+	depends on I2C
+	help
+	  Select this to support the Cirrus Logic CS40L26 Haptic
+	  Driver over I2C.
+
+	  This driver can be built as a module. If built as a module it will be
+	  called "cs40l26-i2c".
+
 config MFD_CS40L50_CORE
 	tristate
 	select MFD_CORE
