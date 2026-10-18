@@ -1,0 +1,26 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * Haptics for the caimito boards -- caiman, komodo and tokay -- which all
+ * carry one Cirrus Logic CS40L26A driving the LRA, wired identically.
+ *
+ * Copyright 2026 Trijal Saha - <trijalsaha2012@gmail.com>
+ */
+
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/interrupt-controller/irq.h>
+
+&hsi2c_9 {
+	/*
+	 * Shares this bus with the NFC controller and the EEPROM.  The part
+	 * boots a ROM firmware on its own and the driver then patches it with
+	 * cs40l26.wmfw, so the waveform table comes from firmware rather than
+	 * from here.
+	 */
+	haptics: haptics@43 {
+		compatible = "cirrus,cs40l26a";
+		reg = <0x43>;
+
+		interrupts-extended = <&gpa6 3 IRQ_TYPE_LEVEL_LOW>;
+		reset-gpios = <&gph2 3 GPIO_ACTIVE_LOW>;
+	};
+};
