@@ -375,7 +375,12 @@ static int cs40l26_vibra_probe(struct platform_device *pdev)
 	struct cs40l26_vibra *vib;
 	int error;
 
-	vib = devm_kzalloc(&pdev->dev, sizeof(*vib), GFP_KERNEL);
+	/*
+	 * Tied to the parent, as the input device and the workqueue below are:
+	 * unbinding this driver alone would otherwise free this while the
+	 * input device that points at it lives on.
+	 */
+	vib = devm_kzalloc(pdev->dev.parent, sizeof(*vib), GFP_KERNEL);
 	if (!vib)
 		return -ENOMEM;
 
