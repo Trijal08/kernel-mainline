@@ -2592,10 +2592,11 @@ static int dp_reg_set_aux_ch_operation_enable(u32 id)
 	val0 = dp_link_read(id, AUX_MONITOR_1);
 	val1 = dp_link_read(id, AUX_MONITOR_2);
 
+	/* NACK / DEFER / timeout replies are normal I2C-over-AUX traffic; DRM retries them */
 	if ((val0 & AUX_CMD_STATUS) != 0x00 || val1 != 0x00) {
-		cal_log_err(id, "AUX_MONITOR_1 : 0x%X, AUX_MONITOR_2 : 0x%X\n",
-			    val0, val1);
-		cal_log_err(
+		cal_log_debug(id, "AUX_MONITOR_1 : 0x%X, AUX_MONITOR_2 : 0x%X\n",
+			      val0, val1);
+		cal_log_debug(
 			id,
 			"AUX_CONTROL : 0x%X, AUX_REQUEST_CONTROL : 0x%X, AUX_COMMAND_CONTROL : 0x%X\n",
 			dp_link_read(id, AUX_CONTROL),
