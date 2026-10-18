@@ -87,6 +87,43 @@ static const struct cs_dsp_region cs40l26_dsp_regions[] = {
 	{ .type = WMFW_ADSP2_YM, .base = CS40L26_YMEM_UNPACKED24_0 },
 };
 
+/*
+ * The patched firmware runs from RAM, which must be powered and initialised
+ * before the core is started: the hardware readiness bit first, then the
+ * firmware's own initialisation entry point.  This runs as the cs_dsp post_run
+ * hook, where the controls the firmware just brought with it are resolvable
+ * and reach the device directly.
+ */
+static int cs40l26_dsp_post_run(struct cs_dsp *dsp)
+{
+	struct cs40l26 *cs40l26 = container_of(dsp, struct cs40l26, dsp);
+	struct cs_dsp_coeff_ctl *ctl;
+	__be32 val = cpu_to_be32(1);
+	int ret;
+
+	ret = regmap_update_bits(cs40l26->regmap, CS40L26_PWRMGT_CTL,
+				 CS40L26_MEM_RDY, CS40L26_MEM_RDY);
+	if (ret) {
+		dev_err(cs40l26->dev, "Failed to ready DSP memory: %d\n", ret);
+		return ret;
+	}
+
+	ctl = cs_dsp_get_ctl(dsp, "CALL_RAM_INIT", WMFW_ADSP2_XM, dsp->fw_id);
+	if (!ctl) {
+		dev_err(cs40l26->dev, "Control not found for RAM init\n");
+		return -ENOENT;
+	}
+
+	/* A write reports whether the value changed, which is not an error */
+	ret = cs_dsp_coeff_write_ctrl(ctl, 0, &val, sizeof(val));
+
+	return ret < 0 ? ret : 0;
+}
+
+static const struct cs_dsp_client_ops cs40l26_client_ops = {
+	.post_run = cs40l26_dsp_post_run,
+};
+
 static void cs40l26_dsp_remove(void *data)
 {
 	cs_dsp_remove(data);
@@ -106,6 +143,7 @@ static int cs40l26_dsp_init(struct cs40l26 *cs40l26)
 	cs40l26->dsp.num_mems = ARRAY_SIZE(cs40l26_dsp_regions);
 	/* The core is started below, with the extra bit this part requires */
 	cs40l26->dsp.no_core_startstop = true;
+	cs40l26->dsp.client_ops = &cs40l26_client_ops;
 
 	ret = cs_dsp_halo_init(&cs40l26->dsp);
 	if (ret)
@@ -185,12 +223,13 @@ static int cs40l26_reset_dsp(struct cs40l26 *cs40l26)
 	if (ret)
 		return ret;
 
-	ret = regmap_write(cs40l26->regmap, CS40L26_CCM_CORE_CONTROL,
-			   CS40L26_CCM_CORE_RESET);
+	/* Readies the DSP's RAM through the post_run hook above */
+	ret = cs_dsp_run(&cs40l26->dsp);
 	if (ret)
 		return ret;
 
-	ret = cs_dsp_run(&cs40l26->dsp);
+	ret = regmap_write(cs40l26->regmap, CS40L26_CCM_CORE_CONTROL,
+			   CS40L26_CCM_CORE_RESET);
 	if (ret)
 		return ret;
 
