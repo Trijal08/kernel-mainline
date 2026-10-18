@@ -27,6 +27,8 @@
 #include <drm/drm_atomic_state_helper.h>
 #include <drm/drm_bridge_connector.h>
 #include <drm/drm_probe_helper.h>
+#include <sound/hdmi-codec.h>
+#include <sound/pcm.h>
 
 #include "exynos_drm_crtc.h"
 #include "exynos_drm_dp.h"
@@ -4822,7 +4824,160 @@ static void exynos_drm_dp_bridge_hpd_notify(struct drm_bridge *bridge,
 		queue_delayed_work(subdev->dp_wq, &subdev->hpd_unplug_work, 0);
 }
 
+/*
+ * DisplayPort audio. The DP block's audio engine is fed by PDMA0 through
+ * exynos-dp-dma.c; this side is the vendor's dp_hw_*_audio() sequence in
+ * asynchronous clock mode. Maud for Naud = 32768, indexed by link rate
+ * (RBR, HBR, HBR2, HBR3) and sample rate.
+ */
+static const u32 dp_audio_fs_hz[] = {
+	32000, 44100, 48000, 88200, 96000, 176400, 192000
+};
+
+static const u32 dp_audio_maud[4][7] = {
+	{ 3314, 4567, 4971, 9134, 9942, 18269, 19884 },
+	{ 1988, 2740, 2983, 5481, 5695, 10961, 11930 },
+	{ 994, 1370, 1491, 2740, 2983, 5481, 5965 },
+	{ 663, 913, 994, 1827, 1988, 3654, 3977 },
+};
+
+static int dp_audio_rate_index(u32 ls_clk)
+{
+	switch (ls_clk) {
+	case 810000000: return 3;
+	case 540000000: return 2;
+	case 270000000: return 1;
+	default: return 0;
+	}
+}
+
+static int exynos_drm_dp_audio_prepare(struct drm_bridge *bridge,
+				       struct drm_connector *connector,
+				       struct hdmi_codec_daifmt *fmt,
+				       struct hdmi_codec_params *hparms)
+{
+	struct exynos_drm_dp *dp = bridge_to_dp(bridge);
+	struct exynos_dp_subdev *sd = dp->subdev;
+	u8 frame[HDMI_INFOFRAME_SIZE(AUDIO)];
+	u32 id = sd->id, ls_clk, burst, pcm_size, word_len, word_max, ch, fs;
+	int phys = snd_pcm_format_physical_width(fmt->bit_fmt);
+
+	if (sd->state != DP_STATE_ON)
+		return -ENODEV;
+
+	for (fs = 0; fs < ARRAY_SIZE(dp_audio_fs_hz); fs++)
+		if (dp_audio_fs_hz[fs] == hparms->sample_rate)
+			break;
+	if (fs == ARRAY_SIZE(dp_audio_fs_hz) || phys < 0)
+		return -EINVAL;
+
+	switch (hparms->sample_width) {
+	case 16:
+		pcm_size = 0; word_len = 1; word_max = 0;
+		break;
+	case 20:
+		pcm_size = 1; word_len = 5; word_max = 0;
+		break;
+	case 24:
+		pcm_size = 2; word_len = 5; word_max = 1;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	ch = hparms->channels;
+	/* words per frame, the DMA's burst; same formula as exynos-dp-dma.c */
+	burst = phys * ch / 32;
+	if (!burst || burst > 8)
+		return -EINVAL;
+
+	ls_clk = dp_reg_get_ls_clk(id);
+
+	dp_link_write_mask(id, SYSTEM_SST1_FUNCTION_ENABLE, ~0, SST1_AUDIO_FUNC_EN);
+	dp_link_write_mask(id, SYSTEM_SST1_FUNCTION_ENABLE, ~0, SST1_AUDIO_FIFO_FUNC_EN);
+
+	dp_link_write_mask(id, SST1_MAIN_CONTROL, 0, MAUD_MODE);
+	dp_link_write(id, SST1_MAUD_MASTER_MODE, hparms->sample_rate);
+	dp_link_write(id, SST1_NAUD_MASTER_MODE, ls_clk / 2);
+	dp_link_write_mask(id, SST1_MAUD_SFR_CONFIGURE,
+			   dp_audio_maud[dp_audio_rate_index(ls_clk)][fs],
+			   MAUD_SFR_CONFIG);
+	dp_link_write_mask(id, SST1_NAUD_SFR_CONFIGURE, 32768, NAUD_SFR_CONFIG);
+
+	dp_link_write_mask(id, SST1_AUDIO_CONTROL, (burst - 1) << 18, DMA_BURST_SEL);
+	dp_link_write_mask(id, SST1_AUDIO_CONTROL, pcm_size << 13, PCM_SIZE);
+	/* 16-bit samples ride two per word (PACKED_MODE2); 32-bit containers as is */
+	dp_link_write_mask(id, SST1_AUDIO_CONTROL, (phys == 32 ? 0 : 2) << 16,
+			   AUDIO_BIT_MAPPING_TYPE);
+	dp_link_write_mask(id, SST1_AUDIO_BUFFER_CONTROL, (ch - 1) << 12,
+			   MASTER_AUDIO_CHANNEL_COUNT);
+	dp_link_write_mask(id, SST1_AUDIO_CHANNEL_1_2_STATUS_CTRL_0,
+			   3 << 28 | fs << 24 | ch << 20 | ch << 16,
+			   CLK_ACCUR | FS_FREQ | CH_NUM | SOURCE_NUM);
+	dp_link_write_mask(id, SST1_AUDIO_CHANNEL_1_2_STATUS_CTRL_1,
+			   word_len << 1 | word_max, WORD_LENGTH | WORD_MAX);
+	dp_link_write_mask(id, SST1_AUDIO_CONTROL, ~0, AUDIO_CH_STATUS_SAME);
+
+	/* the SDP header is the hardware's: skip the HDMI header and checksum */
+	hdmi_audio_infoframe_pack_only(&hparms->cea, frame, sizeof(frame));
+	dp_reg_set_infoframe_data(id, SST1_INFOFRAME_AUDIO_PACKET_DATA_SET0,
+				  frame + HDMI_INFOFRAME_HEADER_SIZE,
+				  HDMI_AUDIO_INFOFRAME_SIZE);
+	dp_link_write_mask(id, SST1_INFOFRAME_UPDATE_CONTROL, ~0, AUDIO_INFO_UPDATE);
+	dp_link_write_mask(id, SST1_INFOFRAME_SEND_CONTROL, ~0, AUDIO_INFO_SEND);
+
+	dp_log_info(dp->dev, "audio: %u Hz, %u ch, %d-bit in %d, burst %u, ls %u\n",
+		    hparms->sample_rate, ch, hparms->sample_width, phys, burst,
+		    ls_clk);
+	return 0;
+}
+
+static int exynos_drm_dp_audio_mute_stream(struct drm_bridge *bridge,
+					   struct drm_connector *connector,
+					   bool mute, int direction)
+{
+	struct exynos_drm_dp *dp = bridge_to_dp(bridge);
+	u32 id = dp->subdev->id;
+
+	if (dp->subdev->state != DP_STATE_ON)
+		return mute ? 0 : -ENODEV;
+
+	if (!mute) {
+		dp_link_write_mask(id, SST1_AUDIO_ENABLE, ~0, AUDIO_EN);
+		dp_link_write_mask(id, SST1_AUDIO_MASTER_TIMING_GEN, ~0,
+				   AUDIO_MASTER_TIME_GEN);
+		dp_link_write_mask(id, SST1_AUDIO_CONTROL, ~0, DMA_REQ_GEN_EN);
+		return 0;
+	}
+
+	dp_link_write_mask(id, SST1_AUDIO_CONTROL, 0, DMA_REQ_GEN_EN);
+	if (dp_link_read(id, SST1_AUDIO_ENABLE) & AUDIO_EN) {
+		usleep_range(1000, 2000);
+		dp_link_write_mask(id, SST1_AUDIO_MASTER_TIMING_GEN, 0,
+				   AUDIO_MASTER_TIME_GEN);
+		dp_link_write_mask(id, SST1_AUDIO_ENABLE, 0, AUDIO_EN);
+		dp_link_write_mask(id, SST1_MAIN_FIFO_CONTROL, ~0, CLEAR_AUDIO_FIFO);
+	}
+	return 0;
+}
+
+static void exynos_drm_dp_audio_shutdown(struct drm_bridge *bridge,
+					 struct drm_connector *connector)
+{
+	struct exynos_drm_dp *dp = bridge_to_dp(bridge);
+	u32 id = dp->subdev->id;
+
+	exynos_drm_dp_audio_mute_stream(bridge, connector, true, 0);
+	if (dp->subdev->state != DP_STATE_ON)
+		return;
+	dp_link_write_mask(id, SYSTEM_SST1_FUNCTION_ENABLE, 0, SST1_AUDIO_FIFO_FUNC_EN);
+	dp_link_write_mask(id, SYSTEM_SST1_FUNCTION_ENABLE, 0, SST1_AUDIO_FUNC_EN);
+}
+
 static const struct drm_bridge_funcs exynos_drm_dp_bridge_funcs = {
+	.dp_audio_prepare = exynos_drm_dp_audio_prepare,
+	.dp_audio_mute_stream = exynos_drm_dp_audio_mute_stream,
+	.dp_audio_shutdown = exynos_drm_dp_audio_shutdown,
 	.hpd_notify = exynos_drm_dp_bridge_hpd_notify,
 	.attach = exynos_drm_dp_bridge_attach,
 	.detect = exynos_drm_dp_bridge_detect,
@@ -5122,7 +5277,10 @@ static int exynos_drm_dp_probe(struct platform_device *pdev)
 	dp->bridge.of_node = dev->of_node;
 	dp->bridge.type = DRM_MODE_CONNECTOR_DisplayPort;
 	dp->bridge.ops = DRM_BRIDGE_OP_DETECT | DRM_BRIDGE_OP_EDID |
-			 DRM_BRIDGE_OP_HPD;
+			 DRM_BRIDGE_OP_HPD | DRM_BRIDGE_OP_DP_AUDIO;
+	dp->bridge.hdmi_audio_dev = dev;
+	dp->bridge.hdmi_audio_max_i2s_playback_channels = 8;
+	dp->bridge.hdmi_audio_dai_port = -1;
 	drm_bridge_add(&dp->bridge);
 
 	dp->id = 0;
