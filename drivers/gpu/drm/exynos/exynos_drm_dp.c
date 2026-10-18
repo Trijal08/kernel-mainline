@@ -2606,6 +2606,18 @@ static int dp_reg_set_aux_ch_operation_enable(u32 id)
 	return 0;
 }
 
+/*
+ * A zero-length request is an I2C-over-AUX address-only transaction: DRM opens
+ * and closes every I2C transfer with one. It has its own command register;
+ * programming it as a normal request with length - 1 sends a 64-byte write the
+ * sink never answers, so EDID reads failed and the AUX engine wedged behind it.
+ */
+static void dp_reg_set_aux_ch_addr_only(u32 id, bool en)
+{
+	dp_link_write_mask(id, AUX_ADDR_ONLY_COMMAND, en ? ADDR_ONLY_CMD : 0,
+			   ADDR_ONLY_CMD);
+}
+
 int dp_reg_aux_write(u32 id, u32 comm, u32 address, u32 length, u8 *data)
 {
 	int ret = 0;
@@ -2615,13 +2627,18 @@ int dp_reg_aux_write(u32 id, u32 comm, u32 address, u32 length, u8 *data)
 		dp_reg_aux_ch_buf_clr(id);
 		dp_reg_aux_defer_ctrl(id, 1);
 		dp_reg_set_aux_reply_timeout(id);
+		dp_reg_set_aux_ch_addr_only(id, !length);
 		dp_reg_set_aux_ch_command(id, comm);
 		dp_reg_set_aux_ch_address(id, address);
-		dp_reg_set_aux_ch_length(id, length);
-		if (comm == DPCD_WRITE)
-			dp_reg_aux_ch_send_buf(id, data, length);
+		if (length) {
+			dp_reg_set_aux_ch_length(id, length);
+			/* bit 0 of the command nibble is read; I2C writes carry data too */
+			if (!(comm & 1))
+				dp_reg_aux_ch_send_buf(id, data, length);
+		}
 
 		ret = dp_reg_set_aux_ch_operation_enable(id);
+		dp_reg_set_aux_ch_addr_only(id, false);
 		if (ret == 0) {
 			ret = length;
 			break;
@@ -2639,6 +2656,7 @@ int dp_reg_aux_read(u32 id, u32 comm, u32 address, u32 length, u8 *data)
 
 	while (retry_cnt > 0) {
 		dp_link_write(id, AUX_REQUEST_CONTROL, 0);
+		dp_reg_set_aux_ch_addr_only(id, !length);
 		dp_reg_set_aux_ch_command(id, comm);
 		dp_reg_set_aux_ch_address(id, address);
 		if (length)
@@ -2648,8 +2666,10 @@ int dp_reg_aux_read(u32 id, u32 comm, u32 address, u32 length, u8 *data)
 		dp_reg_set_aux_reply_timeout(id);
 
 		ret = dp_reg_set_aux_ch_operation_enable(id);
+		dp_reg_set_aux_ch_addr_only(id, false);
 		if (ret == 0) {
-			dp_reg_aux_ch_received_buf(id, data, length);
+			if (length)
+				dp_reg_aux_ch_received_buf(id, data, length);
 			ret = length;
 			break;
 		}
@@ -4806,12 +4826,27 @@ static ssize_t exynos_drm_dp_aux_transfer(struct drm_dp_aux *aux,
 		transferred = dp_reg_dpcd_read_burst(id, msg->address,
 				msg->size, buffer);
 		break;
+	/*
+	 * The request nibble is the AUX command the hardware takes, MOT bit
+	 * included. DRM clears MOT on the last message of an I2C transfer;
+	 * forcing it on left every EDID read unterminated.
+	 */
 	case DP_AUX_I2C_WRITE:
 	case DP_AUX_I2C_WRITE_STATUS_UPDATE:
-		return dp_reg_aux_write(id, I2C_WRITE, msg->address,
+		/*
+		 * The STOP after an I2C write (i2c-dev write(2), as dms's EDID
+		 * offset write) is an address-only *write* with MOT clear. The
+		 * XREAL never answers that shape and the engine then stays BUSY
+		 * for good; the STOP after a read is answered. The vendor never
+		 * sends any address-only request. Send every STOP as a read.
+		 */
+		if (!msg->size && !(msg->request & DP_AUX_I2C_MOT))
+			return dp_reg_aux_read(id, DP_AUX_I2C_READ, msg->address,
+					0, buffer);
+		return dp_reg_aux_write(id, msg->request & 0xf, msg->address,
 				msg->size, buffer);
 	case DP_AUX_I2C_READ:
-		return dp_reg_aux_read(id, I2C_READ, msg->address,
+		return dp_reg_aux_read(id, msg->request & 0xf, msg->address,
 				msg->size, buffer);
 	default:
 		dp_log_err(dev, "invalid msg request(%#x)\n", msg->request);
