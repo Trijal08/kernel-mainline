@@ -2502,11 +2502,13 @@ static void dp_reg_aux_defer_ctrl(u32 id, u32 en)
 	dp_link_write_mask(id, AUX_COMMAND_CONTROL, val, DEFER_CTRL_EN);
 }
 
+/* 1800us reply window and no hardware retries, as the vendor: the engine
+ * otherwise re-issues a deferred I2C request on its own, past our 50ms wait */
 static void dp_reg_set_aux_reply_timeout(u32 id)
 {
 	dp_link_write_mask(id, AUX_CONTROL,
 			   AUX_REPLY_TIMER_VAL(AUX_TIMEOUT_1800us),
-			   AUX_REPLY_TIMER_MODE);
+			   AUX_REPLY_TIMER_MODE | AUX_RETRY_TIMER);
 }
 
 static void dp_reg_set_aux_ch_command(u32 id,
@@ -2569,7 +2571,21 @@ static int dp_reg_set_aux_ch_operation_enable(u32 id)
 	} while (state && cnt);
 
 	if (!cnt) {
-		cal_log_err(id, "AUX_TRAN_START waiting timeout.\n");
+		cal_log_err(id, "AUX_TRAN_START waiting timeout. CONTROL %#x REQ %#x CMD %#x ADDR_ONLY %#x MON1 %#x MON2 %#x\n",
+			    dp_link_read(id, AUX_CONTROL),
+			    dp_link_read(id, AUX_REQUEST_CONTROL),
+			    dp_link_read(id, AUX_COMMAND_CONTROL),
+			    dp_link_read(id, AUX_ADDR_ONLY_COMMAND),
+			    dp_link_read(id, AUX_MONITOR_1),
+			    dp_link_read(id, AUX_MONITOR_2));
+		/* a start that never completes leaves the engine BUSY for good */
+		dp_link_write_mask(id, SYSTEM_COMMON_FUNCTION_ENABLE, 0, AUX_FUNC_EN);
+		dp_link_write_mask(id, AUX_CONTROL, ~0, AUX_POWER_DOWN);
+		dp_link_write_mask(id, AUX_BUFFER_CLEAR, ~0, AUX_BUF_CLR);
+		usleep_range(100, 200);
+		dp_link_write_mask(id, AUX_CONTROL, 0, AUX_POWER_DOWN);
+		dp_link_write_mask(id, SYSTEM_COMMON_FUNCTION_ENABLE, ~0, AUX_FUNC_EN);
+		cal_log_err(id, "AUX reset: MON1 %#x\n", dp_link_read(id, AUX_MONITOR_1));
 		return -ETIME;
 	}
 
@@ -2618,11 +2634,19 @@ static void dp_reg_set_aux_ch_addr_only(u32 id, bool en)
 			   ADDR_ONLY_CMD);
 }
 
+/*
+ * One AUX engine, two users: the HPD work's training and userspace
+ * I2C-over-AUX (ddc probes via i2c-dev). Interleaved transactions wedge the
+ * engine BUSY for good; the vendor never had a second user.
+ */
+static DEFINE_MUTEX(dp_aux_lock);
+
 int dp_reg_aux_write(u32 id, u32 comm, u32 address, u32 length, u8 *data)
 {
 	int ret = 0;
 	int retry_cnt = AUX_RETRY_COUNT;
 
+	mutex_lock(&dp_aux_lock);
 	while (retry_cnt > 0) {
 		dp_reg_aux_ch_buf_clr(id);
 		dp_reg_aux_defer_ctrl(id, 1);
@@ -2645,6 +2669,7 @@ int dp_reg_aux_write(u32 id, u32 comm, u32 address, u32 length, u8 *data)
 		}
 		retry_cnt--;
 	}
+	mutex_unlock(&dp_aux_lock);
 
 	return ret;
 }
@@ -2654,6 +2679,7 @@ int dp_reg_aux_read(u32 id, u32 comm, u32 address, u32 length, u8 *data)
 	int ret = 0;
 	int retry_cnt = AUX_RETRY_COUNT;
 
+	mutex_lock(&dp_aux_lock);
 	while (retry_cnt > 0) {
 		dp_link_write(id, AUX_REQUEST_CONTROL, 0);
 		dp_reg_set_aux_ch_addr_only(id, !length);
@@ -2675,6 +2701,7 @@ int dp_reg_aux_read(u32 id, u32 comm, u32 address, u32 length, u8 *data)
 		}
 		retry_cnt--;
 	}
+	mutex_unlock(&dp_aux_lock);
 
 	return ret;
 }
