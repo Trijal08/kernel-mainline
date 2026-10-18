@@ -34,6 +34,10 @@
 #define CS40L26_REVID_B1		0xB1
 #define CS40L26_REVID_B2		0xB2
 
+/* Power management */
+#define CS40L26_PWRMGT_CTL		0x2900
+#define CS40L26_MEM_RDY			BIT(1)
+
 /* Interrupts */
 #define CS40L26_IRQ1_EINT_1		0x10010
 #define CS40L26_IRQ1_EINT_2		0x10014
