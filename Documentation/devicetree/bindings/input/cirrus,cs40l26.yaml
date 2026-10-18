@@ -1,0 +1,63 @@
+# SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/input/cirrus,cs40l26.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Cirrus Logic CS40L26 Boosted Haptic Driver
+
+maintainers:
+  - Trijal Saha <trijalsaha2012@gmail.com>
+
+description:
+  CS40L26 is a boosted haptic driver with waveform memory, an integrated
+  DSP and closed-loop algorithms. The part boots a firmware held in ROM,
+  which the driver then replaces with a RAM patch and a waveform table.
+
+properties:
+  compatible:
+    enum:
+      - cirrus,cs40l26a
+      - cirrus,cs40l26b
+      - cirrus,cs40l27a
+      - cirrus,cs40l27b
+
+  reg:
+    maxItems: 1
+
+  interrupts:
+    maxItems: 1
+
+  reset-gpios:
+    maxItems: 1
+
+  vdd-a-supply:
+    description: Power supply for internal analog circuits.
+
+  vdd-p-supply:
+    description: Power supply for the boost converter and always-on circuits.
+
+required:
+  - compatible
+  - reg
+  - interrupts
+  - reset-gpios
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/gpio/gpio.h>
+    #include <dt-bindings/interrupt-controller/irq.h>
+
+    i2c {
+      #address-cells = <1>;
+      #size-cells = <0>;
+
+      haptics@43 {
+        compatible = "cirrus,cs40l26a";
+        reg = <0x43>;
+        interrupts-extended = <&gpio 3 IRQ_TYPE_LEVEL_LOW>;
+        reset-gpios = <&gpio 11 GPIO_ACTIVE_LOW>;
+      };
+    };
