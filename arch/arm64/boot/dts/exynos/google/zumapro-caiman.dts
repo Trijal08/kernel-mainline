@@ -227,6 +227,25 @@
 	status = "okay";
 };
 
+&dp_audio {
+	status = "okay";
+};
+
+/ {
+	sound-dp {
+		compatible = "simple-audio-card";
+		simple-audio-card,name = "DisplayPort";
+
+		simple-audio-card,cpu {
+			sound-dai = <&dp_audio>;
+		};
+
+		simple-audio-card,codec {
+			sound-dai = <&dp>;
+		};
+	};
+};
+
 &dpp0 {
 	status = "okay";
 };
