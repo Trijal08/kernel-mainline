@@ -158,6 +158,16 @@ config INPUT_BMA150
 	  To compile this driver as a module, choose M here: the
 	  module will be called bma150.
 
+config INPUT_CS40L26_VIBRA
+	tristate "CS40L26 Haptic Driver support"
+	depends on MFD_CS40L26_CORE
+	help
+	  Say Y here to enable support for Cirrus Logic's CS40L26
+	  boosted haptic driver.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called cs40l26-vibra.
+
 config INPUT_CS40L50_VIBRA
 	tristate "CS40L50 Haptic Driver support"
 	depends on MFD_CS40L50_CORE
