@@ -91,6 +91,31 @@
 #define CS40L26_DSP_TIMEOUT_COUNT	100
 #define CS40L26_AUTOSUSPEND_MS		2000
 
+/*
+ * The firmware can synthesise a buzz of a given frequency, level and length,
+ * which is what an FF_RUMBLE effect describes.  One of the configurations its
+ * buzz generator reserves is enough, as the part plays one effect at a time.
+ *
+ * The algorithm's identifier is firmware specific: this one reports 0x4F202
+ * where the CS40L50's equivalent algorithms sit at 0x9F2xx.
+ */
+#define CS40L26_BUZZGEN_ALGO		0x4F202
+#define CS40L26_BUZZGEN_INDEX		0x1800081
+#define CS40L26_BUZZGEN_FREQ_CTL	"BUZZ_EFFECTS2_BUZZ_FREQ"
+#define CS40L26_BUZZGEN_LEVEL_CTL	"BUZZ_EFFECTS2_BUZZ_LEVEL"
+#define CS40L26_BUZZGEN_DURATION_CTL	"BUZZ_EFFECTS2_BUZZ_DURATION"
+/*
+ * The generator is given a frequency in hertz, derived from the period the
+ * effect carries; it accepts periods of 4 to 10 ms, so 250 Hz down to 100 Hz.
+ */
+#define CS40L26_BUZZGEN_PERIOD_MIN	4
+#define CS40L26_BUZZGEN_PERIOD_MAX	10
+#define CS40L26_BUZZGEN_LEVEL_MAX	0xFF
+/* The length is counted in units of four milliseconds */
+#define CS40L26_BUZZGEN_MS_PER_UNIT	4
+/* A request that names no length gets a click rather than an endless buzz */
+#define CS40L26_BUZZGEN_MS_DFL		20
+
 /* Firmware files */
 #define CS40L26_FW			"cs40l26.wmfw"
 #define CS40L26_WT			"cs40l26.bin"
@@ -116,6 +141,9 @@ struct cs40l26 {
 	const struct firmware *fw;
 	const struct firmware *bin;
 	const struct cs40l26_rom_regs *rom_regs;
+	struct cs_dsp_coeff_ctl *buzz_freq;
+	struct cs_dsp_coeff_ctl *buzz_level;
+	struct cs_dsp_coeff_ctl *buzz_duration;
 	u32 devid;
 	u32 revid;
 };

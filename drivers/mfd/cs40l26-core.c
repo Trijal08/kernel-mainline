@@ -116,8 +116,22 @@ static int cs40l26_dsp_post_run(struct cs_dsp *dsp)
 
 	/* A write reports whether the value changed, which is not an error */
 	ret = cs_dsp_coeff_write_ctrl(ctl, 0, &val, sizeof(val));
+	if (ret < 0)
+		return ret;
 
-	return ret < 0 ? ret : 0;
+	/*
+	 * Resolve the buzz generator's controls while the lock this hook runs
+	 * under is held, so the vibrator can program them later.  A firmware
+	 * without them simply does not offer FF_RUMBLE.
+	 */
+	cs40l26->buzz_freq = cs_dsp_get_ctl(dsp, CS40L26_BUZZGEN_FREQ_CTL,
+					    WMFW_ADSP2_XM, CS40L26_BUZZGEN_ALGO);
+	cs40l26->buzz_level = cs_dsp_get_ctl(dsp, CS40L26_BUZZGEN_LEVEL_CTL,
+					     WMFW_ADSP2_XM, CS40L26_BUZZGEN_ALGO);
+	cs40l26->buzz_duration = cs_dsp_get_ctl(dsp, CS40L26_BUZZGEN_DURATION_CTL,
+						WMFW_ADSP2_XM, CS40L26_BUZZGEN_ALGO);
+
+	return 0;
 }
 
 static const struct cs_dsp_client_ops cs40l26_client_ops = {
