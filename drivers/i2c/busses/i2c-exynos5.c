@@ -162,7 +162,18 @@
 #define HSI2C_MASTER_ID(x)			((x & 0xff) << 24)
 #define MASTER_ID(x)				((x & 0x7) + 0x08)
 
-#define EXYNOS5_I2C_TIMEOUT (msecs_to_jiffies(100))
+#define EXYNOS5_I2C_TIMEOUT_MS 100
+#define EXYNOS5_I2C_TIMEOUT (msecs_to_jiffies(EXYNOS5_I2C_TIMEOUT_MS))
+
+/*
+ * A transfer is given EXYNOS5_I2C_TIMEOUT to complete however long it is, so
+ * it cannot carry more than the bus moves in that time.  A byte costs nine bit
+ * periods, the eight bits and the acknowledge, and half of what remains is
+ * left to a slave stretching the clock and to starting the transfer at all.
+ */
+#define EXYNOS5_I2C_MAX_XFER_LEN(op_clock) \
+	min_t(u32, (op_clock) / 9 * EXYNOS5_I2C_TIMEOUT_MS / MSEC_PER_SEC / 2, \
+	      U16_MAX)
 
 enum i2c_type_exynos {
 	I2C_TYPE_EXYNOS5,
@@ -202,6 +213,9 @@ struct exynos5_i2c {
 
 	/* Controller operating frequency */
 	unsigned int		op_clock;
+
+	/* Transfer length limit derived from @op_clock */
+	struct i2c_adapter_quirks quirks;
 
 	/* Version of HS-I2C Hardware */
 	const struct exynos_hsi2c_variant *variant;
@@ -897,9 +911,13 @@ static int exynos5_i2c_probe(struct platform_device *pdev)
 	if (of_property_read_u32(np, "clock-frequency", &i2c->op_clock))
 		i2c->op_clock = I2C_MAX_STANDARD_MODE_FREQ;
 
+	i2c->quirks.max_write_len = EXYNOS5_I2C_MAX_XFER_LEN(i2c->op_clock);
+	i2c->quirks.max_read_len = i2c->quirks.max_write_len;
+
 	strscpy(i2c->adap.name, "exynos5-i2c", sizeof(i2c->adap.name));
 	i2c->adap.owner   = THIS_MODULE;
 	i2c->adap.algo    = &exynos5_i2c_algorithm;
+	i2c->adap.quirks  = &i2c->quirks;
 	i2c->adap.retries = 3;
 
 	i2c->dev = &pdev->dev;
