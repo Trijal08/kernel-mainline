@@ -3452,6 +3452,9 @@ void exynos_drm_dp_set_normal_data(struct exynos_dp_subdev *dp)
 
 static int exynos_drm_dp_start(struct exynos_dp_subdev *dp);
 static void exynos_drm_dp_stop(struct exynos_dp_subdev *dp);
+static void exynos_drm_dp_mode_set(struct drm_encoder *encoder,
+		const struct drm_display_mode *mode,
+		const struct drm_display_mode *adjusted_mode);
 
 static void exynos_drm_dp_hpd_changed(struct exynos_dp_subdev *dp, int state)
 {
@@ -3871,6 +3874,19 @@ static ssize_t sysfs_store_bist_mode(struct device *dev,
 			return -EINVAL;
 
 		exynos_drm_dp_stream_enable(dp, DP_SST_1);
+	} else {
+		/*
+		 * BIST_EN and the forced stream-valid outlive the stream: nothing
+		 * else clears them, and with them set the DP keeps generating bars
+		 * and ignores DECON's frame start.
+		 */
+		dp_reg_set_video_bist_mode(dp->id, DP_SST_1 - 1, 0);
+		if (dp->state == DP_STATE_ON) {
+			/* the compositor's mode, not the preferred one BIST used */
+			exynos_drm_dp_mode_set(drm_dp->encoder, &drm_dp->cur_mode,
+					       &drm_dp->cur_mode);
+			exynos_drm_dp_stream_enable(dp, DP_SST_1);
+		}
 	}
 
 	dp_log_info(dp->dev, "DP_SST_1 %s w/ bist_type(%#x)\n",
@@ -4501,6 +4517,7 @@ static void exynos_drm_dp_enable(struct drm_encoder *encoder)
 	struct exynos_dp_subdev *subdev = dp->subdev;
 	struct device *dev = dp->dev;
 	dp_sst_idx_t sst_idx;
+	int i;
 
 	dp_log_kms(dev, "exynos_drm_dp_enable\n");
 
@@ -4508,6 +4525,20 @@ static void exynos_drm_dp_enable(struct drm_encoder *encoder)
 		dp_log_info(dev, "DP(%d), state : %d\n", dp->id, subdev->state);
 		return;
 	}
+
+	/*
+	 * The compositor's modeset can land while the plug work is still link
+	 * training: the core reports the connector connected on the type-C HPD,
+	 * before we are. A stream started on an untrained link leaves the sink
+	 * on a frozen partial frame. Wait for the work to finish (~33ms); poll
+	 * rather than flush, since the work's detect() wants the connection
+	 * mutex this commit holds. hpd_state turns HPD_PLUG before that call.
+	 */
+	for (i = 0; i < 100 && subdev->oob_plugged && !subdev->training_state &&
+		    subdev->hpd_state != HPD_LT_FAILED; i++)
+		usleep_range(5000, 6000);
+	if (i)
+		dp_log_info(dev, "waited %dms for link training\n", i * 5);
 
 	exynos_drm_dp_hpd_en(subdev);
 
@@ -4907,7 +4938,14 @@ static void exynos_drm_dp_subdev_detect(struct device *dev)
 	struct drm_device *drm_dev = dp->drm_dev;
 
 	dp_log_kms(dev, "\n");
-	drm_helper_hpd_irq_event(drm_dev);
+	/*
+	 * Unconditional: the Type-C attach already announced "connected"
+	 * before training ran, so the status has not changed and
+	 * drm_helper_hpd_irq_event() would stay silent. Userspace probed on
+	 * that first event with AUX still down, got no EDID, and locked in
+	 * 640x480; this second event makes it probe again now that it can.
+	 */
+	drm_kms_helper_hotplug_event(drm_dev);
 }
 
 static int exynos_drm_dp_subdev_bind(struct device *dev,
