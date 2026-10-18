@@ -15,4 +15,13 @@ config SND_SOC_GOOGLE_AOC
 	  drives the amplifiers; this streams PCM to it over its audio IPC
 	  rings.  Say M here if you have an AOC and want AOC-routed audio.
 
+config SND_SOC_EXYNOS_DP_DMA
+	tristate "Exynos DisplayPort audio DMA front end"
+	depends on DRM_EXYNOS9_DP
+	select SND_SOC_GENERIC_DMAENGINE_PCM
+	help
+	  CPU DAI that feeds the Exynos DisplayPort link's audio FIFO through a
+	  PL330 channel. Pair it with the hdmi-codec the DP bridge registers
+	  via simple-audio-card.
+
 endmenu
