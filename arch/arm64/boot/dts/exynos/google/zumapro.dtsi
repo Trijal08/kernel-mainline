@@ -2656,6 +2656,32 @@
 			samsung,sysreg = <&sysreg_misc>;
 		};
 
+		/*
+		 * PDMA0: the peripheral DMA the DP block's audio FIFO drains
+		 * through (request 30). The PL330 emits 32-bit addresses; the
+		 * Samsung wrapper registers hold bits [35:32] for each channel's
+		 * reads/writes and for the microcode fetch (see pl330.c). The QE
+		 * and SSMT gates sit on its bus path and are off at boot.
+		 */
+		pdma0: dma-controller@10110000 {
+			compatible = "arm,pl330", "arm,primecell";
+			reg = <0x10110000 0x1000>;
+			interrupts = <GIC_SPI 808 IRQ_TYPE_LEVEL_HIGH 0>;
+			clocks = <&cmu_misc CLK_GOUT_MISC_PDMA_ACLK>,
+				 <&cmu_misc CLK_GOUT_MISC_QE_PDMA_ACLK>,
+				 <&cmu_misc CLK_GOUT_MISC_QE_PDMA_PCLK>,
+				 <&cmu_misc CLK_GOUT_MISC_SSMT_PDMA_ACLK>,
+				 <&cmu_misc CLK_GOUT_MISC_SSMT_PDMA_PCLK>;
+			clock-names = "apb_pclk", "qe_aclk", "qe_pclk",
+				      "ssmt_aclk", "ssmt_pclk";
+			#dma-cells = <1>;
+			samsung,dma-arwrapper = <0x10114400 0x10114420 0x10114440 0x10114460
+						 0x10114480 0x101144a0 0x101144c0 0x101144e0>;
+			samsung,dma-awwrapper = <0x10114404 0x10114424 0x10114444 0x10114464
+						 0x10114484 0x101144a4 0x101144c4 0x101144e4>;
+			samsung,dma-instwrapper = <0x10114500>;
+		};
+
 		sysreg_misc: syscon@10030000 {
 			compatible = "google,gs101-misc-sysreg", "syscon";
 			reg = <0x10030000 0x10000>;
@@ -3914,6 +3940,20 @@
 		 * switches on DP alt mode entry, and AUX through the SBU switch
 		 * in the TCPC. Neither is this node's to describe.
 		 */
+		/*
+		 * The DP link's audio FIFO, fed by PDMA0 request 30. A separate
+		 * node so simple-audio-card can name it as the CPU side and the
+		 * DP itself as the codec.
+		 */
+		dp_audio: audio-controller@110f5818 {
+			compatible = "samsung,exynos910-dp-audio-dma";
+			reg = <0x110f5818 0x4>;
+			dmas = <&pdma0 30>;
+			dma-names = "tx";
+			#sound-dai-cells = <0>;
+			status = "disabled";
+		};
+
 		dp: displayport@110f0000 {
 			compatible = "samsung,exynos910-dp";
 			reg = <0x110f0000 0x6000>;
@@ -3964,6 +4004,9 @@
 			 * Until then DPOSC runs from oscclk at 24.576 MHz.
 			 */
 			power-domains = <&pd_hsi0>;
+
+			/* the hdmi-codec the bridge registers, for simple-audio-card */
+			#sound-dai-cells = <0>;
 
 			status = "disabled";
 
