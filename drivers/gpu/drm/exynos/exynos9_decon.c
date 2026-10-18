@@ -32,6 +32,7 @@
 #include "exynos_dpp.h"
 #include "exynos_dpu_dma.h"
 #include "exynos_drm_crtc.h"
+#include "exynos_drm_dp.h"
 #include "exynos_drm_drv.h"
 #include "exynos_drm_plane.h"
 
@@ -1554,6 +1555,8 @@ static void decon_vblank_timeout(struct timer_list *t)
 			     ctx->cal_ops->win_update_req_get(ctx, ctx->win[0].idx),
 			     ctx->cal_ops->win_status(ctx, ctx->win[0].idx));
 
+	/* no frame-done will follow this frame; a stale count would never mask again */
+	atomic_set(&ctx->frames_pending, 0);
 	drm_crtc_handle_vblank(&ctx->crtc->base);
 }
 
@@ -1581,6 +1584,7 @@ static void decon_atomic_flush(struct exynos_drm_crtc *crtc)
 	 */
 	ctx->cal_ops->update_req_global(ctx);
 
+	atomic_inc(&ctx->frames_pending);
 	ctx->cal_ops->set_te(ctx, DECON_TRIG_UNMASK);
 
 	/*
@@ -1726,6 +1730,7 @@ static void decon_enable(struct exynos_drm_crtc *crtc)
 
 	enable_irq(ctx->irq_fd);
 	ctx->enabled = true;
+	atomic_set(&ctx->frames_pending, 0);
 
 	decon_config_print(&ctx->config);
 	drm_info(ctx->drm_dev, "enabled! crtc[%d] = %dx%d-%dHz (%d out_bpc)\n",
@@ -1965,11 +1970,13 @@ static irqreturn_t decon_irq_handler(int irq, void *dev_id)
 	 * the DDIC the gap in host traffic that its frame insertion waits for.
 	 * decon_atomic_flush() re-arms the trigger when there is a new frame.
 	 *
-	 * Assumes frame-done for a frame lands before the commit after it arms
-	 * the trigger again - a late one would disarm a frame that has not been
-	 * sent, stalling it until the next commit.
+	 * Only when no newer frame is armed: a frame-done that lands after the
+	 * next commit re-armed the trigger would otherwise disarm a frame that
+	 * has not been sent.  The panel then holds the old frame in GRAM while
+	 * the TE keeps completing vblanks, so nothing upstream notices; the last
+	 * frame of an animation stays stale until the next commit.
 	 */
-	if (decon_oneshot)
+	if (decon_oneshot && atomic_dec_if_positive(&ctx->frames_pending) <= 0)
 		ctx->cal_ops->set_te(ctx, DECON_TRIG_MASK);
 
 	return IRQ_HANDLED;

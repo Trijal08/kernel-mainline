@@ -12,6 +12,7 @@
 #include "zumapro-caimito-s5400.dtsi"
 #include "zumapro-caimito-cs35l41.dtsi"
 #include "zumapro-caimito-cs40l26.dtsi"
+#include "zumapro-caimito-camera.dtsi"
 
 / {
 	model = "Pixel 9 Pro";
@@ -217,6 +218,25 @@
 
 &dp {
 	status = "okay";
+};
+
+&dp_audio {
+	status = "okay";
+};
+
+/ {
+	sound-dp {
+		compatible = "simple-audio-card";
+		simple-audio-card,name = "DisplayPort";
+
+		simple-audio-card,cpu {
+			sound-dai = <&dp_audio>;
+		};
+
+		simple-audio-card,codec {
+			sound-dai = <&dp>;
+		};
+	};
 };
 
 &dpp0 {

@@ -139,6 +139,7 @@
 #define ZD_CLOCK_CON(_id)			(0x5000 - (0x1000 * (_id)))
 #define ZD_CLOCK_CON_AUTO_CG_MASK		(0x11111 << 0)
 #define ZD_CLOCK_CON_QACTIVE_MASK		((0x1 << 24) | (0x1 << 28))
+#define ZD_CLOCK_CON_QACTIVE_PLL_ON		(0x1 << 28)
 
 /* -------- DECON_WIN (0x1000 per window) -------- */
 #define ZD_WIN_OFFSET(_id)			(0x1000 * (_id))

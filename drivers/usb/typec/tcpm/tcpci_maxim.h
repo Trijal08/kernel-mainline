@@ -56,6 +56,10 @@
 #define TCPC_VENDOR_SBUSW_CTRL                  0x94
 #define SBUSW_OFF                               0x0
 #define SBUSW_PATH_1                            0x9
+/* max77779 crossbar: bit 7 closes it, bit 6 swaps SBU1/SBU2 for a flipped plug */
+#define SBUSW_XBAR_POL_NORMAL                   BIT(7)
+#define SBUSW_XBAR_POL_REVERSE                  (BIT(7) | BIT(6))
+#define MAX77779_PRODUCT_ID                     0x7779
 /* Routes the SBU pair to the SoC's debug UART instead of to DP AUX. */
 #define SBUSW_SERIAL_UART                       0x12
 
@@ -90,6 +94,7 @@ struct max_tcpci_chip {
 	struct regulator *vbus_reg;
 	/* Our own enable state for vbus_reg; see max_tcpci_set_vbus(). */
 	bool vbus_enabled;
+	u16 product_id;
 	/* SBU/AUX pull-up rail, raised to 3.3V while DP alt mode is up */
 	struct regulator *sbu_reg;
 	bool sbu_reg_enabled;
