@@ -1979,6 +1979,7 @@ static const struct regulator_desc s2mpg15_regulators[] = {
 	regulator_desc_s2mpg15_ldo_en(5),
 	regulator_desc_s2mpg15_ldo_en(7),
 	/* UWB rails (L16S_UWB, L17S_UWB): OTP-set levels, switched only */
+	regulator_desc_s2mpg15_ldo_en(12),
 	regulator_desc_s2mpg15_ldo_en(16),
 	regulator_desc_s2mpg15_ldo_en(17),
 };

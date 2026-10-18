@@ -417,6 +417,8 @@ bool max_contaminant_is_contaminant(struct max_tcpci_chip *chip, bool disconnect
 				return false;
 
 			chip->contaminant_state = max_contaminant_detect_contaminant(chip);
+			dev_info(chip->dev, "contaminant check: cc_status 0x%02x debounce %d -> state %d\n",
+				 cc_status, !disconnect_while_debounce, chip->contaminant_state);
 
 			ret = max_tcpci_write8(chip, TCPC_ROLE_CTRL, role_ctrl_backup);
 			if (ret < 0)
@@ -436,6 +438,8 @@ bool max_contaminant_is_contaminant(struct max_tcpci_chip *chip, bool disconnect
 	} else if (chip->contaminant_state == DETECTED) {
 		if (!(cc_status & TCPC_CC_STATUS_TOGGLING)) {
 			chip->contaminant_state = max_contaminant_detect_contaminant(chip);
+			dev_info(chip->dev, "contaminant recheck: cc_status 0x%02x -> state %d\n",
+				 cc_status, chip->contaminant_state);
 			if (chip->contaminant_state == DETECTED) {
 				max_contaminant_enable_dry_detection(chip);
 				return true;

@@ -27,6 +27,8 @@
 #include <drm/drm_atomic_state_helper.h>
 #include <drm/drm_bridge_connector.h>
 #include <drm/drm_probe_helper.h>
+#include <sound/hdmi-codec.h>
+#include <sound/pcm.h>
 
 #include "exynos_drm_crtc.h"
 #include "exynos_drm_dp.h"
@@ -2502,11 +2504,13 @@ static void dp_reg_aux_defer_ctrl(u32 id, u32 en)
 	dp_link_write_mask(id, AUX_COMMAND_CONTROL, val, DEFER_CTRL_EN);
 }
 
+/* 1800us reply window and no hardware retries, as the vendor: the engine
+ * otherwise re-issues a deferred I2C request on its own, past our 50ms wait */
 static void dp_reg_set_aux_reply_timeout(u32 id)
 {
 	dp_link_write_mask(id, AUX_CONTROL,
 			   AUX_REPLY_TIMER_VAL(AUX_TIMEOUT_1800us),
-			   AUX_REPLY_TIMER_MODE);
+			   AUX_REPLY_TIMER_MODE | AUX_RETRY_TIMER);
 }
 
 static void dp_reg_set_aux_ch_command(u32 id,
@@ -2569,17 +2573,32 @@ static int dp_reg_set_aux_ch_operation_enable(u32 id)
 	} while (state && cnt);
 
 	if (!cnt) {
-		cal_log_err(id, "AUX_TRAN_START waiting timeout.\n");
+		cal_log_err(id, "AUX_TRAN_START waiting timeout. CONTROL %#x REQ %#x CMD %#x ADDR_ONLY %#x MON1 %#x MON2 %#x\n",
+			    dp_link_read(id, AUX_CONTROL),
+			    dp_link_read(id, AUX_REQUEST_CONTROL),
+			    dp_link_read(id, AUX_COMMAND_CONTROL),
+			    dp_link_read(id, AUX_ADDR_ONLY_COMMAND),
+			    dp_link_read(id, AUX_MONITOR_1),
+			    dp_link_read(id, AUX_MONITOR_2));
+		/* a start that never completes leaves the engine BUSY for good */
+		dp_link_write_mask(id, SYSTEM_COMMON_FUNCTION_ENABLE, 0, AUX_FUNC_EN);
+		dp_link_write_mask(id, AUX_CONTROL, ~0, AUX_POWER_DOWN);
+		dp_link_write_mask(id, AUX_BUFFER_CLEAR, ~0, AUX_BUF_CLR);
+		usleep_range(100, 200);
+		dp_link_write_mask(id, AUX_CONTROL, 0, AUX_POWER_DOWN);
+		dp_link_write_mask(id, SYSTEM_COMMON_FUNCTION_ENABLE, ~0, AUX_FUNC_EN);
+		cal_log_err(id, "AUX reset: MON1 %#x\n", dp_link_read(id, AUX_MONITOR_1));
 		return -ETIME;
 	}
 
 	val0 = dp_link_read(id, AUX_MONITOR_1);
 	val1 = dp_link_read(id, AUX_MONITOR_2);
 
+	/* NACK / DEFER / timeout replies are normal I2C-over-AUX traffic; DRM retries them */
 	if ((val0 & AUX_CMD_STATUS) != 0x00 || val1 != 0x00) {
-		cal_log_err(id, "AUX_MONITOR_1 : 0x%X, AUX_MONITOR_2 : 0x%X\n",
-			    val0, val1);
-		cal_log_err(
+		cal_log_debug(id, "AUX_MONITOR_1 : 0x%X, AUX_MONITOR_2 : 0x%X\n",
+			      val0, val1);
+		cal_log_debug(
 			id,
 			"AUX_CONTROL : 0x%X, AUX_REQUEST_CONTROL : 0x%X, AUX_COMMAND_CONTROL : 0x%X\n",
 			dp_link_read(id, AUX_CONTROL),
@@ -2606,28 +2625,54 @@ static int dp_reg_set_aux_ch_operation_enable(u32 id)
 	return 0;
 }
 
+/*
+ * A zero-length request is an I2C-over-AUX address-only transaction: DRM opens
+ * and closes every I2C transfer with one. It has its own command register;
+ * programming it as a normal request with length - 1 sends a 64-byte write the
+ * sink never answers, so EDID reads failed and the AUX engine wedged behind it.
+ */
+static void dp_reg_set_aux_ch_addr_only(u32 id, bool en)
+{
+	dp_link_write_mask(id, AUX_ADDR_ONLY_COMMAND, en ? ADDR_ONLY_CMD : 0,
+			   ADDR_ONLY_CMD);
+}
+
+/*
+ * One AUX engine, two users: the HPD work's training and userspace
+ * I2C-over-AUX (ddc probes via i2c-dev). Interleaved transactions wedge the
+ * engine BUSY for good; the vendor never had a second user.
+ */
+static DEFINE_MUTEX(dp_aux_lock);
+
 int dp_reg_aux_write(u32 id, u32 comm, u32 address, u32 length, u8 *data)
 {
 	int ret = 0;
 	int retry_cnt = AUX_RETRY_COUNT;
 
+	mutex_lock(&dp_aux_lock);
 	while (retry_cnt > 0) {
 		dp_reg_aux_ch_buf_clr(id);
 		dp_reg_aux_defer_ctrl(id, 1);
 		dp_reg_set_aux_reply_timeout(id);
+		dp_reg_set_aux_ch_addr_only(id, !length);
 		dp_reg_set_aux_ch_command(id, comm);
 		dp_reg_set_aux_ch_address(id, address);
-		dp_reg_set_aux_ch_length(id, length);
-		if (comm == DPCD_WRITE)
-			dp_reg_aux_ch_send_buf(id, data, length);
+		if (length) {
+			dp_reg_set_aux_ch_length(id, length);
+			/* bit 0 of the command nibble is read; I2C writes carry data too */
+			if (!(comm & 1))
+				dp_reg_aux_ch_send_buf(id, data, length);
+		}
 
 		ret = dp_reg_set_aux_ch_operation_enable(id);
+		dp_reg_set_aux_ch_addr_only(id, false);
 		if (ret == 0) {
 			ret = length;
 			break;
 		}
 		retry_cnt--;
 	}
+	mutex_unlock(&dp_aux_lock);
 
 	return ret;
 }
@@ -2637,8 +2682,10 @@ int dp_reg_aux_read(u32 id, u32 comm, u32 address, u32 length, u8 *data)
 	int ret = 0;
 	int retry_cnt = AUX_RETRY_COUNT;
 
+	mutex_lock(&dp_aux_lock);
 	while (retry_cnt > 0) {
 		dp_link_write(id, AUX_REQUEST_CONTROL, 0);
+		dp_reg_set_aux_ch_addr_only(id, !length);
 		dp_reg_set_aux_ch_command(id, comm);
 		dp_reg_set_aux_ch_address(id, address);
 		if (length)
@@ -2648,13 +2695,16 @@ int dp_reg_aux_read(u32 id, u32 comm, u32 address, u32 length, u8 *data)
 		dp_reg_set_aux_reply_timeout(id);
 
 		ret = dp_reg_set_aux_ch_operation_enable(id);
+		dp_reg_set_aux_ch_addr_only(id, false);
 		if (ret == 0) {
-			dp_reg_aux_ch_received_buf(id, data, length);
+			if (length)
+				dp_reg_aux_ch_received_buf(id, data, length);
 			ret = length;
 			break;
 		}
 		retry_cnt--;
 	}
+	mutex_unlock(&dp_aux_lock);
 
 	return ret;
 }
@@ -3068,18 +3118,36 @@ void dp_reg_set_bist_video_config(u32 id, struct dp_video_info dp_video_info,
 		(range) ? 1 : 0, (bpc) ? 1 : 0, type);
 }
 
+/* level bit, not self-clearing: left set it holds the FIFO in clear and no video comes out */
+static void dp_reg_clear_mapi_fifo(u32 id, u32 sst_id)
+{
+	dp_link_write_mask(id, SST1_MAIN_FIFO_CONTROL + 0x1000 * sst_id, ~0,
+			   CLEAR_MAPI_FIFO);
+	udelay(1);
+	dp_link_write_mask(id, SST1_MAIN_FIFO_CONTROL + 0x1000 * sst_id, 0,
+			   CLEAR_MAPI_FIFO);
+}
+
 void dp_reg_start(u32 id, u32 sst_id)
 {
 	dp_reg_sst_function_enable(id, sst_id, 1);
 	dp_reg_set_sst_stream_enable(id, sst_id, 1);
 	dp_reg_set_sst_interrupt_mask(id, sst_id, VIDEO_FIFO_UNDER_FLOW_MASK,
-				      0);
+				      1);
 	/*
 	 * Long-hop pixel channel first, and only then video: the vendor's
 	 * dp_hw_start() powers it up, waits for it, and treats a failure as
 	 * fatal before it sets VIDEO_EN.
 	 */
 	dp_reg_lh_p_ch_power(id, sst_id, 1);
+	/*
+	 * The unplug path cleared this FIFO while the DECON was still pushing
+	 * pixels into it (the compositor disables the CRTC ~200 ms later), so
+	 * a sink that cycles HPD mid-stream leaves a partial frame here. The
+	 * stream then starts that many pixels late: picture shifted with a
+	 * wrap, one underflow per frame, and no DECON start phase changes it.
+	 */
+	dp_reg_clear_mapi_fifo(id, sst_id);
 	dp_link_write_mask(id, SST1_VIDEO_ENABLE + 0x1000 * sst_id, 1,
 			   VIDEO_EN);
 }
@@ -3125,8 +3193,7 @@ void dp_reg_stop(u32 id, u32 sst_id)
 	/* DSC: DSC disable should be called after checking check LH_PWR_ON_STATUS[5] = 1'b0 */
 	dp_reg_set_dsc_stream(id, sst_id, dp_vi.dsc, 0);
 
-	dp_link_write_mask(id, SST1_MAIN_FIFO_CONTROL + offset, ~0,
-			   CLEAR_MAPI_FIFO);
+	dp_reg_clear_mapi_fifo(id, sst_id);
 	dp_reg_get_int_and_clear(id, DP_IRQ_REG_SST1_SET0 + sst_id);
 	dp_reg_set_sst_stream_enable(id, sst_id, 0);
 }
@@ -3388,6 +3455,9 @@ void exynos_drm_dp_set_normal_data(struct exynos_dp_subdev *dp)
 
 static int exynos_drm_dp_start(struct exynos_dp_subdev *dp);
 static void exynos_drm_dp_stop(struct exynos_dp_subdev *dp);
+static void exynos_drm_dp_mode_set(struct drm_encoder *encoder,
+		const struct drm_display_mode *mode,
+		const struct drm_display_mode *adjusted_mode);
 
 static void exynos_drm_dp_hpd_changed(struct exynos_dp_subdev *dp, int state)
 {
@@ -3490,7 +3560,8 @@ static irqreturn_t exynos_drm_dp_irq(int irq, void *dev_id)
 	for (i = 0; i < MAX_SST_CNT; i++) {
 		val = dp_reg_get_int_and_clear(dp->id, DP_IRQ_REG_SST1_SET0 + i);
 
-		if ((val & DP_IRQ_MAPI_FIFO_UNDER_FLOW) && !irq_type)
+		/* once per frame for the whole stream = a stale MAPI FIFO at start, see dp_reg_start */
+		if (val & DP_IRQ_MAPI_FIFO_UNDER_FLOW)
 			dp_log_errl(dev, "SST%d FIFO_UNDER_FLOW=%#x\n",
 					i + 1, val);
 	}
@@ -3806,6 +3877,19 @@ static ssize_t sysfs_store_bist_mode(struct device *dev,
 			return -EINVAL;
 
 		exynos_drm_dp_stream_enable(dp, DP_SST_1);
+	} else {
+		/*
+		 * BIST_EN and the forced stream-valid outlive the stream: nothing
+		 * else clears them, and with them set the DP keeps generating bars
+		 * and ignores DECON's frame start.
+		 */
+		dp_reg_set_video_bist_mode(dp->id, DP_SST_1 - 1, 0);
+		if (dp->state == DP_STATE_ON) {
+			/* the compositor's mode, not the preferred one BIST used */
+			exynos_drm_dp_mode_set(drm_dp->encoder, &drm_dp->cur_mode,
+					       &drm_dp->cur_mode);
+			exynos_drm_dp_stream_enable(dp, DP_SST_1);
+		}
 	}
 
 	dp_log_info(dp->dev, "DP_SST_1 %s w/ bist_type(%#x)\n",
@@ -4194,7 +4278,8 @@ static void exynos_drm_dp_stop(struct exynos_dp_subdev *dp)
 
 	mutex_lock(&dp->pwlock);
 
-	if (dp->state != DP_STATE_LINKED) {
+	/* ON is a live stream: an unplug mid-stream still has to park the link */
+	if (dp->state == DP_STATE_OFF) {
 		mutex_unlock(&dp->pwlock);
 		return;
 	}
@@ -4435,6 +4520,7 @@ static void exynos_drm_dp_enable(struct drm_encoder *encoder)
 	struct exynos_dp_subdev *subdev = dp->subdev;
 	struct device *dev = dp->dev;
 	dp_sst_idx_t sst_idx;
+	int i;
 
 	dp_log_kms(dev, "exynos_drm_dp_enable\n");
 
@@ -4442,6 +4528,20 @@ static void exynos_drm_dp_enable(struct drm_encoder *encoder)
 		dp_log_info(dev, "DP(%d), state : %d\n", dp->id, subdev->state);
 		return;
 	}
+
+	/*
+	 * The compositor's modeset can land while the plug work is still link
+	 * training: the core reports the connector connected on the type-C HPD,
+	 * before we are. A stream started on an untrained link leaves the sink
+	 * on a frozen partial frame. Wait for the work to finish (~33ms); poll
+	 * rather than flush, since the work's detect() wants the connection
+	 * mutex this commit holds. hpd_state turns HPD_PLUG before that call.
+	 */
+	for (i = 0; i < 100 && subdev->oob_plugged && !subdev->training_state &&
+		    subdev->hpd_state != HPD_LT_FAILED; i++)
+		usleep_range(5000, 6000);
+	if (i)
+		dp_log_info(dev, "waited %dms for link training\n", i * 5);
 
 	exynos_drm_dp_hpd_en(subdev);
 
@@ -4463,8 +4563,13 @@ static void exynos_drm_dp_disable(struct drm_encoder *encoder)
 
 	mutex_lock(&subdev->pwlock);
 
-	if (subdev->state == DP_STATE_LINKED) {
-		dp_log_info(dev, "DP(%d), state : ON\n", dp->id);
+	/*
+	 * Only a live stream goes back to LINKED. After an unplug stop() has
+	 * already parked the link and gated its clocks: OFF stays OFF, or the
+	 * next plug skips start() and trains with AUX powered down.
+	 */
+	if (subdev->state != DP_STATE_ON) {
+		dp_log_info(dev, "DP(%d), state : %d\n", dp->id, subdev->state);
 		mutex_unlock(&subdev->pwlock);
 		return;
 	}
@@ -4719,7 +4824,160 @@ static void exynos_drm_dp_bridge_hpd_notify(struct drm_bridge *bridge,
 		queue_delayed_work(subdev->dp_wq, &subdev->hpd_unplug_work, 0);
 }
 
+/*
+ * DisplayPort audio. The DP block's audio engine is fed by PDMA0 through
+ * exynos-dp-dma.c; this side is the vendor's dp_hw_*_audio() sequence in
+ * asynchronous clock mode. Maud for Naud = 32768, indexed by link rate
+ * (RBR, HBR, HBR2, HBR3) and sample rate.
+ */
+static const u32 dp_audio_fs_hz[] = {
+	32000, 44100, 48000, 88200, 96000, 176400, 192000
+};
+
+static const u32 dp_audio_maud[4][7] = {
+	{ 3314, 4567, 4971, 9134, 9942, 18269, 19884 },
+	{ 1988, 2740, 2983, 5481, 5695, 10961, 11930 },
+	{ 994, 1370, 1491, 2740, 2983, 5481, 5965 },
+	{ 663, 913, 994, 1827, 1988, 3654, 3977 },
+};
+
+static int dp_audio_rate_index(u32 ls_clk)
+{
+	switch (ls_clk) {
+	case 810000000: return 3;
+	case 540000000: return 2;
+	case 270000000: return 1;
+	default: return 0;
+	}
+}
+
+static int exynos_drm_dp_audio_prepare(struct drm_bridge *bridge,
+				       struct drm_connector *connector,
+				       struct hdmi_codec_daifmt *fmt,
+				       struct hdmi_codec_params *hparms)
+{
+	struct exynos_drm_dp *dp = bridge_to_dp(bridge);
+	struct exynos_dp_subdev *sd = dp->subdev;
+	u8 frame[HDMI_INFOFRAME_SIZE(AUDIO)];
+	u32 id = sd->id, ls_clk, burst, pcm_size, word_len, word_max, ch, fs;
+	int phys = snd_pcm_format_physical_width(fmt->bit_fmt);
+
+	if (sd->state != DP_STATE_ON)
+		return -ENODEV;
+
+	for (fs = 0; fs < ARRAY_SIZE(dp_audio_fs_hz); fs++)
+		if (dp_audio_fs_hz[fs] == hparms->sample_rate)
+			break;
+	if (fs == ARRAY_SIZE(dp_audio_fs_hz) || phys < 0)
+		return -EINVAL;
+
+	switch (hparms->sample_width) {
+	case 16:
+		pcm_size = 0; word_len = 1; word_max = 0;
+		break;
+	case 20:
+		pcm_size = 1; word_len = 5; word_max = 0;
+		break;
+	case 24:
+		pcm_size = 2; word_len = 5; word_max = 1;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	ch = hparms->channels;
+	/* words per frame, the DMA's burst; same formula as exynos-dp-dma.c */
+	burst = phys * ch / 32;
+	if (!burst || burst > 8)
+		return -EINVAL;
+
+	ls_clk = dp_reg_get_ls_clk(id);
+
+	dp_link_write_mask(id, SYSTEM_SST1_FUNCTION_ENABLE, ~0, SST1_AUDIO_FUNC_EN);
+	dp_link_write_mask(id, SYSTEM_SST1_FUNCTION_ENABLE, ~0, SST1_AUDIO_FIFO_FUNC_EN);
+
+	dp_link_write_mask(id, SST1_MAIN_CONTROL, 0, MAUD_MODE);
+	dp_link_write(id, SST1_MAUD_MASTER_MODE, hparms->sample_rate);
+	dp_link_write(id, SST1_NAUD_MASTER_MODE, ls_clk / 2);
+	dp_link_write_mask(id, SST1_MAUD_SFR_CONFIGURE,
+			   dp_audio_maud[dp_audio_rate_index(ls_clk)][fs],
+			   MAUD_SFR_CONFIG);
+	dp_link_write_mask(id, SST1_NAUD_SFR_CONFIGURE, 32768, NAUD_SFR_CONFIG);
+
+	dp_link_write_mask(id, SST1_AUDIO_CONTROL, (burst - 1) << 18, DMA_BURST_SEL);
+	dp_link_write_mask(id, SST1_AUDIO_CONTROL, pcm_size << 13, PCM_SIZE);
+	/* 16-bit samples ride two per word (PACKED_MODE2); 32-bit containers as is */
+	dp_link_write_mask(id, SST1_AUDIO_CONTROL, (phys == 32 ? 0 : 2) << 16,
+			   AUDIO_BIT_MAPPING_TYPE);
+	dp_link_write_mask(id, SST1_AUDIO_BUFFER_CONTROL, (ch - 1) << 12,
+			   MASTER_AUDIO_CHANNEL_COUNT);
+	dp_link_write_mask(id, SST1_AUDIO_CHANNEL_1_2_STATUS_CTRL_0,
+			   3 << 28 | fs << 24 | ch << 20 | ch << 16,
+			   CLK_ACCUR | FS_FREQ | CH_NUM | SOURCE_NUM);
+	dp_link_write_mask(id, SST1_AUDIO_CHANNEL_1_2_STATUS_CTRL_1,
+			   word_len << 1 | word_max, WORD_LENGTH | WORD_MAX);
+	dp_link_write_mask(id, SST1_AUDIO_CONTROL, ~0, AUDIO_CH_STATUS_SAME);
+
+	/* the SDP header is the hardware's: skip the HDMI header and checksum */
+	hdmi_audio_infoframe_pack_only(&hparms->cea, frame, sizeof(frame));
+	dp_reg_set_infoframe_data(id, SST1_INFOFRAME_AUDIO_PACKET_DATA_SET0,
+				  frame + HDMI_INFOFRAME_HEADER_SIZE,
+				  HDMI_AUDIO_INFOFRAME_SIZE);
+	dp_link_write_mask(id, SST1_INFOFRAME_UPDATE_CONTROL, ~0, AUDIO_INFO_UPDATE);
+	dp_link_write_mask(id, SST1_INFOFRAME_SEND_CONTROL, ~0, AUDIO_INFO_SEND);
+
+	dp_log_info(dp->dev, "audio: %u Hz, %u ch, %d-bit in %d, burst %u, ls %u\n",
+		    hparms->sample_rate, ch, hparms->sample_width, phys, burst,
+		    ls_clk);
+	return 0;
+}
+
+static int exynos_drm_dp_audio_mute_stream(struct drm_bridge *bridge,
+					   struct drm_connector *connector,
+					   bool mute, int direction)
+{
+	struct exynos_drm_dp *dp = bridge_to_dp(bridge);
+	u32 id = dp->subdev->id;
+
+	if (dp->subdev->state != DP_STATE_ON)
+		return mute ? 0 : -ENODEV;
+
+	if (!mute) {
+		dp_link_write_mask(id, SST1_AUDIO_ENABLE, ~0, AUDIO_EN);
+		dp_link_write_mask(id, SST1_AUDIO_MASTER_TIMING_GEN, ~0,
+				   AUDIO_MASTER_TIME_GEN);
+		dp_link_write_mask(id, SST1_AUDIO_CONTROL, ~0, DMA_REQ_GEN_EN);
+		return 0;
+	}
+
+	dp_link_write_mask(id, SST1_AUDIO_CONTROL, 0, DMA_REQ_GEN_EN);
+	if (dp_link_read(id, SST1_AUDIO_ENABLE) & AUDIO_EN) {
+		usleep_range(1000, 2000);
+		dp_link_write_mask(id, SST1_AUDIO_MASTER_TIMING_GEN, 0,
+				   AUDIO_MASTER_TIME_GEN);
+		dp_link_write_mask(id, SST1_AUDIO_ENABLE, 0, AUDIO_EN);
+		dp_link_write_mask(id, SST1_MAIN_FIFO_CONTROL, ~0, CLEAR_AUDIO_FIFO);
+	}
+	return 0;
+}
+
+static void exynos_drm_dp_audio_shutdown(struct drm_bridge *bridge,
+					 struct drm_connector *connector)
+{
+	struct exynos_drm_dp *dp = bridge_to_dp(bridge);
+	u32 id = dp->subdev->id;
+
+	exynos_drm_dp_audio_mute_stream(bridge, connector, true, 0);
+	if (dp->subdev->state != DP_STATE_ON)
+		return;
+	dp_link_write_mask(id, SYSTEM_SST1_FUNCTION_ENABLE, 0, SST1_AUDIO_FIFO_FUNC_EN);
+	dp_link_write_mask(id, SYSTEM_SST1_FUNCTION_ENABLE, 0, SST1_AUDIO_FUNC_EN);
+}
+
 static const struct drm_bridge_funcs exynos_drm_dp_bridge_funcs = {
+	.dp_audio_prepare = exynos_drm_dp_audio_prepare,
+	.dp_audio_mute_stream = exynos_drm_dp_audio_mute_stream,
+	.dp_audio_shutdown = exynos_drm_dp_audio_shutdown,
 	.hpd_notify = exynos_drm_dp_bridge_hpd_notify,
 	.attach = exynos_drm_dp_bridge_attach,
 	.detect = exynos_drm_dp_bridge_detect,
@@ -4800,12 +5058,27 @@ static ssize_t exynos_drm_dp_aux_transfer(struct drm_dp_aux *aux,
 		transferred = dp_reg_dpcd_read_burst(id, msg->address,
 				msg->size, buffer);
 		break;
+	/*
+	 * The request nibble is the AUX command the hardware takes, MOT bit
+	 * included. DRM clears MOT on the last message of an I2C transfer;
+	 * forcing it on left every EDID read unterminated.
+	 */
 	case DP_AUX_I2C_WRITE:
 	case DP_AUX_I2C_WRITE_STATUS_UPDATE:
-		return dp_reg_aux_write(id, I2C_WRITE, msg->address,
+		/*
+		 * The STOP after an I2C write (i2c-dev write(2), as dms's EDID
+		 * offset write) is an address-only *write* with MOT clear. The
+		 * XREAL never answers that shape and the engine then stays BUSY
+		 * for good; the STOP after a read is answered. The vendor never
+		 * sends any address-only request. Send every STOP as a read.
+		 */
+		if (!msg->size && !(msg->request & DP_AUX_I2C_MOT))
+			return dp_reg_aux_read(id, DP_AUX_I2C_READ, msg->address,
+					0, buffer);
+		return dp_reg_aux_write(id, msg->request & 0xf, msg->address,
 				msg->size, buffer);
 	case DP_AUX_I2C_READ:
-		return dp_reg_aux_read(id, I2C_READ, msg->address,
+		return dp_reg_aux_read(id, msg->request & 0xf, msg->address,
 				msg->size, buffer);
 	default:
 		dp_log_err(dev, "invalid msg request(%#x)\n", msg->request);
@@ -4821,7 +5094,14 @@ static void exynos_drm_dp_subdev_detect(struct device *dev)
 	struct drm_device *drm_dev = dp->drm_dev;
 
 	dp_log_kms(dev, "\n");
-	drm_helper_hpd_irq_event(drm_dev);
+	/*
+	 * Unconditional: the Type-C attach already announced "connected"
+	 * before training ran, so the status has not changed and
+	 * drm_helper_hpd_irq_event() would stay silent. Userspace probed on
+	 * that first event with AUX still down, got no EDID, and locked in
+	 * 640x480; this second event makes it probe again now that it can.
+	 */
+	drm_kms_helper_hotplug_event(drm_dev);
 }
 
 static int exynos_drm_dp_subdev_bind(struct device *dev,
@@ -4997,7 +5277,10 @@ static int exynos_drm_dp_probe(struct platform_device *pdev)
 	dp->bridge.of_node = dev->of_node;
 	dp->bridge.type = DRM_MODE_CONNECTOR_DisplayPort;
 	dp->bridge.ops = DRM_BRIDGE_OP_DETECT | DRM_BRIDGE_OP_EDID |
-			 DRM_BRIDGE_OP_HPD;
+			 DRM_BRIDGE_OP_HPD | DRM_BRIDGE_OP_DP_AUDIO;
+	dp->bridge.hdmi_audio_dev = dev;
+	dp->bridge.hdmi_audio_max_i2s_playback_channels = 8;
+	dp->bridge.hdmi_audio_dai_port = -1;
 	drm_bridge_add(&dp->bridge);
 
 	dp->id = 0;
