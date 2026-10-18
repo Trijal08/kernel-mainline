@@ -41,6 +41,9 @@
 bool max_tcpci_conf_sbu;
 module_param_named(conf_sbu, max_tcpci_conf_sbu, bool, 0444);
 MODULE_PARM_DESC(conf_sbu, "Keep the SBU pair on the debug UART (disables DP AUX)");
+static bool max_tcpci_contaminant = true;
+module_param_named(contaminant_detection, max_tcpci_contaminant, bool, 0444);
+MODULE_PARM_DESC(contaminant_detection, "Run the CC/SBU contaminant (water) check when CC looks open");
 
 /*
  * Accept the name the vendor driver used for the same knob, so a command line
@@ -446,11 +449,26 @@ static void max_tcpci_set_partner_usb_comm_capable(struct tcpci *tcpci, struct t
  * attach and TYPEC_STATE_SAFE from tcpm_reset_port() on every detach,
  * independently of PD, which is the signal a non-PD port does get.
  */
+static u8 max_tcpci_sbusw_val(struct max_tcpci_chip *chip, bool dp)
+{
+	u8 ctrl = 0;
+
+	if (!dp)
+		return SBUSW_OFF;
+	if (chip->product_id != MAX77779_PRODUCT_ID)
+		return SBUSW_PATH_1;
+
+	/* tcpm has already written the plug orientation into TCPC_CTRL */
+	max_tcpci_read8(chip, TCPC_TCPC_CTRL, &ctrl);
+	return ctrl & TCPC_TCPC_CTRL_ORIENTATION ? SBUSW_XBAR_POL_REVERSE :
+						   SBUSW_XBAR_POL_NORMAL;
+}
+
 /*
  * Route the connector's SBU pair to the SoC's DP AUX lines, and raise the
  * pull-up rail to the 3.3V AUX wants while they are routed. The max77759 path
- * is already corrected for the plug orientation, so there is no polarity to
- * choose here.
+ * is already corrected for the plug orientation; the max77779 crossbar takes
+ * the polarity explicitly, see max_tcpci_sbusw_val().
  *
  * Without this AUX never reaches the sink, and a DP partner that is otherwise
  * fully negotiated -- mode entered, lanes muxed, HPD asserted -- can never be
@@ -484,7 +502,7 @@ static int max_tcpci_sbu_switch(struct max_tcpci_chip *chip, bool dp)
 	}
 
 	ret = max_tcpci_write8(chip, TCPC_VENDOR_SBUSW_CTRL,
-			       dp ? SBUSW_PATH_1 : SBUSW_OFF);
+			       max_tcpci_sbusw_val(chip, dp));
 	if (ret < 0)
 		dev_err(chip->dev, "Failed to %s the SBU switch: %d\n",
 			dp ? "close" : "open", ret);
@@ -617,7 +635,8 @@ static irqreturn_t _max_tcpci_irq(struct max_tcpci_chip *chip, u16 status)
 	if (status & TCPC_ALERT_CC_STATUS) {
 		bool cc_handled = false;
 
-		if (chip->contaminant_state == DETECTED || tcpm_port_is_toggling(chip->port)) {
+		if (max_tcpci_contaminant &&
+		    (chip->contaminant_state == DETECTED || tcpm_port_is_toggling(chip->port))) {
 			if (!max_contaminant_is_contaminant(chip, false, &cc_handled))
 				tcpm_port_clean(chip->port);
 		}
@@ -848,7 +867,8 @@ static int max_tcpci_probe(struct i2c_client *client)
 	chip->data.auto_discharge_disconnect = true;
 	chip->data.vbus_vsafe0v = true;
 	chip->data.set_partner_usb_comm_capable = max_tcpci_set_partner_usb_comm_capable;
-	chip->data.check_contaminant = max_tcpci_check_contaminant;
+	if (max_tcpci_contaminant)
+		chip->data.check_contaminant = max_tcpci_check_contaminant;
 	chip->data.cable_comm_capable = true;
 	chip->data.attempt_vconn_swap_discovery = max_tcpci_attempt_vconn_swap_discovery;
 
@@ -869,6 +889,12 @@ static int max_tcpci_probe(struct i2c_client *client)
 	 * defers this port forever, taking PD and charging with it -- describe
 	 * the rail only once the PMIC driver actually has a descriptor for it.
 	 */
+	ret = regmap_raw_read(chip->data.regmap, TCPC_PRODUCT_ID,
+			      &chip->product_id, sizeof(chip->product_id));
+	if (ret < 0)
+		return ret;
+	chip->product_id = le16_to_cpu((__force __le16)chip->product_id);
+
 	chip->sbu_reg = devm_regulator_get_optional(chip->dev, "pullup");
 	if (IS_ERR(chip->sbu_reg)) {
 		if (PTR_ERR(chip->sbu_reg) == -EPROBE_DEFER)

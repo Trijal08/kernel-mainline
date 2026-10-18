@@ -1650,6 +1650,13 @@ config GPIO_RC5T583
 	  This driver provides the support for driving/reading the GPIO pins
 	  of RC5T583 device through standard GPIO library.
 
+config GPIO_S2MPG1415
+	tristate "Samsung S2MPG14/S2MPG15 PMIC GPIO support"
+	depends on MFD_SEC_ACPM || COMPILE_TEST
+	select GPIO_REGMAP
+	help
+	  GPIO pins on the Samsung S2MPG14 and S2MPG15 PMICs.
+
 config GPIO_SL28CPLD
 	tristate "Kontron sl28cpld GPIO support"
 	depends on MFD_SL28CPLD || COMPILE_TEST

@@ -660,6 +660,7 @@ struct exynos5_usbdrd_phy_drvdata {
  * @sw: TypeC orientation switch handle
  * @mux: TypeC mode switch handle, driving the TCA lane mux
  * @tca_mux: tcpc_mux_control value the mode switch last asked for
+ * @tca_sysmode: TCA driven in system-configuration mode (controller never acked)
  * @orientation: TypeC connector orientation - normal or flipped
  */
 struct exynos5_usbdrd_phy {
@@ -689,6 +690,8 @@ struct exynos5_usbdrd_phy {
 	struct typec_mux_dev *mux;
 	/* last tcpc_mux_control the mode switch asked for, reapplied at init */
 	u8 tca_mux;
+	/* controller never acked a TCA request; drive the crossbar directly */
+	bool tca_sysmode;
 	enum typec_orientation orientation;
 };
 
@@ -3608,12 +3611,49 @@ static void zuma_ss_sram_ext_ld_done(struct exynos5_usbdrd_phy *phy_drd)
 	} while (!(reg & ZUMA_USBDP_PHY_SRAM_INIT_DONE) && --retries);
 }
 
+/*
+ * System-configuration mode: software drives the crossbar's typec_conn_mode
+ * directly, with the typec_disable pulse the vendor's nc2usb path uses, so no
+ * controller handshake is needed. The DP-only mux needs the controller to give
+ * the SS lanes up in controller-synced mode, and on this integration the ack
+ * never comes, so that request was never consumed and 4-lane DP never got its
+ * lanes.
+ */
+static void zuma_ss_tca_sysmode_set(struct exynos5_usbdrd_phy *phy_drd, int mux)
+{
+	void __iomem *tca = phy_drd->reg_tca;
+	u32 reg;
+
+	reg = readl(tca + ZUMA_USBDP_TCA_GCFG);
+	reg &= ~TCA_GCFG_OP_MODE;
+	writel(reg, tca + ZUMA_USBDP_TCA_GCFG);
+
+	reg = readl(tca + ZUMA_USBDP_TCA_SYSMODE_CFG);
+	reg |= TCA_SYSMODE_CFG_TYPEC_DISABLE;
+	writel(reg, tca + ZUMA_USBDP_TCA_SYSMODE_CFG);
+	udelay(1);
+	reg &= ~TCA_SYSMODE_CFG_TYPEC_CONN_MODE;
+	reg |= FIELD_PREP(TCA_SYSMODE_CFG_TYPEC_CONN_MODE, mux);
+	writel(reg, tca + ZUMA_USBDP_TCA_SYSMODE_CFG);
+	udelay(1);
+	reg &= ~TCA_SYSMODE_CFG_TYPEC_DISABLE;
+	writel(reg, tca + ZUMA_USBDP_TCA_SYSMODE_CFG);
+
+	dev_dbg(phy_drd->dev, "TCA sysmode mux %d (gen_status %#.8x)\n", mux,
+		readl(tca + ZUMA_USBDP_TCA_GEN_STATUS));
+}
+
 static int zuma_ss_tca_ctrl_sync(struct exynos5_usbdrd_phy *phy_drd, int mux,
 				 int low_power_en)
 {
 	void __iomem *tca = phy_drd->reg_tca;
 	u32 reg, sts;
 	int err;
+
+	if (phy_drd->tca_sysmode) {
+		zuma_ss_tca_sysmode_set(phy_drd, mux);
+		return 0;
+	}
 
 	/* Controller-synced mode: clear auto safe state */
 	reg = readl(tca + ZUMA_USBDP_TCA_CTRLSYNCMODE_CFG0);
@@ -3653,11 +3693,16 @@ static int zuma_ss_tca_ctrl_sync(struct exynos5_usbdrd_phy *phy_drd, int mux,
 				 !(reg & TCA_TCPC_VALID), 1000, 2500 * 1000);
 
 	sts = readl(tca + ZUMA_USBDP_TCA_INTR_STS);
-	if (err)
+	if (err) {
 		dev_warn(phy_drd->dev,
-			 "TCA switch timeout, mux %d low_power %d (tcpc %#.8x sts %#.8x)\n",
+			 "TCA switch timeout, mux %d low_power %d (tcpc %#.8x sts %#.8x), falling back to system mode\n",
 			 mux, low_power_en, reg, sts);
-	else
+		/* drop the stale request before taking the crossbar over */
+		writel(reg & ~TCA_TCPC_VALID, tca + ZUMA_USBDP_TCA_TCPC);
+		phy_drd->tca_sysmode = true;
+		zuma_ss_tca_sysmode_set(phy_drd, mux);
+		err = 0;
+	} else
 		dev_dbg(phy_drd->dev, "TCA switch ok, mux %d low_power %d (sts %#.8x)\n",
 			mux, low_power_en, sts);
 
