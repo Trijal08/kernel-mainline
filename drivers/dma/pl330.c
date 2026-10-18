@@ -26,6 +26,7 @@
 #include <linux/pm_runtime.h>
 #include <linux/bug.h>
 #include <linux/reset.h>
+#include <linux/clk.h>
 
 #include "dmaengine.h"
 #define PL330_MAX_CHAN		8
@@ -381,6 +382,9 @@ struct pl330_thread {
 	unsigned lstenq;
 	/* Index of the last submitted request or -1 if the DMA is stopped */
 	int req_running;
+	/* Samsung address-extension wrapper: bits [35:32] of src/dst */
+	void __iomem *ar_wrapper;
+	void __iomem *aw_wrapper;
 };
 
 enum pl330_dmac_state {
@@ -504,6 +508,10 @@ struct pl330_dmac {
 
 	struct dentry		*dbgfs;
 	struct reset_control	*rstc;
+	/* Samsung address-extension wrapper: bits [35:32] of the microcode */
+	void __iomem		*inst_wrapper;
+	struct clk_bulk_data	*clks;
+	int			num_clks;
 	struct reset_control	*rstc_ocp;
 };
 
@@ -1547,6 +1555,11 @@ static int pl330_submit_req(struct pl330_thread *thrd,
 	thrd->req[idx].desc = desc;
 	_setup_req(pl330, 0, thrd, idx, &xs);
 
+	if (thrd->ar_wrapper)
+		writel(upper_32_bits(xs.desc->px.src_addr) & 0xf, thrd->ar_wrapper);
+	if (thrd->aw_wrapper)
+		writel(upper_32_bits(xs.desc->px.dst_addr) & 0xf, thrd->aw_wrapper);
+
 	ret = 0;
 
 xfer_exit:
@@ -1881,6 +1894,21 @@ static inline void _reset_thread(struct pl330_thread *thrd)
 	thrd->req_running = -1;
 }
 
+/*
+ * Samsung SoCs put the PL330 behind a wrapper that supplies address bits
+ * [35:32]; the DMAC itself only emits 32. One register per channel for
+ * reads and writes, one for the microcode fetches.
+ */
+static void __iomem *pl330_map_wrapper(struct pl330_dmac *pl330,
+				       const char *prop, int idx)
+{
+	u32 addr;
+
+	if (of_property_read_u32_index(pl330->ddma.dev->of_node, prop, idx, &addr))
+		return NULL;
+	return devm_ioremap(pl330->ddma.dev, addr, SZ_4);
+}
+
 static int dmac_alloc_threads(struct pl330_dmac *pl330)
 {
 	int chans = pl330->pcfg.num_chan;
@@ -1899,6 +1927,12 @@ static int dmac_alloc_threads(struct pl330_dmac *pl330)
 		thrd->dmac = pl330;
 		_reset_thread(thrd);
 		thrd->free = true;
+		if (pl330->inst_wrapper) {
+			thrd->ar_wrapper = pl330_map_wrapper(pl330,
+					"samsung,dma-arwrapper", i);
+			thrd->aw_wrapper = pl330_map_wrapper(pl330,
+					"samsung,dma-awwrapper", i);
+		}
 	}
 
 	/* MANAGER is indexed at the end */
@@ -1929,6 +1963,8 @@ static int dmac_alloc_resources(struct pl330_dmac *pl330)
 			__func__, __LINE__);
 		return -ENOMEM;
 	}
+	if (pl330->inst_wrapper)
+		writel(upper_32_bits(pl330->mcode_bus) & 0xf, pl330->inst_wrapper);
 
 	ret = dmac_alloc_threads(pl330);
 	if (ret) {
@@ -2992,6 +3028,7 @@ static int __maybe_unused pl330_suspend(struct device *dev)
 static int __maybe_unused pl330_resume(struct device *dev)
 {
 	struct amba_device *pcdev = to_amba_device(dev);
+	struct pl330_dmac *pl330;
 	int ret;
 
 	ret = clk_prepare(pcdev->pclk);
@@ -2999,6 +3036,10 @@ static int __maybe_unused pl330_resume(struct device *dev)
 		return ret;
 
 	pm_runtime_force_resume(dev);
+
+	pl330 = amba_get_drvdata(pcdev);
+	if (pl330->inst_wrapper)
+		writel(upper_32_bits(pl330->mcode_bus) & 0xf, pl330->inst_wrapper);
 
 	return ret;
 }
@@ -3018,8 +3059,11 @@ pl330_probe(struct amba_device *adev, const struct amba_id *id)
 	int i, ret, irq;
 	int num_chan;
 	struct device_node *np = adev->dev.of_node;
+	u32 inst_wrapper = 0;
 
-	ret = dma_set_mask_and_coherent(&adev->dev, DMA_BIT_MASK(32));
+	of_property_read_u32(np, "samsung,dma-instwrapper", &inst_wrapper);
+	ret = dma_set_mask_and_coherent(&adev->dev,
+					DMA_BIT_MASK(inst_wrapper ? 36 : 32));
 	if (ret)
 		return ret;
 
@@ -3027,6 +3071,17 @@ pl330_probe(struct amba_device *adev, const struct amba_id *id)
 	pl330 = devm_kzalloc(&adev->dev, sizeof(*pl330), GFP_KERNEL);
 	if (!pl330)
 		return -ENOMEM;
+
+	if (inst_wrapper) {
+		pl330->inst_wrapper = devm_ioremap(&adev->dev, inst_wrapper, SZ_4);
+		if (!pl330->inst_wrapper)
+			return -ENOMEM;
+	}
+
+	/* The amba core only enables apb_pclk; bus-side gates (QE, SSMT) too */
+	pl330->num_clks = devm_clk_bulk_get_all_enabled(&adev->dev, &pl330->clks);
+	if (pl330->num_clks < 0)
+		return pl330->num_clks;
 
 	pd = &pl330->ddma;
 	pd->dev = &adev->dev;
