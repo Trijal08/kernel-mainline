@@ -3115,18 +3115,36 @@ void dp_reg_set_bist_video_config(u32 id, struct dp_video_info dp_video_info,
 		(range) ? 1 : 0, (bpc) ? 1 : 0, type);
 }
 
+/* level bit, not self-clearing: left set it holds the FIFO in clear and no video comes out */
+static void dp_reg_clear_mapi_fifo(u32 id, u32 sst_id)
+{
+	dp_link_write_mask(id, SST1_MAIN_FIFO_CONTROL + 0x1000 * sst_id, ~0,
+			   CLEAR_MAPI_FIFO);
+	udelay(1);
+	dp_link_write_mask(id, SST1_MAIN_FIFO_CONTROL + 0x1000 * sst_id, 0,
+			   CLEAR_MAPI_FIFO);
+}
+
 void dp_reg_start(u32 id, u32 sst_id)
 {
 	dp_reg_sst_function_enable(id, sst_id, 1);
 	dp_reg_set_sst_stream_enable(id, sst_id, 1);
 	dp_reg_set_sst_interrupt_mask(id, sst_id, VIDEO_FIFO_UNDER_FLOW_MASK,
-				      0);
+				      1);
 	/*
 	 * Long-hop pixel channel first, and only then video: the vendor's
 	 * dp_hw_start() powers it up, waits for it, and treats a failure as
 	 * fatal before it sets VIDEO_EN.
 	 */
 	dp_reg_lh_p_ch_power(id, sst_id, 1);
+	/*
+	 * The unplug path cleared this FIFO while the DECON was still pushing
+	 * pixels into it (the compositor disables the CRTC ~200 ms later), so
+	 * a sink that cycles HPD mid-stream leaves a partial frame here. The
+	 * stream then starts that many pixels late: picture shifted with a
+	 * wrap, one underflow per frame, and no DECON start phase changes it.
+	 */
+	dp_reg_clear_mapi_fifo(id, sst_id);
 	dp_link_write_mask(id, SST1_VIDEO_ENABLE + 0x1000 * sst_id, 1,
 			   VIDEO_EN);
 }
@@ -3172,8 +3190,7 @@ void dp_reg_stop(u32 id, u32 sst_id)
 	/* DSC: DSC disable should be called after checking check LH_PWR_ON_STATUS[5] = 1'b0 */
 	dp_reg_set_dsc_stream(id, sst_id, dp_vi.dsc, 0);
 
-	dp_link_write_mask(id, SST1_MAIN_FIFO_CONTROL + offset, ~0,
-			   CLEAR_MAPI_FIFO);
+	dp_reg_clear_mapi_fifo(id, sst_id);
 	dp_reg_get_int_and_clear(id, DP_IRQ_REG_SST1_SET0 + sst_id);
 	dp_reg_set_sst_stream_enable(id, sst_id, 0);
 }
@@ -3537,7 +3554,8 @@ static irqreturn_t exynos_drm_dp_irq(int irq, void *dev_id)
 	for (i = 0; i < MAX_SST_CNT; i++) {
 		val = dp_reg_get_int_and_clear(dp->id, DP_IRQ_REG_SST1_SET0 + i);
 
-		if ((val & DP_IRQ_MAPI_FIFO_UNDER_FLOW) && !irq_type)
+		/* once per frame for the whole stream = a stale MAPI FIFO at start, see dp_reg_start */
+		if (val & DP_IRQ_MAPI_FIFO_UNDER_FLOW)
 			dp_log_errl(dev, "SST%d FIFO_UNDER_FLOW=%#x\n",
 					i + 1, val);
 	}
