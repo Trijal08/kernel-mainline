@@ -63,6 +63,7 @@ struct cs40l26_effect {
 };
 
 struct cs40l26_vibra {
+	struct cs40l26 *core;
 	struct device *dev;
 	struct regmap *regmap;
 	struct input_dev *input;
@@ -113,6 +114,60 @@ static int cs40l26_effect_index_set(struct cs40l26_work *work_data,
 	return 0;
 }
 
+/*
+ * FF_RUMBLE asks for a buzz of a given strength for a given time, which is
+ * what the firmware's buzz generator produces.  Program it and hand back its
+ * waveform index, so playing it is no different from playing a wavetable
+ * entry.
+ */
+static int cs40l26_buzz_set(struct cs40l26_work *work_data,
+			    struct cs40l26_effect *effect)
+{
+	struct ff_periodic_effect *periodic = &work_data->effect->u.periodic;
+	struct cs40l26 *core = work_data->vib->core;
+	u16 length = work_data->effect->replay.length;
+	unsigned int period;
+	__be32 val;
+	int ret;
+
+	/*
+	 * The generator wants a frequency where the effect carries a period,
+	 * and only a narrow range of them.  An effect converted from
+	 * FF_RUMBLE arrives with 50 ms, which clamps to the lowest tone the
+	 * generator will produce.
+	 */
+	period = clamp_t(u16, periodic->period, CS40L26_BUZZGEN_PERIOD_MIN,
+			 CS40L26_BUZZGEN_PERIOD_MAX);
+	val = cpu_to_be32(MSEC_PER_SEC / period);
+	ret = cs_dsp_coeff_lock_and_write_ctrl(core->buzz_freq, 0, &val, sizeof(val));
+	if (ret < 0)
+		return ret;
+
+	/*
+	 * Scale the magnitude into the byte-wide level rather than clamping
+	 * it: force feedback states a magnitude as a proportion of full
+	 * scale, and clamping would play every request above a thirtieth of
+	 * it at full strength.
+	 */
+	val = cpu_to_be32(clamp_t(int, periodic->magnitude >> 7, 0,
+				  CS40L26_BUZZGEN_LEVEL_MAX));
+	ret = cs_dsp_coeff_lock_and_write_ctrl(core->buzz_level, 0, &val, sizeof(val));
+	if (ret < 0)
+		return ret;
+
+	if (!length)
+		length = CS40L26_BUZZGEN_MS_DFL;
+
+	val = cpu_to_be32(DIV_ROUND_UP(length, CS40L26_BUZZGEN_MS_PER_UNIT));
+	ret = cs_dsp_coeff_lock_and_write_ctrl(core->buzz_duration, 0, &val, sizeof(val));
+	if (ret < 0)
+		return ret;
+
+	effect->index = CS40L26_BUZZGEN_INDEX;
+
+	return 0;
+}
+
 static void cs40l26_add_worker(struct work_struct *work)
 {
 	struct cs40l26_work *work_data = container_of(work, struct cs40l26_work, work);
@@ -138,7 +193,10 @@ static void cs40l26_add_worker(struct work_struct *work)
 		is_new = true;
 	}
 
-	error = cs40l26_effect_index_set(work_data, effect);
+	if (work_data->effect->u.periodic.waveform == FF_SINE)
+		error = cs40l26_buzz_set(work_data, effect);
+	else
+		error = cs40l26_effect_index_set(work_data, effect);
 
 	if (is_new) {
 		if (error)
@@ -157,27 +215,41 @@ static int cs40l26_add(struct input_dev *dev, struct ff_effect *effect,
 {
 	struct ff_periodic_effect *periodic = &effect->u.periodic;
 	struct cs40l26_vibra *vib = input_get_drvdata(dev);
-	struct cs40l26_work work_data;
+	struct cs40l26_work work_data = {};
 
-	if (effect->type != FF_PERIODIC || periodic->waveform != FF_CUSTOM) {
-		dev_err(vib->dev, "Type (%#X) or waveform (%#X) unsupported\n",
-			effect->type, periodic->waveform);
+	if (effect->type != FF_PERIODIC) {
+		dev_err(vib->dev, "Effect type %#X unsupported\n", effect->type);
 		return -EINVAL;
 	}
 
-	if (periodic->custom_len < CS40L26_CUSTOM_DATA_SIZE) {
-		dev_err(vib->dev, "Invalid custom data length (%u)\n",
-			periodic->custom_len);
+	switch (periodic->waveform) {
+	case FF_SINE:
+		/*
+		 * Fully described by the effect itself.  This is also how an
+		 * FF_RUMBLE request arrives: the input core rewrites it to a
+		 * sine whose magnitude averages the two rumble strengths.
+		 */
+		break;
+	case FF_CUSTOM:
+		if (periodic->custom_len < CS40L26_CUSTOM_DATA_SIZE) {
+			dev_err(vib->dev, "Invalid custom data length (%u)\n",
+				periodic->custom_len);
+			return -EINVAL;
+		}
+
+		work_data.custom_data = memdup_array_user(periodic->custom_data,
+							  CS40L26_CUSTOM_DATA_SIZE,
+							  sizeof(s16));
+		if (IS_ERR(work_data.custom_data))
+			return PTR_ERR(work_data.custom_data);
+
+		work_data.custom_len = CS40L26_CUSTOM_DATA_SIZE;
+		break;
+	default:
+		dev_err(vib->dev, "Waveform %#X unsupported\n", periodic->waveform);
 		return -EINVAL;
 	}
 
-	work_data.custom_data = memdup_array_user(periodic->custom_data,
-						  CS40L26_CUSTOM_DATA_SIZE,
-						  sizeof(s16));
-	if (IS_ERR(work_data.custom_data))
-		return PTR_ERR(work_data.custom_data);
-
-	work_data.custom_len = CS40L26_CUSTOM_DATA_SIZE;
 	work_data.vib = vib;
 	work_data.effect = effect;
 	INIT_WORK_ONSTACK(&work_data.work, cs40l26_add_worker);
@@ -307,6 +379,7 @@ static int cs40l26_vibra_probe(struct platform_device *pdev)
 	if (!vib)
 		return -ENOMEM;
 
+	vib->core = cs40l26;
 	vib->dev = cs40l26->dev;
 	vib->regmap = cs40l26->regmap;
 
@@ -321,11 +394,24 @@ static int cs40l26_vibra_probe(struct platform_device *pdev)
 	input_set_drvdata(vib->input, vib);
 	input_set_capability(vib->input, EV_FF, FF_PERIODIC);
 	input_set_capability(vib->input, EV_FF, FF_CUSTOM);
+	input_set_capability(vib->input, EV_FF, FF_SINE);
 
 	error = input_ff_create(vib->input, CS40L26_EFFECTS_MAX);
 	if (error) {
 		dev_err(vib->dev, "Failed to create FF device: %d\n", error);
 		return error;
+	}
+
+	/*
+	 * input_ff_create() offers FF_RUMBLE on the strength of FF_PERIODIC,
+	 * expecting the memless emulation to serve it.  This driver serves it
+	 * from the buzz generator instead, so withdraw the offer when the
+	 * firmware did not bring one.
+	 */
+	if (!cs40l26->buzz_freq || !cs40l26->buzz_level || !cs40l26->buzz_duration) {
+		dev_warn(vib->dev, "No buzz generator, FF_RUMBLE unavailable\n");
+		__clear_bit(FF_RUMBLE, vib->input->ffbit);
+		__clear_bit(FF_SINE, vib->input->ffbit);
 	}
 
 	vib->input->ff->upload = cs40l26_add;
