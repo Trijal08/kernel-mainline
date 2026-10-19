@@ -81,6 +81,13 @@ properties:
       (deasserted) or MAIN samples it as a partial-reset request and
       self-resets after ONLINE.  Optional.
 
+  samsung,gnss:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description:
+      The GNSS receiver whose firmware this modem stages into its shared
+      memory. The modem fills in the receiver's configuration block from that
+      node's properties while booting it.
+
 required:
   - compatible
   - memory-region
