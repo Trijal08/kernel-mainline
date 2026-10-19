@@ -223,3 +223,13 @@
 		};
 	};
 };
+
+/*
+ * GNSS RF path delays, from komodo's gps.cfg.  Antenna calibration, so each
+ * board carries its own.
+ */
+&gnss {
+	samsung,path-delay-gps-2fx-cm = <12378>;
+	samsung,path-delay-bds-4fx-cm = <168>;
+	samsung,path-delay-l5-20fx-cm = <105902>;
+};
