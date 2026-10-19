@@ -1917,24 +1917,36 @@ static int s5xxx_gnss_blc(struct s5xxx_modem *sm, u32 field0, u32 arg)
  * It is then silent on both of its channels -- no CHPP reply and no diagnostic
  * output -- which is what a mainline boot produced before this.
  *
- * Offsets are into the header block at file offset 4.  Only the MEMS and
- * constellation words differ per board, and those come from the variant; the
- * rest is identical on the s5300 and s5400.  `customer` and the product model
- * are not in gps.cfg at all: they are the stock parser's own defaults, 4 and
- * 0x1f (getProductModel()).
+ * Offsets are into the header block, which begins at file offset 4 and whose
+ * first word is the block length -- the same base the stock parser indexes
+ * from, so these match chip_config_parser() in gnssd one for one.  Only the
+ * MEMS and constellation words differ per board, and those come from the
+ * variant.
+ *
+ * Recovered by reversing gnssd (it is not stripped): lal_chipcfg_generate()
+ * copies a 956-byte template and calls chip_config_parser(), which maps 317
+ * gps.cfg keys onto this block.  There is no product-model field in it, and
+ * `Chip_Configuration_Customer` is absent from komodo's gps.cfg, so both are
+ * left at their template values.
  */
-static void s5xxx_gnss_hdr_cfg(struct s5xxx_modem *sm, u8 *hdr)
+static void s5xxx_gnss_hdr_cfg(struct s5xxx_modem *sm, u8 *hdr, u32 len)
 {
 	u32 flags;
 
 	put_unaligned_le32(0x80008001, hdr + 0x00c);	/* RfMiscCtrl */
 	put_unaligned_le32(0x00020046, hdr + 0x018);	/* AidingConfiguration */
 	put_unaligned_le32(sm->var->gnss_mems_cfg, hdr + 0x01c);
-	hdr[0x028] = 5;					/* ACT */
-	hdr[0x029] = 5;					/* ACT, L5 */
 
-	/* bit 0 = SDL bypass, bit 10 = Android measurement corrections. */
-	flags = get_unaligned_le32(hdr + 0x02c) | BIT(0) | BIT(10);
+	/*
+	 * Feature bits.  Each key in gps.cfg clears its own mask and ORs its
+	 * value back, so a key set to 0 *clears* the bit the image shipped:
+	 * bit 0 = SDL bypass (1), bit 1 = MTPL (0), bit 10 = Android
+	 * measurement corrections (1).  kepler.bin ships 0x832, so MTPL has to
+	 * be cleared rather than just OR-ing the other two in; stock ends up
+	 * with 0xc31.
+	 */
+	flags = get_unaligned_le32(hdr + 0x02c);
+	flags = (flags & ~BIT(1)) | BIT(0) | BIT(10);
 	put_unaligned_le32(flags, hdr + 0x02c);
 
 	put_unaligned_le16(sm->var->gnss_const_cfg, hdr + 0x20e);
@@ -1943,16 +1955,31 @@ static void s5xxx_gnss_hdr_cfg(struct s5xxx_modem *sm, u8 *hdr)
 	flags = get_unaligned_le32(hdr + 0x23c) | BIT(0);
 	put_unaligned_le32(flags, hdr + 0x23c);
 
-	hdr[0x256] = 1;					/* DCXO crystal type */
-	hdr[0x289] = 4;					/* customer */
-	hdr[0x28a] = 0x1f;				/* product model */
+	hdr[0x233] = 0x24;				/* RefClkControl */
+	hdr[0x257] = 1;					/* DCXO crystal type */
 	hdr[0x325] = 0;					/* mailbox disabled */
-	put_unaligned_le16(0, hdr + 0x330);		/* watchdog period */
 	put_unaligned_le32(200, hdr + 0x340);		/* VDR high distance */
 	put_unaligned_le32(200, hdr + 0x344);		/* VDR low distance */
 	put_unaligned_le32(20, hdr + 0x348);		/* VDR high time */
 	put_unaligned_le32(20, hdr + 0x34c);		/* VDR low time */
 	hdr[0x38c] = 1;					/* timemark option */
+
+	/*
+	 * RF path delays.  The image ships these zeroed and the stock daemon
+	 * always fills them; a receiver without them produces clock records
+	 * but no measurements at all.
+	 */
+	put_unaligned_le16(0x305a, hdr + 0x29a);	/* GPS, 2fx, cm */
+	put_unaligned_le16(0x00a8, hdr + 0x30e);	/* BDS, 4fx, cm */
+	put_unaligned_le32(0x19dae, hdr + 0x31c);	/* L5, 20fx, cm */
+	put_unaligned_le32(2, hdr + 0x380);		/* ntn_option */
+
+	/* s5400-only tail: the s5300's 912-byte header stops short of these. */
+	if (len > 0x3bc) {
+		hdr[0x3ba] = 1;				/* HibernateMonitorEn */
+		hdr[0x3bb] = 1;				/* custom_nav_options */
+		hdr[0x3bc] = 1;				/* Cn0FilterMode */
+	}
 }
 
 /* The receiver state the last INIT reply reported: opcode, length, payload. */
@@ -1977,7 +2004,7 @@ static void s5xxx_gnss_codeload(struct s5xxx_modem *sm, const u8 *fw,
 	hdr = kmemdup(fw + 4, hdr4, GFP_KERNEL);
 	if (!hdr)
 		return;
-	s5xxx_gnss_hdr_cfg(sm, hdr);
+	s5xxx_gnss_hdr_cfg(sm, hdr, hdr4);
 
 	for (i = 0; i < 3; i++)
 		s5xxx_gnss_op(sm, S5XXX_GNSS_INIT);
