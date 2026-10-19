@@ -1929,57 +1929,124 @@ static int s5xxx_gnss_blc(struct s5xxx_modem *sm, u32 field0, u32 arg)
  * `Chip_Configuration_Customer` is absent from komodo's gps.cfg, so both are
  * left at their template values.
  */
+/*
+ * The receiver's configuration block, as the vendor's gps.cfg describes it.
+ *
+ * Every key gps.cfg sets that lands in this block is a property on the GNSS
+ * node, so a board states its own values rather than having them compiled in.
+ * @def is what the key is on the Pixel 9 family, used when the node is silent;
+ * entries with no default are left at whatever the image shipped.
+ *
+ * Offsets are into the block, whose first word is its own length, so they are
+ * four higher than the offsets the vendor's parser reports.  An entry that
+ * would run past the end is skipped: the s5300's 912-byte block stops short of
+ * the last three.
+ */
+struct s5xxx_gnss_cfg {
+	const char	*prop;
+	u16		off;
+	u8		width;
+	bool		optional;	/* no default; only write if present */
+	u32		def;
+};
+
+static const struct s5xxx_gnss_cfg s5xxx_gnss_cfgs[] = {
+	{ "samsung,rf-misc-ctrl",		0x00c, 4, false, 0x80008001 },
+	{ "samsung,aiding-configuration",	0x018, 4, false, 0x00020046 },
+	{ "samsung,mems-data-configuration",	0x01c, 4, true },
+	{ "samsung,gnss-const-constraint",	0x20e, 2, true },
+	{ "samsung,ref-clk-control",		0x233, 1, false, 0x24 },
+	{ "samsung,scheduling-enabled",		0x23c, 4, false, 1 },
+	{ "samsung,dcxo-crystal-type",		0x257, 1, false, 1 },
+	{ "samsung,path-delay-gps-2fx-cm",	0x29a, 2, false, 12378 },
+	{ "samsung,path-delay-bds-4fx-cm",	0x30e, 2, false, 168 },
+	{ "samsung,path-delay-l5-20fx-cm",	0x31c, 4, false, 105902 },
+	{ "samsung,mailbox-disabled",		0x325, 1, false, 0 },
+	{ "samsung,vdr-high-end-distance",	0x340, 4, false, 200 },
+	{ "samsung,vdr-low-end-distance",	0x344, 4, false, 200 },
+	{ "samsung,vdr-high-end-time",		0x348, 4, false, 20 },
+	{ "samsung,vdr-low-end-time",		0x34c, 4, false, 20 },
+	{ "samsung,ubsan-opt",			0x37d, 1, false, 2 },
+	{ "samsung,ntn-option",			0x380, 4, false, 2 },
+	{ "samsung,spi-option",			0x384, 4, false, 0 },
+	{ "samsung,timemark-option",		0x38c, 1, false, 1 },
+	{ "samsung,hibernate-monitor-en",	0x3ba, 1, false, 1 },
+	{ "samsung,custom-nav-options",		0x3bb, 1, false, 1 },
+	{ "samsung,cn0-filter-mode",		0x3bc, 1, false, 1 },
+};
+
+static void s5xxx_gnss_cfg_put(u8 *hdr, const struct s5xxx_gnss_cfg *c, u32 v)
+{
+	switch (c->width) {
+	case 1:
+		hdr[c->off] = v;
+		break;
+	case 2:
+		put_unaligned_le16(v, hdr + c->off);
+		break;
+	default:
+		put_unaligned_le32(v, hdr + c->off);
+		break;
+	}
+}
+
 static void s5xxx_gnss_hdr_cfg(struct s5xxx_modem *sm, u8 *hdr, u32 len)
 {
-	u32 flags;
+	struct device_node *np;
+	u32 flags, set, clr, v;
+	int i;
 
-	put_unaligned_le32(0x80008001, hdr + 0x00c);	/* RfMiscCtrl */
-	put_unaligned_le32(0x00020046, hdr + 0x018);	/* AidingConfiguration */
-	put_unaligned_le32(sm->var->gnss_mems_cfg, hdr + 0x01c);
+	np = of_parse_phandle(sm->dev->of_node, "samsung,gnss", 0);
 
 	/*
-	 * Feature bits.  Each key in gps.cfg clears its own mask and ORs its
-	 * value back, so a key set to 0 *clears* the bit the image shipped:
-	 * bit 0 = SDL bypass (1), bit 1 = MTPL (0), bit 10 = Android
-	 * measurement corrections (1).  kepler.bin ships 0x832, so MTPL has to
-	 * be cleared rather than just OR-ing the other two in; stock ends up
-	 * with 0xc31.
+	 * Baseline divergence.  Stock does not configure kepler.bin's embedded
+	 * block at all: gnssd carries its own copy and stages that, so every
+	 * field gps.cfg never mentions still ends up at that copy's value
+	 * rather than the image's.  These seven are the only ones where the
+	 * two baselines disagree, so write them to match what stock stages.
+	 * They are not gps.cfg keys, which is why they are not properties.
 	 */
-	flags = get_unaligned_le32(hdr + 0x02c);
-	flags = (flags & ~BIT(1)) | BIT(0) | BIT(10);
-	put_unaligned_le32(flags, hdr + 0x02c);
+	put_unaligned_le32(2500, hdr + 0x004);		/* RefClkUncertainty */
+	put_unaligned_le32(460800, hdr + 0x010);	/* UartBaudRate */
+	put_unaligned_le32(0x28242c22, hdr + 0x020);	/* IspTestConfig */
+	put_unaligned_le16(100, hdr + 0x32c);		/* Codephase_bias_prenav */
+	put_unaligned_le32(0, hdr + 0x334);		/* RficResetGpio */
+	put_unaligned_le16(0, hdr + 0x33a);		/* dvfs_static_config */
+	hdr[0x37c] = 0;					/* mems_accel_gyro_type */
 
+	/* The two the modem rather than the board decides, unless asked. */
+	put_unaligned_le32(sm->var->gnss_mems_cfg, hdr + 0x01c);
 	put_unaligned_le16(sm->var->gnss_const_cfg, hdr + 0x20e);
 
-	/* scheduling_enabled */
-	flags = get_unaligned_le32(hdr + 0x23c) | BIT(0);
-	put_unaligned_le32(flags, hdr + 0x23c);
+	for (i = 0; i < ARRAY_SIZE(s5xxx_gnss_cfgs); i++) {
+		const struct s5xxx_gnss_cfg *c = &s5xxx_gnss_cfgs[i];
 
-	hdr[0x233] = 0x24;				/* RefClkControl */
-	hdr[0x257] = 1;					/* DCXO crystal type */
-	hdr[0x325] = 0;					/* mailbox disabled */
-	put_unaligned_le32(200, hdr + 0x340);		/* VDR high distance */
-	put_unaligned_le32(200, hdr + 0x344);		/* VDR low distance */
-	put_unaligned_le32(20, hdr + 0x348);		/* VDR high time */
-	put_unaligned_le32(20, hdr + 0x34c);		/* VDR low time */
-	hdr[0x38c] = 1;					/* timemark option */
+		if (c->off + c->width > len)
+			continue;
+		if (np && !of_property_read_u32(np, c->prop, &v))
+			s5xxx_gnss_cfg_put(hdr, c, v);
+		else if (!c->optional)
+			s5xxx_gnss_cfg_put(hdr, c, c->def);
+	}
 
 	/*
-	 * RF path delays.  The image ships these zeroed and the stock daemon
-	 * always fills them; a receiver without them produces clock records
-	 * but no measurements at all.
+	 * The feature word is the one place a key cannot simply be stored: the
+	 * five FeatureCfg keys are bits in a word the image ships non-zero, and
+	 * the two baselines do not even agree on it (kepler.bin 0x832, the
+	 * daemon's copy 0x830).  So it is set and cleared rather than written:
+	 * bit 0 SDL bypass and bit 10 Android measurement corrections on, bit 1
+	 * MTPL off, leaving DVS and DFS as the image has them.
 	 */
-	put_unaligned_le16(0x305a, hdr + 0x29a);	/* GPS, 2fx, cm */
-	put_unaligned_le16(0x00a8, hdr + 0x30e);	/* BDS, 4fx, cm */
-	put_unaligned_le32(0x19dae, hdr + 0x31c);	/* L5, 20fx, cm */
-	put_unaligned_le32(2, hdr + 0x380);		/* ntn_option */
-
-	/* s5400-only tail: the s5300's 912-byte header stops short of these. */
-	if (len > 0x3bc) {
-		hdr[0x3ba] = 1;				/* HibernateMonitorEn */
-		hdr[0x3bb] = 1;				/* custom_nav_options */
-		hdr[0x3bc] = 1;				/* Cn0FilterMode */
+	set = BIT(0) | BIT(10);
+	clr = BIT(1);
+	if (np) {
+		of_property_read_u32(np, "samsung,feature-cfg-set", &set);
+		of_property_read_u32(np, "samsung,feature-cfg-clear", &clr);
 	}
+	flags = get_unaligned_le32(hdr + 0x02c);
+	put_unaligned_le32((flags & ~clr) | set, hdr + 0x02c);
+
+	of_node_put(np);
 }
 
 /* The receiver state the last INIT reply reported: opcode, length, payload. */
