@@ -96,6 +96,13 @@
 		modem@0,0 {
 			compatible = "samsung,s5400-modem";
 			reg = <0x0 0x0 0x0 0x0 0x0>;
+
+			/*
+			 * The GNSS receiver whose firmware this modem stages.
+			 * Its configuration block is filled in from that
+			 * node's properties during the codeload.
+			 */
+			samsung,gnss = <&gnss>;
 			memory-region = <&cp_rmem_reserved>,
 					<&cp_msi_rmem_reserved>,
 					<&cp_pktproc_rmem_reserved>;
@@ -190,10 +197,39 @@
 &spi_21 {
 	num-cs = <1>;
 
-	gnss@0 {
+	gnss: gnss@0 {
 		compatible = "samsung,kepler";
 		reg = <0>;
 		spi-max-frequency = <3125000>;
+
+		/*
+		 * Receiver configuration, which the vendor keeps in
+		 * /vendor/etc/gnss/gps.cfg and its daemon writes into the
+		 * firmware's config block before staging it.  These are the
+		 * values every Pixel 9 shares; the RF path delays are antenna
+		 * calibration and each board states its own.
+		 */
+		samsung,rf-misc-ctrl = <0x80008001>;
+		samsung,aiding-configuration = <0x00020046>;
+		samsung,mems-data-configuration = <0x25>;
+		samsung,gnss-const-constraint = <0x60ff>;
+		samsung,feature-cfg-set = <0x401>;	/* SDL bypass, meas corr */
+		samsung,feature-cfg-clear = <0x2>;	/* MTPL */
+		samsung,ref-clk-control = <0x24>;
+		samsung,scheduling-enabled = <1>;
+		samsung,dcxo-crystal-type = <1>;
+		samsung,mailbox-disabled = <0>;
+		samsung,vdr-high-end-distance = <200>;
+		samsung,vdr-low-end-distance = <200>;
+		samsung,vdr-high-end-time = <20>;
+		samsung,vdr-low-end-time = <20>;
+		samsung,ubsan-opt = <2>;
+		samsung,ntn-option = <2>;
+		samsung,spi-option = <0>;
+		samsung,timemark-option = <1>;
+		samsung,hibernate-monitor-en = <1>;
+		samsung,custom-nav-options = <1>;
+		samsung,cn0-filter-mode = <1>;
 		pinctrl-names = "default";
 		pinctrl-0 = <&gnss_spi_irq &gnss_spi_int>;
 		/* GNSS2AP_SPI_INT on gpa5-4, the data-ready/ready interrupt */
