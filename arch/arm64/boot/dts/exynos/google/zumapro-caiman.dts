@@ -268,3 +268,13 @@
 		};
 	};
 };
+
+/*
+ * GNSS RF path delays, from caiman's gps.cfg.  Antenna calibration, so each
+ * board carries its own.
+ */
+&gnss {
+	samsung,path-delay-gps-2fx-cm = <12371>;
+	samsung,path-delay-bds-4fx-cm = <123>;
+	samsung,path-delay-l5-20fx-cm = <105888>;
+};
