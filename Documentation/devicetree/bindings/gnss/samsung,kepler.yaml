@@ -38,6 +38,138 @@ properties:
     description:
       Host-to-receiver line, asserted by the host to signal that it is ready.
 
+  # Receiver configuration.  The vendor keeps these in /vendor/etc/gnss/gps.cfg
+  # and its daemon writes them into the firmware's configuration block before
+  # the modem stages it; here they are properties so each board can state its
+  # own.  A property left out keeps the value named below, except for the two
+  # the modem decides, which keep whatever the modem driver uses.
+
+  samsung,rf-misc-ctrl:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: RF front-end miscellaneous control word.
+    default: 2147516417
+
+  samsung,aiding-configuration:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: Which aiding sources the receiver may use.
+    default: 131142
+
+  samsung,mems-data-configuration:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: Format and rate of the MEMS samples the host feeds in.
+    default: 37
+
+  samsung,gnss-const-constraint:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: Bitmap of the constellations and bands the receiver may track.
+    maximum: 65535
+    default: 24831
+
+  samsung,feature-cfg-set:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: Feature bits to set in the word the firmware image ships.
+    default: 1025
+
+  samsung,feature-cfg-clear:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: Feature bits to clear in that word.
+    default: 2
+
+  samsung,ref-clk-control:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: Reference-clock source and buffer selection.
+    maximum: 255
+    default: 36
+
+  samsung,scheduling-enabled:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: Enable the receiver's internal measurement scheduler.
+    default: 1
+
+  samsung,dcxo-crystal-type:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: Crystal fitted to the DCXO.
+    maximum: 255
+    default: 1
+
+  samsung,path-delay-gps-2fx-cm:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: GPS L1 antenna path delay, centimetres in 2.2 fixed point.
+    maximum: 65535
+
+  samsung,path-delay-bds-4fx-cm:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: BeiDou antenna path delay, centimetres in 4.4 fixed point.
+    maximum: 65535
+
+  samsung,path-delay-l5-20fx-cm:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: L5 antenna path delay, centimetres in 20.12 fixed point.
+
+  samsung,mailbox-disabled:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: Leave the receiver's mailbox interface shut down.
+    default: 0
+
+  samsung,vdr-high-end-distance:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: Vehicle dead reckoning, distance at the high end, metres.
+    default: 200
+
+  samsung,vdr-low-end-distance:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: Vehicle dead reckoning, distance at the low end, metres.
+    default: 200
+
+  samsung,vdr-high-end-time:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: Vehicle dead reckoning, time at the high end, seconds.
+    default: 20
+
+  samsung,vdr-low-end-time:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: Vehicle dead reckoning, time at the low end, seconds.
+    default: 20
+
+  samsung,ubsan-opt:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: Undefined-behaviour checking level in the receiver firmware.
+    maximum: 255
+    default: 2
+
+  samsung,ntn-option:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: Non-terrestrial network support level.
+    default: 2
+
+  samsung,spi-option:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: Options for the receiver's own SPI controller.
+    default: 0
+
+  samsung,timemark-option:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: Timemark pulse behaviour.
+    maximum: 255
+    default: 1
+
+  samsung,hibernate-monitor-en:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: Enable the hibernate monitor.
+    default: 1
+
+  samsung,custom-nav-options:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: Vendor navigation-engine options.
+    maximum: 255
+    default: 1
+
+  samsung,cn0-filter-mode:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: Carrier-to-noise filter mode.
+    maximum: 255
+    default: 1
+
 required:
   - compatible
   - reg
