@@ -39,6 +39,7 @@
 
 #define ACPM_POLL_TIMEOUT_US		(100 * USEC_PER_MSEC)
 #define ACPM_TX_TIMEOUT_US		500000
+#define ACPM_TX_POLL_DELAY_US		10
 
 #define ACPM_GS101_INITDATA_BASE	0xa000
 
@@ -411,16 +412,22 @@ static int acpm_wait_for_queue_slots(struct acpm_chan *achan, u32 next_tx_front)
 	 * Wait for RX front to keep up with TX front.  Downstream reserves two
 	 * elements so ACPM can never observe a completely full request queue;
 	 * this limits a three-entry channel to one in-flight transaction.
+	 *
+	 * So a full queue means waiting out the previous request, hundreds of
+	 * microseconds the DVFS channel pays hundreds of times a second.  Sleep
+	 * rather than spin; every caller holds tx_lock, so none is atomic, and
+	 * the condition is tested before the first sleep so a free slot is
+	 * still free.
 	 */
-	ret = readl_poll_timeout(achan->rx.front, val, reserved_front != val, 0,
-				 ACPM_TX_TIMEOUT_US);
+	ret = readl_poll_timeout(achan->rx.front, val, reserved_front != val,
+				 ACPM_TX_POLL_DELAY_US, ACPM_TX_TIMEOUT_US);
 	if (ret) {
 		dev_err(achan->acpm->dev, "RX front can not keep up with TX front.\n");
 		return ret;
 	}
 
-	ret = readl_poll_timeout(achan->tx.rear, val, next_tx_front != val, 0,
-				 ACPM_TX_TIMEOUT_US);
+	ret = readl_poll_timeout(achan->tx.rear, val, next_tx_front != val,
+				 ACPM_TX_POLL_DELAY_US, ACPM_TX_TIMEOUT_US);
 	if (ret)
 		dev_err(achan->acpm->dev, "TX queue is full.\n");
 
