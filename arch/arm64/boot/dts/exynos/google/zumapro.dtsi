@@ -237,28 +237,28 @@
 
 		opp-955000000 {
 			opp-hz = /bits/ 64 <955000000>;
-			required-opps = <&mif_opp_421>, <&dsu_opp_610>, <&bci_opp_575>;
+			required-opps = <&mif_opp_676>, <&dsu_opp_610>, <&bci_opp_575>;
 			opp-microvolt = <593750>;
 			clock-latency-ns = <500000>;
 		};
 
 		opp-1098000000 {
 			opp-hz = /bits/ 64 <1098000000>;
-			required-opps = <&mif_opp_421>, <&dsu_opp_610>, <&bci_opp_575>;
+			required-opps = <&mif_opp_676>, <&dsu_opp_610>, <&bci_opp_575>;
 			opp-microvolt = <612500>;
 			clock-latency-ns = <500000>;
 		};
 
 		opp-1197000000 {
 			opp-hz = /bits/ 64 <1197000000>;
-			required-opps = <&mif_opp_421>, <&dsu_opp_610>, <&bci_opp_575>;
+			required-opps = <&mif_opp_676>, <&dsu_opp_610>, <&bci_opp_575>;
 			opp-microvolt = <625000>;
 			clock-latency-ns = <500000>;
 		};
 
 		opp-1328000000 {
 			opp-hz = /bits/ 64 <1328000000>;
-			required-opps = <&mif_opp_421>, <&dsu_opp_610>, <&bci_opp_575>;
+			required-opps = <&mif_opp_676>, <&dsu_opp_610>, <&bci_opp_575>;
 			opp-microvolt = <650000>;
 			clock-latency-ns = <500000>;
 		};
@@ -279,21 +279,21 @@
 
 		opp-1696000000 {
 			opp-hz = /bits/ 64 <1696000000>;
-			required-opps = <&mif_opp_845>, <&dsu_opp_610>, <&bci_opp_575>;
+			required-opps = <&mif_opp_676>, <&dsu_opp_610>, <&bci_opp_575>;
 			opp-microvolt = <718750>;
 			clock-latency-ns = <500000>;
 		};
 
 		opp-1849000000 {
 			opp-hz = /bits/ 64 <1849000000>;
-			required-opps = <&mif_opp_1014>, <&dsu_opp_610>, <&bci_opp_575>;
+			required-opps = <&mif_opp_676>, <&dsu_opp_610>, <&bci_opp_575>;
 			opp-microvolt = <768750>;
 			clock-latency-ns = <500000>;
 		};
 
 		opp-1950000000 {
 			opp-hz = /bits/ 64 <1950000000>;
-			required-opps = <&mif_opp_1352>, <&dsu_opp_610>, <&bci_opp_575>;
+			required-opps = <&mif_opp_676>, <&dsu_opp_610>, <&bci_opp_575>;
 			opp-microvolt = <818750>;
 			clock-latency-ns = <500000>;
 		};
@@ -347,77 +347,77 @@
 
 		opp-1221000000 {
 			opp-hz = /bits/ 64 <1221000000>;
-			required-opps = <&mif_opp_676>, <&dsu_opp_610>, <&bci_opp_575>;
+			required-opps = <&mif_opp_421>, <&dsu_opp_610>, <&bci_opp_575>;
 			opp-microvolt = <612500>;
 			clock-latency-ns = <500000>;
 		};
 
 		opp-1328000000 {
 			opp-hz = /bits/ 64 <1328000000>;
-			required-opps = <&mif_opp_676>, <&dsu_opp_610>, <&bci_opp_575>;
+			required-opps = <&mif_opp_421>, <&dsu_opp_610>, <&bci_opp_575>;
 			opp-microvolt = <631250>;
 			clock-latency-ns = <500000>;
 		};
 
 		opp-1418000000 {
 			opp-hz = /bits/ 64 <1418000000>;
-			required-opps = <&mif_opp_676>, <&dsu_opp_610>, <&bci_opp_575>;
+			required-opps = <&mif_opp_421>, <&dsu_opp_610>, <&bci_opp_575>;
 			opp-microvolt = <643750>;
 			clock-latency-ns = <500000>;
 		};
 
 		opp-1549000000 {
 			opp-hz = /bits/ 64 <1549000000>;
-			required-opps = <&mif_opp_845>, <&dsu_opp_610>, <&bci_opp_575>;
+			required-opps = <&mif_opp_421>, <&dsu_opp_610>, <&bci_opp_575>;
 			opp-microvolt = <675000>;
 			clock-latency-ns = <500000>;
 		};
 
 		opp-1795000000 {
 			opp-hz = /bits/ 64 <1795000000>;
-			required-opps = <&mif_opp_1014>, <&dsu_opp_970>, <&bci_opp_951>;
+			required-opps = <&mif_opp_676>, <&dsu_opp_970>, <&bci_opp_951>;
 			opp-microvolt = <731250>;
 			clock-latency-ns = <500000>;
 		};
 
 		opp-1945000000 {
 			opp-hz = /bits/ 64 <1945000000>;
-			required-opps = <&mif_opp_1352>, <&dsu_opp_970>, <&bci_opp_951>;
+			required-opps = <&mif_opp_676>, <&dsu_opp_970>, <&bci_opp_951>;
 			opp-microvolt = <775000>;
 			clock-latency-ns = <500000>;
 		};
 
 		opp-2130000000 {
 			opp-hz = /bits/ 64 <2130000000>;
-			required-opps = <&mif_opp_1539>, <&dsu_opp_1098>, <&bci_opp_1050>;
+			required-opps = <&mif_opp_845>, <&dsu_opp_1098>, <&bci_opp_1050>;
 			opp-microvolt = <825000>;
 			clock-latency-ns = <500000>;
 		};
 
 		opp-2245000000 {
 			opp-hz = /bits/ 64 <2245000000>;
-			required-opps = <&mif_opp_1716>, <&dsu_opp_1098>, <&bci_opp_1050>;
+			required-opps = <&mif_opp_845>, <&dsu_opp_1098>, <&bci_opp_1050>;
 			opp-microvolt = <850000>;
 			clock-latency-ns = <500000>;
 		};
 
 		opp-2367000000 {
 			opp-hz = /bits/ 64 <2367000000>;
-			required-opps = <&mif_opp_2028>, <&dsu_opp_1098>, <&bci_opp_1050>;
+			required-opps = <&mif_opp_845>, <&dsu_opp_1098>, <&bci_opp_1050>;
 			opp-microvolt = <887500>;
 			clock-latency-ns = <500000>;
 		};
 
 		opp-2450000000 {
 			opp-hz = /bits/ 64 <2450000000>;
-			required-opps = <&mif_opp_2028>, <&dsu_opp_1098>, <&bci_opp_1050>;
+			required-opps = <&mif_opp_845>, <&dsu_opp_1098>, <&bci_opp_1050>;
 			opp-microvolt = <912500>;
 			clock-latency-ns = <500000>;
 		};
 
 		opp-2600000000 {
 			opp-hz = /bits/ 64 <2600000000>;
-			required-opps = <&mif_opp_2288>, <&dsu_opp_1098>, <&bci_opp_1050>;
+			required-opps = <&mif_opp_1014>, <&dsu_opp_1098>, <&bci_opp_1050>;
 			opp-microvolt = <968750>;
 			clock-latency-ns = <500000>;
 		};
@@ -443,112 +443,112 @@
 
 		opp-1396000000 {
 			opp-hz = /bits/ 64 <1396000000>;
-			required-opps = <&mif_opp_676>, <&dsu_opp_610>, <&bci_opp_575>;
+			required-opps = <&mif_opp_421>, <&dsu_opp_610>, <&bci_opp_575>;
 			opp-microvolt = <618750>;
 			clock-latency-ns = <500000>;
 		};
 
 		opp-1557000000 {
 			opp-hz = /bits/ 64 <1557000000>;
-			required-opps = <&mif_opp_845>, <&dsu_opp_610>, <&bci_opp_575>;
+			required-opps = <&mif_opp_546>, <&dsu_opp_610>, <&bci_opp_575>;
 			opp-microvolt = <643750>;
 			clock-latency-ns = <500000>;
 		};
 
 		opp-1745000000 {
 			opp-hz = /bits/ 64 <1745000000>;
-			required-opps = <&mif_opp_1014>, <&dsu_opp_610>, <&bci_opp_575>;
+			required-opps = <&mif_opp_546>, <&dsu_opp_610>, <&bci_opp_575>;
 			opp-microvolt = <675000>;
 			clock-latency-ns = <500000>;
 		};
 
 		opp-1885000000 {
 			opp-hz = /bits/ 64 <1885000000>;
-			required-opps = <&mif_opp_1352>, <&dsu_opp_610>, <&bci_opp_575>;
+			required-opps = <&mif_opp_546>, <&dsu_opp_610>, <&bci_opp_575>;
 			opp-microvolt = <700000>;
 			clock-latency-ns = <500000>;
 		};
 
 		opp-1999000000 {
 			opp-hz = /bits/ 64 <1999000000>;
-			required-opps = <&mif_opp_1539>, <&dsu_opp_610>, <&bci_opp_575>;
+			required-opps = <&mif_opp_546>, <&dsu_opp_610>, <&bci_opp_575>;
 			opp-microvolt = <718750>;
 			clock-latency-ns = <500000>;
 		};
 
 		opp-2147000000 {
 			opp-hz = /bits/ 64 <2147000000>;
-			required-opps = <&mif_opp_1716>, <&dsu_opp_970>, <&bci_opp_951>;
+			required-opps = <&mif_opp_845>, <&dsu_opp_970>, <&bci_opp_951>;
 			opp-microvolt = <750000>;
 			clock-latency-ns = <500000>;
 		};
 
 		opp-2294000000 {
 			opp-hz = /bits/ 64 <2294000000>;
-			required-opps = <&mif_opp_2028>, <&dsu_opp_970>, <&bci_opp_951>;
+			required-opps = <&mif_opp_845>, <&dsu_opp_970>, <&bci_opp_951>;
 			opp-microvolt = <781250>;
 			clock-latency-ns = <500000>;
 		};
 
 		opp-2363000000 {
 			opp-hz = /bits/ 64 <2363000000>;
-			required-opps = <&mif_opp_2028>, <&dsu_opp_1098>, <&bci_opp_1050>;
+			required-opps = <&mif_opp_845>, <&dsu_opp_1098>, <&bci_opp_1050>;
 			opp-microvolt = <800000>;
 			clock-latency-ns = <500000>;
 		};
 
 		opp-2499000000 {
 			opp-hz = /bits/ 64 <2499000000>;
-			required-opps = <&mif_opp_2288>, <&dsu_opp_1098>, <&bci_opp_1050>;
+			required-opps = <&mif_opp_845>, <&dsu_opp_1098>, <&bci_opp_1050>;
 			opp-microvolt = <837500>;
 			clock-latency-ns = <500000>;
 		};
 
 		opp-2687000000 {
 			opp-hz = /bits/ 64 <2687000000>;
-			required-opps = <&mif_opp_2288>, <&dsu_opp_1098>, <&bci_opp_1050>;
+			required-opps = <&mif_opp_845>, <&dsu_opp_1098>, <&bci_opp_1050>;
 			opp-microvolt = <887500>;
 			clock-latency-ns = <500000>;
 		};
 
 		opp-2802000000 {
 			opp-hz = /bits/ 64 <2802000000>;
-			required-opps = <&mif_opp_2730>, <&dsu_opp_1444>, <&bci_opp_1401>;
+			required-opps = <&mif_opp_845>, <&dsu_opp_1444>, <&bci_opp_1401>;
 			opp-microvolt = <925000>;
 			clock-latency-ns = <500000>;
 		};
 
 		opp-2914000000 {
 			opp-hz = /bits/ 64 <2914000000>;
-			required-opps = <&mif_opp_2730>, <&dsu_opp_1444>, <&bci_opp_1401>;
+			required-opps = <&mif_opp_1352>, <&dsu_opp_1444>, <&bci_opp_1401>;
 			opp-microvolt = <981250>;
 			clock-latency-ns = <500000>;
 		};
 
 		opp-2943000000 {
 			opp-hz = /bits/ 64 <2943000000>;
-			required-opps = <&mif_opp_3172>, <&dsu_opp_1444>, <&bci_opp_1401>;
+			required-opps = <&mif_opp_1352>, <&dsu_opp_1444>, <&bci_opp_1401>;
 			opp-microvolt = <987500>;
 			clock-latency-ns = <500000>;
 		};
 
 		opp-2970000000 {
 			opp-hz = /bits/ 64 <2970000000>;
-			required-opps = <&mif_opp_3172>, <&dsu_opp_1444>, <&bci_opp_1401>;
+			required-opps = <&mif_opp_1352>, <&dsu_opp_1444>, <&bci_opp_1401>;
 			opp-microvolt = <993750>;
 			clock-latency-ns = <500000>;
 		};
 
 		opp-3015000000 {
 			opp-hz = /bits/ 64 <3015000000>;
-			required-opps = <&mif_opp_3172>, <&dsu_opp_1444>, <&bci_opp_1401>;
+			required-opps = <&mif_opp_1352>, <&dsu_opp_1444>, <&bci_opp_1401>;
 			opp-microvolt = <1000000>;
 			clock-latency-ns = <500000>;
 		};
 
 		opp-3105000000 {
 			opp-hz = /bits/ 64 <3105000000>;
-			required-opps = <&mif_opp_3172>, <&dsu_opp_1444>, <&bci_opp_1401>;
+			required-opps = <&mif_opp_1352>, <&dsu_opp_1444>, <&bci_opp_1401>;
 			opp-microvolt = <1043750>;
 			clock-latency-ns = <500000>;
 		};
@@ -564,6 +564,10 @@
 
 		mif_opp_421: opp-421000000 {
 			opp-hz = /bits/ 64 <421000000>;
+		};
+
+		mif_opp_546: opp-546000000 {
+			opp-hz = /bits/ 64 <546000000>;
 		};
 
 		mif_opp_676: opp-676000000 {
@@ -745,43 +749,56 @@
 	 */
 	cpu-memstall {
 		compatible = "google,zuma-cpu-memstall";
-		devfreq = <&bus_dsu>, <&bus_bci>;
+		devfreq = <&bus_dsu>, <&bus_bci>, <&bus_mif>;
 
 		cluster-0 {
 			cpus = <&cpu0>, <&cpu1>, <&cpu2>, <&cpu3>;
 			google,mem-stall-threshold-permille = <175>;
-			/*          CPU      DSU      BCI */
-			google,freq-map-khz = < 820000  820000  840000>,
-					      < 955000  970000  951000>,
-					      <1098000 1197000 1205000>,
-					      <1328000 1328000 1401000>;
+			/*          CPU      DSU      BCI      MIF */
+			google,freq-map-khz = < 820000  820000  840000  845000>,
+					      < 955000  970000  951000 1014000>,
+					      <1098000 1197000 1205000 1352000>,
+					      <1328000 1328000 1401000 1352000>;
 		};
 
 		cluster-1 {
 			cpus = <&cpu4>, <&cpu5>, <&cpu6>;
 			google,mem-stall-threshold-permille = <175>;
-			/*          CPU      DSU      BCI */
-			google,freq-map-khz = < 357000  610000  575000>,
-					      < 910000  820000  840000>,
-					      <1328000 1197000 1205000>,
-					      <1795000 1328000 1401000>,
-					      <1945000 1444000 1401000>,
-					      <2130000 1548000 1598000>,
-					      <2450000 2024000 1598000>;
+			/*          CPU      DSU      BCI      MIF */
+			google,freq-map-khz = < 286000  610000  575000  546000>,
+					      < 357000  610000  575000  546000>,
+					      < 578000  610000  575000  676000>,
+					      < 648000  610000  575000  845000>,
+					      < 787000  610000  575000 1014000>,
+					      < 910000  820000  840000 1014000>,
+					      <1065000  820000  840000 1352000>,
+					      <1328000 1197000 1205000 1539000>,
+					      <1549000 1197000 1205000 1716000>,
+					      <1795000 1328000 1401000 1716000>,
+					      <1945000 1444000 1401000 1716000>,
+					      <2130000 1548000 1598000 2288000>,
+					      <2367000 1548000 1598000 2730000>,
+					      <2450000 2024000 1598000 2730000>,
+					      <2600000 2024000 1598000 3172000>;
 		};
 
 		cluster-2 {
 			cpus = <&cpu7>;
 			google,mem-stall-threshold-permille = <175>;
-			/*          CPU      DSU      BCI */
-			google,freq-map-khz = < 700000  610000  575000>,
-					      <1164000  970000  951000>,
-					      <1396000 1197000 1205000>,
-					      <1885000 1328000 1401000>,
-					      <2147000 1444000 1401000>,
-					      <2363000 1800000 1598000>,
-					      <2802000 2024000 1598000>,
-					      <2914000 2150000 1598000>;
+			/*          CPU      DSU      BCI      MIF */
+			google,freq-map-khz = < 400000  610000  575000  546000>,
+					      < 700000  610000  575000  546000>,
+					      < 880000  610000  575000  845000>,
+					      <1164000  970000  951000 1014000>,
+					      <1396000 1197000 1205000 1352000>,
+					      <1557000 1197000 1205000 1716000>,
+					      <1745000 1197000 1205000 2028000>,
+					      <1885000 1328000 1401000 2028000>,
+					      <2147000 1444000 1401000 3172000>,
+					      <2363000 1800000 1598000 3172000>,
+					      <2795000 1800000 1598000 3172000>,
+					      <2802000 2024000 1598000 3172000>,
+					      <2914000 2150000 1598000 3172000>;
 		};
 	};
 
