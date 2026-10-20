@@ -90,6 +90,20 @@ config ARM_EXYNOS_BUS_DEVFREQ
 	  and adjusts the operating frequencies and voltages with OPP support.
 	  This does not yet operate with optimal voltages.
 
+config ARM_GOOGLE_CPU_MEMSTALL_DEVFREQ
+	bool "Google CPU memory-stall bus frequency floor"
+	depends on ARM64 && ARM64_AMU_EXTN
+	help
+	  This raises the minimum frequency of the bus devices behind the CPUs
+	  while the CPUs are stalling on memory, which the frequency they are
+	  running at does not on its own show. The share of cycles lost to a
+	  backend memory stall is read from each CPU's activity monitors, and
+	  the floor is placed as a PM QoS request, so a devfreq governor still
+	  picks the frequency whenever it asks for more.
+
+	  This cannot be a module: it needs cpu_has_amu_feat(), which the
+	  architecture code does not export.
+
 config ARM_HISI_UNCORE_DEVFREQ
 	tristate "HiSilicon uncore DEVFREQ Driver"
 	depends on ACPI && ACPI_PPTT && PCC
