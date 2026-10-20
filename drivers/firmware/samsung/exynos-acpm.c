@@ -38,6 +38,18 @@
 #define ACPM_PROTOCOL_SEQNUM		GENMASK(21, 16)
 
 #define ACPM_POLL_TIMEOUT_US		(100 * USEC_PER_MSEC)
+/*
+ * How long to sleep between polls where the caller can be put to sleep. The
+ * firmware answers a request in anything from tens of microseconds to several
+ * milliseconds, so spinning for the whole of it burns a CPU for no reason.
+ */
+#define ACPM_POLL_SLEEP_US		50
+/*
+ * Waiting for a queue slot has to work from atomic context, so it spins -- but
+ * not tightly: the firmware reads the same shared memory, and a host polling
+ * it without pause starves the core whose answer it is waiting for.
+ */
+#define ACPM_QUEUE_POLL_US		1
 #define ACPM_TX_TIMEOUT_US		500000
 
 #define ACPM_GS101_INITDATA_BASE	0xa000
@@ -384,8 +396,16 @@ static int acpm_dequeue_by_polling(struct acpm_chan *achan,
 			return 0;
 		}
 
-		/* Determined experimentally. */
-		udelay(20);
+		/*
+		 * Sleep rather than spin wherever the caller allows it: the
+		 * firmware can take milliseconds to answer and the wait is
+		 * otherwise a CPU held at whatever frequency it was running.
+		 * The vendor driver draws the same distinction.
+		 */
+		if (preemptible())
+			usleep_range(ACPM_POLL_SLEEP_US, 2 * ACPM_POLL_SLEEP_US);
+		else
+			udelay(20);
 	} while (ktime_before(ktime_get(), timeout));
 
 	dev_err(dev, "Timeout! ch:%u s:%u bitmap:%lx.\n",
@@ -412,15 +432,15 @@ static int acpm_wait_for_queue_slots(struct acpm_chan *achan, u32 next_tx_front)
 	 * elements so ACPM can never observe a completely full request queue;
 	 * this limits a three-entry channel to one in-flight transaction.
 	 */
-	ret = readl_poll_timeout(achan->rx.front, val, reserved_front != val, 0,
-				 ACPM_TX_TIMEOUT_US);
+	ret = readl_poll_timeout_atomic(achan->rx.front, val, reserved_front != val,
+					ACPM_QUEUE_POLL_US, ACPM_TX_TIMEOUT_US);
 	if (ret) {
 		dev_err(achan->acpm->dev, "RX front can not keep up with TX front.\n");
 		return ret;
 	}
 
-	ret = readl_poll_timeout(achan->tx.rear, val, next_tx_front != val, 0,
-				 ACPM_TX_TIMEOUT_US);
+	ret = readl_poll_timeout_atomic(achan->tx.rear, val, next_tx_front != val,
+					ACPM_QUEUE_POLL_US, ACPM_TX_TIMEOUT_US);
 	if (ret)
 		dev_err(achan->acpm->dev, "TX queue is full.\n");
 
