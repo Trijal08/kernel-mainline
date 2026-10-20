@@ -732,6 +732,59 @@
 		operating-points-v2 = <&bci_opp_table>;
 	};
 
+	/*
+	 * The rates above are what the CPU frequencies alone ask for. A core
+	 * waiting on memory wants the buses faster than that, so sample how
+	 * much of each CPU's time goes into a backend memory stall and raise
+	 * the floor while it is high. Both the threshold and the tables are
+	 * the vendor's, whose governor reaches for them under the same
+	 * condition; it also requires a high rate of L2 refills per
+	 * instruction, which needs a CPU performance counter and so cannot be
+	 * checked here. Leaving that condition out can only make this ask
+	 * sooner than the vendor would, never later.
+	 */
+	cpu-memstall {
+		compatible = "google,zuma-cpu-memstall";
+		devfreq = <&bus_dsu>, <&bus_bci>;
+
+		cluster-0 {
+			cpus = <&cpu0>, <&cpu1>, <&cpu2>, <&cpu3>;
+			google,mem-stall-threshold-permille = <175>;
+			/*          CPU      DSU      BCI */
+			google,freq-map-khz = < 820000  820000  840000>,
+					      < 955000  970000  951000>,
+					      <1098000 1197000 1205000>,
+					      <1328000 1328000 1401000>;
+		};
+
+		cluster-1 {
+			cpus = <&cpu4>, <&cpu5>, <&cpu6>;
+			google,mem-stall-threshold-permille = <175>;
+			/*          CPU      DSU      BCI */
+			google,freq-map-khz = < 357000  610000  575000>,
+					      < 910000  820000  840000>,
+					      <1328000 1197000 1205000>,
+					      <1795000 1328000 1401000>,
+					      <1945000 1444000 1401000>,
+					      <2130000 1548000 1598000>,
+					      <2450000 2024000 1598000>;
+		};
+
+		cluster-2 {
+			cpus = <&cpu7>;
+			google,mem-stall-threshold-permille = <175>;
+			/*          CPU      DSU      BCI */
+			google,freq-map-khz = < 700000  610000  575000>,
+					      <1164000  970000  951000>,
+					      <1396000 1197000 1205000>,
+					      <1885000 1328000 1401000>,
+					      <2147000 1444000 1401000>,
+					      <2363000 1800000 1598000>,
+					      <2802000 2024000 1598000>,
+					      <2914000 2150000 1598000>;
+		};
+	};
+
 	memory@80000000 {
 		device_type = "memory";
 		reg = <0x00 0x80000000 0x80000000>;
