@@ -70,7 +70,21 @@
 		 * its clocks up, and there is no cluster or system idle state.
 		 * Lower this once those land.
 		 */
-		sustainable-power = <2500>;
+		/*
+		 * This also sets the controller's gains, which is the reason it is
+		 * not simply the board's measured dissipation: the governor derives
+		 * k_po = sustainable_power / (control - switch_on), k_pu = 2 * k_po
+		 * and k_i = k_pu / 10, and nothing else in the device tree can
+		 * reach them. At 2500 the integral gain came out 15 times the
+		 * vendor's, and the allocation visibly relaxed and saturated every
+		 * few seconds -- the big core swinging between 700MHz and its
+		 * ceiling while the skin sat a degree under the control point.
+		 *
+		 * 1000 puts k_pu within a few percent of the 300 the vendor uses
+		 * for the same set of actors and cuts the integral gain to a third.
+		 * Its own k_i is 5, which this cannot reach from here.
+		 */
+		sustainable-power = <1000>;
 
 		trips {
 			/*
