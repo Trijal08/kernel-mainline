@@ -1,0 +1,100 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/devfreq/google,zuma-cpu-memstall.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Google Zuma CPU memory-stall bus frequency floor
+
+maintainers:
+  - Trijal Saha <trijalsaha2012@gmail.com>
+
+description:
+  The buses between the CPUs and memory on Zuma - the DSU and the BCI - are
+  normally scaled from the CPU frequencies. That misses a core that is waiting
+  on memory rather than running slowly, so this device samples the share of
+  each CPU's cycles that is lost to a backend memory stall, as reported by the
+  CPU's activity monitors, and raises a minimum-frequency floor on the listed
+  bus devices while that share is above a threshold. The floor is dropped
+  again as soon as the share falls back.
+
+properties:
+  compatible:
+    const: google,zuma-cpu-memstall
+
+  devfreq:
+    $ref: /schemas/types.yaml#/definitions/phandle-array
+    minItems: 1
+    maxItems: 4
+    description:
+      The bus devfreq devices to hold a floor on. The order fixes the meaning
+      of the columns in each cluster's google,freq-map-khz.
+
+  google,sample-interval-us:
+    default: 8000
+    description:
+      How often each CPU's monitors are sampled. Rounded up to a whole jiffy,
+      and deferred while a CPU is idle.
+
+patternProperties:
+  '^cluster-[0-9]+$':
+    type: object
+    description:
+      A group of CPUs that share a mapping. One node per cluster, as the
+      mapping follows the CPU operating points.
+
+    properties:
+      cpus:
+        $ref: /schemas/types.yaml#/definitions/phandle-array
+        minItems: 1
+        description: The CPUs in this cluster.
+
+      google,mem-stall-threshold-permille:
+        $ref: /schemas/types.yaml#/definitions/uint32
+        minimum: 1
+        maximum: 1000
+        description:
+          The share of a CPU's cycles that must be lost to a backend memory
+          stall, in parts per thousand, before this cluster asks for a floor.
+
+      google,freq-map-khz:
+        $ref: /schemas/types.yaml#/definitions/uint32-matrix
+        description:
+          Rows of one CPU frequency followed by the floor each device in
+          devfreq is asked for at or above it, all in kHz. Rows must be in
+          ascending order of CPU frequency, and a CPU running below the first
+          row asks for nothing. The CPU frequency is the one the core actually
+          achieved over the sample window, so a partly idle core lands on a
+          lower row than its current operating point.
+        items:
+          minItems: 2
+          maxItems: 5
+
+    required:
+      - cpus
+      - google,mem-stall-threshold-permille
+      - google,freq-map-khz
+
+    additionalProperties: false
+
+required:
+  - compatible
+  - devfreq
+
+additionalProperties: false
+
+examples:
+  - |
+    cpu-memstall {
+        compatible = "google,zuma-cpu-memstall";
+        devfreq = <&bus_dsu>, <&bus_bci>;
+
+        cluster-0 {
+            cpus = <&cpu0>, <&cpu1>, <&cpu2>, <&cpu3>;
+            google,mem-stall-threshold-permille = <175>;
+            /*          CPU      DSU      BCI */
+            google,freq-map-khz = < 820000  820000  840000>,
+                                  < 955000  970000  951000>,
+                                  <1098000 1197000 1205000>;
+        };
+    };
