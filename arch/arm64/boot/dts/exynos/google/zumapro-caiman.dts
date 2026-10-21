@@ -213,10 +213,6 @@
 	status = "okay";
 };
 
-&dpp1 {
-	status = "okay";
-};
-
 &dp {
 	status = "okay";
 };
@@ -240,24 +236,80 @@
 	};
 };
 
-&dpp0 {
+&dpp_l0 {
 	status = "okay";
 };
 
-&dpp_g0 {
+&dpp_l1 {
 	status = "okay";
 };
 
-&dpp_g1 {
+&dpp_l2 {
 	status = "okay";
 };
 
-&dpp_g2 {
+&dpp_l3 {
 	status = "okay";
 };
 
-&dpp_g3 {
+&dpp_l4 {
 	status = "okay";
+};
+
+&dpp_l5 {
+	status = "okay";
+};
+
+&dpp_l6 {
+	status = "okay";
+};
+
+&dpp_l7 {
+	status = "okay";
+};
+
+&dpp_l8 {
+	status = "okay";
+};
+
+&dpp_l9 {
+	status = "okay";
+};
+
+&dpp_l10 {
+	status = "okay";
+};
+
+&dpp_l11 {
+	status = "okay";
+};
+
+&dpp_l12 {
+	status = "okay";
+};
+
+&dpp_l13 {
+	status = "okay";
+};
+
+/*
+ * DECON1 drives the DisplayPort here and takes channel 6 for it, so
+ * DECON0 gives that one up and keeps the other thirteen.
+ */
+&decon0 {
+	dpps = <&dpp_l0>,
+		       <&dpp_l1>,
+		       <&dpp_l2>,
+		       <&dpp_l3>,
+		       <&dpp_l4>,
+		       <&dpp_l5>,
+		       <&dpp_l7>,
+		       <&dpp_l8>,
+		       <&dpp_l9>,
+		       <&dpp_l10>,
+		       <&dpp_l11>,
+		       <&dpp_l12>,
+		       <&dpp_l13>;
 };
 
 &dsim0 {
