@@ -39,6 +39,14 @@
  */
 #define CHG_ILIM_FALLBACK_UA			1500000
 
+/*
+ * How often to re-evaluate the charge tier while charging. The battery moves
+ * between tiers over minutes, and each evaluation is two I2C reads.
+ */
+#define CHG_TIER_POLL_MS			30000
+/* Three times the CHG_CV_PRM step, as the vendor policy uses. */
+#define CHG_TIER_HEADROOM_UV			30000
+
 #define MAX_NUM_RETRIES				3
 #define PSY_WORK_RETRY_DELAY_MS			10
 
@@ -72,6 +80,20 @@ static const struct linear_range chgin_ilim_ranges[] = {
 #define CHG_DTLS_OFF_JEITA			0xc
 #define CHG_DTLS_OFF_TEMP			0xd
 
+/*
+ * The vendor charge table: a constant-voltage tier is picked from the battery
+ * voltage and a temperature band from its temperature, and the two select the
+ * charge current. A zero current means this tier is not allowed at this
+ * temperature, which is how the profile keeps a cold cell off the high tiers.
+ */
+struct max77779_chg_profile {
+	u32 *temp_limits;	/* deci-degrees C, n_temp of them */
+	u32 *volt_limits;	/* uV, n_volt of them */
+	u32 *cc_limits;		/* uA, (n_temp - 1) rows of n_volt */
+	int n_temp;
+	int n_volt;
+};
+
 struct max77779_charger {
 	struct device *dev;
 	struct regmap *regmap;
@@ -86,6 +108,11 @@ struct max77779_charger {
 	struct gpio_desc *ext_bst_ctl;
 	struct mutex lock; /* protects mode */
 	enum max77779_chgr_mode mode;
+	struct max77779_chg_profile profile;
+	struct power_supply *fg_psy;
+	struct delayed_work tier_work;
+	int tier_temp_idx;
+	int tier_volt_idx;
 };
 
 /* The CHG_CNFG_* registers CHGPROT gates drop writes silently while locked. */
@@ -194,10 +221,20 @@ static int get_fast_charge_current(struct max77779_charger *chg)
 	return ret ? ret : val;
 }
 
+/*
+ * A battery profile states what the cell will take, which on this board is more
+ * than the charge path can deliver -- 1.2C is 5.47A against a 4.0A ceiling. Clamp
+ * rather than refuse, or asking for the cell's real limit fails the request.
+ */
 static int set_fast_charge_current(struct max77779_charger *chg, u32 cc_ua)
 {
+	const struct linear_range *last =
+		&chgcc_limit_ranges[ARRAY_SIZE(chgcc_limit_ranges) - 1];
 	u32 regval;
 	bool found;
+
+	cc_ua = clamp(cc_ua, chgcc_limit_ranges[0].min,
+		      linear_range_get_max_value(last));
 
 	linear_range_get_selector_high_array(chgcc_limit_ranges,
 					     ARRAY_SIZE(chgcc_limit_ranges),
@@ -474,6 +511,198 @@ static const struct regulator_desc max77779_otg_desc = {
 	.n_voltages = 1,
 };
 
+/*
+ * Both indices follow the vendor policy exactly. The tier climbs while the
+ * battery is above a limit, and then one further if it is within headroom of
+ * the next one, so that the tier can still deliver its current rather than
+ * sitting in constant voltage at the bottom of it.
+ */
+static int tier_temp_idx(const struct max77779_chg_profile *p, int temp)
+{
+	int i = 0;
+
+	while (i < p->n_temp - 2 && temp >= p->temp_limits[i + 1])
+		i++;
+
+	return i;
+}
+
+static int tier_volt_idx(const struct max77779_chg_profile *p, int vbatt)
+{
+	int i = 0;
+
+	while (i < p->n_volt - 1 && vbatt > p->volt_limits[i])
+		i++;
+
+	if (i != p->n_volt - 1 &&
+	    p->volt_limits[i] - vbatt < CHG_TIER_HEADROOM_UV)
+		i++;
+
+	return i;
+}
+
+static bool tier_temp_in_range(const struct max77779_chg_profile *p, int temp)
+{
+	return temp >= p->temp_limits[0] &&
+	       temp < p->temp_limits[p->n_temp - 1];
+}
+
+/*
+ * Only steer the charger when it is actually charging or idle on an input:
+ * anything else means OTG is sourcing VBUS and the mode is not ours to touch.
+ */
+static bool tier_mode_is_ours(struct max77779_charger *chg)
+{
+	guard(mutex)(&chg->lock);
+
+	return chg->mode == MAX77779_CHGR_MODE_CHGR_BUCK_ON ||
+	       chg->mode == MAX77779_CHGR_MODE_BUCK_ON;
+}
+
+static void tier_work_item(struct work_struct *work)
+{
+	struct max77779_charger *chg =
+		container_of(work, struct max77779_charger, tier_work.work);
+	const struct max77779_chg_profile *p = &chg->profile;
+	union power_supply_propval temp, vbatt;
+	int ti, vi, cc_ua, ret;
+
+	if (!tier_mode_is_ours(chg) || get_online(chg) <= 0)
+		return;
+
+	ret = power_supply_get_property(chg->fg_psy, POWER_SUPPLY_PROP_TEMP,
+					&temp);
+	if (!ret)
+		ret = power_supply_get_property(chg->fg_psy,
+						POWER_SUPPLY_PROP_VOLTAGE_NOW,
+						&vbatt);
+	if (ret) {
+		dev_warn_ratelimited(chg->dev,
+				     "no battery temperature or voltage (%d); leaving the charge tier alone\n",
+				     ret);
+		goto rearm;
+	}
+
+	if (!tier_temp_in_range(p, temp.intval)) {
+		if (chg->tier_temp_idx != -1)
+			dev_info(chg->dev,
+				 "battery at %d.%d C is outside the charge profile; charging off\n",
+				 temp.intval / 10, abs(temp.intval % 10));
+		chg->tier_temp_idx = -1;
+		charger_set_mode(chg, MAX77779_CHGR_MODE_BUCK_ON);
+		goto rearm;
+	}
+
+	ti = tier_temp_idx(p, temp.intval);
+	vi = tier_volt_idx(p, vbatt.intval);
+	cc_ua = p->cc_limits[ti * p->n_volt + vi];
+
+	if (ti == chg->tier_temp_idx && vi == chg->tier_volt_idx)
+		goto rearm;
+
+	if (!cc_ua) {
+		dev_info(chg->dev,
+			 "charge tier %d.%03d V is not allowed at %d.%d C; charging off\n",
+			 p->volt_limits[vi] / 1000000,
+			 p->volt_limits[vi] % 1000000 / 1000,
+			 temp.intval / 10, abs(temp.intval % 10));
+		charger_set_mode(chg, MAX77779_CHGR_MODE_BUCK_ON);
+	} else {
+		ret = set_float_voltage(chg, p->volt_limits[vi]);
+		if (!ret)
+			ret = set_fast_charge_current(chg, cc_ua);
+		if (ret) {
+			dev_warn(chg->dev, "cannot apply charge tier: %d\n",
+				 ret);
+			goto rearm;
+		}
+
+		charger_set_mode(chg, MAX77779_CHGR_MODE_CHGR_BUCK_ON);
+		dev_info(chg->dev,
+			 "charge tier %d.%03d V at %d mA (%d.%d C)\n",
+			 p->volt_limits[vi] / 1000000,
+			 p->volt_limits[vi] % 1000000 / 1000, cc_ua / 1000,
+			 temp.intval / 10, abs(temp.intval % 10));
+	}
+
+	chg->tier_temp_idx = ti;
+	chg->tier_volt_idx = vi;
+
+rearm:
+	schedule_delayed_work(&chg->tier_work,
+			      msecs_to_jiffies(CHG_TIER_POLL_MS));
+}
+
+/*
+ * Charge currents are a percentage of the pack capacity in the device tree, as
+ * in the vendor profile, so that one table describes a cell rather than a cell
+ * in a particular phone.
+ */
+static int max77779_charger_parse_profile(struct max77779_charger *chg,
+					  u32 capacity_ua)
+{
+	struct max77779_chg_profile *p = &chg->profile;
+	struct fwnode_handle *node;
+	int rows, i, ret;
+
+	node = fwnode_find_reference(dev_fwnode(chg->dev), "monitored-battery",
+				     0);
+	if (IS_ERR(node))
+		return -ENODEV;
+
+	p->n_temp = fwnode_property_count_u32(node, "google,chg-temp-limits");
+	p->n_volt = fwnode_property_count_u32(node, "google,chg-cv-limits");
+	if (p->n_temp < 3 || p->n_volt < 1) {
+		ret = -ENODEV;
+		goto out;
+	}
+
+	rows = p->n_temp - 1;
+
+	if (fwnode_property_count_u32(node, "google,chg-cc-limits") !=
+	    rows * p->n_volt) {
+		dev_err(chg->dev,
+			"google,chg-cc-limits must be %d by %d\n", rows,
+			p->n_volt);
+		ret = -EINVAL;
+		goto out;
+	}
+
+	p->temp_limits = devm_kcalloc(chg->dev, p->n_temp,
+				      sizeof(*p->temp_limits), GFP_KERNEL);
+	p->volt_limits = devm_kcalloc(chg->dev, p->n_volt,
+				      sizeof(*p->volt_limits), GFP_KERNEL);
+	p->cc_limits = devm_kcalloc(chg->dev, rows * p->n_volt,
+				    sizeof(*p->cc_limits), GFP_KERNEL);
+	if (!p->temp_limits || !p->volt_limits || !p->cc_limits) {
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	ret = fwnode_property_read_u32_array(node, "google,chg-temp-limits",
+					     p->temp_limits, p->n_temp);
+	if (!ret)
+		ret = fwnode_property_read_u32_array(node,
+						     "google,chg-cv-limits",
+						     p->volt_limits,
+						     p->n_volt);
+	if (!ret)
+		ret = fwnode_property_read_u32_array(node,
+						     "google,chg-cc-limits",
+						     p->cc_limits,
+						     rows * p->n_volt);
+	if (ret)
+		goto out;
+
+	/* percent of the pack's mAh, to uA: pct * mAh * 10 */
+	for (i = 0; i < rows * p->n_volt; i++)
+		p->cc_limits[i] = p->cc_limits[i] * (capacity_ua / 1000) * 10;
+
+out:
+	fwnode_handle_put(node);
+	return ret;
+}
+
 static void psy_work_item(struct work_struct *work)
 {
 	struct max77779_charger *chg =
@@ -507,7 +736,13 @@ static void psy_work_item(struct work_struct *work)
 		}
 
 		charger_set_mode(chg, MAX77779_CHGR_MODE_CHGR_BUCK_ON);
+
+		if (chg->fg_psy)
+			mod_delayed_work(system_wq, &chg->tier_work, 0);
 	} else {
+		cancel_delayed_work(&chg->tier_work);
+		chg->tier_temp_idx = -1;
+		chg->tier_volt_idx = -1;
 		charger_set_mode(chg, MAX77779_CHGR_MODE_ALL_OFF);
 	}
 
@@ -633,6 +868,25 @@ static int max77779_charger_probe(struct platform_device *pdev)
 	} else {
 		fv = info->constant_charge_voltage_max_uv;
 		fast_chg_curr = info->constant_charge_current_max_ua;
+
+		/*
+		 * With a charge table the limits above are only a ceiling:
+		 * tier_work_item() walks the table and lowers both to what the
+		 * battery's temperature and voltage allow. Without one, or
+		 * without a gauge to read, they stand as the fixed setting.
+		 */
+		if (info->charge_full_design_uah > 0 &&
+		    !max77779_charger_parse_profile(chg,
+						    info->charge_full_design_uah)) {
+			chg->fg_psy = devm_power_supply_get_by_reference(dev,
+							       "fuel-gauge");
+			if (IS_ERR(chg->fg_psy)) {
+				dev_warn(dev,
+					 "no fuel-gauge (%ld); charging at the profile ceiling\n",
+					 PTR_ERR(chg->fg_psy));
+				chg->fg_psy = NULL;
+			}
+		}
 	}
 
 	ret = set_fast_charge_current(chg, fast_chg_curr);
@@ -657,6 +911,12 @@ static int max77779_charger_probe(struct platform_device *pdev)
 	ret = unlock_prot_regs(chg, false);
 	if (ret)
 		return dev_err_probe(dev, ret, "Failed to relock CHGPROT\n");
+
+	chg->tier_temp_idx = -1;
+	chg->tier_volt_idx = -1;
+	ret = devm_delayed_work_autocancel(dev, &chg->tier_work, tier_work_item);
+	if (ret)
+		return ret;
 
 	ret = devm_delayed_work_autocancel(dev, &chg->psy_work, psy_work_item);
 	if (ret)

@@ -378,7 +378,13 @@ static const struct mfd_cell max77779_maxq_cells[] = {
 };
 
 static const struct mfd_cell max77779_charger_cells[] = {
-	MFD_CELL_RES("max77779-charger", max77779_charger_resources),
+	/*
+	 * Matched to a child node so the charger can be told which battery it
+	 * is charging; without one it has no of_node and falls back to its
+	 * conservative built-in limits.
+	 */
+	MFD_CELL_OF("max77779-charger", max77779_charger_resources, NULL, 0, 0,
+		    "maxim,max77779-charger"),
 };
 
 int max77779_maxq_command(struct max77779 *max77779,
