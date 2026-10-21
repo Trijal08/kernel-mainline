@@ -650,17 +650,22 @@ static int max77779_fg_probe(struct i2c_client *client)
 	    !(fstat & MAX77779_FG_FSTAT_DNR))
 		return 0;
 
+	/*
+	 * A failed load must not take the power supply down with it: voltage,
+	 * current and temperature do not depend on the model, and reporting
+	 * those beats reporting nothing.
+	 */
 	ret = max77779_fg_load_from_fwnode(client, fg);
-	if (ret == -ENODATA) {
+	if (ret == -ENODATA)
 		dev_warn(dev,
 			 "model not ready (Status=0x%04x FStat=0x%04x) and no maxim,fg-model in DT; state-of-charge unavailable\n",
 			 status, fstat);
-		return 0;
-	}
-	if (ret)
-		return dev_err_probe(dev, ret, "cannot load the battery model\n");
-
-	dev_info(dev, "battery model loaded after POR\n");
+	else if (ret)
+		dev_warn(dev,
+			 "cannot load the battery model (%d); state-of-charge unavailable\n",
+			 ret);
+	else
+		dev_info(dev, "battery model loaded after POR\n");
 
 	return 0;
 }
