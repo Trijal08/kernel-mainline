@@ -4851,6 +4851,50 @@ static int dp_audio_rate_index(u32 ls_clk)
 	}
 }
 
+/*
+ * Width of the container a sample arrives in, which is not the width of the
+ * sample: a 24-bit sample is three bytes in S24_3LE and four in S24_LE, and
+ * the block has to be told which, because the burst size and the container
+ * select below are counted in the container.
+ *
+ * snd_pcm_format_physical_width() answers this, but it lives in the PCM core,
+ * which is a module in most configurations while this driver is not; calling
+ * it leaves vmlinux with an undefined symbol. Only the widths the switch in
+ * exynos_drm_dp_audio_prepare() accepts can reach here, so the handful of
+ * formats that carry them is short enough to say out loud. The values are
+ * the ones in sound/core/pcm_misc.c.
+ */
+static int dp_audio_container_width(snd_pcm_format_t fmt)
+{
+	switch (fmt) {
+	case SNDRV_PCM_FORMAT_S16_LE:
+	case SNDRV_PCM_FORMAT_S16_BE:
+	case SNDRV_PCM_FORMAT_U16_LE:
+	case SNDRV_PCM_FORMAT_U16_BE:
+		return 16;
+	case SNDRV_PCM_FORMAT_S20_3LE:
+	case SNDRV_PCM_FORMAT_S20_3BE:
+	case SNDRV_PCM_FORMAT_U20_3LE:
+	case SNDRV_PCM_FORMAT_U20_3BE:
+	case SNDRV_PCM_FORMAT_S24_3LE:
+	case SNDRV_PCM_FORMAT_S24_3BE:
+	case SNDRV_PCM_FORMAT_U24_3LE:
+	case SNDRV_PCM_FORMAT_U24_3BE:
+		return 24;
+	case SNDRV_PCM_FORMAT_S20_LE:
+	case SNDRV_PCM_FORMAT_S20_BE:
+	case SNDRV_PCM_FORMAT_U20_LE:
+	case SNDRV_PCM_FORMAT_U20_BE:
+	case SNDRV_PCM_FORMAT_S24_LE:
+	case SNDRV_PCM_FORMAT_S24_BE:
+	case SNDRV_PCM_FORMAT_U24_LE:
+	case SNDRV_PCM_FORMAT_U24_BE:
+		return 32;
+	default:
+		return -EINVAL;
+	}
+}
+
 static int exynos_drm_dp_audio_prepare(struct drm_bridge *bridge,
 				       struct drm_connector *connector,
 				       struct hdmi_codec_daifmt *fmt,
@@ -4860,7 +4904,7 @@ static int exynos_drm_dp_audio_prepare(struct drm_bridge *bridge,
 	struct exynos_dp_subdev *sd = dp->subdev;
 	u8 frame[HDMI_INFOFRAME_SIZE(AUDIO)];
 	u32 id = sd->id, ls_clk, burst, pcm_size, word_len, word_max, ch, fs;
-	int phys = snd_pcm_format_physical_width(fmt->bit_fmt);
+	int phys = dp_audio_container_width(fmt->bit_fmt);
 
 	if (sd->state != DP_STATE_ON)
 		return -ENODEV;
