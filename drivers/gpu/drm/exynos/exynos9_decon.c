@@ -145,14 +145,6 @@ struct decon_cal_info {
 #define DECON_HEIGHT_MIN 8
 #define DECON_HEIGHT_MAX 8192
 
-struct decon_win {
-	u32 idx;
-	struct decon_win_config config;
-	struct exynos_dpp_context *dpp;
-	struct exynos_drm_plane plane;
-	struct exynos_drm_plane_config plane_config;
-};
-
 #ifndef MSEC
 #define MSEC (1000)
 #endif
@@ -1815,14 +1807,24 @@ static const struct exynos_drm_crtc_ops decon_crtc_ops = {
 	.atomic_flush = decon_atomic_flush,
 };
 
-static enum drm_plane_type decon_get_win_type(int win_idx, int last_idx)
-{
-	if (win_idx == 0)
-		return DRM_PLANE_TYPE_PRIMARY;
-	else if (win_idx == last_idx)
-		return DRM_PLANE_TYPE_CURSOR;
-	else
-		return DRM_PLANE_TYPE_OVERLAY;
+static const enum drm_plane_type decon_win_types[WINDOWS_NR] = {
+	[PRIMARY_WIN] = DRM_PLANE_TYPE_PRIMARY,
+	[CURSOR_WIN] = DRM_PLANE_TYPE_CURSOR,
+};
+
+/*
+ * The primary sits at the bottom of the blender, so it has nothing beneath it
+ * to blend with and advertises neither alpha nor a blend mode. Every window
+ * above it does: decon_update_plane() programs WINx_ALPHA from the plane's
+ * alpha and the per-pixel blend function from its blend mode.
+ */
+static const unsigned int capabilities[WINDOWS_NR] = {
+	[PRIMARY_WIN] = 0,
+	[1] = EXYNOS_DRM_PLANE_CAP_WIN_BLEND | EXYNOS_DRM_PLANE_CAP_PIX_BLEND,
+	[2] = EXYNOS_DRM_PLANE_CAP_WIN_BLEND | EXYNOS_DRM_PLANE_CAP_PIX_BLEND,
+	[3] = EXYNOS_DRM_PLANE_CAP_WIN_BLEND | EXYNOS_DRM_PLANE_CAP_PIX_BLEND,
+	[CURSOR_WIN] = EXYNOS_DRM_PLANE_CAP_WIN_BLEND |
+		       EXYNOS_DRM_PLANE_CAP_PIX_BLEND,
 };
 
 /*
@@ -1845,12 +1847,13 @@ static const u32 dpp_gf_formats[] = {
  * would back this DECON's planes with the channel already feeding another
  * one, so disabling an unused plane here would stop that DECON's scanout.
  */
-static struct exynos_dpp_context *decon_find_dpp(struct device *dev)
+static struct exynos_dpp_context *decon_find_dpp(struct device *dev,
+						unsigned int index)
 {
 	struct device_node *np;
 	struct platform_device *pdev;
 
-	np = of_parse_phandle(dev->of_node, "dpps", 0);
+	np = of_parse_phandle(dev->of_node, "dpps", index);
 	if (!np)
 		return NULL;
 
@@ -1866,8 +1869,6 @@ static int decon_bind(struct device *dev, struct device *master, void *data)
 {
 	struct decon_context *ctx = dev_get_drvdata(dev);
 	struct drm_device *drm_dev = data;
-	struct drm_plane *primary_plane = NULL;
-
 	int i, ret = 0;
 
 	/*
@@ -1879,8 +1880,6 @@ static int decon_bind(struct device *dev, struct device *master, void *data)
 	 * decon_reg_stop/SRESET).
 	 */
 
-	struct exynos_dpp_context *dpp = decon_find_dpp(dev);
-
 	ctx->drm_dev = drm_dev;
 
 	/*
@@ -1891,36 +1890,37 @@ static int decon_bind(struct device *dev, struct device *master, void *data)
 	 * geometry over the panel's 1280x2856 window, blacking out everything
 	 * below line 1080 and leaving neither DECON with a sane window.
 	 *
-	 * Carve the bank up statically, one quarter per DECON. The vendor hands
-	 * windows out dynamically from a driver-wide available_win_mask.
+	 * Carve the bank up statically instead, WINDOWS_NR per DECON, which is
+	 * decided in decon_probe(). The vendor hands windows out dynamically
+	 * from a driver-wide available_win_mask.
 	 */
 	for (i = 0; i < ctx->win_cnt; i++) {
 		struct decon_win *win = &ctx->win[i];
 
-		ctx->win[i].dpp = dpp;
-		win->idx = ctx->idx * (MAX_WIN_PER_DECON / 2) + i;
+		win->dpp = decon_find_dpp(dev, i);
+		win->idx = ctx->first_win + i;
 
-		if (!dpp)
+		if (!win->dpp)
 			continue;
 
 		win->plane_config.pixel_formats = dpp_gf_formats;
 		win->plane_config.num_pixel_formats = ARRAY_SIZE(dpp_gf_formats);
 		win->plane_config.zpos = i;
-		win->plane_config.type =
-			decon_get_win_type(i, ctx->win_cnt - 1);
+		win->plane_config.type = decon_win_types[i];
+		win->plane_config.capabilities = capabilities[i];
 
 		ret = exynos_plane_init(drm_dev, &win->plane, i,
 					&win->plane_config);
 		if (ret)
 			return ret;
-
-		if (win->plane_config.type == DRM_PLANE_TYPE_PRIMARY)
-			primary_plane = &win->plane.base;
-		// if (win->plane_config.type == DRM_PLANE_TYPE_CURSOR)
-		//	cursor_plane = &win->plane.base;
 	}
 
-	ctx->crtc = exynos_drm_crtc_create(drm_dev, primary_plane,
+	if (!ctx->win[PRIMARY_WIN].dpp)
+		return dev_err_probe(dev, -ENODEV,
+				     "no channel for the primary window\n");
+
+	ctx->crtc = exynos_drm_crtc_create(drm_dev,
+					   &ctx->win[PRIMARY_WIN].plane.base,
 					   EXYNOS_DISPLAY_TYPE_LCD,
 					   &decon_crtc_ops, ctx);
 
@@ -2056,14 +2056,23 @@ static int decon_probe(struct platform_device *pdev)
 	}
 
 	ctx->type = 0;
-	ctx->win_max = 8;
 
-	ctx->win_cnt = 1;
-
-	ctx->win = devm_kcalloc(dev, ctx->win_max, sizeof(*ctx->win),
-				GFP_KERNEL);
-	if (!ctx->win)
-		return -ENOMEM;
+	/*
+	 * One window per channel the device tree gives this DECON, and a slice
+	 * of the shared window bank to put them in. Two DECONs must not land on
+	 * the same window: WIN_OFFSET indexes by window and the "win" reg
+	 * region is the same physical block in both DECON nodes.
+	 */
+	ret = of_count_phandle_with_args(dev->of_node, "dpps", NULL);
+	if (ret <= 0)
+		return dev_err_probe(dev, -EINVAL, "no dpps\n");
+	ctx->win_cnt = min_t(u32, ret, WINDOWS_NR);
+	ctx->first_win = ctx->idx * WINDOWS_NR;
+	if (ctx->first_win + ctx->win_cnt > MAX_WIN_PER_DECON)
+		return dev_err_probe(dev, -EINVAL,
+				     "windows %u..%u are outside the bank\n",
+				     ctx->first_win,
+				     ctx->first_win + ctx->win_cnt - 1);
 
 	ret = ctx->cal_ops->init(ctx, pdev);
 	if (ret)

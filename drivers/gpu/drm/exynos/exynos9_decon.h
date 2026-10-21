@@ -26,7 +26,7 @@ struct device;
 struct drm_device;
 struct clk;
 struct platform_device;
-struct decon_win;
+struct exynos_dpp_context;
 
 enum decon_type {
 	EXYNOS9_DECON0 = 0,
@@ -117,6 +117,26 @@ struct decon_win_config {
 	u32 dpp_type;
 };
 
+/* One window of the DECON's slice of the bank, and the channel feeding it. */
+struct decon_win {
+	u32 idx;
+	struct decon_win_config config;
+	struct exynos_dpp_context *dpp;
+	struct exynos_drm_plane plane;
+	struct exynos_drm_plane_config plane_config;
+};
+
+/*
+ * Windows this DECON registers as DRM planes, and which of them is the
+ * primary and the cursor. The hardware has a bank of windows shared between
+ * the DECONs and a pool of DPP/IDMA channels to feed them; a DECON takes a
+ * contiguous slice of the bank starting at @first_win and one channel per
+ * window from its "dpps" list.
+ */
+#define WINDOWS_NR	5
+#define PRIMARY_WIN	0
+#define CURSOR_WIN	(WINDOWS_NR - 1)
+
 struct decon_context {
 	u32 idx;
 	u32 plane_mask;
@@ -124,9 +144,9 @@ struct decon_context {
 	struct device *dev;
 	struct drm_device *drm_dev;
 	struct exynos_drm_crtc *crtc;
-	struct decon_win *win;
+	struct decon_win win[WINDOWS_NR];
 	u32 win_cnt;
-	u32 win_max;
+	u32 first_win;
 	u32 disable_mask;
 	struct videomode v_mode;
 	struct decon_config config;
