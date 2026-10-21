@@ -1,0 +1,56 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/media/google,zuma-bigwave.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Hantro G2 VPU codec on Google Zuma SoCs
+
+maintainers:
+  - Trijal Saha <trijalsaha2012@gmail.com>
+
+description: >
+  The video accelerator Google calls BigWave on its Zuma and Zuma Pro SoCs,
+  used for AV1 and VP9 decoding. It is a Hantro G2 class core, exposing the
+  same 4-byte-strided bank of swregs the other G2 cores do, with the hardware
+  identifier, the control word and the status word at its front.
+
+  The core has no clock of its own to name here. Its frequency follows the
+  power domain, which the firmware scales, so there is nothing for a consumer
+  to ask for.
+
+properties:
+  compatible:
+    const: google,zuma-bigwave
+
+  reg:
+    maxItems: 1
+
+  interrupts:
+    maxItems: 1
+
+  power-domains:
+    maxItems: 1
+
+  iommus:
+    maxItems: 1
+
+required:
+  - compatible
+  - reg
+  - interrupts
+  - power-domains
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/interrupt-controller/arm-gic.h>
+
+    vpu: video-codec@1a700000 {
+        compatible = "google,zuma-bigwave";
+        reg = <0x1a700000 0x860>;
+        interrupts = <GIC_SPI 523 IRQ_TYPE_LEVEL_HIGH>;
+        power-domains = <&pd_bw>;
+        iommus = <&sysmmu_bw>;
+    };
