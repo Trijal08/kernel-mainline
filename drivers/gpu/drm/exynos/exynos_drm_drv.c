@@ -103,7 +103,13 @@ static const struct drm_ioctl_desc exynos_ioctls[] = {
 
 DEFINE_DRM_GEM_FOPS(exynos_drm_driver_fops);
 
-static const struct drm_driver exynos_drm_driver = {
+/*
+ * Not const: exynos_drm_bind() clears DRIVER_RENDER here when nothing would
+ * answer on a render node. There is one of these devices per system, and the
+ * minor is created inside drm_dev_alloc(), so the feature cannot be dropped
+ * from the device afterwards -- it has to be gone before.
+ */
+static struct drm_driver exynos_drm_driver = {
 	.driver_features	= DRIVER_MODESET | DRIVER_GEM
 				  | DRIVER_ATOMIC | DRIVER_RENDER,
 	.open			= exynos_drm_open,
@@ -150,6 +156,7 @@ struct exynos_drm_driver_info {
 #define DRM_COMPONENT_DRIVER	BIT(0)	/* supports component framework */
 #define DRM_VIRTUAL_DEVICE	BIT(1)	/* create virtual platform device */
 #define DRM_FIMC_DEVICE		BIT(2)	/* devices shared with V4L2 subsystem */
+#define DRM_RENDER_DEVICE	BIT(3)	/* answers render-node ioctls */
 
 #define DRV_PTR(drv, cond) (IS_ENABLED(cond) ? &drv : NULL)
 
@@ -199,24 +206,56 @@ static struct exynos_drm_driver_info exynos_drm_drivers[] = {
 		DRM_COMPONENT_DRIVER | DRM_VIRTUAL_DEVICE
 	}, {
 		DRV_PTR(g2d_driver, CONFIG_DRM_EXYNOS_G2D),
-		DRM_COMPONENT_DRIVER
+		DRM_COMPONENT_DRIVER | DRM_RENDER_DEVICE
 	}, {
 		DRV_PTR(fimc_driver, CONFIG_DRM_EXYNOS_FIMC),
-		DRM_COMPONENT_DRIVER | DRM_FIMC_DEVICE,
+		DRM_COMPONENT_DRIVER | DRM_FIMC_DEVICE | DRM_RENDER_DEVICE,
 	}, {
 		DRV_PTR(rotator_driver, CONFIG_DRM_EXYNOS_ROTATOR),
-		DRM_COMPONENT_DRIVER
+		DRM_COMPONENT_DRIVER | DRM_RENDER_DEVICE
 	}, {
 		DRV_PTR(scaler_driver, CONFIG_DRM_EXYNOS_SCALER),
-		DRM_COMPONENT_DRIVER
+		DRM_COMPONENT_DRIVER | DRM_RENDER_DEVICE
 	}, {
 		DRV_PTR(gsc_driver, CONFIG_DRM_EXYNOS_GSC),
-		DRM_COMPONENT_DRIVER
+		DRM_COMPONENT_DRIVER | DRM_RENDER_DEVICE
 	}, {
 		&exynos_drm_platform_driver,
 		DRM_VIRTUAL_DEVICE
 	}
 };
+
+/*
+ * Whether anything behind a render node would answer. The G2D and IPP ioctls
+ * are the only render-allowed ones this driver has, and the devices that serve
+ * them do not exist on every SoC it covers - on the newer ones none of them do.
+ *
+ * A render node with nothing behind it is not merely useless, it is a decoy:
+ * userspace enumerates it, opens it looking for somewhere to allocate from,
+ * and then fails. Mesa hands it a scanout buffer request, gets -EACCES for the
+ * dumb-buffer ioctl because no render node may serve one, allocates on the GPU
+ * instead and finally cannot export the handle through this device at all.
+ */
+static bool exynos_drm_has_render_device(void)
+{
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(exynos_drm_drivers); ++i) {
+		const struct exynos_drm_driver_info *info = &exynos_drm_drivers[i];
+		struct device *d;
+
+		if (!info->driver || !(info->flags & DRM_RENDER_DEVICE))
+			continue;
+
+		d = platform_find_device_by_driver(NULL, &info->driver->driver);
+		if (d) {
+			put_device(d);
+			return true;
+		}
+	}
+
+	return false;
+}
 
 static struct component_match *exynos_drm_match_add(struct device *dev)
 {
@@ -251,6 +290,9 @@ static int exynos_drm_bind(struct device *dev)
 	struct drm_device *drm;
 	unsigned int clone_mask;
 	int ret;
+
+	if (!exynos_drm_has_render_device())
+		exynos_drm_driver.driver_features &= ~DRIVER_RENDER;
 
 	drm = drm_dev_alloc(&exynos_drm_driver, dev);
 	if (IS_ERR(drm))
