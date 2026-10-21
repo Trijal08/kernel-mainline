@@ -149,7 +149,12 @@ struct decon_cal_info {
 #define MSEC (1000)
 #endif
 
-#define MAX_WIN_PER_DECON 8
+/*
+ * Windows in the shared bank. The window registers are strided 0x1000 apart
+ * and the DECON's "win" region is 0xe000 long, so there are fourteen of them -
+ * the same number the vendor hands out from its available_win_mask.
+ */
+#define MAX_WIN_PER_DECON 14
 
 enum {
 	DPUM_DECON0 = 0,
@@ -284,7 +289,7 @@ static inline void decon_global_write_mask(u32 idx, u32 offset, u32 val,
 	val = (val & mask) | (old & ~mask);
 	decon_global_write(idx, offset, val);
 }
-static void __iomem *regs_win[MAX_EXYNOS910_DECON * 8];
+static void __iomem *regs_win[MAX_EXYNOS910_DECON * MAX_WIN_PER_DECON];
 static inline uint32_t win_read(u32 idx, u32 offset)
 {
 	return readl(regs_win[idx] + offset);
@@ -299,7 +304,7 @@ static inline void win_write_mask(u32 idx, u32 offset, u32 val, u32 mask)
 	val = (val & mask) | (old & ~mask);
 	win_write(idx, offset, val);
 }
-static void __iomem *regs_winctrl[MAX_EXYNOS910_DECON * 8];
+static void __iomem *regs_winctrl[MAX_EXYNOS910_DECON * MAX_WIN_PER_DECON];
 static inline uint32_t winctrl_read(u32 idx, u32 offset)
 {
 	return readl(regs_winctrl[idx] + offset);
@@ -1828,6 +1833,15 @@ static const unsigned int capabilities[WINDOWS_NR] = {
 	[1] = DECON_WIN_BLEND_CAPS,
 	[2] = DECON_WIN_BLEND_CAPS,
 	[3] = DECON_WIN_BLEND_CAPS,
+	[4] = DECON_WIN_BLEND_CAPS,
+	[5] = DECON_WIN_BLEND_CAPS,
+	[6] = DECON_WIN_BLEND_CAPS,
+	[7] = DECON_WIN_BLEND_CAPS,
+	[8] = DECON_WIN_BLEND_CAPS,
+	[9] = DECON_WIN_BLEND_CAPS,
+	[10] = DECON_WIN_BLEND_CAPS,
+	[11] = DECON_WIN_BLEND_CAPS,
+	[12] = DECON_WIN_BLEND_CAPS,
 	[CURSOR_WIN] = DECON_WIN_BLEND_CAPS,
 };
 
@@ -2071,7 +2085,14 @@ static int decon_probe(struct platform_device *pdev)
 	if (ret <= 0)
 		return dev_err_probe(dev, -EINVAL, "no dpps\n");
 	ctx->win_cnt = min_t(u32, ret, WINDOWS_NR);
-	ctx->first_win = ctx->idx * WINDOWS_NR;
+	/*
+	 * DECON0 takes its windows from the bottom of the bank and any other
+	 * DECON from the top, so two of them stay apart whatever number of
+	 * channels the device tree gives each. They overlap only if the lists
+	 * together ask for more windows than the bank holds, which is a
+	 * device tree to answer for.
+	 */
+	ctx->first_win = ctx->idx ? MAX_WIN_PER_DECON - ctx->win_cnt : 0;
 	if (ctx->first_win + ctx->win_cnt > MAX_WIN_PER_DECON)
 		return dev_err_probe(dev, -EINVAL,
 				     "windows %u..%u are outside the bank\n",
