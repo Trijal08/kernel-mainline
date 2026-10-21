@@ -4942,7 +4942,19 @@
 			clock-names = "aclk";
 			power-domains = <&pd_dpuf0>;
 			decon,id = <0>;
-			dpps = <&dpp0>;
+			/*
+			 * One channel per window, in window order, so the
+			 * first is the primary. GF0 keeps that job because it
+			 * is the channel the bootloader hands over already
+			 * feeding the panel; the G channels stack above it.
+			 *
+			 * Only GF0's IDMA interrupt is wired up (see the
+			 * dpu-dma node). The others fetch correctly without
+			 * it; what is lost is their error and recovery
+			 * reporting, not their pixels.
+			 */
+			dpps = <&dpp0>, <&dpp_g0>, <&dpp_g1>, <&dpp_g2>,
+			       <&dpp_g3>;
 			/*
 			 * The DECON is the CRTC/blender/output block; it issues no
 			 * framebuffer DMA of its own. Memory reads are done by the
@@ -5035,6 +5047,46 @@
 		 * the channel: this DPP (0x19930000 + id * 0x1000), the IDMA in
 		 * dpu_dma (0x19900000 + id * 0x1000), and the DECON's WIN_CHMAP.
 		 */
+		dpp_g0: dpp@19931000 {
+			compatible = "samsung,exynosauto-dpp";
+			reg = <0x19931000 0x1000>;	/* G0 */
+			dpp,id = <1>;
+			clocks = <&cmu_dpu CLK_GOUT_DPU_DECON0_ACLK>;
+			clock-names = "aclk";
+			power-domains = <&pd_dpuf0>;
+			status = "disabled";
+		};
+
+		dpp_g1: dpp@19932000 {
+			compatible = "samsung,exynosauto-dpp";
+			reg = <0x19932000 0x1000>;	/* G1 */
+			dpp,id = <2>;
+			clocks = <&cmu_dpu CLK_GOUT_DPU_DECON0_ACLK>;
+			clock-names = "aclk";
+			power-domains = <&pd_dpuf0>;
+			status = "disabled";
+		};
+
+		dpp_g2: dpp@19933000 {
+			compatible = "samsung,exynosauto-dpp";
+			reg = <0x19933000 0x1000>;	/* G2 */
+			dpp,id = <3>;
+			clocks = <&cmu_dpu CLK_GOUT_DPU_DECON0_ACLK>;
+			clock-names = "aclk";
+			power-domains = <&pd_dpuf0>;
+			status = "disabled";
+		};
+
+		dpp_g3: dpp@19934000 {
+			compatible = "samsung,exynosauto-dpp";
+			reg = <0x19934000 0x1000>;	/* G3 */
+			dpp,id = <4>;
+			clocks = <&cmu_dpu CLK_GOUT_DPU_DECON0_ACLK>;
+			clock-names = "aclk";
+			power-domains = <&pd_dpuf0>;
+			status = "disabled";
+		};
+
 		dpp0: dpp@19935000 {
 			compatible = "samsung,exynosauto-dpp";
 			reg = <0x19935000 0x1000>;	/* GF0 */

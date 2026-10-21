@@ -193,6 +193,22 @@
 	status = "okay";
 };
 
+&dpp_g0 {
+	status = "okay";
+};
+
+&dpp_g1 {
+	status = "okay";
+};
+
+&dpp_g2 {
+	status = "okay";
+};
+
+&dpp_g3 {
+	status = "okay";
+};
+
 &dsim0 {
 	status = "okay";
 
