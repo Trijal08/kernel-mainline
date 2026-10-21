@@ -2,6 +2,8 @@
 #ifndef _EXYNOSAUTO_DPU_DMA_H_
 #define _EXYNOSAUTO_DPU_DMA_H_
 
+#include <linux/pm_domain.h>
+
 #include "exynos_drm_drv.h"
 
 struct exynos_dpu_dma_context {
@@ -9,6 +11,8 @@ struct exynos_dpu_dma_context {
 	struct clk *aclk;
 	int irq;
 	void __iomem *regs;
+	void __iomem *regs_hi;
+	struct dev_pm_domain_list *pd_list;
 	void *dma_priv;
 };
 

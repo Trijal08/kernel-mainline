@@ -17,6 +17,8 @@
 #include <drm/drm_framebuffer.h>
 
 #include "exynos_drm_fb.h"
+#include <linux/pm_domain.h>
+
 #include "exynos_dpu_dma.h"
 
 #define DMA_SHD_OFFSET 0x0800
@@ -33,9 +35,13 @@
 
 /*
  * 1.1 - IDMA Register
- * < DMA.offset >
- *  G0      G1      G2      G3      GF0     GF1     VG0     VG1
- *  0x1000  0x2000  0x3000  0x4000  0x5000  0x6000  0x7000  0x8000
+ *
+ * One 0x1000 window per channel from the start of the block, so channel n is
+ * at n * 0x1000 -- channel 0 included, there is no common region in front of
+ * it. (An older comment here carried the Exynos Auto v9 layout, where the
+ * window names are shifted by one against the channel numbers; on this SoC the
+ * channel number and the window index are the same thing, which the vendor's
+ * own description agrees with: its layer 5 names 0x19905000.)
  */
 
 #define IDMA_ENABLE 0x0000
@@ -175,16 +181,33 @@
 #define IDMA_S_CFG_ERR_SRC_OFFSET_Y BIT(0)
 #define IDMA_S_CFG_ERR_GET(_v) (((_v) >> 0) & 0x7FF)
 
+/*
+ * The channels are split between two DPUF blocks, seven each, and the second
+ * block's registers are a separate region rather than a continuation of the
+ * first: channel 0 to 6 sit at DPUF0 + channel * 0x1000, channel 7 to 13 at
+ * DPUF1 + (channel - 7) * 0x1000. A device tree that describes only DPUF0
+ * leaves @regs_hi NULL and simply has no channels above six.
+ */
+#define DPU_DMA_CH_PER_BLOCK	7
+
+static inline void __iomem *dma_base(struct exynos_dpu_dma_context *ctx, u32 idx)
+{
+	if (idx < DPU_DMA_CH_PER_BLOCK)
+		return ctx->regs + 0x1000 * idx;
+
+	return ctx->regs_hi + 0x1000 * (idx - DPU_DMA_CH_PER_BLOCK);
+}
+
 static inline u32 dma_read(struct exynos_dpu_dma_context *ctx, u32 idx,
 				u32 offset)
 {
-	return readl(ctx->regs + 0x1000 * idx + offset);
+	return readl(dma_base(ctx, idx) + offset);
 }
 
 static inline u32 dma_read_mask(struct exynos_dpu_dma_context *ctx,
 				u32 idx, u32 offset, u32 mask)
 {
-	u32 val = readl(ctx->regs + 0x1000 * idx + offset);
+	u32 val = readl(dma_base(ctx, idx) + offset);
 
 	return val & mask;
 }
@@ -192,7 +215,7 @@ static inline u32 dma_read_mask(struct exynos_dpu_dma_context *ctx,
 static inline void dma_write(struct exynos_dpu_dma_context *ctx, u32 idx,
 			     u32 offset, u32 val)
 {
-	writel(val, ctx->regs + 0x1000 * idx + offset);
+	writel(val, dma_base(ctx, idx) + offset);
 }
 
 static inline void dma_write_mask(struct exynos_dpu_dma_context *ctx, u32 idx,
@@ -516,6 +539,24 @@ static int dpu_dma_probe(struct platform_device *pdev)
 	ctx->regs = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(ctx->regs))
 		return PTR_ERR(ctx->regs);
+
+	if (platform_get_resource(pdev, IORESOURCE_MEM, 1)) {
+		ctx->regs_hi = devm_platform_ioremap_resource(pdev, 1);
+		if (IS_ERR(ctx->regs_hi))
+			return PTR_ERR(ctx->regs_hi);
+
+		/*
+		 * The second block's registers are in a power domain of their
+		 * own, so both have to follow this device. The driver core
+		 * attaches a power domain by itself only when the device names
+		 * exactly one, so with two named here nothing is attached
+		 * until this is called.
+		 */
+		ret = devm_pm_domain_attach_list(dev, NULL, &ctx->pd_list);
+		if (ret < 0)
+			return dev_err_probe(dev, ret,
+					     "cannot attach the power domains\n");
+	}
 
 	ctx->irq = platform_get_irq(pdev, 0);
 	if (ctx->irq < 0)
