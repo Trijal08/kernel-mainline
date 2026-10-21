@@ -133,7 +133,7 @@ struct decon_win {
  * contiguous slice of the bank starting at @first_win and one channel per
  * window from its "dpps" list.
  */
-#define WINDOWS_NR	5
+#define WINDOWS_NR	14
 #define PRIMARY_WIN	0
 #define CURSOR_WIN	(WINDOWS_NR - 1)
 
