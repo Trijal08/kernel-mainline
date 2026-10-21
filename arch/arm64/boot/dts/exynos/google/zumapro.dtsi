@@ -4953,8 +4953,20 @@
 			 * it; what is lost is their error and recovery
 			 * reporting, not their pixels.
 			 */
-			dpps = <&dpp0>, <&dpp_g0>, <&dpp_g1>, <&dpp_g2>,
-			       <&dpp_g3>;
+			dpps = <&dpp_l0>,
+			       <&dpp_l1>,
+			       <&dpp_l2>,
+			       <&dpp_l3>,
+			       <&dpp_l4>,
+			       <&dpp_l5>,
+			       <&dpp_l6>,
+			       <&dpp_l7>,
+			       <&dpp_l8>,
+			       <&dpp_l9>,
+			       <&dpp_l10>,
+			       <&dpp_l11>,
+			       <&dpp_l12>,
+			       <&dpp_l13>;
 			/*
 			 * The DECON is the CRTC/blender/output block; it issues no
 			 * framebuffer DMA of its own. Memory reads are done by the
@@ -5000,7 +5012,7 @@
 			clock-names = "aclk";
 			power-domains = <&pd_dpuf0>;
 			decon,id = <1>;
-			dpps = <&dpp1>;
+			dpps = <&dpp_l6>;
 
 			status = "disabled";
 
@@ -5024,11 +5036,12 @@
 		 */
 		dpu_dma: dma-controller@19900000 {
 			compatible = "samsung,exynosauto-dpu-dma";
-			reg = <0x19900000 0x9000>;
+			reg = <0x19900000 0x7000>,	/* DPUF0 ch0-6  */
+			      <0x19d00000 0x7000>;	/* DPUF1 ch7-13 */
 			interrupts = <GIC_SPI 261 IRQ_TYPE_LEVEL_HIGH 0>; /* IDMA GF0 (ch5) */
 			clocks = <&cmu_dpu CLK_GOUT_DPU_DECON0_ACLK>;
 			clock-names = "aclk";
-			power-domains = <&pd_dpuf0>;
+			power-domains = <&pd_dpuf0>, <&pd_dpuf1>;
 			/*
 			 * The IDMA is the DPU's memory master. Route it through the
 			 * v9 DPU SysMMUs (mainline exynos-iommu gained v9 support),
@@ -5047,9 +5060,27 @@
 		 * the channel: this DPP (0x19930000 + id * 0x1000), the IDMA in
 		 * dpu_dma (0x19900000 + id * 0x1000), and the DECON's WIN_CHMAP.
 		 */
-		dpp_g0: dpp@19931000 {
+		/*
+		 * The DPU's fetch channels. The channel number is the one index
+		 * the whole path shares: the DECON's WIN_CHMAP selects it, the
+		 * DPP block sits at 0x19930000 + channel * 0x1000 and the IDMA
+		 * at 0x19900000 + channel * 0x1000. The upper seven channels
+		 * live in the second DPUF block instead, 0x19d30000 and
+		 * 0x19d00000, and in its power domain.
+		 */
+		dpp_l0: dpp@19930000 {
 			compatible = "samsung,exynosauto-dpp";
-			reg = <0x19931000 0x1000>;	/* G0 */
+			reg = <0x19930000 0x1000>;
+			dpp,id = <0>;
+			clocks = <&cmu_dpu CLK_GOUT_DPU_DECON0_ACLK>;
+			clock-names = "aclk";
+			power-domains = <&pd_dpuf0>;
+			status = "disabled";
+		};
+
+		dpp_l1: dpp@19931000 {
+			compatible = "samsung,exynosauto-dpp";
+			reg = <0x19931000 0x1000>;
 			dpp,id = <1>;
 			clocks = <&cmu_dpu CLK_GOUT_DPU_DECON0_ACLK>;
 			clock-names = "aclk";
@@ -5057,9 +5088,9 @@
 			status = "disabled";
 		};
 
-		dpp_g1: dpp@19932000 {
+		dpp_l2: dpp@19932000 {
 			compatible = "samsung,exynosauto-dpp";
-			reg = <0x19932000 0x1000>;	/* G1 */
+			reg = <0x19932000 0x1000>;
 			dpp,id = <2>;
 			clocks = <&cmu_dpu CLK_GOUT_DPU_DECON0_ACLK>;
 			clock-names = "aclk";
@@ -5067,9 +5098,9 @@
 			status = "disabled";
 		};
 
-		dpp_g2: dpp@19933000 {
+		dpp_l3: dpp@19933000 {
 			compatible = "samsung,exynosauto-dpp";
-			reg = <0x19933000 0x1000>;	/* G2 */
+			reg = <0x19933000 0x1000>;
 			dpp,id = <3>;
 			clocks = <&cmu_dpu CLK_GOUT_DPU_DECON0_ACLK>;
 			clock-names = "aclk";
@@ -5077,9 +5108,9 @@
 			status = "disabled";
 		};
 
-		dpp_g3: dpp@19934000 {
+		dpp_l4: dpp@19934000 {
 			compatible = "samsung,exynosauto-dpp";
-			reg = <0x19934000 0x1000>;	/* G3 */
+			reg = <0x19934000 0x1000>;
 			dpp,id = <4>;
 			clocks = <&cmu_dpu CLK_GOUT_DPU_DECON0_ACLK>;
 			clock-names = "aclk";
@@ -5087,9 +5118,9 @@
 			status = "disabled";
 		};
 
-		dpp0: dpp@19935000 {
+		dpp_l5: dpp@19935000 {
 			compatible = "samsung,exynosauto-dpp";
-			reg = <0x19935000 0x1000>;	/* GF0 */
+			reg = <0x19935000 0x1000>;
 			dpp,id = <5>;
 			clocks = <&cmu_dpu CLK_GOUT_DPU_DECON0_ACLK>;
 			clock-names = "aclk";
@@ -5097,13 +5128,83 @@
 			status = "disabled";
 		};
 
-		dpp1: dpp@19936000 {
+		dpp_l6: dpp@19936000 {
 			compatible = "samsung,exynosauto-dpp";
-			reg = <0x19936000 0x1000>;	/* GF1 */
+			reg = <0x19936000 0x1000>;
 			dpp,id = <6>;
 			clocks = <&cmu_dpu CLK_GOUT_DPU_DECON0_ACLK>;
 			clock-names = "aclk";
 			power-domains = <&pd_dpuf0>;
+			status = "disabled";
+		};
+
+		dpp_l7: dpp@19d30000 {
+			compatible = "samsung,exynosauto-dpp";
+			reg = <0x19d30000 0x1000>;
+			dpp,id = <7>;
+			clocks = <&cmu_dpu CLK_GOUT_DPU_DECON0_ACLK>;
+			clock-names = "aclk";
+			power-domains = <&pd_dpuf1>;
+			status = "disabled";
+		};
+
+		dpp_l8: dpp@19d31000 {
+			compatible = "samsung,exynosauto-dpp";
+			reg = <0x19d31000 0x1000>;
+			dpp,id = <8>;
+			clocks = <&cmu_dpu CLK_GOUT_DPU_DECON0_ACLK>;
+			clock-names = "aclk";
+			power-domains = <&pd_dpuf1>;
+			status = "disabled";
+		};
+
+		dpp_l9: dpp@19d32000 {
+			compatible = "samsung,exynosauto-dpp";
+			reg = <0x19d32000 0x1000>;
+			dpp,id = <9>;
+			clocks = <&cmu_dpu CLK_GOUT_DPU_DECON0_ACLK>;
+			clock-names = "aclk";
+			power-domains = <&pd_dpuf1>;
+			status = "disabled";
+		};
+
+		dpp_l10: dpp@19d33000 {
+			compatible = "samsung,exynosauto-dpp";
+			reg = <0x19d33000 0x1000>;
+			dpp,id = <10>;
+			clocks = <&cmu_dpu CLK_GOUT_DPU_DECON0_ACLK>;
+			clock-names = "aclk";
+			power-domains = <&pd_dpuf1>;
+			status = "disabled";
+		};
+
+		dpp_l11: dpp@19d34000 {
+			compatible = "samsung,exynosauto-dpp";
+			reg = <0x19d34000 0x1000>;
+			dpp,id = <11>;
+			clocks = <&cmu_dpu CLK_GOUT_DPU_DECON0_ACLK>;
+			clock-names = "aclk";
+			power-domains = <&pd_dpuf1>;
+			status = "disabled";
+		};
+
+		dpp_l12: dpp@19d35000 {
+			compatible = "samsung,exynosauto-dpp";
+			reg = <0x19d35000 0x1000>;
+			dpp,id = <12>;
+			clocks = <&cmu_dpu CLK_GOUT_DPU_DECON0_ACLK>;
+			clock-names = "aclk";
+			power-domains = <&pd_dpuf1>;
+			status = "disabled";
+		};
+
+		dpp_l13: dpp@19d36000 {
+			compatible = "samsung,exynosauto-dpp";
+			reg = <0x19d36000 0x1000>;
+			dpp,id = <13>;
+			clocks = <&cmu_dpu CLK_GOUT_DPU_DECON0_ACLK>;
+			clock-names = "aclk";
+			power-domains = <&pd_dpuf1>;
 			status = "disabled";
 		};
 
