@@ -21,6 +21,35 @@
 		serial0 = &serial_0;
 	};
 
+	/*
+	 * Cell fitted to caiman: ATL, battery id 17. The three google,chg-*
+	 * arrays are the vendor charge table under their original names, so a
+	 * different cell's block can be copied across unchanged: temperature
+	 * band boundaries in deci-degrees, constant-voltage tiers, and for each
+	 * (band, tier) the charge current as a percentage of the pack capacity,
+	 * where 0 means do not charge that tier at that temperature. Below
+	 * 10 degrees that stops charging at 4.3 V, which is the protection the
+	 * charger's fixed fallback limit cannot express.
+	 */
+	battery: battery {
+		compatible = "simple-battery";
+
+		charge-full-design-microamp-hours = <4558000>;
+		constant-charge-voltage-max-microvolt = <4480000>;
+		constant-charge-current-max-microamp = <5469600>;
+
+		google,chg-cv-limits = <4200000 4300000 4350000 4480000>;
+		google,chg-temp-limits = <0 100 200 420 460 480 550>;
+		google,chg-cc-limits = <
+			 50   30    0    0
+			 70   30   30   30
+			120  120  120   50
+			100  100  100   50
+			 50   50    0    0
+			 30    0    0    0
+		>;
+	};
+
 	chosen {
 		/* Bootloader expects bootargs specified otherwise it crashes */
 		bootargs = "earlycon=exynos4210,0x10870000 splash plymouth.ignore-serial-consoles plymouth.prefer-fbcon clk_ignore_unused pmos_boot_uuid=054e6c2a-294c-4542-be46-56ac95c6d2d9 pmos_root_uuid=738b808b-8486-42b8-9520-0cd5fa0e4ac7 pmos_rootfsopts=defaults";
@@ -613,7 +642,7 @@
 		};
 	};
 
-	fuel-gauge@36 {
+	fuel_gauge: fuel-gauge@36 {
 		compatible = "maxim,max77779fg";
 		reg = <0x36>;
 
@@ -659,6 +688,13 @@
 
 		/* OTG VBUS sourced via the TCPC's external-boost enable */
 		extbst-gpios = <&max77759tcpc 0 GPIO_ACTIVE_HIGH>;
+
+		charger {
+			compatible = "maxim,max77779-charger";
+
+			monitored-battery = <&battery>;
+			fuel-gauge = <&fuel_gauge>;
+		};
 
 		max77779_otg: otg-regulator {
 			regulator-name = "vbus";
