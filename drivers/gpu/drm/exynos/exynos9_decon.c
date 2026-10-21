@@ -1813,18 +1813,22 @@ static const enum drm_plane_type decon_win_types[WINDOWS_NR] = {
 };
 
 /*
- * The primary sits at the bottom of the blender, so it has nothing beneath it
- * to blend with and advertises neither alpha nor a blend mode. Every window
- * above it does: decon_update_plane() programs WINx_ALPHA from the plane's
- * alpha and the per-pixel blend function from its blend mode.
+ * Every window can blend, including the primary: decon_update_plane() programs
+ * WINx_ALPHA from the plane's alpha and the per-pixel blend function from its
+ * blend mode whichever window it is handed. The primary has nothing beneath it
+ * in the blender, but it is offered the same formats as the rest and some of
+ * those carry alpha, and DRM asks that a plane exposing an alpha format also
+ * expose a blend mode to say what should be done with it.
  */
+#define DECON_WIN_BLEND_CAPS \
+	(EXYNOS_DRM_PLANE_CAP_WIN_BLEND | EXYNOS_DRM_PLANE_CAP_PIX_BLEND)
+
 static const unsigned int capabilities[WINDOWS_NR] = {
-	[PRIMARY_WIN] = 0,
-	[1] = EXYNOS_DRM_PLANE_CAP_WIN_BLEND | EXYNOS_DRM_PLANE_CAP_PIX_BLEND,
-	[2] = EXYNOS_DRM_PLANE_CAP_WIN_BLEND | EXYNOS_DRM_PLANE_CAP_PIX_BLEND,
-	[3] = EXYNOS_DRM_PLANE_CAP_WIN_BLEND | EXYNOS_DRM_PLANE_CAP_PIX_BLEND,
-	[CURSOR_WIN] = EXYNOS_DRM_PLANE_CAP_WIN_BLEND |
-		       EXYNOS_DRM_PLANE_CAP_PIX_BLEND,
+	[PRIMARY_WIN] = DECON_WIN_BLEND_CAPS,
+	[1] = DECON_WIN_BLEND_CAPS,
+	[2] = DECON_WIN_BLEND_CAPS,
+	[3] = DECON_WIN_BLEND_CAPS,
+	[CURSOR_WIN] = DECON_WIN_BLEND_CAPS,
 };
 
 /*
