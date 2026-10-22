@@ -1084,6 +1084,15 @@ static void s5xxx_pm_work(struct work_struct *work)
 			spin_unlock_irqrestore(&sm->lock, flags);
 			sm->relink_failures = 0;
 			dev_dbg(sm->dev, "CP wakeup: link up (MAIN armed)\n");
+			/*
+			 * Vendor s5100_poweron_pcie rings pcie_link_ack after every
+			 * runtime relink, not only at boot. Without it the CP sits on
+			 * the rx it woke the link for (responses, indications) until
+			 * our next doorbell -- a slow SIM/SMS reply is then only seen
+			 * on the AP's next request, after the caller timed out.
+			 */
+			if (sm->online)
+				s5xxx_send_doorbell(sm, S5XXX_DB_LINK_ACK);
 		} else {
 			/*
 			 * A CP can stay alive -- CP_ACTIVE and PS_HOLD high --
