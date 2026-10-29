@@ -36,6 +36,17 @@ int acpm_dvfs_set_rate(struct acpm_handle *handle,
 {
 	struct acpm_xfer xfer = {0};
 	u32 cmd[4];
+	int ret;
+
+	/*
+	 * The domains the firmware scales on its own also take a request as a
+	 * store to shared memory plus a doorbell, which costs none of the
+	 * queue slot, sequence number and round trip the message below does.
+	 * Only a firmware that does not offer that path answers -ENODEV.
+	 */
+	ret = acpm_dvfs_async_set(handle, clk_id, rate / HZ_PER_KHZ);
+	if (ret != -ENODEV)
+		return ret;
 
 	acpm_dvfs_init_set_rate_cmd(cmd, clk_id, rate);
 	acpm_set_xfer(&xfer, cmd, ARRAY_SIZE(cmd), acpm_chan_id, false);
@@ -55,7 +66,16 @@ unsigned long acpm_dvfs_get_rate(struct acpm_handle *handle,
 {
 	struct acpm_xfer xfer;
 	unsigned int cmd[4] = {0};
+	u32 khz;
 	int ret;
+
+	/*
+	 * Where the firmware publishes the rate it has applied, reading it is
+	 * a load from shared memory rather than a message.  It has nothing to
+	 * publish before the first request, so fall back until then.
+	 */
+	if (!acpm_dvfs_async_get(handle, clk_id, &khz))
+		return khz * HZ_PER_KHZ;
 
 	acpm_dvfs_init_get_rate_cmd(cmd, clk_id);
 	acpm_set_xfer(&xfer, cmd, ARRAY_SIZE(cmd), acpm_chan_id, true);
