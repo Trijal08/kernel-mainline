@@ -357,6 +357,18 @@ struct aoc_audio_stream {
 	u32 base;				/* AOC byte position at start */
 	snd_pcm_uframes_t pushed;		/* frames handed to the ring */
 	spinlock_t ring_lock;			/* serialises ring fill: .ack vs tick */
+	/*
+	 * Cleared before the tick is cancelled on STOP.  hrtimer_try_to_cancel()
+	 * cannot wait -- .trigger runs atomically -- so a tick already past its
+	 * check, or a period_work already queued, still runs after the stream has
+	 * stopped.  By then .prepare may have re-based the pointer, and the
+	 * snd_pcm_period_elapsed() that work does lands on a stream whose
+	 * position means nothing yet; the core reads it as the hardware having
+	 * overrun the application and declares an XRUN.  Recovery re-prepares and
+	 * the same stale work hits again, which is how a stream ends up stuck
+	 * returning -EPIPE from snd_pcm_avail() for as long as it is open.
+	 */
+	bool running;
 };
 
 /*
@@ -1154,7 +1166,17 @@ static int aoc_audio_mic(struct aoc_audio *aud, bool on)
  * anything on it; this is the only view of that.
  */
 static const struct snd_pcm_hardware aoc_pcm_hw = {
-	.info = SNDRV_PCM_INFO_INTERLEAVED | SNDRV_PCM_INFO_BLOCK_TRANSFER,
+	/*
+	 * BATCH is not decoration: the AOC never interrupts, so the position
+	 * only moves when the 10 ms tick below reads it, and between ticks it
+	 * is stale by up to a tick.  Clients that believe a pointer is exact to
+	 * the frame -- PipeWire among them -- otherwise run with no headroom at
+	 * all and take an XRUN on the first cycle.  Declaring BATCH is what
+	 * makes them allow for the granularity, and it keeps doing so for
+	 * clients this driver has never met.
+	 */
+	.info = SNDRV_PCM_INFO_INTERLEAVED | SNDRV_PCM_INFO_BLOCK_TRANSFER |
+		SNDRV_PCM_INFO_BATCH,
 	.formats = SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S32_LE,
 	.rates = SNDRV_PCM_RATE_44100 | SNDRV_PCM_RATE_48000,
 	.rate_min = 44100,
@@ -1179,6 +1201,9 @@ static void aoc_pcm_period_work(struct work_struct *w)
 {
 	struct aoc_audio_stream *s = container_of(w, struct aoc_audio_stream,
 						  period_work);
+
+	if (!READ_ONCE(s->running))
+		return;
 
 	/* move the data first: top the playback ring up, or drain the capture ring */
 	if (s->playback)
@@ -1236,7 +1261,18 @@ static int aoc_pcm_open(struct snd_soc_component *comp,
 	substream->runtime->private_data = s;
 
 	snd_soc_set_runtime_hwparams(substream, &aoc_pcm_hw);
-	return 0;
+
+	/*
+	 * A period shorter than the tick is a promise this driver cannot keep:
+	 * it would have the core expect a position update it has no way to
+	 * produce until the next poll.  Ask for at least one tick's worth, and
+	 * for the period to be a whole number of ticks, so every period
+	 * boundary is one the tick can actually land on.
+	 */
+	return snd_pcm_hw_constraint_minmax(substream->runtime,
+					    SNDRV_PCM_HW_PARAM_PERIOD_TIME,
+					    AOC_PCM_TICK_NS / NSEC_PER_USEC,
+					    UINT_MAX);
 }
 
 static int aoc_pcm_close(struct snd_soc_component *comp,
@@ -1470,11 +1506,14 @@ static int aoc_pcm_trigger(struct snd_soc_component *comp,
 		return -EINVAL;
 	}
 
-	if (on)
+	if (on) {
+		WRITE_ONCE(s->running, true);
 		hrtimer_start(&s->tick, ns_to_ktime(AOC_PCM_TICK_NS),
 			      HRTIMER_MODE_REL);
-	else
+	} else {
+		WRITE_ONCE(s->running, false);
 		hrtimer_try_to_cancel(&s->tick);
+	}
 
 	/* Capture starts/stops the mics; playback's route is already up. */
 	if (!s->playback)
