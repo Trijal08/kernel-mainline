@@ -593,6 +593,17 @@ static ktime_t zumapro_cpu_wakeup[ARRAY_SIZE(zumapro_cpu_cluster)];
 #define ZUMAPRO_CPD_RESIDENCY_US	10000
 
 /*
+ * Clusters the firmware may be asked to take down around an idling core.
+ * Downstream describes a cpd_cl0 power mode but gives it no "entry-allowed"
+ * cpumask, which its entry_allow() reads as "never", and it creates no sysfs
+ * control for it either.  Measured on stock, awake idle fires
+ * CAL_CLUSTER_ENABLE_1 and _2 a couple of times a second and _0 not once.
+ * Cluster 0 carries the boot core and the DSU the other clusters reach memory
+ * through, and goes down only as part of system idle.
+ */
+#define ZUMAPRO_CPD_CLUSTERS		(BIT(1) | BIT(2))
+
+/*
  * Cores whose CPU_INFORM register currently holds a published hint.  A hint
  * left behind is not inert: the firmware keeps honouring it for the rest of
  * the boot, so an abandoned SICD request turns every later awake idle into a
@@ -609,8 +620,8 @@ static u32 zumapro_dbg_c2, zumapro_dbg_cpd, zumapro_dbg_sicd, zumapro_dbg_fail;
  * @cpu: the core entering idle.
  *
  * C2 powers the core down on its own.  CPD adds the cluster around it, which
- * only the last core of that cluster can ask for, and only when none of them
- * is due to be woken before the cluster has paid for the trip.  SICD takes the
+ * only the last core of an eligible cluster can ask for, and only when none of
+ * them is due to be woken before the cluster has paid for the trip.  SICD takes the
  * whole SoC down and so is offered only while a suspend-to-idle has armed the
  * wakeup mask; there, one core claims it on a first-come basis and the others
  * report plain C2, because the cores enter and leave idle far too quickly for
@@ -633,6 +644,9 @@ static u32 zumapro_idle_hint(unsigned int cpu)
 
 		return CPU_INFORM_C2;
 	}
+
+	if (!(ZUMAPRO_CPD_CLUSTERS & BIT(zumapro_cpu_cluster[cpu])))
+		return CPU_INFORM_C2;
 
 	if (ktime_to_us(ktime_sub(zumapro_cpu_wakeup[cpu], now)) <
 	    ZUMAPRO_CPD_RESIDENCY_US)
