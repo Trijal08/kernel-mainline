@@ -962,9 +962,39 @@ static void acpm_async_dvfs_init(struct acpm_info *acpm, u32 ndomains)
 	async->chan = achan;
 }
 
-static void acpm_clk_pdev_unregister(void *data)
+static void acpm_pdev_unregister(void *data)
 {
 	platform_device_unregister(data);
+}
+
+/**
+ * acpm_register_hw_pressure() - report firmware frequency capping to the scheduler.
+ * @acpm:	pointer to driver private data.
+ *
+ * Only worth having where the firmware publishes the rate it applied in shared
+ * memory: the reporter polls, and reading an applied rate back over the IPC
+ * queue would cost a round trip per sample.  Not fatal if it fails -- the
+ * scheduler simply keeps assuming no CPU is ever capped, which is where it was
+ * before.
+ */
+static void acpm_register_hw_pressure(struct acpm_info *acpm)
+{
+	struct platform_device *pdev;
+	int ret;
+
+	if (!acpm->async_dvfs.chan)
+		return;
+
+	pdev = platform_device_register_data(acpm->dev, "exynos-acpm-hw-pressure",
+					     PLATFORM_DEVID_NONE, NULL, 0);
+	if (IS_ERR(pdev)) {
+		dev_warn(acpm->dev, "No CPU pressure reporting: %pe\n", pdev);
+		return;
+	}
+
+	ret = devm_add_action_or_reset(acpm->dev, acpm_pdev_unregister, pdev);
+	if (ret)
+		dev_warn(acpm->dev, "Failed to add devm action: %d\n", ret);
 }
 
 static const struct acpm_ops exynos_acpm_driver_ops = {
@@ -1050,10 +1080,11 @@ static int acpm_probe(struct platform_device *pdev)
 		return dev_err_probe(dev, PTR_ERR(acpm_clk_pdev),
 				     "Failed to register ACPM clocks device.\n");
 
-	ret = devm_add_action_or_reset(dev, acpm_clk_pdev_unregister,
-				       acpm_clk_pdev);
+	ret = devm_add_action_or_reset(dev, acpm_pdev_unregister, acpm_clk_pdev);
 	if (ret)
 		return dev_err_probe(dev, ret, "Failed to add devm action.\n");
+
+	acpm_register_hw_pressure(acpm);
 
 	return devm_of_platform_populate(dev);
 }
