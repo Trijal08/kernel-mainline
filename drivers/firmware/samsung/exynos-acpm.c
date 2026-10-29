@@ -56,6 +56,20 @@
 #define ACPM_GS101_INITDATA_BASE	0xa000
 
 /**
+ * enum acpm_chan_type - how the firmware lays out a channel's memory.
+ * @ACPM_CHAN_TYPE_QUEUE:	ring of fixed size messages, exchanged with the
+ *				IPC protocol: a sequence number, a front and a
+ *				rear index and a reply.
+ * @ACPM_CHAN_TYPE_BUFFER:	plain array that the host and the firmware both
+ *				address directly, with the doorbell as the only
+ *				protocol.
+ */
+enum acpm_chan_type {
+	ACPM_CHAN_TYPE_QUEUE	= 1,
+	ACPM_CHAN_TYPE_BUFFER	= 2,
+};
+
+/**
  * struct acpm_shmem - shared memory configuration information.
  * @reserved:	unused fields.
  * @chans:	offset to array of struct acpm_chan_shmem.
@@ -74,6 +88,7 @@ struct acpm_shmem {
  *
  * @id:			channel ID.
  * @reserved:		unused fields.
+ * @type:		channel memory layout, see &enum acpm_chan_type.
  * @rx_rear:		rear pointer of APM RX queue (TX for AP).
  * @rx_front:		front pointer of APM RX queue (TX for AP).
  * @rx_base:		base address of APM RX queue (TX for AP).
@@ -88,7 +103,8 @@ struct acpm_shmem {
  */
 struct acpm_chan_shmem {
 	u32 id;
-	u32 reserved[3];
+	u32 reserved[2];
+	u32 type;
 	u32 rx_rear;
 	u32 rx_front;
 	u32 rx_base;
@@ -151,6 +167,7 @@ struct acpm_rx_data {
  * @mlen:	message length. Applies to both TX/RX queues.
  * @seqnum:	sequence number of the last message enqueued on TX queue.
  * @id:		channel ID.
+ * @type:	channel memory layout, see &enum acpm_chan_type.
  * @poll_completion:	indicates if the transfer needs to be polled for
  *			completion or interrupt mode is used.
  * @bitmap_seqnum: bitmap that tracks the messages on the TX/RX queues.
@@ -169,10 +186,34 @@ struct acpm_chan {
 	unsigned int mlen;
 	u8 seqnum;
 	u8 id;
+	u8 type;
 	bool poll_completion;
 
 	DECLARE_BITMAP(bitmap_seqnum, ACPM_SEQNUM_MAX - 1);
 	struct acpm_rx_data rx_data[ACPM_SEQNUM_MAX];
+};
+
+/**
+ * struct acpm_async_dvfs - the firmware's doorbell driven DVFS path.
+ *
+ * Besides the DVFS requests it answers over the IPC queue, the firmware also
+ * watches a buffer channel: an array of per domain rates the host writes to
+ * directly, and a second array it publishes the applied rates in.  A request
+ * is one store plus a doorbell, with no sequence number, no queue slot to wait
+ * for and no reply, which is what makes it worth having - the queued form
+ * costs the requesting CPU the whole round trip, hundreds of microseconds,
+ * several hundred times a second once cpufreq is running.
+ *
+ * @requested:	per domain rates in kHz, written by the host.
+ * @running:	per domain rates in kHz, published by the firmware.
+ * @chan:	channel carrying both arrays, NULL when the path is unavailable.
+ * @ndomains:	number of domains the firmware accepts this way.
+ */
+struct acpm_async_dvfs {
+	void __iomem *requested;
+	void __iomem *running;
+	struct acpm_chan *chan;
+	u32 ndomains;
 };
 
 /**
@@ -183,6 +224,7 @@ struct acpm_chan {
  * @dev:	pointer to the exynos-acpm device.
  * @handle:	instance of acpm_handle to send to clients.
  * @num_chans:	number of channels available for this controller.
+ * @async_dvfs:	doorbell driven DVFS path, see &struct acpm_async_dvfs.
  */
 struct acpm_info {
 	struct acpm_shmem __iomem *shmem;
@@ -191,16 +233,20 @@ struct acpm_info {
 	struct device *dev;
 	struct acpm_handle handle;
 	u32 num_chans;
+	struct acpm_async_dvfs async_dvfs;
 };
 
 /**
  * struct acpm_match_data - of_device_id data.
  * @initdata_base:	offset in SRAM where the channels configuration resides.
  * @acpm_clk_dev_name:	base name for the ACPM clocks device that we're registering.
+ * @async_dvfs_ndomains: number of leading DVFS domains the firmware takes
+ *			asynchronous requests for, zero when it takes none.
  */
 struct acpm_match_data {
 	loff_t initdata_base;
 	const char *acpm_clk_dev_name;
+	u32 async_dvfs_ndomains;
 };
 
 #define client_to_acpm_chan(c) container_of(c, struct acpm_chan, cl)
@@ -640,6 +686,72 @@ int acpm_get_chan_by_id(struct acpm_handle *handle, unsigned int fw_chan_id)
 EXPORT_SYMBOL_GPL(acpm_get_chan_by_id);
 
 /**
+ * acpm_dvfs_async_set() - ask the firmware for a rate through shared memory.
+ * @handle:	pointer to the acpm handle.
+ * @domain:	DVFS domain identifier.
+ * @khz:	requested rate, in kHz.
+ *
+ * Store the rate in the domain's slot and ring the doorbell.  Nothing is
+ * waited for: the firmware picks the request up on its own and reports what it
+ * applied in the array acpm_dvfs_async_get() reads.
+ *
+ * Return: 0 on success, -ENODEV if the firmware does not take asynchronous
+ * requests for @domain, -errno otherwise.
+ */
+int acpm_dvfs_async_set(struct acpm_handle *handle, unsigned int domain,
+			u32 khz)
+{
+	struct acpm_info *acpm = handle_to_acpm_info(handle);
+	struct acpm_async_dvfs *async = &acpm->async_dvfs;
+	struct exynos_mbox_msg msg;
+	int ret;
+
+	if (!async->chan || domain >= async->ndomains)
+		return -ENODEV;
+
+	writel(khz, async->requested + domain * sizeof(u32));
+
+	msg.chan_id = async->chan->id;
+	msg.chan_type = EXYNOS_MBOX_CHAN_TYPE_DOORBELL;
+
+	ret = mbox_send_message(async->chan->chan, &msg);
+	if (ret < 0)
+		return ret;
+
+	mbox_client_txdone(async->chan->chan, 0);
+
+	return 0;
+}
+
+/**
+ * acpm_dvfs_async_get() - read back the rate the firmware has applied.
+ * @handle:	pointer to the acpm handle.
+ * @domain:	DVFS domain identifier.
+ * @khz:	where the rate is stored, in kHz.
+ *
+ * Return: 0 on success, -ENODEV if the firmware does not publish @domain this
+ * way, -EAGAIN while it has not published anything yet.
+ */
+int acpm_dvfs_async_get(struct acpm_handle *handle, unsigned int domain,
+			u32 *khz)
+{
+	struct acpm_info *acpm = handle_to_acpm_info(handle);
+	struct acpm_async_dvfs *async = &acpm->async_dvfs;
+	u32 val;
+
+	if (!async->chan || domain >= async->ndomains)
+		return -ENODEV;
+
+	val = readl(async->running + domain * sizeof(u32));
+	if (!val)
+		return -EAGAIN;
+
+	*khz = val;
+
+	return 0;
+}
+
+/**
  * acpm_set_xfer() - initialize an ACPM IPC transfer structure.
  * @xfer:	pointer to the ACPM transfer structure that is being initialized.
  * @cmd:	pointer to the buffer containing the command to be transmitted
@@ -681,6 +793,7 @@ static void acpm_chan_shmem_get_params(struct acpm_chan *achan,
 	achan->mlen = readl(&chan_shmem->mlen);
 	achan->poll_completion = readl(&chan_shmem->poll_completion);
 	achan->id = readl(&chan_shmem->id);
+	achan->type = readl(&chan_shmem->type);
 	achan->qlen = readl(&chan_shmem->qlen);
 
 	tx->base = base + readl(&chan_shmem->rx_base);
@@ -792,6 +905,63 @@ static int acpm_channels_init(struct acpm_info *acpm)
 	return 0;
 }
 
+/**
+ * acpm_async_dvfs_init() - set up the doorbell driven DVFS path.
+ * @acpm:	pointer to driver private data.
+ * @ndomains:	number of leading DVFS domains the firmware accepts this way.
+ *
+ * The path is optional: without the channel the device tree names, or on a
+ * firmware whose channel table does not carry it, every request keeps going
+ * through the IPC queue.  Leave the requested rates at zero, which the
+ * firmware reads as "no request", so that it only acts on domains the kernel
+ * has actually asked for.
+ */
+static void acpm_async_dvfs_init(struct acpm_info *acpm, u32 ndomains)
+{
+	struct acpm_async_dvfs *async = &acpm->async_dvfs;
+	struct acpm_chan *achan;
+	u32 fw_chan, i, words;
+	int idx;
+
+	if (!ndomains)
+		return;
+
+	if (of_property_read_u32(acpm->dev->of_node, "google,async-dvfs-channel",
+				 &fw_chan))
+		return;
+
+	idx = acpm_get_chan_by_id(&acpm->handle, fw_chan);
+	if (idx < 0) {
+		dev_warn(acpm->dev, "No ACPM channel %u for asynchronous DVFS\n",
+			 fw_chan);
+		return;
+	}
+
+	achan = &acpm->chans[idx];
+	if (achan->type != ACPM_CHAN_TYPE_BUFFER) {
+		dev_warn(acpm->dev, "ACPM channel %u is not a buffer channel\n",
+			 fw_chan);
+		return;
+	}
+
+	words = (achan->mlen * achan->qlen) / sizeof(u32);
+	if (words < ndomains) {
+		dev_warn(acpm->dev, "ACPM channel %u holds %u of %u domains\n",
+			 fw_chan, words, ndomains);
+		if (!words)
+			return;
+		ndomains = words;
+	}
+
+	for (i = 0; i < ndomains; i++)
+		writel(0, achan->tx.base + i * sizeof(u32));
+
+	async->requested = achan->tx.base;
+	async->running = achan->rx.base;
+	async->ndomains = ndomains;
+	async->chan = achan;
+}
+
 static void acpm_clk_pdev_unregister(void *data)
 {
 	platform_device_unregister(data);
@@ -868,6 +1038,8 @@ static int acpm_probe(struct platform_device *pdev)
 		return ret;
 
 	acpm->handle.ops = &exynos_acpm_driver_ops;
+
+	acpm_async_dvfs_init(acpm, match_data->async_dvfs_ndomains);
 
 	platform_set_drvdata(pdev, acpm);
 
@@ -1017,6 +1189,13 @@ static const struct acpm_match_data acpm_gs101 = {
 static const struct acpm_match_data acpm_zuma = {
 	.initdata_base = ACPM_GS101_INITDATA_BASE,
 	.acpm_clk_dev_name = "zuma-acpm-clk",
+	/*
+	 * The firmware's DVFS plugin drives MIF, INT, the three CPU clusters,
+	 * the DSU and the BCI itself, and those are the domains it keeps the
+	 * shared memory arrays up to date for.  They are the first seven in
+	 * its numbering; everything above still goes through the IPC queue.
+	 */
+	.async_dvfs_ndomains = 7,
 };
 
 static const struct of_device_id acpm_match[] = {
