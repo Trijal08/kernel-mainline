@@ -70,6 +70,19 @@ config EXYNOS_S2MPU
 	  the unit into passthrough so the master (e.g. the GPU) can reach
 	  memory, which is required to bring such masters up on these SoCs.
 
+config EXYNOS_ACPM_HW_PRESSURE
+	tristate "Exynos ACPM firmware CPU frequency capping reporter"
+	depends on EXYNOS_ACPM_PROTOCOL && CPU_FREQ
+	depends on GENERIC_ARCH_TOPOLOGY
+	help
+	  The ACPM firmware arbitrates between the kernel's DVFS request and
+	  its own thermal and current limits, and the clock API reports the
+	  request as accepted either way. Without this the scheduler keeps
+	  costing and placing work against a frequency a capped CPU cannot
+	  reach. This compares the rate the firmware says it applied against
+	  what cpufreq asked for and reports the difference as CPU hardware
+	  pressure.
+
 config S2MPG1415_METER
 	tristate "S2MPG14/S2MPG15 on-device power monitoring"
 	depends on MFD_SEC_ACPM || COMPILE_TEST
