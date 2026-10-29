@@ -21,11 +21,13 @@
 #include <linux/bitfield.h>
 #include <linux/debugfs.h>
 #include <linux/delay.h>
+#include <linux/interrupt.h>
 #include <linux/iopoll.h>
 #include <linux/math64.h>
 #include <linux/mfd/samsung/s2mpg14.h>
 #include <linux/mfd/samsung/s2mpg15.h>
 #include <linux/mod_devicetable.h>
+#include <linux/of_irq.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
@@ -136,6 +138,8 @@ struct s2mpg1415_meter {
 	const struct s2mpg1415_chip *chip;
 	/* Serialises the latch-then-read sequence against concurrent readers. */
 	struct mutex lock;
+	/* NULL when the device tree gives the meter block no interrupt. */
+	struct regmap_irq_chip_data *irq_data;
 };
 
 /*
@@ -186,7 +190,62 @@ static const struct s2mpg1415_ntc_pt s2mpg15_ntc_map[] = {
 
 struct s2mpg1415_ntc {
 	struct s2mpg1415_meter *meter;
+	struct thermal_zone_device *tz;
 	unsigned int chan;
+};
+
+/*
+ * Each channel has an over- and an under-temperature comparator, and the
+ * meter block raises an interrupt when the filtered code crosses one. The
+ * threshold registers hold the top eight bits of the twelve-bit code.
+ *
+ * The two comparators are what let a zone be interrupt driven rather than
+ * polled, which matters most for the thermistor next to the case: it is the
+ * slowest sensor on the board and the one a skin policy regulates on, so it
+ * should be the first to report a crossing, not something a timer notices up
+ * to a poll interval later.
+ */
+#define S2MPG1415_NTC_WARN_SHIFT	4
+
+/* Meter INT3 carries the eight over-temperature bits, INT4 the under. */
+#define S2MPG1415_NTC_IRQ_OT(chan)	(chan)
+#define S2MPG1415_NTC_IRQ_UT(chan)	(S2MPG1415_NTC_CHANNELS + (chan))
+
+#define S2MPG1415_NTC_IRQ_OT_REG	2
+#define S2MPG1415_NTC_IRQ_UT_REG	3
+
+static const struct regmap_irq s2mpg1415_ntc_irqs[] = {
+	REGMAP_IRQ_REG(S2MPG1415_NTC_IRQ_OT(0), S2MPG1415_NTC_IRQ_OT_REG, BIT(0)),
+	REGMAP_IRQ_REG(S2MPG1415_NTC_IRQ_OT(1), S2MPG1415_NTC_IRQ_OT_REG, BIT(1)),
+	REGMAP_IRQ_REG(S2MPG1415_NTC_IRQ_OT(2), S2MPG1415_NTC_IRQ_OT_REG, BIT(2)),
+	REGMAP_IRQ_REG(S2MPG1415_NTC_IRQ_OT(3), S2MPG1415_NTC_IRQ_OT_REG, BIT(3)),
+	REGMAP_IRQ_REG(S2MPG1415_NTC_IRQ_OT(4), S2MPG1415_NTC_IRQ_OT_REG, BIT(4)),
+	REGMAP_IRQ_REG(S2MPG1415_NTC_IRQ_OT(5), S2MPG1415_NTC_IRQ_OT_REG, BIT(5)),
+	REGMAP_IRQ_REG(S2MPG1415_NTC_IRQ_OT(6), S2MPG1415_NTC_IRQ_OT_REG, BIT(6)),
+	REGMAP_IRQ_REG(S2MPG1415_NTC_IRQ_OT(7), S2MPG1415_NTC_IRQ_OT_REG, BIT(7)),
+	REGMAP_IRQ_REG(S2MPG1415_NTC_IRQ_UT(0), S2MPG1415_NTC_IRQ_UT_REG, BIT(0)),
+	REGMAP_IRQ_REG(S2MPG1415_NTC_IRQ_UT(1), S2MPG1415_NTC_IRQ_UT_REG, BIT(1)),
+	REGMAP_IRQ_REG(S2MPG1415_NTC_IRQ_UT(2), S2MPG1415_NTC_IRQ_UT_REG, BIT(2)),
+	REGMAP_IRQ_REG(S2MPG1415_NTC_IRQ_UT(3), S2MPG1415_NTC_IRQ_UT_REG, BIT(3)),
+	REGMAP_IRQ_REG(S2MPG1415_NTC_IRQ_UT(4), S2MPG1415_NTC_IRQ_UT_REG, BIT(4)),
+	REGMAP_IRQ_REG(S2MPG1415_NTC_IRQ_UT(5), S2MPG1415_NTC_IRQ_UT_REG, BIT(5)),
+	REGMAP_IRQ_REG(S2MPG1415_NTC_IRQ_UT(6), S2MPG1415_NTC_IRQ_UT_REG, BIT(6)),
+	REGMAP_IRQ_REG(S2MPG1415_NTC_IRQ_UT(7), S2MPG1415_NTC_IRQ_UT_REG, BIT(7)),
+};
+
+/*
+ * The meter block's four interrupt registers live in its own regmap, so they
+ * cannot be folded into the PMIC block's chip; both hang off the one interrupt
+ * the SoC demultiplexes for this PMIC, which is why the line is requested
+ * shared. Nothing is unmasked until a zone asks for a trip window.
+ */
+static const struct regmap_irq_chip s2mpg1415_meter_irq_chip = {
+	.name = "s2mpg1415-meter",
+	.status_base = S2MPG15_METER_INT1,
+	.mask_base = S2MPG15_METER_INT1M,
+	.num_regs = 4,
+	.irqs = s2mpg1415_ntc_irqs,
+	.num_irqs = ARRAY_SIZE(s2mpg1415_ntc_irqs),
 };
 
 /*
@@ -237,8 +296,85 @@ static int s2mpg1415_ntc_get_temp(struct thermal_zone_device *tz, int *temp)
 	return 0;
 }
 
+/*
+ * The inverse of s2mpg1415_ntc_millic(), for programming the comparators.
+ * Same table, same linear interpolation, walked the other way: the codes fall
+ * as the temperature rises, so a temperature below the table's range maps to
+ * its highest code and above it to its lowest.
+ */
+static u16 s2mpg1415_ntc_code(int millic)
+{
+	const struct s2mpg1415_ntc_pt *t = s2mpg15_ntc_map;
+	size_t n = ARRAY_SIZE(s2mpg15_ntc_map);
+	size_t i;
+
+	if (millic <= t[0].millic)
+		return t[0].code;
+	if (millic >= t[n - 1].millic)
+		return t[n - 1].code;
+
+	for (i = 1; i < n; i++)
+		if (millic <= t[i].millic)
+			break;
+
+	/* Between t[i - 1] (colder, higher code) and t[i] (hotter, lower). */
+	return t[i].code + mult_frac(t[i - 1].code - t[i].code,
+				     t[i].millic - millic,
+				     t[i].millic - t[i - 1].millic);
+}
+
+/**
+ * s2mpg1415_ntc_set_trips() - program a channel's comparators.
+ * @tz:		the thermal zone.
+ * @low:	temperature below which to report, in millidegrees.
+ * @high:	temperature above which to report, in millidegrees.
+ *
+ * Crossing the window raises the channel's under- or over-temperature
+ * interrupt. A bound the core does not want is passed as a saturated value,
+ * which maps to the end of the calibration table and so to a comparator that
+ * cannot fire.
+ *
+ * Return: 0 on success, -errno otherwise.
+ */
+static int s2mpg1415_ntc_set_trips(struct thermal_zone_device *tz, int low,
+				   int high)
+{
+	struct s2mpg1415_ntc *ntc = thermal_zone_device_priv(tz);
+	u8 ut, ot;
+	int ret;
+
+	ut = s2mpg1415_ntc_code(low) >> S2MPG1415_NTC_WARN_SHIFT;
+	ot = s2mpg1415_ntc_code(high) >> S2MPG1415_NTC_WARN_SHIFT;
+
+	ret = regmap_write(ntc->meter->regmap,
+			   S2MPG15_METER_NTC_UT_WARN0 + ntc->chan, ut);
+	if (ret)
+		return ret;
+
+	return regmap_write(ntc->meter->regmap,
+			    S2MPG15_METER_NTC_OT_WARN0 + ntc->chan, ot);
+}
+
+static irqreturn_t s2mpg1415_ntc_irq(int irq, void *data)
+{
+	struct s2mpg1415_ntc *ntc = data;
+
+	/*
+	 * The zone re-reads the channel and reprograms the window through
+	 * ->set_trips(), which is what rearms the comparator that just fired.
+	 */
+	thermal_zone_device_update(ntc->tz, THERMAL_TRIP_VIOLATED);
+
+	return IRQ_HANDLED;
+}
+
 static const struct thermal_zone_device_ops s2mpg1415_ntc_ops = {
 	.get_temp = s2mpg1415_ntc_get_temp,
+};
+
+static const struct thermal_zone_device_ops s2mpg1415_ntc_ops_irq = {
+	.get_temp = s2mpg1415_ntc_get_temp,
+	.set_trips = s2mpg1415_ntc_set_trips,
 };
 
 /*
@@ -251,6 +387,84 @@ static const struct thermal_zone_device_ops s2mpg1415_ntc_ops = {
  * and put it back afterwards. CTRL5 is clobbered by the reset, and the
  * caller's mode selection reprograms it.
  */
+/**
+ * s2mpg1415_meter_init_irq() - bring up the meter block's interrupts.
+ * @dev:	the meter device.
+ * @meter:	driver private data.
+ *
+ * Optional: a device tree that gives the meter node no interrupt leaves
+ * @meter->irq_data NULL and the zones fall back to being polled, which is what
+ * they did before this existed.
+ *
+ * Return: 0 on success or when there is no interrupt, -errno otherwise.
+ */
+static int s2mpg1415_meter_init_irq(struct device *dev,
+				    struct s2mpg1415_meter *meter)
+{
+	int irq, ret;
+
+	irq = of_irq_get(dev_of_node(dev), 0);
+	if (irq == -EPROBE_DEFER)
+		return irq;
+	if (irq <= 0) {
+		dev_dbg(dev, "No meter interrupt, NTC zones will be polled\n");
+		return 0;
+	}
+
+	/*
+	 * Shared because the PMIC block's chip is already on this line, and
+	 * threaded one-shot because reaching these registers goes out over
+	 * I3C.
+	 */
+	ret = devm_regmap_add_irq_chip(dev, meter->regmap, irq,
+				       IRQF_ONESHOT | IRQF_SHARED, 0,
+				       &s2mpg1415_meter_irq_chip,
+				       &meter->irq_data);
+	if (ret)
+		return dev_err_probe(dev, ret, "cannot add meter irq chip\n");
+
+	return 0;
+}
+
+/**
+ * s2mpg1415_ntc_request_irqs() - take a channel's two comparator interrupts.
+ * @dev:	the meter device.
+ * @ntc:	the channel.
+ *
+ * Return: 0 on success, -errno otherwise.
+ */
+static int s2mpg1415_ntc_request_irqs(struct device *dev,
+				      struct s2mpg1415_ntc *ntc)
+{
+	static const char * const what[] = { "ot", "ut" };
+	unsigned int i;
+	int ret;
+
+	for (i = 0; i < ARRAY_SIZE(what); i++) {
+		unsigned int hwirq = i ? S2MPG1415_NTC_IRQ_UT(ntc->chan)
+				       : S2MPG1415_NTC_IRQ_OT(ntc->chan);
+		const char *name;
+		int virq;
+
+		virq = regmap_irq_get_virq(ntc->meter->irq_data, hwirq);
+		if (virq < 0)
+			return virq;
+
+		name = devm_kasprintf(dev, GFP_KERNEL, "ntc%u-%s", ntc->chan,
+				      what[i]);
+		if (!name)
+			return -ENOMEM;
+
+		ret = devm_request_threaded_irq(dev, virq, NULL,
+						s2mpg1415_ntc_irq,
+						IRQF_ONESHOT, name, ntc);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+
 static int s2mpg1415_meter_init_ntc(struct device *dev,
 				    struct s2mpg1415_meter *meter)
 {
@@ -259,6 +473,10 @@ static int s2mpg1415_meter_init_ntc(struct device *dev,
 
 	if (!meter->chip->has_ntc)
 		return 0;
+
+	ret = s2mpg1415_meter_init_irq(dev, meter);
+	if (ret)
+		return ret;
 
 	for (chan = 0; chan < S2MPG1415_NTC_CHANNELS; chan++) {
 		struct thermal_zone_device *tz;
@@ -272,6 +490,8 @@ static int s2mpg1415_meter_init_ntc(struct device *dev,
 		ntc->chan = chan;
 
 		tz = devm_thermal_of_zone_register(dev, chan, ntc,
+						   meter->irq_data ?
+						   &s2mpg1415_ntc_ops_irq :
 						   &s2mpg1415_ntc_ops);
 		if (IS_ERR(tz)) {
 			/*
@@ -286,6 +506,16 @@ static int s2mpg1415_meter_init_ntc(struct device *dev,
 			return dev_err_probe(dev, PTR_ERR(tz),
 					     "cannot register NTC%u\n", chan);
 		}
+		ntc->tz = tz;
+
+		if (meter->irq_data) {
+			ret = s2mpg1415_ntc_request_irqs(dev, ntc);
+			if (ret)
+				return dev_err_probe(dev, ret,
+						     "cannot take NTC%u interrupts\n",
+						     chan);
+		}
+
 		enabled |= BIT(chan);
 	}
 
