@@ -46,6 +46,8 @@
 /* Bus devices one instance can hold a floor on. */
 #define MEMSTALL_MAX_DEVS		4
 #define MEMSTALL_DEFAULT_INTERVAL_US	8000
+/* How many times the sampling interval may stretch while a CPU is quiet. */
+#define MEMSTALL_IDLE_BACKOFF		8
 
 /* An effective CPU rate, and the floor each bus device is asked for above it. */
 struct memstall_row {
@@ -69,6 +71,7 @@ struct memstall_cpu {
 	struct memstall_cluster *cluster;
 	struct timer_list timer;
 	bool enabled;
+	unsigned int interval_us;
 	u64 last_cyc;
 	u64 last_stall;
 	u64 last_ns;
@@ -181,11 +184,31 @@ static void memstall_tick(struct timer_list *t)
 	}
 
 	if (changed)
-		queue_work(system_unbound_wq, &ms->work);
+		queue_work(system_dfl_wq, &ms->work);
 
-	if (READ_ONCE(cd->enabled))
-		mod_timer(&cd->timer,
-			  jiffies + usecs_to_jiffies(ms->interval_us));
+	/*
+	 * Sampling every CPU at the full rate costs a wakeup per core per
+	 * window whether or not anything is happening, and on an idle machine
+	 * that is the largest thing keeping the cores out of their deeper idle
+	 * states - measured at around a thousand extra wakeups a second across
+	 * eight cores, against a timer tick that is otherwise almost silent.
+	 *
+	 * A core that asked for nothing is unlikely to ask for something in the
+	 * next window either, so back off on it and come back to the full rate
+	 * the moment it does ask. Waiting longer costs only how quickly a floor
+	 * appears once a workload turns up, and the floors exist for sustained
+	 * memory-bound work rather than for a single window of it.
+	 */
+	if (!READ_ONCE(cd->enabled))
+		return;
+
+	if (row)
+		cd->interval_us = ms->interval_us;
+	else
+		cd->interval_us = min(cd->interval_us * 2,
+				      ms->interval_us * MEMSTALL_IDLE_BACKOFF);
+
+	mod_timer(&cd->timer, jiffies + usecs_to_jiffies(cd->interval_us));
 }
 
 static int memstall_cpu_online(unsigned int cpu)
@@ -201,6 +224,7 @@ static int memstall_cpu_online(unsigned int cpu)
 		return 0;
 
 	cd->primed = false;
+	cd->interval_us = ms->interval_us;
 	WRITE_ONCE(cd->enabled, true);
 	add_timer_on(&cd->timer, cpu);
 
@@ -226,7 +250,7 @@ static int memstall_cpu_offline(unsigned int cpu)
 	/* An offline CPU stalls on nothing; drop whatever it was asking for. */
 	for (i = 0; i < ms->nr_devs; i++)
 		WRITE_ONCE(cd->dev_khz[i], 0);
-	queue_work(system_unbound_wq, &ms->work);
+	queue_work(system_dfl_wq, &ms->work);
 
 	return 0;
 }
