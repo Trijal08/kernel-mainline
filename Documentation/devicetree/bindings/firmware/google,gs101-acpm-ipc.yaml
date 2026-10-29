@@ -37,6 +37,16 @@ properties:
       appropriately with the clock scaling. The argument is the ID of the
       clock contained by the firmware messages.
 
+  google,async-dvfs-channel:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description:
+      Firmware channel ID of the buffer channel the firmware watches for
+      asynchronous DVFS requests. The channel carries an array of requested
+      rates in kHz that the host writes to directly, and an array of the rates
+      the firmware has applied; a request is one store plus a doorbell, with
+      no message and no reply. Absent on firmware that only takes DVFS
+      requests over the IPC queue.
+
   mboxes:
     maxItems: 1
 
