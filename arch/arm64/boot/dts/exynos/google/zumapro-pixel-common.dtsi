@@ -392,6 +392,16 @@
 		 */
 		s2mpg15_meter: meter {
 			compatible = "samsung,s2mpg15-meter";
+			/*
+			 * The meter block's interrupt registers are in its own
+			 * regmap but share the one interrupt the SoC
+			 * demultiplexes for this PMIC, so the line is named
+			 * again here and requested shared. It carries the NTC
+			 * comparator crossings, which is what lets the
+			 * thermistor zones be interrupt driven.
+			 */
+			interrupt-parent = <&vgpio2ap>;
+			interrupts = <1 IRQ_TYPE_LEVEL_HIGH>;
 			#thermal-sensor-cells = <1>;
 		};
 
