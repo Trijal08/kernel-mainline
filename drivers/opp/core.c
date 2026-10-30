@@ -1207,6 +1207,22 @@ static int _set_required_opps(struct device *dev, struct opp_table *opp_table,
 	if (!devs)
 		return 0;
 
+	/*
+	 * The array is allocated for every table that has required-opps, but an
+	 * entry is only filled in for a device whose OPP this is forwarded to.
+	 * A table whose links are consumed from the other side instead -- the
+	 * passive devfreq governor reads them with
+	 * dev_pm_opp_xlate_required_opp() -- has nothing to forward, so the
+	 * loop below would do nothing and the state of the linking cannot
+	 * matter to it.
+	 */
+	for (index = 0; index < opp_table->required_opp_count; index++)
+		if (devs[index])
+			break;
+
+	if (index == opp_table->required_opp_count)
+		return 0;
+
 	/* required-opps not fully initialized yet */
 	if (lazy_linking_pending(opp_table))
 		return -EBUSY;
