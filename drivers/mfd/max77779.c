@@ -150,7 +150,12 @@ static const struct regmap_range max77779_charger_registers[] = {
 };
 
 static const struct regmap_range max77779_charger_ro_registers[] = {
-	regmap_reg_range(0xb6, 0xbb), /* INT_OK, DETAILS_0x */
+	/*
+	 * DETAILS_04 is left out: its FSHIP_EXIT_DTLS field is the latched
+	 * reason the PMIC last left factory ship mode, and it is cleared by
+	 * writing it back.
+	 */
+	regmap_reg_range(0xb6, 0xba), /* INT_OK, DETAILS_00..03 */
 };
 
 static const struct regmap_range max77779_charger_volatile_registers[] = {
@@ -600,6 +605,41 @@ static int max77779_add_chained_topsys(struct i2c_client *client,
 	return 0;
 }
 
+/**
+ * max77779_report_topsys() - say which top-system conditions are asserted.
+ * @dev:	the PMIC device.
+ * @regmap:	the top register map.
+ *
+ * TOPSYS_INT summarises into INTSRC from its raw state rather than from what
+ * TOPSYS_INT_MASK allows through, so a condition that is set and does not
+ * clear keeps the shared line asserted whether or not anything is listening
+ * for it -- and three of the four are faults worth knowing about regardless.
+ */
+static void max77779_report_topsys(struct device *dev, struct regmap *regmap)
+{
+	static const struct {
+		unsigned int bit;
+		const char *what;
+	} topsys[] = {
+		{ MAX77779_PMIC_REG_TOPSYS_INT_TSHDN,   "thermal shutdown" },
+		{ MAX77779_PMIC_REG_TOPSYS_INT_SYSOVLO, "system overvoltage" },
+		{ MAX77779_PMIC_REG_TOPSYS_INT_SYSUVLO, "system undervoltage" },
+		{ MAX77779_PMIC_REG_TOPSYS_INT_FSHIP,
+		  "ship-mode exit reason unread" },
+	};
+	unsigned int val;
+	int i, ret;
+
+	ret = regmap_read(regmap, MAX77779_PMIC_REG_TOPSYS_INT, &val);
+	if (ret || !val)
+		return;
+
+	for (i = 0; i < ARRAY_SIZE(topsys); i++)
+		if (val & topsys[i].bit)
+			dev_warn(dev, "top-system interrupt asserted: %s\n",
+				 topsys[i].what);
+}
+
 static int max77779_add_chained_charger(struct i2c_client *client,
 					struct max77779 *max77779,
 					struct regmap_irq_chip_data *parent)
@@ -686,6 +726,8 @@ static int max77779_probe(struct i2c_client *client)
 	ret = max77779_add_chained_topsys(client, max77779, irq_chip_data_pmic);
 	if (ret)
 		return ret;
+
+	max77779_report_topsys(&client->dev, max77779->regmap_top);
 
 	ret = max77779_add_chained_charger(client, max77779, irq_chip_data_pmic);
 	if (ret)
