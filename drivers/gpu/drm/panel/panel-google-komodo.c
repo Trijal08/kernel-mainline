@@ -169,6 +169,11 @@ struct komodo_mode {
 	const struct drm_dsc_config *dsc;
 	u8 image_conf;		/* DCS 0xC3: image-size select */
 	u8 depth_conf;		/* DCS 0xF2: bit-depth select */
+	/*
+	 * Refresh rate the DDIC may fall back to once the host stops sending
+	 * frames, or zero to hold the mode's rate. See komodo_set_refresh().
+	 */
+	u8 idle_hz;
 };
 
 #define KOMODO_MODE(w, hfp, hsa, hbp, h, vfp, vsa, vbp, hz, flags)	\
@@ -199,15 +204,19 @@ static const struct komodo_mode komodo_modes[] = {
 		KOMODO_MODE(1344, 80, 24, 42, 2992, 12, 4, 22,
 			    120, DRM_MODE_TYPE_PREFERRED),
 		.dsc = &komodo_wqhd_dsc, .image_conf = 0x0C, .depth_conf = 0x01,
+		.idle_hz = 30,
 	}, {
 		KOMODO_MODE(1344, 80, 24, 42, 2992, 12, 4, 22, 60, 0),
 		.dsc = &komodo_wqhd_dsc, .image_conf = 0x0C, .depth_conf = 0x01,
+		.idle_hz = 30,
 	}, {
 		KOMODO_MODE(1008, 80, 24, 38, 2244, 12, 4, 20, 120, 0),
 		.dsc = &komodo_fhd_dsc, .image_conf = 0x0D, .depth_conf = 0x81,
+		.idle_hz = 30,
 	}, {
 		KOMODO_MODE(1008, 80, 24, 38, 2244, 12, 4, 20, 60, 0),
 		.dsc = &komodo_fhd_dsc, .image_conf = 0x0D, .depth_conf = 0x81,
+		.idle_hz = 30,
 	},
 };
 
@@ -248,12 +257,6 @@ static int komodo_panel_disable(struct drm_panel *panel)
 	return 0;
 }
 
-/*
- * The bootloader powered the panel and ran its full init, but the DECON now
- * drives a freshly-programmed dual-DSC command stream. (Re)program the panel's
- * DSC decoder to match, mirroring the vendor km4_enable() DSC path, and
- * (re)assert TE + display-on so the panel accepts the DECON-driven GRAM writes.
- */
 /* Send a DCS command with inline bytes (cmd + params) to the panel. */
 #define km4_feat(dsi, seq...)                                                  \
 	mipi_dsi_dcs_write_buffer((dsi), (const u8[]){ seq },                  \
@@ -261,6 +264,82 @@ static int komodo_panel_disable(struct drm_panel *panel)
 
 static const struct komodo_mode *komodo_cur_mode(struct komodo_panel *ctx);
 
+/*
+ * Tell the DDIC what to scan the panel at.
+ *
+ * This is a command-mode panel: the host writes a frame and the DDIC then
+ * refreshes the display from its own memory, so on a still screen the scan
+ * rate is pure cost and nothing on the host side can lower it. The DDIC can
+ * lower it itself -- programmed with a starting rate, a target rate and the
+ * steps between, it drops to the target a few frames after the host stops
+ * writing, and "early exit" brings it straight back up on the next frame.
+ * That keeps a static screen off 120 Hz without the host having to notice it
+ * went static, which is the only way to do it here without a modeset behind
+ * the compositor's back.
+ *
+ * Note which rate the TE output keeps: fixed, at the mode's rate rather than
+ * the idle one, so the display controller's vsync does not disappear
+ * underneath it while the panel is idling.
+ *
+ * Values are the vendor driver's, for its high-speed (non-NS) operating mode.
+ */
+static void komodo_set_refresh(struct mipi_dsi_device *dsi,
+			       const struct komodo_mode *cm)
+{
+	unsigned int hz = drm_mode_vrefresh(&cm->mode);
+
+	/* TE: fixed while the DDIC may idle, changeable otherwise. */
+	if (cm->idle_hz) {
+		km4_feat(dsi, 0xB9, 0x51);
+		km4_feat(dsi, 0xB0, 0x00, 0x08, 0xB9);
+		km4_feat(dsi, 0xB9, 0x0B, 0x9A, 0x00, 0x1F, 0x0B, 0x9A, 0x00,
+			 0x1F);
+		km4_feat(dsi, 0xB0, 0x00, 0x02, 0xB9);
+		km4_feat(dsi, 0xB9, hz == 60 ? 0x01 : 0x00);
+	} else {
+		km4_feat(dsi, 0xB9, 0x04);
+		km4_feat(dsi, 0xB0, 0x00, 0x04, 0xB9);
+		km4_feat(dsi, 0xB9, 0x0B, 0x9A, 0x00, 0x1F);
+	}
+
+	/* Early exit, so a frame after an idle step is not held up by it. */
+	km4_feat(dsi, 0xB0, 0x00, 0x01, 0xBD);
+	km4_feat(dsi, 0xBD, cm->idle_hz ? 0x01 : 0x81);
+
+	if (!cm->idle_hz) {
+		/* Manual: the DDIC scans at one rate and stays there. */
+		km4_feat(dsi, 0xBD, 0x21);
+		km4_feat(dsi, 0x60, hz == 120 ? 0x00 : 0x01);
+		km4_feat(dsi, 0xF7, 0x0F);
+		return;
+	}
+
+	/* Starting rate. */
+	km4_feat(dsi, 0xB0, 0x00, 0x92, 0xBD);
+	km4_feat(dsi, 0xBD, 0x00, hz == 60 ? 0x02 : 0x00);
+	/* Target rate: only 30Hz is used here, the mildest step the DDIC has. */
+	km4_feat(dsi, 0xB0, 0x00, 0x12, 0xBD);
+	km4_feat(dsi, 0xBD, 0x00, 0x00, 0x06);
+	/* The ladder of intermediate rates. */
+	km4_feat(dsi, 0xB0, 0x00, 0x9E, 0xBD);
+	km4_feat(dsi, 0xBD, 0x00, 0x02, 0x00, 0x06, 0x00, 0x16);
+	/* Which rungs of it this mode uses to reach the target. */
+	km4_feat(dsi, 0xB0, 0x00, 0xAE, 0xBD);
+	if (hz == 60)
+		km4_feat(dsi, 0xBD, 0x01, 0x00, 0x00);
+	else
+		km4_feat(dsi, 0xBD, 0x00, 0x00, 0x00);
+	/* Hand the rate over to the DDIC. */
+	km4_feat(dsi, 0xBD, 0xA3);
+	km4_feat(dsi, 0xF7, 0x0F);
+}
+
+/*
+ * The bootloader powered the panel and ran its full init, but the DECON now
+ * drives a freshly-programmed dual-DSC command stream. (Re)program the panel's
+ * DSC decoder to match, mirroring the vendor km4_enable() DSC path, and
+ * (re)assert TE + display-on so the panel accepts the DECON-driven GRAM writes.
+ */
 static int komodo_panel_enable(struct drm_panel *panel)
 {
 	struct komodo_panel *ctx = to_komodo_panel(panel);
@@ -276,9 +355,9 @@ static int komodo_panel_enable(struct drm_panel *panel)
 	/*
 	 * Full power-on (vendor km4_enable, needs_reset path): the panel was just
 	 * hardware-reset in prepare(), so program its DSC decoder, sleep it out,
-	 * run the init cmdset and put it into continuous HS operation (early-exit
-	 * OFF, manual FI OFF) so it accepts the DECON-driven write_memory, then
-	 * send Display On.
+	 * run the init cmdset and put it into HS operation (manual frame
+	 * insertion OFF) so it accepts the DECON-driven write_memory, then set
+	 * the scan rate and send Display On.
 	 */
 
 	/* DSC: enable + PPS (vendor: 0x9D 0x01 + gs_dcs_write_dsc_config()) */
@@ -325,10 +404,6 @@ static int komodo_panel_enable(struct drm_panel *panel)
 	 * to the running (bootloader-lit) panel.
 	 */
 	km4_feat(dsi, 0xF0, 0x5A, 0x5A);				/* unlock */
-	/* TE (changeable) */
-	km4_feat(dsi, 0xB9, 0x04);
-	km4_feat(dsi, 0xB0, 0x00, 0x04, 0xB9);
-	km4_feat(dsi, 0xB9, 0x0B, 0x9A, 0x00, 0x1F);
 	/* HBM / IRC (flat default) */
 	km4_feat(dsi, 0xB0, 0x02, 0x00, 0x92);
 	km4_feat(dsi, 0x92, 0x00, 0x00, 0xFF, 0xD0);
@@ -338,9 +413,12 @@ static int komodo_panel_enable(struct drm_panel *panel)
 	/* operating mode: HS */
 	km4_feat(dsi, 0xF2, 0x01);
 	km4_feat(dsi, 0x60, 0x00);
-	/* early-exit off */
-	km4_feat(dsi, 0xB0, 0x00, 0x01, 0xBD);
-	km4_feat(dsi, 0xBD, 0x81);
+	/*
+	 * Left at the value the panel has always run with. These two are the
+	 * only part of the sequence the vendor driver makes conditional on its
+	 * "mrr v1" mode, which a shipping build does not use, so it leaves
+	 * them alone; this keeps the known state rather than inventing one.
+	 */
 	km4_feat(dsi, 0xB0, 0x00, 0x10, 0xBD);
 	km4_feat(dsi, 0xBD, 0x00);
 	km4_feat(dsi, 0xB0, 0x00, 0x82, 0xBD);
@@ -359,10 +437,8 @@ static int komodo_panel_enable(struct drm_panel *panel)
 	km4_feat(dsi, 0xF2, 0xD0);
 	km4_feat(dsi, 0xB0, 0x00, 0x41, 0xB9);
 	km4_feat(dsi, 0xB9, 0x02);
-	/* frequency: manual HS - 0x60 selects the rate (0x00 = 120Hz, 0x01 = 60Hz) */
-	km4_feat(dsi, 0xBD, 0x21);
-	km4_feat(dsi, 0x60, drm_mode_vrefresh(mode) == 120 ? 0x00 : 0x01);
-	km4_feat(dsi, 0xF7, 0x0F);					/* freq update */
+	/* TE, early exit and the scan rate itself. */
+	komodo_set_refresh(dsi, km);
 	km4_feat(dsi, 0xF0, 0xA5, 0xA5);				/* lock */
 
 	/* WRCTRLD: enable brightness control (vendor km4_write_display_mode) */
