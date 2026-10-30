@@ -38,9 +38,13 @@
 /* METER_CTRL1 */
 #define INT_SAMP_RATE			GENMASK(4, 2)
 #define INT_SAMP_RATE_62P5HZ		3
+#define EXT_METER_EN			BIT(1)
 #define METER_EN			BIT(0)
 /* METER_CTRL2 */
 #define ASYNC_RD			BIT(7)
+#define EXT_CHANNEL_EN			GENMASK(5, 3)
+#define EXT_SAMP_RATE			GENMASK(2, 0)
+#define EXT_SAMP_RATE_62P5HZ		3
 /* METER_CTRL5 and METER_CTRL7 hold the top four channels' mode bits. */
 #define METER_MODE_HI			GENMASK(3, 0)
 
@@ -68,10 +72,29 @@
 #define DVS_NLDO_POWER_800mA_ON		IQ30(0.001221001221001)
 #define DVS_NLDO_POWER_1200mA_ON	IQ30(0.001831501831501)
 
+/*
+ * A rail brought out to one of the three external sense inputs is measured
+ * across a board shunt rather than inside the PMIC, so its resolution depends
+ * on that shunt and has to be computed rather than looked up:
+ *
+ *	mW/LSB = V_rail/LSB * V_shunt/LSB * trim * 10 / shunt_uohms
+ *
+ * with the vendor's 2.1978021 and 0.7935698 and its 3-bit trim. Every external
+ * rail on this board uses a 5 mOhm shunt.
+ */
+#define EXT_SHUNT_POWER(_uohms)						\
+	IQ30(2.1978021 * 0.7935698 * 8 * 10 / (_uohms))
+#define EXT_SHUNT_POWER_5MOHM		EXT_SHUNT_POWER(5000)
+
 struct s2mpg1415_rail {
 	const char *name;
 	u8 muxsel;
 	u32 resolution;
+	/*
+	 * For a rail on an external sense input, which of the three the board
+	 * wired it to; zero for a rail measured inside the PMIC.
+	 */
+	u8 ext_channel_en;
 };
 
 struct s2mpg1415_chip {
@@ -99,10 +122,17 @@ static const struct s2mpg1415_rail s2mpg14_rails[S2MPG1415_METER_CHANNELS] = {
 	{ "LLDO2_M",		0x8, CMS_BUCK_POWER },
 	{ "VDD_CPUCL1_M",	0x9, CMS_BUCK_POWER },
 	/*
-	 * The clusters' SRAM supplies. LDOs, so whatever they drop is heat,
-	 * and they are the only CPU rails not on a buck.
+	 * The display's supply, on the first external sense input. It is the
+	 * largest single rail on the board at idle, and the only way to tell
+	 * what the panel costs: there is no die sensor for it and its heat
+	 * reaches the case rather than any thermal zone.
 	 */
-	{ "VDD_CPUCL2_HS_M",	0x2b, DVS_NLDO_POWER_1200mA_ON },
+	{ "VSYS_PWR_DISPLAY",	0x5c, EXT_SHUNT_POWER_5MOHM, BIT(0) },
+	/*
+	 * Two of the clusters' SRAM supplies. LDOs, so whatever they drop is
+	 * heat, and they are the only CPU rails not on a buck. The third,
+	 * VDD_CPUCL2_HS_M, lost its channel to the display above.
+	 */
 	{ "VDD_CPUCL0_M",	0x2c, DVS_NLDO_POWER_1200mA_ON },
 	{ "VDD_CPUCL2_HD_M",	0x31, DVS_NLDO_POWER_800mA_ON },
 };
@@ -649,6 +679,7 @@ static int s2mpg1415_meter_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct s2mpg1415_meter *meter;
 	unsigned int acc_mode, ctrl1;
+	u8 ext_en = 0;
 	int ch, ret;
 
 	meter = devm_kzalloc(dev, sizeof(*meter), GFP_KERNEL);
@@ -709,14 +740,40 @@ static int s2mpg1415_meter_probe(struct platform_device *pdev)
 		return dev_err_probe(dev, ret, "cannot select power mode\n");
 
 	/*
+	 * Turn on whichever external sense inputs have a rail pointed at them,
+	 * and give them the same rate as the internal channels.
+	 *
+	 * The rate matters here in a way it does not for the internal ones:
+	 * acc/count is an average however often it sampled, but the count is
+	 * shared, so an external channel sampling at a different rate would
+	 * divide its own accumulator by the internal channels' sample count.
+	 * The two rate fields take the same encoding, so this is just the same
+	 * selector written twice.
+	 */
+	for (ch = 0; ch < S2MPG1415_METER_CHANNELS; ch++)
+		ext_en |= meter->chip->rails[ch].ext_channel_en;
+
+	if (ext_en) {
+		ret = regmap_update_bits(meter->regmap, S2MPG14_METER_CTRL2,
+					 EXT_CHANNEL_EN | EXT_SAMP_RATE,
+					 FIELD_PREP(EXT_CHANNEL_EN, ext_en) |
+					 FIELD_PREP(EXT_SAMP_RATE,
+						    EXT_SAMP_RATE_62P5HZ));
+		if (ret)
+			return dev_err_probe(dev, ret,
+					     "cannot enable external channels\n");
+	}
+
+	/*
 	 * The rate is not in the arithmetic -- acc/count is an average however
 	 * often it sampled -- but it has to be a known one: left alone, the two
 	 * chips came up 60x apart and moved between boots.
 	 */
 	ret = regmap_update_bits(meter->regmap, S2MPG14_METER_CTRL1,
-				 INT_SAMP_RATE | METER_EN,
+				 INT_SAMP_RATE | EXT_METER_EN | METER_EN,
 				 FIELD_PREP(INT_SAMP_RATE,
-					    INT_SAMP_RATE_62P5HZ) | METER_EN);
+					    INT_SAMP_RATE_62P5HZ) | METER_EN |
+				 (ext_en ? EXT_METER_EN : 0));
 	if (ret)
 		return dev_err_probe(dev, ret, "cannot enable the meter\n");
 
