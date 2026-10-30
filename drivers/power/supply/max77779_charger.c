@@ -801,6 +801,49 @@ static void max77779_unreg_psy_notifier(void *nb)
 	power_supply_unreg_notifier(nb);
 }
 
+/**
+ * max77779_charger_clear_fship() - read out why ship mode was last left.
+ * @chg: charger private data.
+ *
+ * The PMIC latches the reason it last came out of factory ship mode and holds
+ * its TOPSYS FSHIP interrupt asserted until that reason has been read. Nothing
+ * consumes the interrupt, and the register it is acked through cannot clear a
+ * condition that has not gone away, so a latched reason costs a level
+ * interrupt that re-fires as fast as its handler can run: measured at ~1 kHz,
+ * with ~4 kHz of I2C behind it and the handler's wakeups landing on the big
+ * core, which then sat at its top frequency drawing 329 mW instead of the
+ * 2.7 mW it draws when it is allowed to stay down.
+ *
+ * Reading the field and writing it back is what clears it, as the vendor
+ * driver does.
+ */
+static void max77779_charger_clear_fship(struct max77779_charger *chg)
+{
+	unsigned int val;
+	int ret;
+
+	ret = regmap_read(chg->regmap, MAX77779_CHGR_REG_CHG_DETAILS_04, &val);
+	if (ret) {
+		dev_warn(chg->dev, "cannot read ship-mode exit reason: %d\n",
+			 ret);
+		return;
+	}
+
+	val = FIELD_GET(MAX77779_CHGR_REG_CHG_DETAILS_04_FSHIP_EXIT_DTLS, val);
+	if (!val)
+		return;
+
+	ret = regmap_update_bits(chg->regmap,
+				 MAX77779_CHGR_REG_CHG_DETAILS_04,
+				 MAX77779_CHGR_REG_CHG_DETAILS_04_FSHIP_EXIT_DTLS,
+				 0);
+	if (ret)
+		dev_warn(chg->dev, "cannot clear ship-mode exit reason %u: %d\n",
+			 val, ret);
+	else
+		dev_info(chg->dev, "cleared ship-mode exit reason %u\n", val);
+}
+
 static int max77779_charger_probe(struct platform_device *pdev)
 {
 	struct regulator_config config = { };
@@ -823,6 +866,9 @@ static int max77779_charger_probe(struct platform_device *pdev)
 	chg->regmap = dev_get_regmap(dev->parent, "charger");
 	if (!chg->regmap)
 		return dev_err_probe(dev, -ENODEV, "Missing charger regmap\n");
+
+	/* Before anything else: this is costing an interrupt per millisecond. */
+	max77779_charger_clear_fship(chg);
 
 	ret = devm_mutex_init(dev, &chg->lock);
 	if (ret)
