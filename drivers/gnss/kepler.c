@@ -16,6 +16,11 @@
  * (Samsung "BETP"); this driver is only the pipe -- it hands the raw byte
  * stream to the GNSS core and lets user space frame it.
  *
+ * The receiver has its own supplies -- a core rail and two RF rails -- and
+ * nothing else on the board switches them.  They are raised here around the
+ * character device rather than pinned on, so a system with no GNSS user leaves
+ * the receiver and its LDO pre-regulator unloaded.
+ *
  * Ported from the Google/Samsung out-of-tree gnssif_spi driver.
  *
  * Copyright (C) 2022 Samsung Electronics Co., Ltd.
@@ -32,6 +37,7 @@
 #include <linux/module.h>
 #include <linux/pm.h>
 #include <linux/pm_wakeup.h>
+#include <linux/regulator/consumer.h>
 #include <linux/sizes.h>
 #include <linux/slab.h>
 #include <linux/spi/spi.h>
@@ -55,9 +61,25 @@
 /* Frames are a whole number of 32-bit words even though the words are not. */
 #define KEPLER_FRAME_ALIGN	4
 
+/*
+ * Core first: the RF rails are specified to come up no earlier than the core,
+ * and regulator_bulk_enable() walks the array in order.
+ */
+static const char * const kepler_supply_names[] = { "core", "rf", "aux" };
+
+#define KEPLER_NUM_SUPPLIES	ARRAY_SIZE(kepler_supply_names)
+
+/*
+ * No vendor figure to copy -- the out-of-tree driver never touched these rails
+ * -- so this is a conservative settle before the first burst is clocked.
+ */
+#define KEPLER_SUPPLY_SETTLE_MS	10
+
 struct kepler_gnss {
 	struct spi_device	*spi;
 	struct gnss_device	*gdev;
+
+	struct regulator_bulk_data supplies[KEPLER_NUM_SUPPLIES];
 
 	struct gpio_desc	*gnss2ap;	/* device->host, IRQ source */
 	struct gpio_desc	*ap2gnss;	/* host->device */
@@ -218,6 +240,13 @@ static irqreturn_t kepler_irq_thread(int irq, void *data)
 static int kepler_open(struct gnss_device *gdev)
 {
 	struct kepler_gnss *kp = gnss_get_drvdata(gdev);
+	int ret;
+
+	ret = regulator_bulk_enable(KEPLER_NUM_SUPPLIES, kp->supplies);
+	if (ret)
+		return ret;
+
+	msleep(KEPLER_SUPPLY_SETTLE_MS);
 
 	kepler_irq_enable(kp);
 
@@ -229,6 +258,8 @@ static void kepler_close(struct gnss_device *gdev)
 	struct kepler_gnss *kp = gnss_get_drvdata(gdev);
 
 	kepler_irq_disable_sync(kp);
+
+	regulator_bulk_disable(KEPLER_NUM_SUPPLIES, kp->supplies);
 }
 
 static int kepler_write_raw(struct gnss_device *gdev,
@@ -299,6 +330,7 @@ static int kepler_probe(struct spi_device *spi)
 	struct device *dev = &spi->dev;
 	struct kepler_gnss *kp;
 	struct gnss_device *gdev;
+	unsigned int i;
 	int ret;
 
 	kp = devm_kzalloc(dev, sizeof(*kp), GFP_KERNEL);
@@ -316,6 +348,13 @@ static int kepler_probe(struct spi_device *spi)
 	ret = spi_setup(spi);
 	if (ret)
 		return dev_err_probe(dev, ret, "spi_setup failed\n");
+
+	for (i = 0; i < KEPLER_NUM_SUPPLIES; i++)
+		kp->supplies[i].supply = kepler_supply_names[i];
+
+	ret = devm_regulator_bulk_get(dev, KEPLER_NUM_SUPPLIES, kp->supplies);
+	if (ret)
+		return dev_err_probe(dev, ret, "failed to get supplies\n");
 
 	kp->gnss2ap = devm_gpiod_get(dev, "gnss2ap", GPIOD_IN);
 	if (IS_ERR(kp->gnss2ap))
