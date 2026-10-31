@@ -230,6 +230,15 @@
 		samsung,hibernate-monitor-en = <1>;
 		samsung,custom-nav-options = <1>;
 		samsung,cn0-filter-mode = <1>;
+		/*
+		 * The receiver's own rails (L9S/L10S/L11S).  Consumed here so
+		 * the driver can raise them only while /dev/gnss0 is open;
+		 * nothing else on the board switches them.
+		 */
+		core-supply = <&s_ldo9_reg>;
+		rf-supply = <&s_ldo10_reg>;
+		aux-supply = <&s_ldo11_reg>;
+
 		pinctrl-names = "default";
 		pinctrl-0 = <&gnss_spi_irq &gnss_spi_int>;
 		/* GNSS2AP_SPI_INT on gpa5-4, the data-ready/ready interrupt */
