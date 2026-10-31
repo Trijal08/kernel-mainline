@@ -22,6 +22,21 @@
 
 #define MAX_SPI_PORTS		12
 #define S3C64XX_SPI_QUIRK_CS_AUTO	(1 << 1)
+/*
+ * Wait for a PIO transfer by polling the RX FIFO level rather than by taking
+ * the RX-FIFO-ready interrupt.
+ *
+ * The interrupt path leaves a hazard for a transfer with no rx_buf: PIO always
+ * shifts data in (see s3c64xx_enable_datapath()), but the wait returns as soon
+ * as the data is sent without draining what was shifted in, so the next chunk
+ * arms RX_RDY_LVL over a FIFO that is already full of the previous chunk's
+ * leftovers and the interrupt can fire on those instead of on the transfer in
+ * progress.  A long run of such transfers -- a DSP firmware download, say --
+ * then desynchronises and a chunk eventually waits out its completion for
+ * nothing.  Set this where the vendor driver polls, which is what the silicon
+ * is known to work with.
+ */
+#define S3C64XX_SPI_QUIRK_POLL_PIO	BIT(2)
 #define AUTOSUSPEND_TIMEOUT	2000
 
 /* Registers and bit-fields */
@@ -910,7 +925,8 @@ static int s3c64xx_spi_transfer_one(struct spi_controller *host,
 
 	do {
 		/* transfer size is greater than 32, change to IRQ mode */
-		if (!use_dma && xfer->len > S3C64XX_SPI_POLLING_SIZE)
+		if (!use_dma && xfer->len > S3C64XX_SPI_POLLING_SIZE &&
+		    !(sdd->port_conf->quirks & S3C64XX_SPI_QUIRK_POLL_PIO))
 			use_irq = true;
 
 		if (use_irq) {
@@ -1702,7 +1718,8 @@ static const struct s3c64xx_spi_port_config gs101_spi_port_config = {
 	.clk_from_cmu	= true,
 	.has_loopback	= true,
 	.use_32bit_io	= true,
-	.quirks		= S3C64XX_SPI_QUIRK_CS_AUTO,
+	.quirks		= S3C64XX_SPI_QUIRK_CS_AUTO |
+			  S3C64XX_SPI_QUIRK_POLL_PIO,
 };
 
 static const struct platform_device_id s3c64xx_spi_driver_ids[] = {
