@@ -1848,6 +1848,24 @@ static const struct s5xxx_txring s5xxx_fmt_txring = {
 };
 
 /*
+ * How much free ring a frame of @flen bytes needs, honouring as much of the
+ * control reserve as the frame leaves room for.
+ *
+ * A frame too large to coexist with the whole reserve cannot honour it: the
+ * GEMS replies measured on this CP run to 4034 bytes, within 48 of the entire
+ * ring, so demanding another kilobyte free would refuse them for good and
+ * strand the service the CP is waiting on.  Such a frame is asked for an empty
+ * ring instead, which is the most it can be asked for; the ordinary small
+ * frames still leave the reserve untouched.
+ */
+static u32 s5xxx_tx_needed(u32 size, u32 flen, u32 reserve)
+{
+	if (!reserve || flen >= size)
+		return flen;
+	return flen + min_t(u32, reserve, size - 1 - flen);
+}
+
+/*
  * Frame one app message with the 12-byte EXYNOS link header for channel @ch,
  * push it into ring @r and signal the CP (ap2cp_msg SEND_* + doorbell).
  * Single-frame only.  @frame_seq (shared per ring) and the head RMW are
@@ -1863,10 +1881,12 @@ static int s5xxx_ring_tx(struct s5xxx_modem *sm, const struct s5xxx_txring *r,
 	void __iomem *buff = sm->ipc + r->buff;
 	unsigned long flags;
 	u8 hdr[S5XXX_SIT_HDR];
-	u32 in, out;
+	u32 in, out, needed;
 
 	if (len == 0 || len > max)
 		return -EMSGSIZE;
+
+	needed = s5xxx_tx_needed(r->size, flen, reserve);
 
 	spin_lock_irqsave(&sm->tx_lock, flags);
 
@@ -1878,7 +1898,7 @@ static int s5xxx_ring_tx(struct s5xxx_modem *sm, const struct s5xxx_txring *r,
 				    in, out);
 		return -EIO;
 	}
-	if (s5xxx_circ_space(r->size, in, out) < flen + reserve) {
+	if (s5xxx_circ_space(r->size, in, out) < needed) {
 		spin_unlock_irqrestore(&sm->tx_lock, flags);
 		dev_info_ratelimited(sm->dev,
 			     "txq full: ch %#x len %u in %#x out %#x space %u\n",
@@ -2362,7 +2382,8 @@ static int s5xxx_fmt_tx_frame(struct s5xxx_modem *sm, u8 ch, u8 *ch_seq,
 			      u16 cfg, const u8 *data, u32 len, u32 reserve,
 			      bool interruptible)
 {
-	u32 needed = round_up(S5XXX_SIT_HDR + len, 8) + reserve;
+	u32 needed = s5xxx_tx_needed(S5XXX_FMT_TXQ_SIZE,
+				     round_up(S5XXX_SIT_HDR + len, 8), reserve);
 	unsigned long deadline;
 	int ret;
 
