@@ -599,6 +599,23 @@ struct s5xxx_variant {
 #define S5XXX_CH_GNSS_DUMP		0xef
 #define S5XXX_GNSS_DUMP_MAX		SZ_4K
 #define S5XXX_FMT_MAX			(S5XXX_FMT_TXQ_SIZE - S5XXX_SIT_HDR - 8)
+/*
+ * Headroom on the FMT ring that only the CP's control channels may use.
+ *
+ * The ring is 4 KiB and a single message may be almost all of it, so one
+ * chatty channel starves every other: the GEMS/GIPC service on oem_ipc3 sends
+ * 3-4 KiB frames, and with one of those queued the ring reports 47 bytes free
+ * -- far too little for the 983-byte SETUP_DATA_CALL or the 272-byte
+ * IMS_SEND_SMS that the modem's control path needs, so sending an SMS or
+ * bringing up a PDN fails while bulk traffic sails through. Control frames are
+ * small and latency-critical and bulk frames are neither, so the bulk writers
+ * are held back short of this much space and the control writers are not.
+ *
+ * Sized for the largest control frame seen on this CP (SETUP_DATA_CALL, 983
+ * bytes plus the link header) rounded up: enough that one always fits, with
+ * the control path's own blocking retry covering a burst of them.
+ */
+#define S5XXX_FMT_CTRL_RESERVE		1024
 #define S5XXX_SIT_CH_BOOT		0xf1		/* EXYNOS_CH_ID_BOOT */
 #define S5XXX_DL_HDR			12
 #define S5XXX_DL_CHUNK			0xc000		/* 49152-byte payload cap */
@@ -1738,7 +1755,7 @@ static const struct s5xxx_txring s5xxx_fmt_txring = {
  */
 static int s5xxx_ring_tx(struct s5xxx_modem *sm, const struct s5xxx_txring *r,
 			 u16 *frame_seq, u8 ch, u8 *ch_seq, u32 max,
-			 const u8 *data, u32 len, int full_err)
+			 const u8 *data, u32 len, int full_err, u32 reserve)
 {
 	u32 flen = ALIGN(S5XXX_SIT_HDR + len, 8);
 	void __iomem *buff = sm->ipc + r->buff;
@@ -1759,7 +1776,7 @@ static int s5xxx_ring_tx(struct s5xxx_modem *sm, const struct s5xxx_txring *r,
 				    in, out);
 		return -EIO;
 	}
-	if (s5xxx_circ_space(r->size, in, out) < flen) {
+	if (s5xxx_circ_space(r->size, in, out) < flen + reserve) {
 		spin_unlock_irqrestore(&sm->tx_lock, flags);
 		dev_info_ratelimited(sm->dev,
 			     "txq full: ch %#x len %u in %#x out %#x space %u\n",
@@ -1794,7 +1811,7 @@ static int s5xxx_ipc_tx(struct s5xxx_modem *sm, u8 ch, const u8 *data, u32 len)
 {
 	return s5xxx_ring_tx(sm, &s5xxx_raw_txring, &sm->frame_seq, ch,
 			     &sm->at_ch_seq, 2048 - S5XXX_SIT_HDR, data, len,
-			     -EAGAIN);
+			     -EAGAIN, 0);
 }
 
 static int s5xxx_wwan_start(struct wwan_port *port)
@@ -1878,7 +1895,7 @@ static int s5xxx_gnss_cmd(struct s5xxx_modem *sm, const void *cmd, u32 len)
 	reinit_completion(&sm->gnss_rsp);
 	ret = s5xxx_ring_tx(sm, &s5xxx_raw_txring, &sm->frame_seq,
 			    S5XXX_CH_GNSS_BOOT, &sm->gnss_ch_seq,
-			    2048 - S5XXX_SIT_HDR, cmd, len, -EAGAIN);
+			    2048 - S5XXX_SIT_HDR, cmd, len, -EAGAIN, 0);
 	if (ret)
 		return ret;
 	/* Wait for the reply so commands are paced as the receiver expects;
@@ -2144,7 +2161,7 @@ static int s5xxx_gnss_tx(struct wwan_port *port, struct sk_buff *skb)
 		return -ENODEV;
 	ret = s5xxx_ring_tx(sm, &s5xxx_raw_txring, &sm->frame_seq,
 			    S5XXX_CH_GNSS_BOOT, &sm->gnss_ch_seq,
-			    2048 - S5XXX_SIT_HDR, skb->data, skb->len, -EAGAIN);
+			    2048 - S5XXX_SIT_HDR, skb->data, skb->len, -EAGAIN, 0);
 	if (ret)
 		return ret;
 	consume_skb(skb);
@@ -2168,7 +2185,7 @@ static int s5xxx_gnss_dump_tx(struct wwan_port *port, struct sk_buff *skb)
 	ret = s5xxx_ring_tx(sm, &s5xxx_raw_txring, &sm->frame_seq,
 			    S5XXX_CH_GNSS_DUMP, &sm->gnss_dump_ch_seq,
 			    S5XXX_GNSS_DUMP_MAX - S5XXX_SIT_HDR,
-			    skb->data, skb->len, -EAGAIN);
+			    skb->data, skb->len, -EAGAIN, 0);
 	if (ret)
 		return ret;
 	consume_skb(skb);
@@ -2201,14 +2218,14 @@ static u32 s5xxx_fmt_txq_space(struct s5xxx_modem *sm)
  * can wait for space and retry; the SIT port just propagates it.
  */
 static int s5xxx_fmt_ring_tx(struct s5xxx_modem *sm, u8 ch, u8 *ch_seq,
-			     u32 max, const u8 *data, u32 len)
+			     u32 max, const u8 *data, u32 len, u32 reserve)
 {
 	int ret;
 
 	if (!READ_ONCE(sm->online))
 		return -ENODEV;
 	ret = s5xxx_ring_tx(sm, &s5xxx_fmt_txring, &sm->fmt_frame_seq, ch,
-			    ch_seq, max, data, len, -EBUSY);
+			    ch_seq, max, data, len, -EBUSY, reserve);
 	if (!ret)
 		s5xxx_fmt_mark_busy(sm);	/* keep the link up during the transfer */
 	return ret;
@@ -2230,8 +2247,9 @@ static int s5xxx_ctrl_tx(struct wwan_port *port, struct sk_buff *skb)
 	 * from the IRQ handler) and retry.
 	 */
 	for (;;) {
+		/* Control frames may use the reserve; that is what it is for. */
 		ret = s5xxx_fmt_ring_tx(sm, sc->ch, &sc->ch_seq,
-					S5XXX_FMT_MAX, skb->data, skb->len);
+					S5XXX_FMT_MAX, skb->data, skb->len, 0);
 		if (ret != -EBUSY)
 			break;
 		ret = wait_event_interruptible_timeout(sm->fmt_tx_wq,
@@ -2285,8 +2303,10 @@ static int s5xxx_oem_tx(struct wwan_port *port, struct sk_buff *skb)
 	if (skb->len > S5XXX_FMT_MAX)
 		return -EMSGSIZE;
 
+	/* Bulk, so it stops short of the control reserve like the blocking
+	 * writer below; a ring too full for it is -EAGAIN as before. */
 	ret = s5xxx_fmt_ring_tx(sm, oc->ch, &oc->ch_seq, S5XXX_FMT_MAX,
-				skb->data, skb->len);
+				skb->data, skb->len, S5XXX_FMT_CTRL_RESERVE);
 	if (ret == -EBUSY)
 		return -EAGAIN;
 	if (ret)
@@ -2313,12 +2333,19 @@ static int s5xxx_oem_tx_blocking(struct wwan_port *port, struct sk_buff *skb)
 		return -EMSGSIZE;
 
 	for (;;) {
+		/*
+		 * Stop short of the control reserve. Bulk traffic here waits
+		 * for the CP to drain instead of filling the ring, so a chatty
+		 * service cannot push the modem's own control frames out.
+		 */
 		ret = s5xxx_fmt_ring_tx(sm, oc->ch, &oc->ch_seq,
-					S5XXX_FMT_MAX, skb->data, skb->len);
+					S5XXX_FMT_MAX, skb->data, skb->len,
+					S5XXX_FMT_CTRL_RESERVE);
 		if (ret != -EBUSY)
 			break;
 		ret = wait_event_interruptible_timeout(sm->fmt_tx_wq,
-				s5xxx_fmt_txq_space(sm) >= needed, HZ);
+				s5xxx_fmt_txq_space(sm) >=
+					needed + S5XXX_FMT_CTRL_RESERVE, HZ);
 		if (ret == 0)
 			ret = -ETIMEDOUT;
 		if (ret < 0)
@@ -2380,7 +2407,7 @@ static int s5xxx_raw_port_tx(struct wwan_port *port, struct sk_buff *skb)
 
 	ret = s5xxx_ring_tx(sm, &s5xxx_raw_txring, &sm->frame_seq, rc->ch,
 			    &rc->ch_seq, S5XXX_RFS_MAX, skb->data, skb->len,
-			    -EAGAIN);
+			    -EAGAIN, 0);
 	if (ret)
 		return ret;
 	consume_skb(skb);
@@ -2404,7 +2431,7 @@ static const struct wwan_port_ops s5xxx_oem_ops = {
 static int s5xxx_rfs_tx(struct s5xxx_modem *sm, const u8 *data, u32 len)
 {
 	return s5xxx_ring_tx(sm, &s5xxx_raw_txring, &sm->frame_seq, S5XXX_CH_RFS,
-			     &sm->rfs_ch_seq, S5XXX_RFS_MAX, data, len, -EAGAIN);
+			     &sm->rfs_ch_seq, S5XXX_RFS_MAX, data, len, -EAGAIN, 0);
 }
 
 static int s5xxx_rfs_port_tx(struct wwan_port *port, struct sk_buff *skb)
