@@ -2731,7 +2731,6 @@ static void s5xxx_drain_raw_rxq(struct s5xxx_modem *sm, u32 intval)
 			out = in;
 			break;
 		}
-		cfg = get_unaligned_le16(hdr + 4);
 		flen = get_unaligned_le16(hdr + 6);	/* header + payload */
 		total = ALIGN(flen, 8);
 		if (flen < S5XXX_SIT_HDR || total > usage)
@@ -3018,6 +3017,7 @@ static void s5xxx_drain_fmt_rxq(struct s5xxx_modem *sm, u32 intval)
 			out = in;
 			break;
 		}
+		cfg = get_unaligned_le16(hdr + 4);
 		flen = get_unaligned_le16(hdr + 6);
 		total = ALIGN(flen, 8);
 		if (flen < S5XXX_SIT_HDR || total > usage)
