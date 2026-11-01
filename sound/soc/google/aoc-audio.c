@@ -361,12 +361,14 @@ struct aoc_audio_stream {
 	 * Cleared before the tick is cancelled on STOP.  hrtimer_try_to_cancel()
 	 * cannot wait -- .trigger runs atomically -- so a tick already past its
 	 * check, or a period_work already queued, still runs after the stream has
-	 * stopped.  By then .prepare may have re-based the pointer, and the
-	 * snd_pcm_period_elapsed() that work does lands on a stream whose
-	 * position means nothing yet; the core reads it as the hardware having
-	 * overrun the application and declares an XRUN.  Recovery re-prepares and
-	 * the same stale work hits again, which is how a stream ends up stuck
-	 * returning -EPIPE from snd_pcm_avail() for as long as it is open.
+	 * stopped, and the snd_pcm_period_elapsed() that work does would land on
+	 * a stopped stream.
+	 *
+	 * This closes that window and no more.  It cannot help across a restart:
+	 * by the time work queued before the stop runs, .trigger(START) has set
+	 * the flag again, so the work proceeds and reports a position from
+	 * before the re-base.  Waiting the work out in .prepare() is what
+	 * actually stops that; see the comment there.
 	 */
 	bool running;
 };
@@ -1309,6 +1311,28 @@ static int aoc_pcm_prepare(struct snd_soc_component *comp,
 
 	if (aoc_pcm_is_be(substream))
 		return 0;
+
+	/*
+	 * Wait out the tick and its refill work before re-basing the position.
+	 *
+	 * .trigger(STOP) cannot do this.  It runs atomically, so
+	 * hrtimer_try_to_cancel() can return with the callback still in flight
+	 * and a work item already queued behind it; this runs in process
+	 * context with no stream lock held (snd_pcm_action_nonatomic), and is
+	 * the only place that can wait.
+	 *
+	 * Letting that work land after the re-base is what kept a recovered
+	 * stream broken.  Its snd_pcm_period_elapsed() reports a hardware
+	 * position that means nothing yet, the core reads that as the hardware
+	 * having overrun the application, and the XRUN it raises re-prepares
+	 * and arms the very same race again.  Measured on komodo: PipeWire
+	 * recovering the speaker sink about sixteen times a second, silent, for
+	 * as long as the stream stayed open, and a suspend/resume of the sink
+	 * -- which closes the PCM, where this wait already happens -- clearing
+	 * it every time.
+	 */
+	hrtimer_cancel(&s->tick);
+	cancel_work_sync(&s->period_work);
 
 	s->base = aoc_service_progress(s->svc, s->playback);
 	s->prev_consumed = s->base;
