@@ -5136,7 +5136,7 @@ static ssize_t s5xxx_sitdump_read(struct file *file, char __user *buf,
 		}
 		n = min(count, seg[i] - pos);
 		if (copy_to_user(buf + done, c->buf + off[i] + pos, n))
-			return done ? done : -EFAULT;
+			return done ? (ssize_t)done : -EFAULT;
 		done += n;
 		count -= n;
 		pos = 0;
