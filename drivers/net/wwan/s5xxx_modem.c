@@ -50,6 +50,7 @@
 #include <linux/pcie-zumapro.h>
 #include <linux/pm_wakeirq.h>
 #include <linux/reset.h>
+#include <linux/seq_file.h>
 #include <linux/sizes.h>
 #include <linux/skbuff.h>
 #include <linux/timekeeping.h>
@@ -5071,6 +5072,63 @@ static ssize_t s5xxx_bootlog_read(struct file *file, char __user *ubuf,
 }
 
 /*
+ * The four ring cursors and the link state behind them, for catching a stalled
+ * control plane in the act.
+ *
+ * A capture shows what crossed the link, not what is sitting in a ring waiting
+ * to: a CP that has written its response and an AP that has not drained it
+ * look exactly like a CP that has not answered.  rxq head != tail here says
+ * which -- the CP's data is in the ring and the SEND_FMT that should have
+ * brought us in never arrived.
+ */
+static void s5xxx_rings_one(struct seq_file *m, const char *name, u32 size,
+			    u32 head_off, u32 tail_off, const char *what)
+{
+	struct s5xxx_modem *sm = m->private;
+	u32 head = readl(sm->ipc + head_off);
+	u32 tail = readl(sm->ipc + tail_off);
+
+	seq_printf(m, "%-6s head %#08x tail %#08x %s %u of %#x\n", name, head,
+		   tail, what,
+		   (head < size && tail < size) ?
+			   s5xxx_circ_usage(size, head, tail) : 0,
+		   size);
+}
+
+static int s5xxx_rings_show(struct seq_file *m, void *v)
+{
+	struct s5xxx_modem *sm = m->private;
+	unsigned long flags;
+	bool link_up, db_reserved, main_armed;
+
+	spin_lock_irqsave(&sm->lock, flags);
+	link_up = sm->link_up;
+	db_reserved = sm->db_reserved;
+	main_armed = sm->main_armed;
+	spin_unlock_irqrestore(&sm->lock, flags);
+
+	seq_printf(m, "online %u link_up %u main_armed %u db_reserved %u fmt_busy %u\n",
+		   READ_ONCE(sm->online) ? 1 : 0, link_up, main_armed, db_reserved,
+		   time_before(jiffies, READ_ONCE(sm->fmt_busy_until)) ? 1 : 0);
+
+	/*
+	 * The rings live in the AP's reserved carveout, not across the link, so
+	 * these reads are valid whether the link is up or parked -- which is the
+	 * point: a stall with the link down is exactly what wants inspecting.
+	 */
+	s5xxx_rings_one(m, "fmt tx", S5XXX_FMT_TXQ_SIZE, S5XXX_FMT_TXQ_HEAD,
+			S5XXX_FMT_TXQ_TAIL, "pending");
+	s5xxx_rings_one(m, "fmt rx", S5XXX_FMT_RXQ_SIZE, S5XXX_FMT_RXQ_HEAD,
+			S5XXX_FMT_RXQ_TAIL, "undrained");
+	s5xxx_rings_one(m, "raw tx", S5XXX_RAW_TXQ_SIZE, S5XXX_RAW_TXQ_HEAD,
+			S5XXX_RAW_TXQ_TAIL, "pending");
+	s5xxx_rings_one(m, "raw rx", S5XXX_RAW_RXQ_SIZE, S5XXX_RAW_RXQ_HEAD,
+			S5XXX_RAW_RXQ_TAIL, "undrained");
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(s5xxx_rings);
+
+/*
  * Holding the dump open stops the ring overwriting itself, so the file a reader
  * walks is consistent from the first byte to the last and the records it gains
  * while being read are only ever appended to its end.
@@ -5998,6 +6056,7 @@ static int s5xxx_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	debugfs_create_file("srinfo", 0400, sm->dbgfs, sm, &s5xxx_srinfo_fops);
 	debugfs_create_file("capture", 0600, sm->dbgfs, sm, &s5xxx_capture_fops);
 	debugfs_create_file("sitdump", 0400, sm->dbgfs, sm, &s5xxx_sitdump_fops);
+	debugfs_create_file("rings", 0400, sm->dbgfs, sm, &s5xxx_rings_fops);
 	debugfs_create_file("capture_gnss", 0200, sm->dbgfs, sm,
 			    &s5xxx_capture_gnss_fops);
 
