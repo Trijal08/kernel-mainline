@@ -1974,9 +1974,9 @@ static u8 *s5xxx_cap_reserve(struct s5xxx_modem *sm, u8 ch, bool rx, u32 len,
 	/*
 	 * The receiver's diagnostic stream is most of what crosses this link
 	 * -- measured at 89% of records, around 14KB/s -- and it is not what
-	 * anyone opens this file for. Left in, it fills the buffer within
-	 * minutes and the capture stops before whatever was being chased ever
-	 * happened. Keep it out unless it is the thing being chased.
+	 * anyone opens this file for. Left in, it laps the buffer within minutes
+	 * and the records worth having are gone before whatever was being chased
+	 * ever happened. Keep it out unless it is the thing being chased.
 	 */
 	if ((ch == S5XXX_CH_GNSS_DUMP || ch == S5XXX_CH_GNSS_BOOT) &&
 	    !READ_ONCE(c->gnss))
