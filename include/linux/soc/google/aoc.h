@@ -43,6 +43,12 @@ bool aoc_service_can_write(struct aoc_service *svc);
  */
 u32 aoc_service_progress(struct aoc_service *svc, bool playback);
 
+/*
+ * The size of the service's ring in bytes, or zero if it has none.  A reader
+ * may have taken up to this much more than it has rendered.
+ */
+u32 aoc_service_ring_size(struct aoc_service *svc, bool playback);
+
 /**
  * aoc_service_set_handler() - register a doorbell callback for a service
  * @svc: the service handle
