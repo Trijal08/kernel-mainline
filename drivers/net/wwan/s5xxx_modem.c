@@ -831,17 +831,31 @@ struct s5xxx_modem {
 	 * where the channel and direction come from, so keeping it would be
 	 * recording the same thing twice.
 	 *
-	 * Records are appended and never rewritten, so a reader can walk what is
-	 * there while the capture is still running -- the prefix it reads is
-	 * already final. Filling up stops the capture rather than wrapping, which
-	 * leaves a dump that parses to its end instead of starting mid-record.
+	 * The buffer is a ring of whole records: when the write cursor reaches
+	 * the end it starts a new lap at offset 0 and drops the oldest records
+	 * to make room, so what is kept is always the most recent traffic.
+	 * Filling up and stopping instead -- which this did at first -- loses
+	 * exactly the window anyone captures for, the one before the event.
+	 *
+	 * A record is never split across the wrap, so every reservation stays
+	 * linear and a message can be copied straight out of a ring into it.
+	 * @limit is where the previous lap stopped, i.e. where the unused slack
+	 * at the end of the buffer begins; the dump is served oldest record
+	 * first, so what user space reads is still the plain append-only stream
+	 * the downstream dump is, whether a wrap has happened or not.
 	 */
 	struct s5xxx_capture {
 		u8		*buf;
 		size_t		size;
-		size_t		used;
-		u64		dropped;	/* records that did not fit */
+		size_t		head;		/* where the next record goes */
+		size_t		tail;		/* oldest record kept */
+		size_t		limit;		/* end of the previous lap */
+		bool		wrapped;	/* head is on a lap below tail */
+		u64		dropped;	/* records not recorded at all */
+		u64		evicted;	/* records overwritten by a lap */
+		unsigned int	readers;	/* dumps open; freezes the ring */
 		bool		on;
+		bool		frozen;		/* held at a CP crash */
 		bool		gnss;		/* include the GNSS diagnostic stream */
 		spinlock_t	lock;		/* also taken from the hard IRQ */
 	} cap;
@@ -1366,6 +1380,17 @@ static irqreturn_t s5xxx_cp_active_irq(int irq, void *data)
 			readl(sm->msi + S5XXX_MSI_FLAG_CAFE),
 			readl(sm->ipc + S5XXX_IPC_CP2AP_MSG),
 			sm->irq_count);
+		/*
+		 * Hold the capture where it is.  The records either side of
+		 * this are the whole reason for having one, and the CP will
+		 * not be adding any more -- left running, the ring laps and
+		 * overwrites them long before anyone pulls the dump.
+		 */
+		if (READ_ONCE(sm->cap.on)) {
+			WRITE_ONCE(sm->cap.on, false);
+			WRITE_ONCE(sm->cap.frozen, true);
+			dev_err(sm->dev, "SIT capture frozen at the crash\n");
+		}
 	}
 	return IRQ_HANDLED;
 }
@@ -1876,10 +1901,57 @@ static const struct s5xxx_txring s5xxx_fmt_txring = {
 #define S5XXX_CAP_REC_HDR	12
 
 /*
+ * Make @need bytes available contiguously at the write cursor: start a new lap
+ * when the rest of the buffer is too short, and drop whole records at the tail
+ * when the lap has caught up with them.  Each record carries its own length,
+ * so the tail walks itself.
+ *
+ * Nothing is overwritten while a dump is open: a multi-megabyte pull takes long
+ * enough that a lap underneath it would hand back a file torn at the oldest
+ * end.  For that window the capture fills and counts what it drops instead,
+ * which is the one case where losing the newest records is the right trade.
+ *
+ * Returns false only if the record could never fit the buffer, or if a reader
+ * is holding the ring and it is full.
+ */
+static bool s5xxx_cap_room(struct s5xxx_capture *c, size_t need)
+{
+	if (need > c->size)
+		return false;
+
+	for (;;) {
+		if (!c->wrapped) {
+			if (c->size - c->head >= need)
+				return true;
+			if (c->readers)
+				return false;
+			c->limit = c->head;
+			c->head = 0;
+			c->wrapped = true;
+			continue;
+		}
+		/* Wrapped, so the tail is what the cursor runs into. */
+		if (c->tail - c->head >= need)
+			return true;
+		if (c->readers)
+			return false;
+		c->tail += S5XXX_CAP_REC_HDR +
+			   get_unaligned_le16(c->buf + c->tail + 8);
+		c->evicted++;
+		if (c->tail >= c->limit) {
+			/* Past the last record of that lap: one region again. */
+			c->tail = 0;
+			c->wrapped = false;
+		}
+	}
+}
+
+/*
  * Reserve a record and fill in its header, or return NULL if the capture is
- * off or full.  Returns with cap.lock held on success, because the payload is
- * copied straight into the reservation by the caller -- a message read from a
- * ring goes there directly rather than through a bounce buffer.
+ * off or the record cannot be made to fit.  Returns with cap.lock held on
+ * success, because the payload is copied straight into the reservation by the
+ * caller -- a message read from a ring goes there directly rather than through
+ * a bounce buffer.
  */
 static u8 *s5xxx_cap_reserve(struct s5xxx_modem *sm, u8 ch, bool rx, u32 len,
 			     unsigned long *flags)
@@ -1903,17 +1975,17 @@ static u8 *s5xxx_cap_reserve(struct s5xxx_modem *sm, u8 ch, bool rx, u32 len,
 		return NULL;
 
 	spin_lock_irqsave(&c->lock, *flags);
-	if (!c->buf || c->used + need > c->size) {
+	if (!c->buf || !s5xxx_cap_room(c, need)) {
 		if (c->buf)
 			c->dropped++;
 		spin_unlock_irqrestore(&c->lock, *flags);
 		return NULL;
 	}
-	p = c->buf + c->used;
+	p = c->buf + c->head;
 	put_unaligned_le64(ktime_get_boottime_ns(), p);
 	put_unaligned_le16(len, p + 8);
 	put_unaligned_le16(((u16)ch << 8) | (rx ? 1 : 0), p + 10);
-	c->used += need;
+	c->head += need;
 	return p + S5XXX_CAP_REC_HDR;
 }
 
@@ -4985,46 +5057,114 @@ static ssize_t s5xxx_bootlog_read(struct file *file, char __user *ubuf,
 }
 
 /*
- * The capture, as a plain file of records.  Reading does not need the lock:
- * records are only ever appended and a record is complete before @used grows
- * past it, so everything up to the @used sampled here is already final.
+ * Holding the dump open stops the ring overwriting itself, so the file a reader
+ * walks is consistent from the first byte to the last and the records it gains
+ * while being read are only ever appended to its end.
+ */
+static int s5xxx_sitdump_open(struct inode *inode, struct file *file)
+{
+	struct s5xxx_modem *sm = inode->i_private;
+	unsigned long flags;
+
+	file->private_data = sm;
+	spin_lock_irqsave(&sm->cap.lock, flags);
+	sm->cap.readers++;
+	spin_unlock_irqrestore(&sm->cap.lock, flags);
+	return 0;
+}
+
+static int s5xxx_sitdump_release(struct inode *inode, struct file *file)
+{
+	struct s5xxx_modem *sm = file->private_data;
+	unsigned long flags;
+
+	spin_lock_irqsave(&sm->cap.lock, flags);
+	sm->cap.readers--;
+	spin_unlock_irqrestore(&sm->cap.lock, flags);
+	return 0;
+}
+
+/*
+ * The capture, as a plain file of records, oldest first.  A lap splits the
+ * kept records into two regions of the buffer and this is where they are put
+ * back in order, so nothing downstream of here has to know the ring exists.
  */
 static ssize_t s5xxx_sitdump_read(struct file *file, char __user *buf,
 				  size_t count, loff_t *ppos)
 {
 	struct s5xxx_modem *sm = file->private_data;
-	size_t used = READ_ONCE(sm->cap.used);
+	struct s5xxx_capture *c = &sm->cap;
+	size_t off[2], seg[2], pos, done = 0;
+	unsigned long flags;
+	int i;
 
-	if (!sm->cap.buf)
+	if (*ppos < 0)
+		return -EINVAL;
+	pos = *ppos;
+
+	spin_lock_irqsave(&c->lock, flags);
+	if (!c->buf) {
+		spin_unlock_irqrestore(&c->lock, flags);
 		return 0;
-	return simple_read_from_buffer(buf, count, ppos, sm->cap.buf, used);
+	}
+	off[0] = c->tail;
+	seg[0] = (c->wrapped ? c->limit : c->head) - c->tail;
+	off[1] = 0;
+	seg[1] = c->wrapped ? c->head : 0;
+	spin_unlock_irqrestore(&c->lock, flags);
+
+	for (i = 0; i < 2 && count; i++) {
+		size_t n;
+
+		if (pos >= seg[i]) {
+			pos -= seg[i];
+			continue;
+		}
+		n = min(count, seg[i] - pos);
+		if (copy_to_user(buf + done, c->buf + off[i] + pos, n))
+			return done ? done : -EFAULT;
+		done += n;
+		count -= n;
+		pos = 0;
+	}
+	*ppos += done;
+	return done;
 }
 
 static const struct file_operations s5xxx_sitdump_fops = {
-	.owner	= THIS_MODULE,
-	.open	= simple_open,
-	.read	= s5xxx_sitdump_read,
-	.llseek	= default_llseek,
+	.owner	 = THIS_MODULE,
+	.open	 = s5xxx_sitdump_open,
+	.release = s5xxx_sitdump_release,
+	.read	 = s5xxx_sitdump_read,
+	.llseek	 = default_llseek,
 };
 
 static ssize_t s5xxx_capture_read(struct file *file, char __user *buf,
 				  size_t count, loff_t *ppos)
 {
 	struct s5xxx_modem *sm = file->private_data;
-	char line[96];
+	struct s5xxx_capture *c = &sm->cap;
+	unsigned long flags;
+	size_t kept;
+	char line[128];
 	int n;
 
-	n = scnprintf(line, sizeof(line), "%u %zu %zu %llu gnss=%u\n",
-		      READ_ONCE(sm->cap.on) ? 1 : 0, READ_ONCE(sm->cap.used),
-		      sm->cap.size, sm->cap.dropped,
-		      READ_ONCE(sm->cap.gnss) ? 1 : 0);
+	spin_lock_irqsave(&c->lock, flags);
+	kept = c->wrapped ? (c->limit - c->tail) + c->head : c->head - c->tail;
+	n = scnprintf(line, sizeof(line),
+		      "%u %zu %zu %llu gnss=%u evicted=%llu frozen=%u\n",
+		      c->on ? 1 : 0, kept, c->size, c->dropped,
+		      c->gnss ? 1 : 0, c->evicted, c->frozen ? 1 : 0);
+	spin_unlock_irqrestore(&c->lock, flags);
 	return simple_read_from_buffer(buf, count, ppos, line, n);
 }
 
 /*
  * Write 1 to start a capture and 0 to stop one.  Starting allocates the buffer
  * and discards whatever the last capture left, so a run always begins at
- * record zero; stopping keeps the buffer so the dump can still be read.
+ * record zero; stopping keeps the buffer so the dump can still be read.  The
+ * capture runs from probe, so this is for discarding a run or for picking one
+ * up again after a CP crash froze it.
  */
 static ssize_t s5xxx_capture_write(struct file *file, const char __user *buf,
 				   size_t count, loff_t *ppos)
@@ -5054,8 +5194,13 @@ static ssize_t s5xxx_capture_write(struct file *file, const char __user *buf,
 			c->size = S5XXX_CAP_DEFAULT_SIZE;
 			fresh = NULL;
 		}
-		c->used = 0;
+		c->head = 0;
+		c->tail = 0;
+		c->limit = 0;
+		c->wrapped = false;
 		c->dropped = 0;
+		c->evicted = 0;
+		c->frozen = false;
 		WRITE_ONCE(c->on, true);
 	} else {
 		WRITE_ONCE(c->on, false);
