@@ -180,40 +180,6 @@ struct aoc_data {
 };
 
 /*
- * Map the register blocks the device declares.  All of them are wanted before
- * the core is started -- the power request and the SSMT to let it run at all,
- * the mailboxes to hear from it -- so take them together and fail as a unit.
- */
-static int aoc_map_regs(struct aoc_data *aoc, struct platform_device *pdev)
-{
-	static const char * const mbox_names[AOC_MBOX_BLOCKS] = {
-		"mbox-a32", "mbox-f1", "mbox-p6",
-	};
-	int b;
-
-	aoc->req = devm_platform_ioremap_resource_byname(pdev, "req");
-	if (IS_ERR(aoc->req))
-		return dev_err_probe(aoc->dev, PTR_ERR(aoc->req),
-				     "cannot map the power request block\n");
-
-	aoc->ssmt = devm_platform_ioremap_resource_byname(pdev, "ssmt");
-	if (IS_ERR(aoc->ssmt))
-		return dev_err_probe(aoc->dev, PTR_ERR(aoc->ssmt),
-				     "cannot map the ssmt\n");
-
-	for (b = 0; b < AOC_MBOX_BLOCKS; b++) {
-		void __iomem *mbox;
-
-		mbox = devm_platform_ioremap_resource_byname(pdev, mbox_names[b]);
-		if (IS_ERR(mbox))
-			return dev_err_probe(aoc->dev, PTR_ERR(mbox),
-					     "cannot map %s\n", mbox_names[b]);
-		aoc->mbox[b] = mbox;
-	}
-	return 0;
-}
-
-/*
  * Read the SoC chip-id the (chip-specific) AOC firmware validates at boot.
  *
  * The block belongs to the SoC rather than to the AOC, so reach it through a
@@ -1358,6 +1324,40 @@ static int aoc_enable_sensor_rails(struct device *dev)
 
 	/* Left enabled for the life of the device; the AoC owns them after. */
 	return devm_regulator_bulk_get_enable(dev, n, names);
+}
+
+/*
+ * Map the register blocks the device declares.  All of them are wanted before
+ * the core is started -- the power request and the SSMT to let it run at all,
+ * the mailboxes to hear from it -- so take them together and fail as a unit.
+ */
+static int aoc_map_regs(struct aoc_data *aoc, struct platform_device *pdev)
+{
+	static const char * const mbox_names[AOC_MBOX_BLOCKS] = {
+		"mbox-a32", "mbox-f1", "mbox-p6",
+	};
+	int b;
+
+	aoc->req = devm_platform_ioremap_resource_byname(pdev, "req");
+	if (IS_ERR(aoc->req))
+		return dev_err_probe(aoc->dev, PTR_ERR(aoc->req),
+				     "cannot map the power request block\n");
+
+	aoc->ssmt = devm_platform_ioremap_resource_byname(pdev, "ssmt");
+	if (IS_ERR(aoc->ssmt))
+		return dev_err_probe(aoc->dev, PTR_ERR(aoc->ssmt),
+				     "cannot map the ssmt\n");
+
+	for (b = 0; b < AOC_MBOX_BLOCKS; b++) {
+		void __iomem *mbox;
+
+		mbox = devm_platform_ioremap_resource_byname(pdev, mbox_names[b]);
+		if (IS_ERR(mbox))
+			return dev_err_probe(aoc->dev, PTR_ERR(mbox),
+					     "cannot map %s\n", mbox_names[b]);
+		aoc->mbox[b] = mbox;
+	}
+	return 0;
 }
 
 static int aoc_probe(struct platform_device *pdev)
