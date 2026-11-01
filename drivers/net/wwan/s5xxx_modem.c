@@ -534,9 +534,10 @@ struct s5xxx_variant {
  * spec-shaped multi-frames breaks the boot uecap exchange and with it LTE
  * attach, a result the sibling s5300 driver records from hardware.  Only a
  * message too large for the ring falls back to fragments, where the
- * alternative is refusing it outright.  Control-channel starvation is handled
- * by S5XXX_FMT_CTRL_RESERVE below instead, which costs a bulk writer a wait
- * rather than changing the shape of what the CP receives.
+ * alternative is refusing it outright.  Writers competing for a ring barely
+ * larger than one of their messages are kept in order by the admission queue
+ * in s5xxx_fmt_tx_frame() instead, which costs a writer a wait rather than
+ * changing the shape of what the CP receives.
  */
 #define S5XXX_SIT_CFG_MULTI_START	BIT(15)
 #define S5XXX_SIT_CFG_MULTI_LAST	BIT(14)
@@ -653,23 +654,6 @@ struct s5xxx_variant {
 #define S5XXX_CH_GNSS_DUMP		0xef
 #define S5XXX_GNSS_DUMP_MAX		SZ_4K
 #define S5XXX_FMT_MAX			(S5XXX_FMT_TXQ_SIZE - S5XXX_SIT_HDR - 8)
-/*
- * Headroom on the FMT ring that only the CP's control channels may use.
- *
- * The ring is 4 KiB and a single message may be almost all of it, so one
- * chatty channel starves every other: the GEMS/GIPC service on oem_ipc3 sends
- * 3-4 KiB frames, and with one of those queued the ring reports 47 bytes free
- * -- far too little for the 983-byte SETUP_DATA_CALL or the 272-byte
- * IMS_SEND_SMS that the modem's control path needs, so sending an SMS or
- * bringing up a PDN fails while bulk traffic sails through. Control frames are
- * small and latency-critical and bulk frames are neither, so the bulk writers
- * are held back short of this much space and the control writers are not.
- *
- * Sized for the largest control frame seen on this CP (SETUP_DATA_CALL, 983
- * bytes plus the link header) rounded up: enough that one always fits, with
- * the control path's own blocking retry covering a burst of them.
- */
-#define S5XXX_FMT_CTRL_RESERVE		1024
 #define S5XXX_SIT_CH_BOOT		0xf1		/* EXYNOS_CH_ID_BOOT */
 #define S5XXX_DL_HDR			12
 #define S5XXX_DL_CHUNK			0xc000		/* 49152-byte payload cap */
@@ -821,6 +805,19 @@ struct s5xxx_modem {
 	 */
 	struct s5xxx_oem_ch	oem[S5XXX_OEM_PORTS];
 	struct s5xxx_oem_ch	raw[S5XXX_RAW_PORTS];
+
+	/*
+	 * Admission queue for the FMT ring, in arrival order.  The ring is
+	 * 4 KiB and the CP's own replies on the oem channels run to nearly all
+	 * of it, so a large frame only fits an empty ring -- and while it waits
+	 * for one, every small SIT frame that fits the gap keeps the ring from
+	 * ever emptying.  That livelock is what killed the CP: the GEMS reply
+	 * timed out unsent and the CP asserted PAL_QUEUE_FULL.  So a writer
+	 * that cannot fit queues here, and a newcomer that finds the queue
+	 * occupied must queue behind it rather than take the gap.
+	 */
+	struct list_head	fmt_tx_queue;
+	spinlock_t		fmt_tx_queue_lock;	/* guards fmt_tx_queue */
 	struct dentry		*dbgfs;		/* dump-boot trigger */
 
 	/*
@@ -1874,23 +1871,6 @@ static const struct s5xxx_txring s5xxx_fmt_txring = {
 	.int_flag = S5XXX_INT_SEND_FMT,
 };
 
-/*
- * How much free ring a frame of @flen bytes needs, honouring as much of the
- * control reserve as the frame leaves room for.
- *
- * A frame too large to coexist with the whole reserve cannot honour it: the
- * GEMS replies measured on this CP run to 4034 bytes, within 48 of the entire
- * ring, so demanding another kilobyte free would refuse them for good and
- * strand the service the CP is waiting on.  Such a frame is asked for an empty
- * ring instead, which is the most it can be asked for; the ordinary small
- * frames still leave the reserve untouched.
- */
-static u32 s5xxx_tx_needed(u32 size, u32 flen, u32 reserve)
-{
-	if (!reserve || flen >= size)
-		return flen;
-	return flen + min_t(u32, reserve, size - 1 - flen);
-}
 
 #define S5XXX_CAP_DEFAULT_SIZE	SZ_8M
 #define S5XXX_CAP_REC_HDR	12
@@ -1973,19 +1953,16 @@ static void s5xxx_cap_rx(struct s5xxx_modem *sm, u8 ch, void __iomem *buff,
  */
 static int s5xxx_ring_tx(struct s5xxx_modem *sm, const struct s5xxx_txring *r,
 			 u16 *frame_seq, u8 ch, u8 *ch_seq, u32 max,
-			 const u8 *data, u32 len, int full_err, u32 reserve,
-			 u16 cfg)
+			 const u8 *data, u32 len, int full_err, u16 cfg)
 {
 	u32 flen = ALIGN(S5XXX_SIT_HDR + len, 8);
 	void __iomem *buff = sm->ipc + r->buff;
 	unsigned long flags;
 	u8 hdr[S5XXX_SIT_HDR];
-	u32 in, out, needed;
+	u32 in, out;
 
 	if (len == 0 || len > max)
 		return -EMSGSIZE;
-
-	needed = s5xxx_tx_needed(r->size, flen, reserve);
 
 	spin_lock_irqsave(&sm->tx_lock, flags);
 
@@ -1997,7 +1974,7 @@ static int s5xxx_ring_tx(struct s5xxx_modem *sm, const struct s5xxx_txring *r,
 				    in, out);
 		return -EIO;
 	}
-	if (s5xxx_circ_space(r->size, in, out) < needed) {
+	if (s5xxx_circ_space(r->size, in, out) < flen) {
 		spin_unlock_irqrestore(&sm->tx_lock, flags);
 		dev_info_ratelimited(sm->dev,
 			     "txq full: ch %#x len %u in %#x out %#x space %u\n",
@@ -2043,7 +2020,7 @@ static int s5xxx_ipc_tx(struct s5xxx_modem *sm, u8 ch, const u8 *data, u32 len)
 {
 	return s5xxx_ring_tx(sm, &s5xxx_raw_txring, &sm->frame_seq, ch,
 			     &sm->at_ch_seq, 2048 - S5XXX_SIT_HDR, data, len,
-			     -EAGAIN, 0, S5XXX_SIT_CFG_SINGLE);
+			     -EAGAIN, S5XXX_SIT_CFG_SINGLE);
 }
 
 static int s5xxx_wwan_start(struct wwan_port *port)
@@ -2127,7 +2104,7 @@ static int s5xxx_gnss_cmd(struct s5xxx_modem *sm, const void *cmd, u32 len)
 	reinit_completion(&sm->gnss_rsp);
 	ret = s5xxx_ring_tx(sm, &s5xxx_raw_txring, &sm->frame_seq,
 			    S5XXX_CH_GNSS_BOOT, &sm->gnss_ch_seq,
-			    2048 - S5XXX_SIT_HDR, cmd, len, -EAGAIN, 0, S5XXX_SIT_CFG_SINGLE);
+			    2048 - S5XXX_SIT_HDR, cmd, len, -EAGAIN, S5XXX_SIT_CFG_SINGLE);
 	if (ret)
 		return ret;
 	/* Wait for the reply so commands are paced as the receiver expects;
@@ -2394,7 +2371,7 @@ static int s5xxx_gnss_tx(struct wwan_port *port, struct sk_buff *skb)
 	ret = s5xxx_ring_tx(sm, &s5xxx_raw_txring, &sm->frame_seq,
 			    S5XXX_CH_GNSS_BOOT, &sm->gnss_ch_seq,
 			    2048 - S5XXX_SIT_HDR, skb->data, skb->len,
-			    -EAGAIN, 0, S5XXX_SIT_CFG_SINGLE);
+			    -EAGAIN, S5XXX_SIT_CFG_SINGLE);
 	if (ret)
 		return ret;
 	consume_skb(skb);
@@ -2418,7 +2395,7 @@ static int s5xxx_gnss_dump_tx(struct wwan_port *port, struct sk_buff *skb)
 	ret = s5xxx_ring_tx(sm, &s5xxx_raw_txring, &sm->frame_seq,
 			    S5XXX_CH_GNSS_DUMP, &sm->gnss_dump_ch_seq,
 			    S5XXX_GNSS_DUMP_MAX - S5XXX_SIT_HDR,
-			    skb->data, skb->len, -EAGAIN, 0, S5XXX_SIT_CFG_SINGLE);
+			    skb->data, skb->len, -EAGAIN, S5XXX_SIT_CFG_SINGLE);
 	if (ret)
 		return ret;
 	consume_skb(skb);
@@ -2442,6 +2419,72 @@ static u32 s5xxx_fmt_txq_space(struct s5xxx_modem *sm)
 	return s5xxx_circ_space(S5XXX_FMT_TXQ_SIZE, in, out);
 }
 
+/* One writer waiting for room on the FMT ring.  Lives on the writer's stack. */
+struct s5xxx_fmt_waiter {
+	struct list_head	node;
+	u32			need;	/* bytes of ring the frame needs */
+};
+
+/* Nobody waiting, so a frame that fits can go straight out. */
+static bool s5xxx_fmt_tx_queue_idle(struct s5xxx_modem *sm)
+{
+	unsigned long flags;
+	bool idle;
+
+	spin_lock_irqsave(&sm->fmt_tx_queue_lock, flags);
+	idle = list_empty(&sm->fmt_tx_queue);
+	spin_unlock_irqrestore(&sm->fmt_tx_queue_lock, flags);
+	return idle;
+}
+
+static void s5xxx_fmt_tx_queue_add(struct s5xxx_modem *sm,
+				   struct s5xxx_fmt_waiter *w, u32 need)
+{
+	unsigned long flags;
+
+	w->need = need;
+	spin_lock_irqsave(&sm->fmt_tx_queue_lock, flags);
+	list_add_tail(&w->node, &sm->fmt_tx_queue);
+	spin_unlock_irqrestore(&sm->fmt_tx_queue_lock, flags);
+}
+
+/*
+ * Leave the queue, whether the frame went out or was given up on.  A waiter is
+ * on a list and not holding a ticket, so abandoning the wait from anywhere in
+ * the queue leaves no hole for the writers behind it.
+ */
+static void s5xxx_fmt_tx_queue_del(struct s5xxx_modem *sm,
+				   struct s5xxx_fmt_waiter *w)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&sm->fmt_tx_queue_lock, flags);
+	list_del(&w->node);
+	spin_unlock_irqrestore(&sm->fmt_tx_queue_lock, flags);
+	wake_up_all(&sm->fmt_tx_wq);	/* the next writer's turn */
+}
+
+/* First in the queue: the only writer allowed to claim ring space. */
+static bool s5xxx_fmt_tx_turn(struct s5xxx_modem *sm,
+			      struct s5xxx_fmt_waiter *w)
+{
+	unsigned long flags;
+	bool first;
+
+	spin_lock_irqsave(&sm->fmt_tx_queue_lock, flags);
+	first = list_first_entry(&sm->fmt_tx_queue,
+				 struct s5xxx_fmt_waiter, node) == w;
+	spin_unlock_irqrestore(&sm->fmt_tx_queue_lock, flags);
+	return first;
+}
+
+/* What the waiter sleeps on: its turn, with the room it asked for. */
+static bool s5xxx_fmt_tx_ready(struct s5xxx_modem *sm,
+			       struct s5xxx_fmt_waiter *w)
+{
+	return s5xxx_fmt_tx_turn(sm, w) && s5xxx_fmt_txq_space(sm) >= w->need;
+}
+
 /*
  * Frame one app message onto the FMT ring (SIT control plane at ch 0xF5 or the
  * oem/GEMS chardev at ch 0x82) and signal the CP (ap2cp_msg SEND_FMT + doorbell).
@@ -2451,62 +2494,84 @@ static u32 s5xxx_fmt_txq_space(struct s5xxx_modem *sm)
  * can wait for space and retry; the SIT port just propagates it.
  */
 static int s5xxx_fmt_ring_tx(struct s5xxx_modem *sm, u8 ch, u8 *ch_seq,
-			     u32 max, const u8 *data, u32 len, u32 reserve,
-			     u16 cfg)
+			     u32 max, const u8 *data, u32 len, u16 cfg)
 {
 	int ret;
 
 	if (!READ_ONCE(sm->online))
 		return -ENODEV;
 	ret = s5xxx_ring_tx(sm, &s5xxx_fmt_txring, &sm->fmt_frame_seq, ch,
-			    ch_seq, max, data, len, -EBUSY, reserve, cfg);
+			    ch_seq, max, data, len, -EBUSY, cfg);
 	if (!ret)
 		s5xxx_fmt_mark_busy(sm);	/* keep the link up during the transfer */
 	return ret;
 }
 
 /*
- * One link frame onto the FMT ring, waiting out a full ring.
+ * One link frame onto the FMT ring, waiting out a full ring in turn.
  *
  * The CP advances the FMT tail without an MSI, so a sleep that only ends on
  * the interrupt can sleep straight through the drain and fail a write that
  * would have gone through.  Poll instead, and let every retry go back through
  * s5xxx_fmt_ring_tx() so the full-ring path re-asserts SEND_FMT each time.
  *
- * @reserve is the headroom this writer leaves for the control channels; the
- * control writers themselves pass 0.  @interruptible is false for the
- * fragments after the first of a split message, which cannot be abandoned
- * half-sent.
+ * A frame that does not fit joins the admission queue and only reaches for the
+ * ring at the front of it.  That is what guarantees forward progress for a
+ * frame the size of the ring: with everyone else queued behind, the CP's next
+ * drain empties the ring instead of refilling it, so the frame goes out.  The
+ * timeout is therefore measured from reaching the front, not from arrival -- a
+ * frame that waited its turn still gets its full look at an empty ring.
+ *
+ * @interruptible is false for the fragments after the first of a split
+ * message, which cannot be abandoned half-sent.
  */
 static int s5xxx_fmt_tx_frame(struct s5xxx_modem *sm, u8 ch, u8 *ch_seq,
-			      u16 cfg, const u8 *data, u32 len, u32 reserve,
+			      u16 cfg, const u8 *data, u32 len,
 			      bool interruptible)
 {
-	u32 needed = s5xxx_tx_needed(S5XXX_FMT_TXQ_SIZE,
-				     round_up(S5XXX_SIT_HDR + len, 8), reserve);
-	unsigned long deadline;
+	u32 needed = round_up(S5XXX_SIT_HDR + len, 8);
+	struct s5xxx_fmt_waiter w;
+	unsigned long deadline = 0;
 	int ret;
 
-	deadline = jiffies + msecs_to_jiffies(S5XXX_FMT_TX_TIMEOUT_MS);
-	for (;;) {
+	/* Nobody is waiting, so there is nobody to get ahead of. */
+	if (s5xxx_fmt_tx_queue_idle(sm)) {
 		ret = s5xxx_fmt_ring_tx(sm, ch, ch_seq, S5XXX_FMT_MAX, data,
-					len, reserve, cfg);
+					len, cfg);
 		if (ret != -EBUSY)
 			return ret;
-		if (time_after_eq(jiffies, deadline))
-			return -ETIMEDOUT;
+	}
+
+	s5xxx_fmt_tx_queue_add(sm, &w, needed);
+	for (;;) {
+		if (s5xxx_fmt_tx_turn(sm, &w)) {
+			if (!deadline)
+				deadline = jiffies +
+					msecs_to_jiffies(S5XXX_FMT_TX_TIMEOUT_MS);
+			ret = s5xxx_fmt_ring_tx(sm, ch, ch_seq, S5XXX_FMT_MAX,
+						data, len, cfg);
+			if (ret != -EBUSY)
+				break;
+			if (time_after_eq(jiffies, deadline)) {
+				ret = -ETIMEDOUT;
+				break;
+			}
+		}
 		if (interruptible) {
 			ret = wait_event_interruptible_timeout(sm->fmt_tx_wq,
-					s5xxx_fmt_txq_space(sm) >= needed,
+					s5xxx_fmt_tx_ready(sm, &w),
 					msecs_to_jiffies(S5XXX_FMT_TX_POLL_MS));
 			if (ret < 0)
-				return ret;
+				break;
 		} else {
 			wait_event_timeout(sm->fmt_tx_wq,
-					   s5xxx_fmt_txq_space(sm) >= needed,
+					   s5xxx_fmt_tx_ready(sm, &w),
 					   msecs_to_jiffies(S5XXX_FMT_TX_POLL_MS));
 		}
+		ret = -EBUSY;
 	}
+	s5xxx_fmt_tx_queue_del(sm, &w);
+	return ret;
 }
 
 /*
@@ -2525,7 +2590,7 @@ static int s5xxx_fmt_tx_frame(struct s5xxx_modem *sm, u8 ch, u8 *ch_seq,
  */
 static int s5xxx_fmt_tx_msg(struct s5xxx_modem *sm, struct mutex *msg_lock,
 			    u8 *frag_id, u8 ch, u8 *ch_seq, const u8 *data,
-			    u32 len, u32 reserve)
+			    u32 len)
 {
 	u32 frags, i, sent, flen, left;
 	u16 cfg;
@@ -2541,7 +2606,7 @@ static int s5xxx_fmt_tx_msg(struct s5xxx_modem *sm, struct mutex *msg_lock,
 	 */
 	if (len <= S5XXX_FMT_MAX)
 		return s5xxx_fmt_tx_frame(sm, ch, ch_seq, S5XXX_SIT_CFG_SINGLE,
-					  data, len, reserve, true);
+					  data, len, true);
 	if (len > S5XXX_FMT_MSG_MAX)
 		return -EMSGSIZE;
 
@@ -2565,7 +2630,7 @@ static int s5xxx_fmt_tx_msg(struct s5xxx_modem *sm, struct mutex *msg_lock,
 			cfg = S5XXX_SIT_CFG_MULTI_LAST |
 			      (id << S5XXX_SIT_CFG_MULTI_ID_SHIFT);
 		ret = s5xxx_fmt_tx_frame(sm, ch, ch_seq, cfg, data + sent, flen,
-					 reserve, i == 0);
+					 i == 0);
 		if (ret)
 			break;
 	}
@@ -2584,11 +2649,9 @@ static int s5xxx_ctrl_tx(struct wwan_port *port, struct sk_buff *skb)
 	 * SET_DATA_PROFILE / SET_INITIAL_ATTACH_APN / SETUP_DATA_CALL frames
 	 * back-to-back and the shallow FMT txq fills, which surfaced as
 	 * "Sending command failed: Device or resource busy" on connect.
-	 *
-	 * Control frames may use the reserve; that is what it is for.
 	 */
 	ret = s5xxx_fmt_tx_msg(sc->sm, &sc->tx_msg_lock, &sc->tx_frag_id,
-			       sc->ch, &sc->ch_seq, skb->data, skb->len, 0);
+			       sc->ch, &sc->ch_seq, skb->data, skb->len);
 	if (ret)
 		return ret;
 	consume_skb(skb);
@@ -2639,12 +2702,14 @@ static int s5xxx_oem_tx(struct wwan_port *port, struct sk_buff *skb)
 		return -EMSGSIZE;
 
 	/*
-	 * Bulk, so it stops short of the control reserve like the blocking
-	 * writer below; a ring too full for it is -EAGAIN as before.
+	 * Non-blocking, so it cannot take a place in the admission queue -- but
+	 * it must not step over one either, or it is the barging that starves a
+	 * ring-sized frame.  Queue occupied is -EAGAIN, same as a full ring.
 	 */
+	if (!s5xxx_fmt_tx_queue_idle(sm))
+		return -EAGAIN;
 	ret = s5xxx_fmt_ring_tx(sm, oc->ch, &oc->ch_seq, S5XXX_FMT_MAX,
-				skb->data, skb->len, S5XXX_FMT_CTRL_RESERVE,
-				S5XXX_SIT_CFG_SINGLE);
+				skb->data, skb->len, S5XXX_SIT_CFG_SINGLE);
 	if (ret == -EBUSY)
 		return -EAGAIN;
 	if (ret)
@@ -2668,13 +2733,12 @@ static int s5xxx_oem_tx_blocking(struct wwan_port *port, struct sk_buff *skb)
 		return -ENODEV;
 
 	/*
-	 * Stop short of the control reserve.  Bulk traffic here waits for the
-	 * CP to drain instead of filling the ring, so a chatty service cannot
-	 * push the modem's own control frames out.
+	 * Waits for the CP to drain rather than dropping the frame.  The CP
+	 * asserts over an unanswered request on these channels, so a frame that
+	 * can still be delivered late is always worth more than an error.
 	 */
 	ret = s5xxx_fmt_tx_msg(sm, &oc->tx_msg_lock, &oc->tx_frag_id, oc->ch,
-			       &oc->ch_seq, skb->data, skb->len,
-			       S5XXX_FMT_CTRL_RESERVE);
+			       &oc->ch_seq, skb->data, skb->len);
 	if (ret)
 		return ret;
 	consume_skb(skb);
@@ -2729,7 +2793,7 @@ static int s5xxx_raw_port_tx(struct wwan_port *port, struct sk_buff *skb)
 
 	ret = s5xxx_ring_tx(sm, &s5xxx_raw_txring, &sm->frame_seq, rc->ch,
 			    &rc->ch_seq, S5XXX_RFS_MAX, skb->data, skb->len,
-			    -EAGAIN, 0, S5XXX_SIT_CFG_SINGLE);
+			    -EAGAIN, S5XXX_SIT_CFG_SINGLE);
 	if (ret)
 		return ret;
 	consume_skb(skb);
@@ -2754,7 +2818,7 @@ static int s5xxx_rfs_tx(struct s5xxx_modem *sm, const u8 *data, u32 len)
 {
 	return s5xxx_ring_tx(sm, &s5xxx_raw_txring, &sm->frame_seq, S5XXX_CH_RFS,
 			     &sm->rfs_ch_seq, S5XXX_RFS_MAX, data, len,
-			     -EAGAIN, 0, S5XXX_SIT_CFG_SINGLE);
+			     -EAGAIN, S5XXX_SIT_CFG_SINGLE);
 }
 
 static int s5xxx_rfs_port_tx(struct wwan_port *port, struct sk_buff *skb)
@@ -3799,8 +3863,14 @@ static irqreturn_t s5xxx_irq_handler(int irq, void *data)
 			 */
 			s5xxx_drain_raw_rxq(sm, val);
 			s5xxx_drain_fmt_rxq(sm, val);
-			/* CP advancing the FMT txq tail frees space for oem writers. */
-			wake_up_interruptible(&sm->fmt_tx_wq);
+			/*
+			 * CP advancing the FMT txq tail frees space for the
+			 * queued writers.  wake_up_all(), not the interruptible
+			 * form: the fragments after the first of a split
+			 * message wait uninterruptibly and would otherwise only
+			 * ever be released by their poll timeout.
+			 */
+			wake_up_all(&sm->fmt_tx_wq);
 		} else
 			/* Boot: std_dl acks; consume so the CP keeps draining. */
 			writel(readl(sm->ipc + S5XXX_RAW_RXQ_HEAD),
@@ -5361,6 +5431,8 @@ static int s5xxx_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	INIT_WORK(&sm->boot_work, s5xxx_boot_work);
 	INIT_WORK(&sm->pm_work, s5xxx_pm_work);
 	init_waitqueue_head(&sm->fmt_tx_wq);
+	INIT_LIST_HEAD(&sm->fmt_tx_queue);
+	spin_lock_init(&sm->fmt_tx_queue_lock);
 	for (i = 0; i < S5XXX_OEM_PORTS; i++) {
 		static const struct {
 			u8 ch;
