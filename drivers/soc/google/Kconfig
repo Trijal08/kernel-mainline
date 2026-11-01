@@ -6,6 +6,7 @@
 config GOOGLE_AOC
 	tristate "Google AOC (Always-On Compute) coprocessor"
 	depends on EXYNOS_GSA
+	select MFD_SYSCON
 	help
 	  The AOC is an always-on coprocessor on Google Tensor SoCs that owns
 	  Bluetooth, audio and the sensor hub.  The GSA security core

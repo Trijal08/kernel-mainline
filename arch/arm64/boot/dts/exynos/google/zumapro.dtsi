@@ -2625,16 +2625,37 @@
 		 * driver programs sysmmu_aoc from the firmware's mapping table
 		 * before starting the core.
 		 */
-		aoc: aoc {
+		/*
+		 * SoC chip-id (OTP): product id, type and revision.  The AOC
+		 * firmware validates these at boot, so the AOC driver reads
+		 * them through this syscon rather than mapping a block that is
+		 * not its own.
+		 */
+		chipid: chipid@10000000 {
+			compatible = "google,zumapro-chipid", "syscon";
+			reg = <0x10000000 0x100>;
+		};
+
+		aoc: aoc@15200000 {
 			compatible = "google,aoc";
+			/*
+			 * One mailbox block per AOC core (A32/F1/P6), each
+			 * carrying 16 of the doorbell channels; then the power
+			 * request block, and the SSMT that stamps the partition
+			 * IDs on the AOC's own DMA.
+			 */
+			reg = <0x15200000 0x1000>,
+			      <0x15220000 0x1000>,
+			      <0x15240000 0x1000>,
+			      <0x154b0000 0x1000>,
+			      <0x19060000 0x5000>;
+			reg-names = "mbox-a32", "mbox-f1", "mbox-p6",
+				    "req", "ssmt";
 			memory-region = <&aoc_reserve>;
 			gsa-device = <&gsa>;
+			google,chipid = <&chipid>;
 			iommus = <&sysmmu_aoc>;
-			/*
-			 * The AOC2AP doorbell interrupts, one per mailbox block
-			 * (A32/F1/P6 at 0x1520/0x1522/0x1524_0000); the driver
-			 * maps the mailbox registers itself.
-			 */
+			/* The AOC2AP doorbells, one per mailbox block above. */
 			interrupts = <GIC_SPI 77 IRQ_TYPE_LEVEL_HIGH 0>,
 				     <GIC_SPI 78 IRQ_TYPE_LEVEL_HIGH 0>,
 				     <GIC_SPI 79 IRQ_TYPE_LEVEL_HIGH 0>;
