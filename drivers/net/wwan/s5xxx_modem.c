@@ -31,6 +31,7 @@
 
 #include <linux/completion.h>
 #include <linux/debugfs.h>
+#include <linux/vmalloc.h>
 #include <linux/delay.h>
 #include <linux/firmware.h>
 #include <linux/gpio/consumer.h>
@@ -821,6 +822,31 @@ struct s5xxx_modem {
 	struct s5xxx_oem_ch	oem[S5XXX_OEM_PORTS];
 	struct s5xxx_oem_ch	raw[S5XXX_RAW_PORTS];
 	struct dentry		*dbgfs;		/* dump-boot trigger */
+
+	/*
+	 * Capture of every app message crossing either ring, in the same
+	 * container the downstream driver's dump uses so one parser reads both:
+	 *
+	 *   [u64 ts_ns][u16 len][u16 tag][len bytes of the message]
+	 *
+	 * @tag is (channel << 8) | direction, 0 for AP->CP and 1 for CP->AP.
+	 * What is stored is the message itself: the 12-byte EXYNOS link header is
+	 * where the channel and direction come from, so keeping it would be
+	 * recording the same thing twice.
+	 *
+	 * Records are appended and never rewritten, so a reader can walk what is
+	 * there while the capture is still running -- the prefix it reads is
+	 * already final. Filling up stops the capture rather than wrapping, which
+	 * leaves a dump that parses to its end instead of starting mid-record.
+	 */
+	struct s5xxx_capture {
+		u8		*buf;
+		size_t		size;
+		size_t		used;
+		u64		dropped;	/* records that did not fit */
+		bool		on;
+		spinlock_t	lock;		/* also taken from the hard IRQ */
+	} cap;
 	wait_queue_head_t	fmt_tx_wq;
 	unsigned long		fmt_busy_until;	/* inhibit park during an FMT transfer (jiffies) */
 
@@ -1865,6 +1891,68 @@ static u32 s5xxx_tx_needed(u32 size, u32 flen, u32 reserve)
 	return flen + min_t(u32, reserve, size - 1 - flen);
 }
 
+#define S5XXX_CAP_DEFAULT_SIZE	SZ_8M
+#define S5XXX_CAP_REC_HDR	12
+
+/*
+ * Reserve a record and fill in its header, or return NULL if the capture is
+ * off or full.  Returns with cap.lock held on success, because the payload is
+ * copied straight into the reservation by the caller -- a message read from a
+ * ring goes there directly rather than through a bounce buffer.
+ */
+static u8 *s5xxx_cap_reserve(struct s5xxx_modem *sm, u8 ch, bool rx, u32 len,
+			     unsigned long *flags)
+	__acquires(&sm->cap.lock)
+{
+	struct s5xxx_capture *c = &sm->cap;
+	size_t need = S5XXX_CAP_REC_HDR + len;
+	u8 *p;
+
+	if (!READ_ONCE(c->on) || !len)
+		return NULL;
+
+	spin_lock_irqsave(&c->lock, *flags);
+	if (!c->buf || c->used + need > c->size) {
+		if (c->buf)
+			c->dropped++;
+		spin_unlock_irqrestore(&c->lock, *flags);
+		return NULL;
+	}
+	p = c->buf + c->used;
+	put_unaligned_le64(ktime_get_boottime_ns(), p);
+	put_unaligned_le16(len, p + 8);
+	put_unaligned_le16(((u16)ch << 8) | (rx ? 1 : 0), p + 10);
+	c->used += need;
+	return p + S5XXX_CAP_REC_HDR;
+}
+
+/* One AP->CP message, already linear in @data. */
+static void s5xxx_cap_tx(struct s5xxx_modem *sm, u8 ch, const u8 *data, u32 len)
+{
+	unsigned long flags;
+	u8 *dst;
+
+	dst = s5xxx_cap_reserve(sm, ch, false, len, &flags);
+	if (!dst)
+		return;
+	memcpy(dst, data, len);
+	spin_unlock_irqrestore(&sm->cap.lock, flags);
+}
+
+/* One CP->AP message, still in the ring at @off. */
+static void s5xxx_cap_rx(struct s5xxx_modem *sm, u8 ch, void __iomem *buff,
+			 u32 ring_size, u32 off, u32 len)
+{
+	unsigned long flags;
+	u8 *dst;
+
+	dst = s5xxx_cap_reserve(sm, ch, true, len, &flags);
+	if (!dst)
+		return;
+	s5xxx_circ_read(dst, buff, ring_size, off, len);
+	spin_unlock_irqrestore(&sm->cap.lock, flags);
+}
+
 /*
  * Frame one app message with the 12-byte EXYNOS link header for channel @ch,
  * push it into ring @r and signal the CP (ap2cp_msg SEND_* + doorbell).
@@ -1934,6 +2022,7 @@ static int s5xxx_ring_tx(struct s5xxx_modem *sm, const struct s5xxx_txring *r,
 
 	spin_unlock_irqrestore(&sm->tx_lock, flags);
 
+	s5xxx_cap_tx(sm, ch, data, len);
 	s5xxx_send_ipc_irq(sm, S5XXX_INT_VALID | r->int_flag);
 	return 0;
 }
@@ -2737,6 +2826,8 @@ static void s5xxx_drain_raw_rxq(struct s5xxx_modem *sm, u32 intval)
 			break;			/* partial frame; wait for more */
 		ch = hdr[8];
 		plen = flen - S5XXX_SIT_HDR;
+		s5xxx_cap_rx(sm, ch, buff, S5XXX_RAW_RXQ_SIZE,
+			     (out + S5XXX_SIT_HDR) % S5XXX_RAW_RXQ_SIZE, plen);
 		pdp = s5xxx_pdp_ndev(sm, ch);
 
 		if (ch == S5XXX_CH_RFS) {
@@ -3023,6 +3114,9 @@ static void s5xxx_drain_fmt_rxq(struct s5xxx_modem *sm, u32 intval)
 		if (flen < S5XXX_SIT_HDR || total > usage)
 			break;			/* partial frame; wait for more */
 		plen = flen - S5XXX_SIT_HDR;
+
+		s5xxx_cap_rx(sm, hdr[8], buff, S5XXX_FMT_RXQ_SIZE,
+			     (out + S5XXX_SIT_HDR) % S5XXX_FMT_RXQ_SIZE, plen);
 
 		oc = s5xxx_oem_lookup(sm, hdr[8]);
 		sc = oc ? NULL : s5xxx_sit_lookup(sm, hdr[8]);
@@ -4809,6 +4903,96 @@ static ssize_t s5xxx_bootlog_read(struct file *file, char __user *ubuf,
 	return simple_read_from_buffer(ubuf, count, ppos, buf, len);
 }
 
+/*
+ * The capture, as a plain file of records.  Reading does not need the lock:
+ * records are only ever appended and a record is complete before @used grows
+ * past it, so everything up to the @used sampled here is already final.
+ */
+static ssize_t s5xxx_sitdump_read(struct file *file, char __user *buf,
+				  size_t count, loff_t *ppos)
+{
+	struct s5xxx_modem *sm = file->private_data;
+	size_t used = READ_ONCE(sm->cap.used);
+
+	if (!sm->cap.buf)
+		return 0;
+	return simple_read_from_buffer(buf, count, ppos, sm->cap.buf, used);
+}
+
+static const struct file_operations s5xxx_sitdump_fops = {
+	.owner	= THIS_MODULE,
+	.open	= simple_open,
+	.read	= s5xxx_sitdump_read,
+	.llseek	= default_llseek,
+};
+
+static ssize_t s5xxx_capture_read(struct file *file, char __user *buf,
+				  size_t count, loff_t *ppos)
+{
+	struct s5xxx_modem *sm = file->private_data;
+	char line[96];
+	int n;
+
+	n = scnprintf(line, sizeof(line), "%u %zu %zu %llu\n",
+		      READ_ONCE(sm->cap.on) ? 1 : 0, READ_ONCE(sm->cap.used),
+		      sm->cap.size, sm->cap.dropped);
+	return simple_read_from_buffer(buf, count, ppos, line, n);
+}
+
+/*
+ * Write 1 to start a capture and 0 to stop one.  Starting allocates the buffer
+ * and discards whatever the last capture left, so a run always begins at
+ * record zero; stopping keeps the buffer so the dump can still be read.
+ */
+static ssize_t s5xxx_capture_write(struct file *file, const char __user *buf,
+				   size_t count, loff_t *ppos)
+{
+	struct s5xxx_modem *sm = file->private_data;
+	struct s5xxx_capture *c = &sm->cap;
+	unsigned long flags;
+	void *fresh = NULL;
+	bool on;
+	int ret;
+
+	ret = kstrtobool_from_user(buf, count, &on);
+	if (ret)
+		return ret;
+
+	/* Allocate outside the lock; the recorder runs in the hard IRQ. */
+	if (on && !c->buf) {
+		fresh = vmalloc(S5XXX_CAP_DEFAULT_SIZE);
+		if (!fresh)
+			return -ENOMEM;
+	}
+
+	spin_lock_irqsave(&c->lock, flags);
+	if (on) {
+		if (fresh && !c->buf) {
+			c->buf = fresh;
+			c->size = S5XXX_CAP_DEFAULT_SIZE;
+			fresh = NULL;
+		}
+		c->used = 0;
+		c->dropped = 0;
+		WRITE_ONCE(c->on, true);
+	} else {
+		WRITE_ONCE(c->on, false);
+	}
+	spin_unlock_irqrestore(&c->lock, flags);
+
+	vfree(fresh);
+	dev_info(sm->dev, "SIT capture %s\n", on ? "started" : "stopped");
+	return count;
+}
+
+static const struct file_operations s5xxx_capture_fops = {
+	.owner	= THIS_MODULE,
+	.open	= simple_open,
+	.read	= s5xxx_capture_read,
+	.write	= s5xxx_capture_write,
+	.llseek	= default_llseek,
+};
+
 static const struct file_operations s5xxx_bootlog_fops = {
 	.owner	= THIS_MODULE,
 	.open	= simple_open,
@@ -5121,6 +5305,7 @@ static int s5xxx_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	sm->pdev = pdev;
 	spin_lock_init(&sm->lock);
 	spin_lock_init(&sm->tx_lock);
+	spin_lock_init(&sm->cap.lock);
 	mutex_init(&sm->pcie_onoff_lock);
 	init_completion(&sm->init_done);
 	init_completion(&sm->cp_release);
@@ -5532,6 +5717,8 @@ static int s5xxx_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 			    &s5xxx_dump_boot_fops);
 	debugfs_create_file("bootlog", 0400, sm->dbgfs, sm, &s5xxx_bootlog_fops);
 	debugfs_create_file("srinfo", 0400, sm->dbgfs, sm, &s5xxx_srinfo_fops);
+	debugfs_create_file("capture", 0600, sm->dbgfs, sm, &s5xxx_capture_fops);
+	debugfs_create_file("sitdump", 0400, sm->dbgfs, sm, &s5xxx_sitdump_fops);
 
 	/* The oem/GEMS port (ch 0x82) comes up with the other CP channels at ONLINE. */
 	schedule_work(&sm->boot_work);
@@ -5563,6 +5750,10 @@ static void s5xxx_remove(struct pci_dev *pdev)
 	int i;
 
 	debugfs_remove_recursive(sm->dbgfs);
+	/* The files are gone, so nothing can read the capture any more. */
+	WRITE_ONCE(sm->cap.on, false);
+	vfree(sm->cap.buf);
+	sm->cap.buf = NULL;
 
 	/*
 	 * Quiesce runtime PM first: free_irq() stops new wakeup IRQs and waits for
