@@ -13,51 +13,82 @@
 #include <linux/mutex.h>
 #include <linux/regmap.h>
 
+/*
+ * PMIC (top) block register map. NOTE: the MAX77779 interrupt registers are
+ * NOT the MAX77759's. There is no TOPSYS register on this part at all: the
+ * per-source mask is INTB_MASK at 0x24 (not 0x23, which is a *status*
+ * register), and the top-system faults live in INT_STS/INT_MASK at 0x2a/0x2b
+ * behind INTSRC_STS.PMICTOP rather than behind bit 1. Using the MAX77759
+ * offsets reads a mask register as status, writes the mask into a status
+ * register, and leaves every source permanently unmasked.
+ */
 #define MAX77779_PMIC_REG_PMIC_ID               0x00
 #define MAX77779_PMIC_REG_PMIC_REVISION         0x01
 #define MAX77779_PMIC_REG_OTP_REVISION          0x02
-#define MAX77779_PMIC_REG_INTSRC                0x22
-#define MAX77779_PMIC_REG_INTSRCMASK            0x23
-#define   MAX77779_PMIC_REG_INTSRC_MAXQ         BIT(3)
-#define   MAX77779_PMIC_REG_INTSRC_TOPSYS       BIT(1)
-#define   MAX77779_PMIC_REG_INTSRC_CHGR         BIT(0)
-#define MAX77779_PMIC_REG_TOPSYS_INT            0x24
-#define MAX77779_PMIC_REG_TOPSYS_INT_MASK       0x26
-#define   MAX77779_PMIC_REG_TOPSYS_INT_TSHDN    BIT(6)
-#define   MAX77779_PMIC_REG_TOPSYS_INT_SYSOVLO  BIT(5)
-#define   MAX77779_PMIC_REG_TOPSYS_INT_SYSUVLO  BIT(4)
-#define   MAX77779_PMIC_REG_TOPSYS_INT_FSHIP    BIT(0)
+/* INTSRC_STS is write-1-to-clear and summarises the sub-blocks below it. */
+#define MAX77779_PMIC_REG_INTSRC_STS            0x22
+#define   MAX77779_PMIC_REG_INTSRC_STS_TCPC     BIT(0)
+#define   MAX77779_PMIC_REG_INTSRC_STS_FG       BIT(1)
+#define   MAX77779_PMIC_REG_INTSRC_STS_CHGR     BIT(2)
+#define   MAX77779_PMIC_REG_INTSRC_STS_I2CM     BIT(3)
+#define   MAX77779_PMIC_REG_INTSRC_STS_BATTVIMON BIT(4)
+#define   MAX77779_PMIC_REG_INTSRC_STS_GPIO     BIT(5)
+#define   MAX77779_PMIC_REG_INTSRC_STS_VDROOP   BIT(6)
+#define   MAX77779_PMIC_REG_INTSRC_STS_PMICTOP  BIT(7)
+#define MAX77779_PMIC_REG_VDROOP_INT            0x23
+#define   MAX77779_PMIC_REG_VDROOP_INT_OILO2_CNT BIT(0)
+#define   MAX77779_PMIC_REG_VDROOP_INT_OILO1_CNT BIT(1)
+#define   MAX77779_PMIC_REG_VDROOP_INT_UVLO2_CNT BIT(2)
+#define   MAX77779_PMIC_REG_VDROOP_INT_UVLO1_CNT BIT(3)
+#define   MAX77779_PMIC_REG_VDROOP_INT_BAT_OILO2 BIT(4)
+#define   MAX77779_PMIC_REG_VDROOP_INT_BAT_OILO1 BIT(5)
+#define   MAX77779_PMIC_REG_VDROOP_INT_SYS_UVLO2 BIT(6)
+#define   MAX77779_PMIC_REG_VDROOP_INT_SYS_UVLO1 BIT(7)
+/* INTB_MASK masks INTSRC_STS bit for bit; 1 masks. */
+#define MAX77779_PMIC_REG_INTB_MASK             0x24
+#define MAX77779_PMIC_REG_SPMI_INT_MASK         0x25
+#define MAX77779_PMIC_REG_SPMI_INT_PRIORITY     0x26
+#define MAX77779_PMIC_REG_VDROOP_INT_MASK       0x27
+#define MAX77779_PMIC_REG_VDROOP_INT_SPMI_MASK  0x28
+#define MAX77779_PMIC_REG_VDROOP_INT_SPMI_PRIORITY 0x29
+/* INT_STS is the PMICTOP source; write-1-to-clear. Bit 0 (SPR_0) is spare. */
+#define MAX77779_PMIC_REG_INT_STS               0x2a
+#define   MAX77779_PMIC_REG_INT_STS_SPMIERR     BIT(1)
+#define   MAX77779_PMIC_REG_INT_STS_VDDPOR      BIT(2)
+#define   MAX77779_PMIC_REG_INT_STS_SYSMSGI     BIT(3)
+#define   MAX77779_PMIC_REG_INT_STS_SYSUVLO     BIT(4)
+#define   MAX77779_PMIC_REG_INT_STS_SYSOVLO     BIT(5)
+#define   MAX77779_PMIC_REG_INT_STS_TSHDN       BIT(6)
+#define   MAX77779_PMIC_REG_INT_STS_APCMDRESI   BIT(7)
+/*
+ * INT_MASK masks INT_STS from bit 1 up. Bit 0 is not a mask: FSHIP_NOT_RD is
+ * a latch that reads 1 until the ship-mode exit reason has been read out, so
+ * it must be left alone when masking.
+ */
+#define MAX77779_PMIC_REG_INT_MASK              0x2b
+#define   MAX77779_PMIC_REG_INT_MASK_FSHIP_NOT_RD BIT(0)
 #define MAX77779_PMIC_REG_I2C_CNFG              0x40
 #define MAX77779_PMIC_REG_SWRESET               0x50
 #define MAX77779_PMIC_REG_CONTROL_FG            0x51
 
-#define MAX77779_MAXQ_REG_UIC_INT1              0x64
-#define   MAX77779_MAXQ_REG_UIC_INT1_APCMDRESI  BIT(7)
-#define   MAX77779_MAXQ_REG_UIC_INT1_SYSMSGI    BIT(6)
-#define   MAX77779_MAXQ_REG_UIC_INT1_GPIO6I     BIT(1)
-#define   MAX77779_MAXQ_REG_UIC_INT1_GPIO5I     BIT(0)
-#define   MAX77779_MAXQ_REG_UIC_INT1_GPIOxI(offs, en)  (((en) & 1) << (offs))
-#define   MAX77779_MAXQ_REG_UIC_INT1_GPIOxI_MASK(offs) \
-				MAX77779_MAXQ_REG_UIC_INT1_GPIOxI(offs, ~0)
-#define MAX77779_MAXQ_REG_UIC_INT2              0x65
-#define MAX77779_MAXQ_REG_UIC_INT3              0x66
-#define MAX77779_MAXQ_REG_UIC_INT4              0x67
-#define MAX77779_MAXQ_REG_UIC_UIC_STATUS1       0x68
-#define MAX77779_MAXQ_REG_UIC_UIC_STATUS2       0x69
-#define MAX77779_MAXQ_REG_UIC_UIC_STATUS3       0x6a
-#define MAX77779_MAXQ_REG_UIC_UIC_STATUS4       0x6b
-#define MAX77779_MAXQ_REG_UIC_UIC_STATUS5       0x6c
-#define MAX77779_MAXQ_REG_UIC_UIC_STATUS6       0x6d
-#define MAX77779_MAXQ_REG_UIC_UIC_STATUS7       0x6f
-#define MAX77779_MAXQ_REG_UIC_UIC_STATUS8       0x6f
-#define MAX77779_MAXQ_REG_UIC_INT1_M            0x70
-#define MAX77779_MAXQ_REG_UIC_INT2_M            0x71
-#define MAX77779_MAXQ_REG_UIC_INT3_M            0x72
-#define MAX77779_MAXQ_REG_UIC_INT4_M            0x73
-#define MAX77779_MAXQ_REG_AP_DATAOUT0           0x81
-#define MAX77779_MAXQ_REG_AP_DATAOUT32          0xa1
+/*
+ * MaxQ (RISC-V) block. Shares the 'top' I2C address -- these are the PMIC
+ * block's RISCV_* registers. The MAX77759's UIC_INTx/UIC_STATUSx window at
+ * 0x64..0x73 does not exist here, and neither does a 33-byte mailbox: the
+ * command window is AP_DATAOUT1..8 plus the opcode register that latches it,
+ * and the response window is AP_DATAIN0..10.
+ */
+#define MAX77779_MAXQ_REG_RISCV_DEVICE_ID       0x60
+#define MAX77779_MAXQ_REG_RISCV_DEVICE_REV      0x61
+#define MAX77779_MAXQ_REG_RISCV_FW_REV          0x62
+#define MAX77779_MAXQ_REG_RISCV_FW_SUB_REV      0x63
+#define MAX77779_MAXQ_REG_AP_DATAOUT1           0x81
+#define MAX77779_MAXQ_REG_AP_DATAOUT8           0x88
+#define MAX77779_MAXQ_REG_AP_DATAOUT_OPCODE     0x89
 #define MAX77779_MAXQ_REG_AP_DATAIN0            0xb1
-#define MAX77779_MAXQ_REG_UIC_SWRST             0xe0
+#define MAX77779_MAXQ_REG_AP_DATAIN10           0xbb
+#define MAX77779_MAXQ_REG_SYSMSG                0xbc
+#define MAX77779_MAXQ_REG_COMMAND_HW            0xbf
 
 /*
  * Charger block register map. NOTE: despite the shared register *names*, the
@@ -134,9 +165,12 @@ enum max77779_chgr_mode {
 #define MAX77779_SP_PAGE_SIZE                   256
 
 /* MaxQ opcodes for max77779_maxq_command() */
-#define MAX77779_MAXQ_OPCODE_MAXLENGTH (MAX77779_MAXQ_REG_AP_DATAOUT32 - \
-					MAX77779_MAXQ_REG_AP_DATAOUT0 + \
-					1)
+#define MAX77779_MAXQ_CMD_MAXLENGTH (MAX77779_MAXQ_REG_AP_DATAOUT_OPCODE - \
+				     MAX77779_MAXQ_REG_AP_DATAOUT1 + \
+				     1)
+#define MAX77779_MAXQ_RSP_MAXLENGTH (MAX77779_MAXQ_REG_AP_DATAIN10 - \
+				     MAX77779_MAXQ_REG_AP_DATAIN0 + \
+				     1)
 
 #define MAX77779_MAXQ_OPCODE_GPIO_TRIGGER_READ   0x21
 #define MAX77779_MAXQ_OPCODE_GPIO_TRIGGER_WRITE  0x22
