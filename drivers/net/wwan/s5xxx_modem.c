@@ -845,6 +845,7 @@ struct s5xxx_modem {
 		size_t		used;
 		u64		dropped;	/* records that did not fit */
 		bool		on;
+		bool		gnss;		/* include the GNSS diagnostic stream */
 		spinlock_t	lock;		/* also taken from the hard IRQ */
 	} cap;
 	wait_queue_head_t	fmt_tx_wq;
@@ -1909,6 +1910,16 @@ static u8 *s5xxx_cap_reserve(struct s5xxx_modem *sm, u8 ch, bool rx, u32 len,
 	u8 *p;
 
 	if (!READ_ONCE(c->on) || !len)
+		return NULL;
+	/*
+	 * The receiver's diagnostic stream is most of what crosses this link
+	 * -- measured at 89% of records, around 14KB/s -- and it is not what
+	 * anyone opens this file for. Left in, it fills the buffer within
+	 * minutes and the capture stops before whatever was being chased ever
+	 * happened. Keep it out unless it is the thing being chased.
+	 */
+	if ((ch == S5XXX_CH_GNSS_DUMP || ch == S5XXX_CH_GNSS_BOOT) &&
+	    !READ_ONCE(c->gnss))
 		return NULL;
 
 	spin_lock_irqsave(&c->lock, *flags);
@@ -4933,9 +4944,10 @@ static ssize_t s5xxx_capture_read(struct file *file, char __user *buf,
 	char line[96];
 	int n;
 
-	n = scnprintf(line, sizeof(line), "%u %zu %zu %llu\n",
+	n = scnprintf(line, sizeof(line), "%u %zu %zu %llu gnss=%u\n",
 		      READ_ONCE(sm->cap.on) ? 1 : 0, READ_ONCE(sm->cap.used),
-		      sm->cap.size, sm->cap.dropped);
+		      sm->cap.size, sm->cap.dropped,
+		      READ_ONCE(sm->cap.gnss) ? 1 : 0);
 	return simple_read_from_buffer(buf, count, ppos, line, n);
 }
 
@@ -4984,6 +4996,29 @@ static ssize_t s5xxx_capture_write(struct file *file, const char __user *buf,
 	dev_info(sm->dev, "SIT capture %s\n", on ? "started" : "stopped");
 	return count;
 }
+
+/* Whether the capture also keeps the GNSS receiver's diagnostic stream. */
+static ssize_t s5xxx_capture_gnss_write(struct file *file,
+					const char __user *buf,
+					size_t count, loff_t *ppos)
+{
+	struct s5xxx_modem *sm = file->private_data;
+	bool on;
+	int ret;
+
+	ret = kstrtobool_from_user(buf, count, &on);
+	if (ret)
+		return ret;
+	WRITE_ONCE(sm->cap.gnss, on);
+	return count;
+}
+
+static const struct file_operations s5xxx_capture_gnss_fops = {
+	.owner	= THIS_MODULE,
+	.open	= simple_open,
+	.write	= s5xxx_capture_gnss_write,
+	.llseek	= default_llseek,
+};
 
 static const struct file_operations s5xxx_capture_fops = {
 	.owner	= THIS_MODULE,
@@ -5306,6 +5341,19 @@ static int s5xxx_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	spin_lock_init(&sm->lock);
 	spin_lock_init(&sm->tx_lock);
 	spin_lock_init(&sm->cap.lock);
+	/*
+	 * Capture from the moment the driver is live rather than from whenever
+	 * someone thinks to ask for it: the sequence worth having is the CP's
+	 * boot and first attach, and that is over before a shell can be
+	 * reached. Writing 1 to the control file restarts it from record zero.
+	 */
+	sm->cap.buf = vmalloc(S5XXX_CAP_DEFAULT_SIZE);
+	if (sm->cap.buf) {
+		sm->cap.size = S5XXX_CAP_DEFAULT_SIZE;
+		sm->cap.on = true;
+	} else {
+		dev_warn(dev, "no buffer for the SIT capture\n");
+	}
 	mutex_init(&sm->pcie_onoff_lock);
 	init_completion(&sm->init_done);
 	init_completion(&sm->cp_release);
@@ -5719,6 +5767,8 @@ static int s5xxx_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	debugfs_create_file("srinfo", 0400, sm->dbgfs, sm, &s5xxx_srinfo_fops);
 	debugfs_create_file("capture", 0600, sm->dbgfs, sm, &s5xxx_capture_fops);
 	debugfs_create_file("sitdump", 0400, sm->dbgfs, sm, &s5xxx_sitdump_fops);
+	debugfs_create_file("capture_gnss", 0200, sm->dbgfs, sm,
+			    &s5xxx_capture_gnss_fops);
 
 	/* The oem/GEMS port (ch 0x82) comes up with the other CP channels at ONLINE. */
 	schedule_work(&sm->boot_work);
