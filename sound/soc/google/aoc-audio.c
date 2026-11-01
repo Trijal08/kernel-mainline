@@ -353,6 +353,7 @@ struct aoc_audio_stream {
 	struct work_struct period_work;		/* the tick cannot enter the core */
 	u32 prev_consumed;
 	bool playback;
+	struct device *dev;			/* for the debug lines below */
 	u8 source;				/* AOC entry point = PCM device */
 	u32 base;				/* AOC byte position at start */
 	snd_pcm_uframes_t pushed;		/* frames handed to the ring */
@@ -1256,6 +1257,7 @@ static int aoc_pcm_open(struct snd_soc_component *comp,
 	s->svc = svc;
 	s->substream = substream;
 	s->playback = playback;
+	s->dev = comp->dev;
 	spin_lock_init(&s->ring_lock);
 	hrtimer_setup(&s->tick, aoc_pcm_tick, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 	INIT_WORK(&s->period_work, aoc_pcm_period_work);
@@ -1337,6 +1339,9 @@ static int aoc_pcm_prepare(struct snd_soc_component *comp,
 	s->base = aoc_service_progress(s->svc, s->playback);
 	s->prev_consumed = s->base;
 	s->pushed = 0;
+	dev_dbg(s->dev, "prepare: base %u buffer %lu period %lu\n",
+		s->base, substream->runtime->buffer_size,
+		substream->runtime->period_size);
 	return 0;
 }
 
@@ -1380,6 +1385,8 @@ static void aoc_pcm_push(struct aoc_audio_stream *s)
 			break;
 	}
 	spin_unlock_irqrestore(&s->ring_lock, flags);
+	dev_dbg(s->dev, "push: appl %lu pushed %lu\n",
+		(unsigned long)appl, s->pushed);
 }
 
 /*
@@ -1432,6 +1439,12 @@ static snd_pcm_uframes_t aoc_pcm_pointer(struct snd_soc_component *comp,
 		return s->pushed % rt->buffer_size;
 
 	pos = aoc_service_progress(s->svc, s->playback) - s->base;
+	dev_dbg(s->dev,
+		"pointer: prog %u base %u delta %u -> %lu of %lu, appl %lu hw %lu pushed %lu\n",
+		pos + s->base, s->base, pos,
+		(unsigned long)bytes_to_frames(rt, pos % buf_bytes),
+		rt->buffer_size, (unsigned long)READ_ONCE(rt->control->appl_ptr),
+		(unsigned long)READ_ONCE(rt->status->hw_ptr), s->pushed);
 	return bytes_to_frames(rt, pos % buf_bytes);
 }
 
