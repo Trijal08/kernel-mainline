@@ -29,7 +29,9 @@
 #include <linux/of_address.h>
 #include <linux/of_platform.h>
 #include <linux/of_reserved_mem.h>
+#include <linux/mfd/syscon.h>
 #include <linux/platform_device.h>
+#include <linux/regmap.h>
 #include <linux/random.h>
 #include <linux/seq_file.h>
 #include <linux/sizes.h>
@@ -102,8 +104,6 @@
  * acknowledges at +0x40.  This must be asserted before the GSA starts the core,
  * or the core has no power and the start silently fails.
  */
-#define AOC_REQ_PHYS			0x154b0000
-#define AOC_REQ_SIZE			0x1000
 #define AOC_REQ_ACK_OFFSET		0x40
 
 /*
@@ -111,14 +111,11 @@
  * IDs the AOC's DMA carries; the vendor sets every stream to "bypass" so the
  * transactions are accepted downstream.  Registers NS_READ_PID/NS_WRITE_PID.
  */
-#define AOC_SSMT_PHYS			0x19060000
-#define AOC_SSMT_SIZE			0x5000
 #define SSMT_BYPASS_VALUE		0x80000000
 #define SSMT_NS_READ_PID(n)		(0x4000 + 4 * (n))
 #define SSMT_NS_WRITE_PID(n)		(0x4200 + 4 * (n))
 
 /* SoC chip-id (OTP) block - zumapro uses the zuma layout (product_ver 1). */
-#define AOC_CHIPID_PHYS			0x10000000
 #define CHIPID_PRODUCT_ID_MASK		0xfffff000
 #define CHIPID_TYPE_MASK		0x000000ff
 #define CHIPID_MAIN_REV_MASK		0x0000000f
@@ -164,6 +161,8 @@ struct aoc_data {
 	u32 services_offset;
 	struct aoc_service *svc_tbl;	/* one wrapper per published service */
 	void __iomem *mbox[3];		/* the three AOC2AP mailbox blocks */
+	void __iomem *req;		/* AOC power-on request block */
+	void __iomem *ssmt;		/* AOC stream security management table */
 	struct aoc_mbox_irq {
 		struct aoc_data *aoc;
 		int block;
@@ -180,20 +179,65 @@ struct aoc_data {
 	void *boot_priv;
 };
 
-/* Read the SoC chip-id the (chip-specific) AOC firmware validates at boot. */
+/*
+ * Map the register blocks the device declares.  All of them are wanted before
+ * the core is started -- the power request and the SSMT to let it run at all,
+ * the mailboxes to hear from it -- so take them together and fail as a unit.
+ */
+static int aoc_map_regs(struct aoc_data *aoc, struct platform_device *pdev)
+{
+	static const char * const mbox_names[AOC_MBOX_BLOCKS] = {
+		"mbox-a32", "mbox-f1", "mbox-p6",
+	};
+	int b;
+
+	aoc->req = devm_platform_ioremap_resource_byname(pdev, "req");
+	if (IS_ERR(aoc->req))
+		return dev_err_probe(aoc->dev, PTR_ERR(aoc->req),
+				     "cannot map the power request block\n");
+
+	aoc->ssmt = devm_platform_ioremap_resource_byname(pdev, "ssmt");
+	if (IS_ERR(aoc->ssmt))
+		return dev_err_probe(aoc->dev, PTR_ERR(aoc->ssmt),
+				     "cannot map the ssmt\n");
+
+	for (b = 0; b < AOC_MBOX_BLOCKS; b++) {
+		void __iomem *mbox;
+
+		mbox = devm_platform_ioremap_resource_byname(pdev, mbox_names[b]);
+		if (IS_ERR(mbox))
+			return dev_err_probe(aoc->dev, PTR_ERR(mbox),
+					     "cannot map %s\n", mbox_names[b]);
+		aoc->mbox[b] = mbox;
+	}
+	return 0;
+}
+
+/*
+ * Read the SoC chip-id the (chip-specific) AOC firmware validates at boot.
+ *
+ * The block belongs to the SoC rather than to the AOC, so reach it through a
+ * syscon phandle instead of mapping someone else's registers.  Not fatal if it
+ * is absent: the firmware is told zeroes and says so itself.
+ */
 static void aoc_read_chipid(struct aoc_data *aoc)
 {
-	void __iomem *cid = ioremap(AOC_CHIPID_PHYS, SZ_256);
-	u32 raw;
+	struct regmap *cid;
+	u32 raw, sub;
 
-	if (!cid)
+	cid = syscon_regmap_lookup_by_phandle(aoc->dev->of_node, "google,chipid");
+	if (IS_ERR(cid)) {
+		dev_warn(aoc->dev, "no chip-id syscon: %pe\n", cid);
 		return;
-	raw = readl(cid);
+	}
+	if (regmap_read(cid, 0, &raw) ||
+	    regmap_read(cid, CHIPID_SUB_REV_REG, &sub))
+		return;
+
 	aoc->chip_product_id = raw & CHIPID_PRODUCT_ID_MASK;
 	aoc->chip_type = raw & CHIPID_TYPE_MASK;
 	aoc->chip_rev = ((raw & CHIPID_MAIN_REV_MASK) << 4) |
-			((readl(cid + CHIPID_SUB_REV_REG) >> CHIPID_SUB_REV_SHIFT) & 0xf);
-	iounmap(cid);
+			((sub >> CHIPID_SUB_REV_SHIFT) & 0xf);
 	dev_info(aoc->dev, "chip id: product %#x type %#x rev %#x\n",
 		 aoc->chip_product_id, aoc->chip_type, aoc->chip_rev);
 }
@@ -201,14 +245,11 @@ static void aoc_read_chipid(struct aoc_data *aoc)
 /* Stamp every AOC DMA stream as "bypass" in the SSMT (mirrors the vendor). */
 static void aoc_configure_ssmt(struct aoc_data *aoc)
 {
-	void __iomem *ssmt;
+	void __iomem *ssmt = aoc->ssmt;
 	int sid;
 
-	ssmt = devm_ioremap(aoc->dev, AOC_SSMT_PHYS, AOC_SSMT_SIZE);
-	if (!ssmt) {
-		dev_warn(aoc->dev, "cannot map ssmt_aoc\n");
+	if (!ssmt)
 		return;
-	}
 	for (sid = 0; sid <= 32; sid++) {
 		if (sid == 31)			/* the vendor skips stream 31 */
 			continue;
@@ -220,13 +261,12 @@ static void aoc_configure_ssmt(struct aoc_data *aoc)
 /* Ask the AOC power controller to keep the core powered, and wait for its ack. */
 static int aoc_request_on(struct aoc_data *aoc)
 {
-	void __iomem *req;
+	void __iomem *req = aoc->req;
 	unsigned int i;
 	u32 ack = 0;
 
-	req = devm_ioremap(aoc->dev, AOC_REQ_PHYS, AOC_REQ_SIZE);
 	if (!req)
-		return -ENOMEM;
+		return -ENODEV;
 
 	writel(1, req);
 	for (i = 0; i < 20; i++) {	/* up to ~2s, like the vendor */
@@ -609,18 +649,15 @@ static bool aoc_check_alive(struct aoc_data *aoc)
 /*
  * The AOC2AP doorbell mailboxes: three whitechapel blocks (for the A32, F1 and
  * P6 cores), 16 channels each, so a service's 0..47 channel index selects both
- * the block and the bit.  These match the vendor's mbox@1520/1522/1524_0000.
+ * the block and the bit.  They come from the device's reg entries, named for
+ * the core each belongs to.
  */
 #define AOC_MBOX_BLOCKS		3
 #define AOC_MBOX_CH_PER_BLOCK	16
-#define AOC_MBOX_SIZE		0x1000
 #define MB_INTGR0		0x0020	/* AP -> AOC: generate interrupt */
 #define MB_INTCR1		0x0044	/* AOC -> AP: clear interrupt */
 #define MB_INTMR1		0x0048	/* AOC -> AP: interrupt mask */
 #define MB_INTSR1		0x004c	/* AOC -> AP: interrupt status */
-static const phys_addr_t aoc_mbox_phys[AOC_MBOX_BLOCKS] = {
-	0x15200000, 0x15220000, 0x15240000,
-};
 
 /*
  * The control service's version command (from the vendor aoc-interface): a
@@ -1106,10 +1143,6 @@ static int aoc_ipc_init(struct aoc_data *aoc, struct platform_device *pdev)
 	}
 
 	for (b = 0; b < AOC_MBOX_BLOCKS; b++) {
-		aoc->mbox[b] = devm_ioremap(aoc->dev, aoc_mbox_phys[b],
-					    AOC_MBOX_SIZE);
-		if (!aoc->mbox[b])
-			return -ENOMEM;
 		writel(0xffff, aoc->mbox[b] + MB_INTCR1);	/* clear stale */
 		writel(0, aoc->mbox[b] + MB_INTMR1);		/* unmask all */
 
@@ -1393,6 +1426,10 @@ static int aoc_probe(struct platform_device *pdev)
 	}
 
 	ret = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(36));
+	if (ret)
+		goto err_put_gsa;
+
+	ret = aoc_map_regs(aoc, pdev);
 	if (ret)
 		goto err_put_gsa;
 
