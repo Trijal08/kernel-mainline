@@ -52,20 +52,18 @@ struct max77779_i2c_subdev {
 
 static const struct regmap_range max77779_top_registers[] = {
 	regmap_reg_range(0x00, 0x02), /* PMIC_ID / PMIC_REVISION / OTP_REVISION */
-	regmap_reg_range(0x22, 0x24), /* INTSRC / INTSRCMASK / TOPSYS_INT */
-	regmap_reg_range(0x26, 0x26), /* TOPSYS_INT_MASK */
+	regmap_reg_range(0x22, 0x2b), /* INTSRC_STS .. INT_MASK */
 	regmap_reg_range(0x40, 0x40), /* I2C_CNFG */
 	regmap_reg_range(0x50, 0x51), /* SWRESET / CONTROL_FG */
 };
 
 static const struct regmap_range max77779_top_ro_registers[] = {
 	regmap_reg_range(0x00, 0x02),
-	regmap_reg_range(0x22, 0x22),
 };
 
 static const struct regmap_range max77779_top_volatile_registers[] = {
-	regmap_reg_range(0x22, 0x22),
-	regmap_reg_range(0x24, 0x24),
+	regmap_reg_range(0x22, 0x23), /* INTSRC_STS / VDROOP_INT */
+	regmap_reg_range(0x2a, 0x2a), /* INT_STS */
 };
 
 static const struct regmap_access_table max77779_top_wr_table = {
@@ -98,22 +96,19 @@ static const struct regmap_config max77779_regmap_config_top = {
 };
 
 static const struct regmap_range max77779_maxq_registers[] = {
-	regmap_reg_range(0x60, 0x73), /* Device ID, Rev, INTx, STATUSx, MASKx */
-	regmap_reg_range(0x81, 0xa1), /* AP_DATAOUTx */
-	regmap_reg_range(0xb1, 0xd1), /* AP_DATAINx */
-	regmap_reg_range(0xe0, 0xe0), /* UIC_SWRST */
+	regmap_reg_range(0x60, 0x63), /* RISCV_DEVICE_ID .. RISCV_FW_SUB_REV */
+	regmap_reg_range(0x81, 0x89), /* AP_DATAOUT1..8 / AP_DATAOUT_OPCODE */
+	regmap_reg_range(0xb1, 0xbc), /* AP_DATAIN0..10 / SysMsg */
+	regmap_reg_range(0xbf, 0xbf), /* COMMAND_HW */
 };
 
 static const struct regmap_range max77779_maxq_ro_registers[] = {
-	regmap_reg_range(0x60, 0x63), /* Device ID, Rev */
-	regmap_reg_range(0x68, 0x6f), /* STATUSx */
-	regmap_reg_range(0xb1, 0xd1),
+	regmap_reg_range(0x60, 0x63), /* RISCV_DEVICE_ID .. RISCV_FW_SUB_REV */
+	regmap_reg_range(0xb1, 0xbc), /* AP_DATAIN0..10 / SysMsg */
 };
 
 static const struct regmap_range max77779_maxq_volatile_registers[] = {
-	regmap_reg_range(0x64, 0x6f), /* INTx, STATUSx */
-	regmap_reg_range(0xb1, 0xd1),
-	regmap_reg_range(0xe0, 0xe0),
+	regmap_reg_range(0xb1, 0xbc), /* AP_DATAIN0..10 / SysMsg */
 };
 
 static const struct regmap_access_table max77779_maxq_wr_table = {
@@ -137,11 +132,11 @@ static const struct regmap_config max77779_regmap_config_maxq = {
 	.name = "maxq",
 	.reg_bits = 8,
 	.val_bits = 8,
-	.max_register = MAX77779_MAXQ_REG_UIC_SWRST,
+	.max_register = MAX77779_MAXQ_REG_COMMAND_HW,
 	.wr_table = &max77779_maxq_wr_table,
 	.rd_table = &max77779_maxq_rd_table,
 	.volatile_table = &max77779_maxq_volatile_table,
-	.num_reg_defaults_raw = MAX77779_MAXQ_REG_UIC_SWRST + 1,
+	.num_reg_defaults_raw = MAX77779_MAXQ_REG_COMMAND_HW + 1,
 	.cache_type = REGCACHE_FLAT,
 };
 
@@ -222,43 +217,52 @@ static const struct regmap_config max77779_regmap_config_scratch = {
 
 /*
  * Interrupts - with the following interrupt hierarchy:
- *   pmic IRQs (INTSRC)
- *     - MAXQ_INT: MaxQ IRQs
- *       - UIC_INT1
- *         - APCmdResI
- *         - SysMsgI
- *         - GPIOxI
- *     - TOPSYS_INT: topsys
- *       - TOPSYS_INT
- *         - TSHDN_INT
- *         - SYSOVLO_INT
- *         - SYSUVLO_INT
- *         - FSHIP_NOT_RD
+ *   INTSRC_STS: one bit per sub-block, masked bit for bit by INTB_MASK
+ *     - TCPC_INT
+ *     - FG_INT
  *     - CHGR_INT: charger
  *       - CHG_INT
  *       - CHG_INT2
+ *     - I2CM_INT
+ *     - BATTVIMON_INT
+ *     - GPIO_INT
+ *     - VDROOP_INT
+ *     - PMICTOP_INT: top-system faults (INT_STS)
+ *       - SPMIERR_INT
+ *       - VDDPOR_INT
+ *       - SysMsgI_INT
+ *       - SYSUVLO_INT
+ *       - SYSOVLO_INT
+ *       - TSHDN_INT
+ *       - APCmdResI_INT
+ *
+ * Every source INTSRC_STS can raise is declared, including the ones this
+ * driver has no child for. regmap-irq masks each declared source at
+ * registration and only unmasks what a consumer asks for, and a sub-block
+ * left unmasked with nothing to service it holds the shared line asserted
+ * indefinitely -- which ends with the spurious-interrupt detector disabling
+ * the PMIC interrupt outright, taking the charger and the top-system faults
+ * down with it.
  */
 enum {
-	MAX77779_INT_MAXQ,
-	MAX77779_INT_TOPSYS,
+	MAX77779_INT_TCPC,
+	MAX77779_INT_FG,
 	MAX77779_INT_CHGR,
+	MAX77779_INT_I2CM,
+	MAX77779_INT_BATTVIMON,
+	MAX77779_INT_GPIO,
+	MAX77779_INT_VDROOP,
+	MAX77779_INT_PMICTOP,
 };
 
 enum {
-	MAX77779_TOPSYS_INT_TSHDN,
-	MAX77779_TOPSYS_INT_SYSOVLO,
-	MAX77779_TOPSYS_INT_SYSUVLO,
-	MAX77779_TOPSYS_INT_FSHIP_NOT_RD,
-};
-
-enum {
-	MAX77779_MAXQ_INT_APCMDRESI,
-	MAX77779_MAXQ_INT_SYSMSGI,
-	MAX77779_MAXQ_INT_GPIO,
-	MAX77779_MAXQ_INT_UIC1,
-	MAX77779_MAXQ_INT_UIC2,
-	MAX77779_MAXQ_INT_UIC3,
-	MAX77779_MAXQ_INT_UIC4,
+	MAX77779_PMICTOP_INT_SPMIERR,
+	MAX77779_PMICTOP_INT_VDDPOR,
+	MAX77779_PMICTOP_INT_SYSMSGI,
+	MAX77779_PMICTOP_INT_SYSUVLO,
+	MAX77779_PMICTOP_INT_SYSOVLO,
+	MAX77779_PMICTOP_INT_TSHDN,
+	MAX77779_PMICTOP_INT_APCMDRESI,
 };
 
 enum {
@@ -267,26 +271,39 @@ enum {
 };
 
 static const struct regmap_irq max77779_pmic_irqs[] = {
-	REGMAP_IRQ_REG(MAX77779_INT_MAXQ, 0, MAX77779_PMIC_REG_INTSRC_MAXQ),
-	REGMAP_IRQ_REG(MAX77779_INT_TOPSYS, 0, MAX77779_PMIC_REG_INTSRC_TOPSYS),
-	REGMAP_IRQ_REG(MAX77779_INT_CHGR, 0, MAX77779_PMIC_REG_INTSRC_CHGR),
+	REGMAP_IRQ_REG(MAX77779_INT_TCPC, 0,
+		       MAX77779_PMIC_REG_INTSRC_STS_TCPC),
+	REGMAP_IRQ_REG(MAX77779_INT_FG, 0,
+		       MAX77779_PMIC_REG_INTSRC_STS_FG),
+	REGMAP_IRQ_REG(MAX77779_INT_CHGR, 0,
+		       MAX77779_PMIC_REG_INTSRC_STS_CHGR),
+	REGMAP_IRQ_REG(MAX77779_INT_I2CM, 0,
+		       MAX77779_PMIC_REG_INTSRC_STS_I2CM),
+	REGMAP_IRQ_REG(MAX77779_INT_BATTVIMON, 0,
+		       MAX77779_PMIC_REG_INTSRC_STS_BATTVIMON),
+	REGMAP_IRQ_REG(MAX77779_INT_GPIO, 0,
+		       MAX77779_PMIC_REG_INTSRC_STS_GPIO),
+	REGMAP_IRQ_REG(MAX77779_INT_VDROOP, 0,
+		       MAX77779_PMIC_REG_INTSRC_STS_VDROOP),
+	REGMAP_IRQ_REG(MAX77779_INT_PMICTOP, 0,
+		       MAX77779_PMIC_REG_INTSRC_STS_PMICTOP),
 };
 
-static const struct regmap_irq max77779_maxq_irqs[] = {
-	REGMAP_IRQ_REG(MAX77779_MAXQ_INT_APCMDRESI, 0, MAX77779_MAXQ_REG_UIC_INT1_APCMDRESI),
-	REGMAP_IRQ_REG(MAX77779_MAXQ_INT_SYSMSGI, 0, MAX77779_MAXQ_REG_UIC_INT1_SYSMSGI),
-	REGMAP_IRQ_REG(MAX77779_MAXQ_INT_GPIO, 0, GENMASK(1, 0)),
-	REGMAP_IRQ_REG(MAX77779_MAXQ_INT_UIC1, 0, GENMASK(5, 2)),
-	REGMAP_IRQ_REG(MAX77779_MAXQ_INT_UIC2, 1, GENMASK(7, 0)),
-	REGMAP_IRQ_REG(MAX77779_MAXQ_INT_UIC3, 2, GENMASK(7, 0)),
-	REGMAP_IRQ_REG(MAX77779_MAXQ_INT_UIC4, 3, GENMASK(7, 0)),
-};
-
-static const struct regmap_irq max77779_topsys_irqs[] = {
-	REGMAP_IRQ_REG(MAX77779_TOPSYS_INT_TSHDN, 0, MAX77779_PMIC_REG_TOPSYS_INT_TSHDN),
-	REGMAP_IRQ_REG(MAX77779_TOPSYS_INT_SYSOVLO, 0, MAX77779_PMIC_REG_TOPSYS_INT_SYSOVLO),
-	REGMAP_IRQ_REG(MAX77779_TOPSYS_INT_SYSUVLO, 0, MAX77779_PMIC_REG_TOPSYS_INT_SYSUVLO),
-	REGMAP_IRQ_REG(MAX77779_TOPSYS_INT_FSHIP_NOT_RD, 0, MAX77779_PMIC_REG_TOPSYS_INT_FSHIP),
+static const struct regmap_irq max77779_pmictop_irqs[] = {
+	REGMAP_IRQ_REG(MAX77779_PMICTOP_INT_SPMIERR, 0,
+		       MAX77779_PMIC_REG_INT_STS_SPMIERR),
+	REGMAP_IRQ_REG(MAX77779_PMICTOP_INT_VDDPOR, 0,
+		       MAX77779_PMIC_REG_INT_STS_VDDPOR),
+	REGMAP_IRQ_REG(MAX77779_PMICTOP_INT_SYSMSGI, 0,
+		       MAX77779_PMIC_REG_INT_STS_SYSMSGI),
+	REGMAP_IRQ_REG(MAX77779_PMICTOP_INT_SYSUVLO, 0,
+		       MAX77779_PMIC_REG_INT_STS_SYSUVLO),
+	REGMAP_IRQ_REG(MAX77779_PMICTOP_INT_SYSOVLO, 0,
+		       MAX77779_PMIC_REG_INT_STS_SYSOVLO),
+	REGMAP_IRQ_REG(MAX77779_PMICTOP_INT_TSHDN, 0,
+		       MAX77779_PMIC_REG_INT_STS_TSHDN),
+	REGMAP_IRQ_REG(MAX77779_PMICTOP_INT_APCMDRESI, 0,
+		       MAX77779_PMIC_REG_INT_STS_APCMDRESI),
 };
 
 static const struct regmap_irq max77779_chgr_irqs[] = {
@@ -294,41 +311,41 @@ static const struct regmap_irq max77779_chgr_irqs[] = {
 	REGMAP_IRQ_REG(MAX77779_CHARGER_INT_2, 1, GENMASK(7, 0)),
 };
 
+/*
+ * INTSRC_STS is write-1-to-clear, so it has to be acked for the shared line
+ * to drop even though every bit in it is only a summary of a sub-block.
+ */
 static const struct regmap_irq_chip max77779_pmic_irq_chip = {
 	.name = "max77779-pmic",
-	/* INTSRC is read-only and doesn't require clearing */
-	.status_base = MAX77779_PMIC_REG_INTSRC,
-	.mask_base = MAX77779_PMIC_REG_INTSRCMASK,
+	.status_base = MAX77779_PMIC_REG_INTSRC_STS,
+	.mask_base = MAX77779_PMIC_REG_INTB_MASK,
+	.ack_base = MAX77779_PMIC_REG_INTSRC_STS,
+	.init_ack_masked = true,
 	.num_regs = 1,
 	.irqs = max77779_pmic_irqs,
 	.num_irqs = ARRAY_SIZE(max77779_pmic_irqs),
 };
 
 /*
- * We can let regmap-irq auto-ack the topsys interrupt bits as required, but
- * for all others the individual drivers need to know which interrupt bit
+ * We can let regmap-irq auto-ack the top-system interrupt bits as required,
+ * but for all others the individual drivers need to know which interrupt bit
  * exactly is set inside their interrupt handlers, and therefore we can not set
  * .ack_base for those.
+ *
+ * Only bits 1 and up are declared here: INT_MASK bit 0 is not a mask but the
+ * FSHIP_NOT_RD latch, and leaving it undeclared keeps regmap-irq's masking,
+ * which is a read-modify-write over the declared bits only, off it.
  */
-static const struct regmap_irq_chip max77779_maxq_irq_chip = {
-	.name = "max77779-maxq",
-	.domain_suffix = "MAXQ",
-	.status_base = MAX77779_MAXQ_REG_UIC_INT1,
-	.mask_base = MAX77779_MAXQ_REG_UIC_INT1_M,
-	.num_regs = 4,
-	.irqs = max77779_maxq_irqs,
-	.num_irqs = ARRAY_SIZE(max77779_maxq_irqs),
-};
-
-static const struct regmap_irq_chip max77779_topsys_irq_chip = {
-	.name = "max77779-topsys",
-	.domain_suffix = "TOPSYS",
-	.status_base = MAX77779_PMIC_REG_TOPSYS_INT,
-	.mask_base = MAX77779_PMIC_REG_TOPSYS_INT_MASK,
-	.ack_base = MAX77779_PMIC_REG_TOPSYS_INT,
+static const struct regmap_irq_chip max77779_pmictop_irq_chip = {
+	.name = "max77779-pmictop",
+	.domain_suffix = "PMICTOP",
+	.status_base = MAX77779_PMIC_REG_INT_STS,
+	.mask_base = MAX77779_PMIC_REG_INT_MASK,
+	.ack_base = MAX77779_PMIC_REG_INT_STS,
+	.init_ack_masked = true,
 	.num_regs = 1,
-	.irqs = max77779_topsys_irqs,
-	.num_irqs = ARRAY_SIZE(max77779_topsys_irqs),
+	.irqs = max77779_pmictop_irqs,
+	.num_irqs = ARRAY_SIZE(max77779_pmictop_irqs),
 };
 
 static const struct regmap_irq_chip max77779_chrg_irq_chip = {
@@ -364,7 +381,7 @@ static const struct max77779_i2c_subdev max77779_i2c_subdevs[] = {
 };
 
 static const struct resource max77779_gpio_resources[] = {
-	DEFINE_RES_IRQ_NAMED(MAX77779_MAXQ_INT_GPIO, "GPI"),
+	DEFINE_RES_IRQ_NAMED(MAX77779_INT_GPIO, "GPI"),
 };
 
 static const struct resource max77779_charger_resources[] = {
@@ -375,9 +392,10 @@ static const struct resource max77779_charger_resources[] = {
 static const struct mfd_cell max77779_cells[] = {
 	MFD_CELL_OF("max77779-nvmem", NULL, NULL, 0, 0,
 		    "maxim,max77779-nvmem"),
-};
-
-static const struct mfd_cell max77779_maxq_cells[] = {
+	/*
+	 * GPIO_INT is a top-level source, so the GPIO child takes its
+	 * interrupt straight from the INTSRC_STS domain.
+	 */
 	MFD_CELL_OF("max77779-gpio", max77779_gpio_resources, NULL, 0, 0,
 		    "maxim,max77779-gpio"),
 };
@@ -401,7 +419,7 @@ int max77779_maxq_command(struct max77779 *max77779,
 	static const unsigned int timeout_ms = 200;
 	int ret;
 
-	if (cmd->length > MAX77779_MAXQ_OPCODE_MAXLENGTH)
+	if (cmd->length > MAX77779_MAXQ_CMD_MAXLENGTH)
 		return -EINVAL;
 
 	/*
@@ -413,7 +431,7 @@ int max77779_maxq_command(struct max77779 *max77779,
 	if (!rsp)
 		rsp = _rsp;
 
-	if (!rsp->length || rsp->length > MAX77779_MAXQ_OPCODE_MAXLENGTH)
+	if (!rsp->length || rsp->length > MAX77779_MAXQ_RSP_MAXLENGTH)
 		return -EINVAL;
 
 	guard(mutex)(&max77779->maxq_lock);
@@ -421,15 +439,16 @@ int max77779_maxq_command(struct max77779 *max77779,
 	reinit_completion(&max77779->cmd_done);
 
 	/*
-	 * MaxQ latches the message when the DATAOUT32 register is written. If
-	 * cmd->length is shorter we still need to write 0 to it.
+	 * MaxQ latches the message when the last register of the command
+	 * window is written. If cmd->length is shorter we still need to write
+	 * 0 to it.
 	 */
 	ret = regmap_bulk_write(max77779->regmap_maxq,
-				MAX77779_MAXQ_REG_AP_DATAOUT0, cmd->cmd,
+				MAX77779_MAXQ_REG_AP_DATAOUT1, cmd->cmd,
 				cmd->length);
-	if (!ret && cmd->length < MAX77779_MAXQ_OPCODE_MAXLENGTH)
+	if (!ret && cmd->length < MAX77779_MAXQ_CMD_MAXLENGTH)
 		ret = regmap_write(max77779->regmap_maxq,
-				   MAX77779_MAXQ_REG_AP_DATAOUT32, 0);
+				   MAX77779_MAXQ_REG_AP_DATAOUT_OPCODE, 0);
 	if (ret) {
 		dev_err(dev, "writing command failed: %d\n", ret);
 		return ret;
@@ -468,9 +487,7 @@ static irqreturn_t apcmdres_irq_handler(int irq, void *irq_data)
 {
 	struct max77779 *max77779 = irq_data;
 
-	regmap_write(max77779->regmap_maxq, MAX77779_MAXQ_REG_UIC_INT1,
-		     MAX77779_MAXQ_REG_UIC_INT1_APCMDRESI);
-
+	/* The PMICTOP chip sets .ack_base, so INT_STS is already cleared. */
 	complete(&max77779->cmd_done);
 
 	return IRQ_HANDLED;
@@ -545,26 +562,30 @@ static int max77779_add_chained_irq_chip(struct device *dev,
 	return 0;
 }
 
-static int max77779_add_chained_maxq(struct i2c_client *client,
-				     struct max77779 *max77779,
-				     struct regmap_irq_chip_data *parent)
+static int max77779_add_chained_pmictop(struct i2c_client *client,
+					struct max77779 *max77779,
+					struct regmap_irq_chip_data *parent)
 {
 	struct regmap_irq_chip_data *irq_chip_data;
 	int apcmdres_irq;
 	int ret;
 
 	ret = max77779_add_chained_irq_chip(&client->dev,
-					    max77779->regmap_maxq,
-					    MAX77779_INT_MAXQ,
+					    max77779->regmap_top,
+					    MAX77779_INT_PMICTOP,
 					    parent,
-					    &max77779_maxq_irq_chip,
+					    &max77779_pmictop_irq_chip,
 					    &irq_chip_data);
 	if (ret)
 		return ret;
 
+	/*
+	 * The MaxQ command response arrives as a top-system interrupt; there
+	 * is no separate MaxQ source in INTSRC_STS.
+	 */
 	init_completion(&max77779->cmd_done);
 	apcmdres_irq = regmap_irq_get_virq(irq_chip_data,
-					   MAX77779_MAXQ_INT_APCMDRESI);
+					   MAX77779_PMICTOP_INT_APCMDRESI);
 
 	ret = devm_request_threaded_irq(&client->dev, apcmdres_irq,
 					NULL, apcmdres_irq_handler,
@@ -572,72 +593,42 @@ static int max77779_add_chained_maxq(struct i2c_client *client,
 					dev_name(&client->dev), max77779);
 	if (ret)
 		return dev_err_probe(&client->dev, ret,
-				     "MAX77779_MAXQ_INT_APCMDRESI failed\n");
-
-	ret = devm_mfd_add_devices(&client->dev, PLATFORM_DEVID_AUTO,
-				   max77779_maxq_cells,
-				   ARRAY_SIZE(max77779_maxq_cells),
-				   NULL, 0,
-				   regmap_irq_get_domain(irq_chip_data));
-	if (ret)
-		return dev_err_probe(&client->dev, ret,
-				     "failed to add child devices (MaxQ)\n");
-
-	return 0;
-}
-
-static int max77779_add_chained_topsys(struct i2c_client *client,
-				       struct max77779 *max77779,
-				       struct regmap_irq_chip_data *parent)
-{
-	struct regmap_irq_chip_data *irq_chip_data;
-	int ret;
-
-	ret = max77779_add_chained_irq_chip(&client->dev,
-					    max77779->regmap_top,
-					    MAX77779_INT_TOPSYS,
-					    parent,
-					    &max77779_topsys_irq_chip,
-					    &irq_chip_data);
-	if (ret)
-		return ret;
+				     "MAX77779_PMICTOP_INT_APCMDRESI failed\n");
 
 	return 0;
 }
 
 /**
- * max77779_report_topsys() - say which top-system conditions are asserted.
+ * max77779_report_faults() - say which top-system conditions are asserted.
  * @dev:	the PMIC device.
  * @regmap:	the top register map.
  *
- * TOPSYS_INT summarises into INTSRC from its raw state rather than from what
- * TOPSYS_INT_MASK allows through, so a condition that is set and does not
- * clear keeps the shared line asserted whether or not anything is listening
- * for it -- and three of the four are faults worth knowing about regardless.
+ * INT_STS latches until it is written back, so a fault recorded before this
+ * driver loaded is still readable here, and three of these are worth knowing
+ * about whether or not anything has asked for the interrupt.
  */
-static void max77779_report_topsys(struct device *dev, struct regmap *regmap)
+static void max77779_report_faults(struct device *dev, struct regmap *regmap)
 {
 	static const struct {
 		unsigned int bit;
 		const char *what;
-	} topsys[] = {
-		{ MAX77779_PMIC_REG_TOPSYS_INT_TSHDN,   "thermal shutdown" },
-		{ MAX77779_PMIC_REG_TOPSYS_INT_SYSOVLO, "system overvoltage" },
-		{ MAX77779_PMIC_REG_TOPSYS_INT_SYSUVLO, "system undervoltage" },
-		{ MAX77779_PMIC_REG_TOPSYS_INT_FSHIP,
-		  "ship-mode exit reason unread" },
+	} faults[] = {
+		{ MAX77779_PMIC_REG_INT_STS_TSHDN,   "thermal shutdown" },
+		{ MAX77779_PMIC_REG_INT_STS_SYSOVLO, "system overvoltage" },
+		{ MAX77779_PMIC_REG_INT_STS_SYSUVLO, "system undervoltage" },
+		{ MAX77779_PMIC_REG_INT_STS_VDDPOR,  "VDD power-on reset" },
 	};
 	unsigned int val;
 	int i, ret;
 
-	ret = regmap_read(regmap, MAX77779_PMIC_REG_TOPSYS_INT, &val);
+	ret = regmap_read(regmap, MAX77779_PMIC_REG_INT_STS, &val);
 	if (ret || !val)
 		return;
 
-	for (i = 0; i < ARRAY_SIZE(topsys); i++)
-		if (val & topsys[i].bit)
+	for (i = 0; i < ARRAY_SIZE(faults); i++)
+		if (val & faults[i].bit)
 			dev_warn(dev, "top-system interrupt asserted: %s\n",
-				 topsys[i].what);
+				 faults[i].what);
 }
 
 static int max77779_add_chained_charger(struct i2c_client *client,
@@ -719,15 +710,16 @@ static int max77779_probe(struct i2c_client *client)
 				     "failed to add IRQ chip '%s'\n",
 				     max77779_pmic_irq_chip.name);
 
-	ret = max77779_add_chained_maxq(client, max77779, irq_chip_data_pmic);
+	/*
+	 * Read the latched faults out before the PMICTOP chip is registered:
+	 * it acks INT_STS as it comes up, which is what clears them.
+	 */
+	max77779_report_faults(&client->dev, max77779->regmap_top);
+
+	ret = max77779_add_chained_pmictop(client, max77779,
+					   irq_chip_data_pmic);
 	if (ret)
 		return ret;
-
-	ret = max77779_add_chained_topsys(client, max77779, irq_chip_data_pmic);
-	if (ret)
-		return ret;
-
-	max77779_report_topsys(&client->dev, max77779->regmap_top);
 
 	ret = max77779_add_chained_charger(client, max77779, irq_chip_data_pmic);
 	if (ret)
