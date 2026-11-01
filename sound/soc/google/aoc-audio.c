@@ -353,6 +353,7 @@ struct aoc_audio_stream {
 	struct work_struct period_work;		/* the tick cannot enter the core */
 	u32 prev_consumed;
 	bool playback;
+	u32 ring;				/* AOC ring size in bytes */
 	struct device *dev;			/* for the debug lines below */
 	u8 source;				/* AOC entry point = PCM device */
 	u32 base;				/* AOC byte position at start */
@@ -1257,6 +1258,7 @@ static int aoc_pcm_open(struct snd_soc_component *comp,
 	s->svc = svc;
 	s->substream = substream;
 	s->playback = playback;
+	s->ring = aoc_service_ring_size(svc, playback);
 	s->dev = comp->dev;
 	spin_lock_init(&s->ring_lock);
 	hrtimer_setup(&s->tick, aoc_pcm_tick, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
@@ -1432,16 +1434,38 @@ static snd_pcm_uframes_t aoc_pcm_pointer(struct snd_soc_component *comp,
 	struct snd_pcm_runtime *rt = substream->runtime;
 	struct aoc_audio_stream *s = rt->private_data;
 	u32 buf_bytes = frames_to_bytes(rt, rt->buffer_size);
-	u32 pos;
+	u32 taken, pos;
 
 	/* Capture position is what we have moved into the buffer ourselves. */
 	if (!s->playback)
 		return s->pushed % rt->buffer_size;
 
-	pos = aoc_service_progress(s->svc, s->playback) - s->base;
+	taken = aoc_service_progress(s->svc, s->playback) - s->base;
+	/*
+	 * What the AOC has taken is not what it has rendered.  On start it
+	 * swallows up to a whole ring at once -- hardware-observed: the writes
+	 * saturate at 2048 frames and the read counter jumps that far within
+	 * half a millisecond, against the 42 ms those frames actually last --
+	 * and only then does it pace itself at the sample rate.
+	 *
+	 * Reported as-is, that start-up gulp lands the hardware pointer exactly
+	 * on appl_ptr whenever the application committed less than a ring
+	 * before starting, and the core reads an empty buffer and raises an
+	 * XRUN on the very first pointer read.  Recovery re-prepares and the
+	 * next start does the same, so the stream never plays a sample: with
+	 * PipeWire prefilling three 512-frame quanta for a desktop notification
+	 * it wedged there permanently, while a client that happened to prefill
+	 * more ran fine.
+	 *
+	 * So hold the pointer back by the ring: a frame counts as played once
+	 * the AOC has taken a ring's worth beyond it, which is the most that
+	 * can still be sitting in front of the renderer.  It costs the ring's
+	 * worth of reported latency, which the stream genuinely has.
+	 */
+	pos = taken > s->ring ? taken - s->ring : 0;
 	dev_dbg(s->dev,
-		"pointer: prog %u base %u delta %u -> %lu of %lu, appl %lu hw %lu pushed %lu\n",
-		pos + s->base, s->base, pos,
+		"pointer: taken %u ring %u played %u -> %lu of %lu, appl %lu hw %lu pushed %lu\n",
+		taken, s->ring, pos,
 		(unsigned long)bytes_to_frames(rt, pos % buf_bytes),
 		rt->buffer_size, (unsigned long)READ_ONCE(rt->control->appl_ptr),
 		(unsigned long)READ_ONCE(rt->status->hw_ptr), s->pushed);

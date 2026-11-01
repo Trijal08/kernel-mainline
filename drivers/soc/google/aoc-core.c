@@ -1012,6 +1012,21 @@ u32 aoc_service_progress(struct aoc_service *svc, bool playback)
 }
 EXPORT_SYMBOL_GPL(aoc_service_progress);
 
+/*
+ * The size of this service's ring, in bytes: how much the far side can hold
+ * at once, and so how far ahead of what it has rendered a consumer may have
+ * taken.  Zero if the service does not carry a ring.
+ */
+u32 aoc_service_ring_size(struct aoc_service *svc, bool playback)
+{
+	void *r = svc_region(svc->hdr, playback ? AOC_DOWN : AOC_UP);
+
+	if (svc_type(svc->hdr) != SVC_TYPE_RING)
+		return 0;
+	return ipc_r32((u8 *)r + REG_SIZE);
+}
+EXPORT_SYMBOL_GPL(aoc_service_ring_size);
+
 void aoc_service_set_handler(struct aoc_service *svc,
 			     void (*handler)(struct aoc_service *svc, void *priv),
 			     void *priv)
