@@ -815,6 +815,14 @@ struct s5xxx_modem {
 	 * timed out unsent and the CP asserted PAL_QUEUE_FULL.  So a writer
 	 * that cannot fit queues here, and a newcomer that finds the queue
 	 * occupied must queue behind it rather than take the gap.
+	 *
+	 * Each channel holds at most one place in it (@tx_msg_lock, taken for
+	 * the whole of s5xxx_fmt_tx_msg()), so the queue is never longer than
+	 * the number of FMT channels and no writer can push the CP's own reply
+	 * back by more than one frame per other channel.  Without that cap a
+	 * chatty service could keep the queue deep enough to time the reply out
+	 * and assert the CP from user space, which is the same failure the
+	 * queue exists to prevent.
 	 */
 	struct list_head	fmt_tx_queue;
 	spinlock_t		fmt_tx_queue_lock;	/* guards fmt_tx_queue */
@@ -2671,20 +2679,25 @@ static int s5xxx_fmt_tx_msg(struct s5xxx_modem *sm, struct mutex *msg_lock,
 
 	if (!len)
 		return -EINVAL;
-	/*
-	 * The common case, and no @msg_lock: a SINGLE frame is self-describing,
-	 * so landing one between another writer's fragments costs the receiver
-	 * nothing -- only two split messages on one channel have to queue.
-	 */
-	if (len <= S5XXX_FMT_MAX)
-		return s5xxx_fmt_tx_frame(sm, ch, ch_seq, S5XXX_SIT_CFG_SINGLE,
-					  data, len, true);
 	if (len > S5XXX_FMT_MSG_MAX)
 		return -EMSGSIZE;
 
-	frags = DIV_ROUND_UP(len, S5XXX_FMT_FRAME_PAYLOAD);
+	/*
+	 * @msg_lock covers the whole send, single frame or split, so a channel
+	 * holds at most one place in the ring's admission queue and cannot push
+	 * another channel's frame back by flooding it.  A split message needs
+	 * the lock anyway, to keep its fragments together.
+	 */
 	if (mutex_lock_interruptible(msg_lock))
 		return -ERESTARTSYS;
+
+	if (len <= S5XXX_FMT_MAX) {
+		ret = s5xxx_fmt_tx_frame(sm, ch, ch_seq, S5XXX_SIT_CFG_SINGLE,
+					 data, len, true);
+		goto out;
+	}
+
+	frags = DIV_ROUND_UP(len, S5XXX_FMT_FRAME_PAYLOAD);
 	id = (++*frag_id) & S5XXX_SIT_CFG_MULTI_ID_MAX;
 
 	for (i = 0, sent = 0, flen = 0; i < frags; i++, sent += flen) {
@@ -2707,6 +2720,7 @@ static int s5xxx_fmt_tx_msg(struct s5xxx_modem *sm, struct mutex *msg_lock,
 			break;
 	}
 
+out:
 	mutex_unlock(msg_lock);
 	return ret;
 }
