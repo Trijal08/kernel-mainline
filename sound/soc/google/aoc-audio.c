@@ -41,6 +41,12 @@
 #include <sound/tlv.h>
 
 /* The ring the AOC drains is 16K; keep the staging buffer a few of those. */
+/*
+ * The staging buffer the application writes into, from which .ack and the
+ * refill tick copy on to the AOC's ring.  Six rings' worth: enough that a
+ * writer can get far enough ahead to ride out a scheduling delay, since the
+ * ring itself only holds about 42ms.
+ */
 #define AOC_PCM_BUFFER_BYTES	(16384 * 6)
 #define AOC_PCM_TICK_NS		(10 * NSEC_PER_MSEC)
 /*
@@ -101,14 +107,12 @@
 #define AOC_CMD_AUDIO_OUTPUT_TELEPHONY_MODEM_START_ID	256
 #define AOC_CMD_AUDIO_OUTPUT_TELEPHONY_MODEM_STOP_ID	257
 /*
- * EXPERIMENT: the AOC has three telephony starts -- MODEM (256) for a circuit
- * bearer the CP decodes, VOIP (258), and RTP (289).  Every call since IMS came
- * up is VoLTE, and on MODEM the AOC reports "PCIe Modem Configuration: Unknown
- * codec type (0xffffffff)" -- it is told a call is up and finds no format
- * behind it.  Try the RTP start instead.
+ * The firmware has two further telephony starts, VOIP (258/259) and RTP
+ * (289/290), for bearers it decodes itself.  MODEM is the one that works here,
+ * including for VoLTE: the AOC logs "PCIe Modem Configuration: Unknown codec
+ * type (0xffffffff)" alongside it and carries the call regardless, so the
+ * complaint is not what it looks like.  Neither alternative is used.
  */
-#define AOC_CMD_AUDIO_OUTPUT_TELEPHONY_VOIP_START_ID	258
-#define AOC_CMD_AUDIO_OUTPUT_TELEPHONY_VOIP_STOP_ID	259
 /*
  * The AOC's audio DSP runs one processing mode at a time, and a call needs
  * TELEPHONY: in the boot default the modem mixer comes up with its
@@ -117,13 +121,15 @@
  * from the vendor driver's "Audio DSP Mode" control (aoc_set_audio_dsp_mode).
  */
 #define AOC_CMD_AUDIO_OUTPUT_DSP_MODE_SET_ID	277
+/*
+ * Mode 2 is the telephony mode the comment above describes.  It is not set
+ * here: calls carry correctly with the DSP left in AMBIENT, so the AOC is
+ * evidently switching itself when the modem flow starts.
+ */
 #define AOC_DSP_MODE_AMBIENT		0
-#define AOC_DSP_MODE_TELEPHONY		2
 /* Switching mode reloads DSP blocks, well past the ordinary reply window. */
 #define AOC_CMD_DSP_MODE_TIMEOUT_MS	700
 
-#define AOC_CMD_AUDIO_OUTPUT_TELEPHONY_RTP_START_ID	289
-#define AOC_CMD_AUDIO_OUTPUT_TELEPHONY_RTP_STOP_ID	290
 /*
  * The call's uplink, and the downlink's precondition.
  *
@@ -152,9 +158,9 @@
  *   bind: src:8 - sink:0!
  *
  * The AEC reference stays MODEM_MIC_INPUT_INDEX (the speaker-playback case in
- * the vendor's ft_aec_ref_source switch), so the two are NOT the same value.
+ * the vendor's ft_aec_ref_source switch), so the two are NOT the same value:
+ * the in-call input index is 3, which nothing here needs to send.
  */
-#define AOC_MODEM_INCALL_INPUT_INDEX			3
 
 struct aoc_cmd_hdr {
 	u8 type;
@@ -249,7 +255,7 @@ struct cmd_audio_output_bind {
  */
 #define AOC_TELEPHONY_SINK_BLOCK			19
 #define AOC_TELEPHONY_BLOCK_KEY			16
-#define AOC_TELEPHONY_COMPONENT_PRE		0
+/* The "before" value in the capture above is 0; only POST is ever sent. */
 #define AOC_TELEPHONY_COMPONENT_POST		30
 #define AOC_SPEAKER_VOLUME_MAX			1000	/* stock chip->volume */
 
@@ -1464,11 +1470,11 @@ static snd_pcm_uframes_t aoc_pcm_pointer(struct snd_soc_component *comp,
 	 */
 	pos = taken > s->ring ? taken - s->ring : 0;
 	dev_dbg(s->dev,
-		"pointer: taken %u ring %u played %u -> %lu of %lu, appl %lu hw %lu pushed %lu\n",
+		"pointer: taken %u ring %u played %u -> %lu of %lu, hw %lu pushed %lu\n",
 		taken, s->ring, pos,
 		(unsigned long)bytes_to_frames(rt, pos % buf_bytes),
-		rt->buffer_size, (unsigned long)READ_ONCE(rt->control->appl_ptr),
-		(unsigned long)READ_ONCE(rt->status->hw_ptr), s->pushed);
+		rt->buffer_size, (unsigned long)READ_ONCE(rt->status->hw_ptr),
+		s->pushed);
 	return bytes_to_frames(rt, pos % buf_bytes);
 }
 
