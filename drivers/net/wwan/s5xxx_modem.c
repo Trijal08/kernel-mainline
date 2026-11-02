@@ -529,13 +529,25 @@ struct s5xxx_variant {
  * payload holds, so the receive path has to reassemble.  Without that, a
  * userspace daemon is handed each fragment as though it were a whole message.
  *
- * The transmit direction deliberately does NOT split what would fit.  This CP
- * is validated against one oversized single frame -- its own UE-capability
- * replies run to nearly the whole 4 KiB ring -- and reframing those as
- * spec-shaped multi-frames breaks the boot uecap exchange and with it LTE
- * attach, a result the sibling s5300 driver records from hardware.  Only a
- * message too large for the ring falls back to fragments, where the
- * alternative is refusing it outright.  Writers competing for a ring barely
+ * How much goes in one frame is a property of the channel, not of the ring.
+ *
+ * On the SIT control channels the transmit direction deliberately does NOT
+ * split what would fit: that CP is validated against one oversized single
+ * frame, and reframing those as spec-shaped multi-frames breaks the boot uecap
+ * exchange and with it LTE attach, a result the sibling s5300 driver records
+ * from hardware.  Only a message too large for the ring falls back to
+ * fragments, where the alternative is refusing it outright.
+ *
+ * On the oem channels the opposite holds, and stock is the proof.  Captured
+ * from komodo's own Android answering a byte-identical carrier-config read
+ * (ap_plmn_mapping.binarypb, 2975 bytes, block_size 4000): it replies with
+ * frames of 2036 and 957 bytes -- one logical message across two link frames,
+ * the first declaring 2970 bytes of data while carrying 2036 -- and the CP
+ * asks once.  Answering the same request as one 4033-byte frame instead makes
+ * the CP re-read the same files without end: 61 requests for that one file in
+ * 54 seconds, 26x stock's volume through a 4 KiB ring, which is what starves
+ * the control channels and hangs the CP.  So the oem channels fragment at one
+ * frame, exactly as stock does.  Writers competing for a ring barely
  * larger than one of their messages are kept in order by the admission queue
  * in s5xxx_fmt_tx_frame() instead, which costs a writer a wait rather than
  * changing the shape of what the CP receives.
@@ -2658,10 +2670,13 @@ static int s5xxx_fmt_tx_frame(struct s5xxx_modem *sm, u8 ch, u8 *ch_seq,
 /*
  * One app message onto the FMT ring.
  *
- * It goes as a single frame whenever it fits the ring, oversized or not: this
- * CP is validated against exactly that and comes apart when handed fragments
- * instead (see the S5XXX_SIT_CFG_MULTI_START comment).  Only a message too
- * large for the ring is split, where the alternative is refusing it.
+ * @single_max is the most this channel puts in one frame; beyond it the message
+ * is split.  The SIT control channels pass S5XXX_FMT_MAX, so a message goes
+ * whole whenever it fits the ring -- that CP is validated against exactly that
+ * and comes apart when handed fragments instead.  The oem channels pass
+ * S5XXX_FMT_FRAME_PAYLOAD, because stock fragments there and the CP re-reads
+ * for ever if it does not.  Both are measured, not chosen; see the
+ * S5XXX_SIT_CFG_MULTI_START comment.
  *
  * A signal part way through a split message cannot abort the write -- user
  * space would resend from the first fragment while the CP still held the
@@ -2671,7 +2686,7 @@ static int s5xxx_fmt_tx_frame(struct s5xxx_modem *sm, u8 ch, u8 *ch_seq,
  */
 static int s5xxx_fmt_tx_msg(struct s5xxx_modem *sm, struct mutex *msg_lock,
 			    u8 *frag_id, u8 ch, u8 *ch_seq, const u8 *data,
-			    u32 len)
+			    u32 len, u32 single_max)
 {
 	u32 frags, i, sent, flen, left;
 	u16 cfg;
@@ -2692,7 +2707,7 @@ static int s5xxx_fmt_tx_msg(struct s5xxx_modem *sm, struct mutex *msg_lock,
 	if (mutex_lock_interruptible(msg_lock))
 		return -ERESTARTSYS;
 
-	if (len <= S5XXX_FMT_MAX) {
+	if (len <= single_max) {
 		ret = s5xxx_fmt_tx_frame(sm, ch, ch_seq, S5XXX_SIT_CFG_SINGLE,
 					 data, len, true);
 		goto out;
@@ -2738,7 +2753,8 @@ static int s5xxx_ctrl_tx(struct wwan_port *port, struct sk_buff *skb)
 	 * "Sending command failed: Device or resource busy" on connect.
 	 */
 	ret = s5xxx_fmt_tx_msg(sc->sm, &sc->tx_msg_lock, &sc->tx_frag_id,
-			       sc->ch, &sc->ch_seq, skb->data, skb->len);
+			       sc->ch, &sc->ch_seq, skb->data, skb->len,
+			       S5XXX_FMT_MAX);
 	if (ret)
 		return ret;
 	consume_skb(skb);
@@ -2783,9 +2799,10 @@ static int s5xxx_oem_tx(struct wwan_port *port, struct sk_buff *skb)
 	/*
 	 * A message too large for one frame has to be split, and a split one
 	 * cannot be abandoned half-sent, so it belongs on the blocking path
-	 * only -- see s5xxx_fmt_tx_msg().
+	 * only -- see s5xxx_fmt_tx_msg().  One frame here is the oem channels'
+	 * own ceiling, not the ring's.
 	 */
-	if (skb->len > S5XXX_FMT_MAX)
+	if (skb->len > S5XXX_FMT_FRAME_PAYLOAD)
 		return -EMSGSIZE;
 
 	/*
@@ -2795,8 +2812,9 @@ static int s5xxx_oem_tx(struct wwan_port *port, struct sk_buff *skb)
 	 */
 	if (!s5xxx_fmt_tx_queue_idle(sm))
 		return -EAGAIN;
-	ret = s5xxx_fmt_ring_tx(sm, oc->ch, &oc->ch_seq, S5XXX_FMT_MAX,
-				skb->data, skb->len, S5XXX_SIT_CFG_SINGLE);
+	ret = s5xxx_fmt_ring_tx(sm, oc->ch, &oc->ch_seq,
+				S5XXX_FMT_FRAME_PAYLOAD, skb->data, skb->len,
+				S5XXX_SIT_CFG_SINGLE);
 	if (ret == -EBUSY)
 		return -EAGAIN;
 	if (ret)
@@ -2825,7 +2843,8 @@ static int s5xxx_oem_tx_blocking(struct wwan_port *port, struct sk_buff *skb)
 	 * can still be delivered late is always worth more than an error.
 	 */
 	ret = s5xxx_fmt_tx_msg(sm, &oc->tx_msg_lock, &oc->tx_frag_id, oc->ch,
-			       &oc->ch_seq, skb->data, skb->len);
+			       &oc->ch_seq, skb->data, skb->len,
+			       S5XXX_FMT_FRAME_PAYLOAD);
 	if (ret)
 		return ret;
 	consume_skb(skb);
