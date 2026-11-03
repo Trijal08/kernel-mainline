@@ -1194,7 +1194,7 @@
 		camera_cma: camera-pool {
 			compatible = "shared-dma-pool";
 			reusable;
-			size = <0x0 0x4000000>;
+			size = <0x4000000>;
 			alignment = <0x0 0x400000>;
 		};
 
