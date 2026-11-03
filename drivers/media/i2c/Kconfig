@@ -867,6 +867,15 @@ config VIDEO_S5K6A3
 	  This is a V4L2 sensor driver for Samsung S5K6A3 raw
 	  camera sensor.
 
+config VIDEO_S5KGNK
+	tristate "Samsung S5KGNK sensor support"
+	select V4L2_CCI_I2C
+	help
+	  This is a Video4Linux2 sensor driver for the Samsung S5KGNK camera.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called s5kgnk.
+
 config VIDEO_S5KJN1
 	tristate "Samsung S5KJN1 sensor support"
 	select V4L2_CCI_I2C
