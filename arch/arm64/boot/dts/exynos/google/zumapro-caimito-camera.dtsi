@@ -160,13 +160,22 @@
 	};
 };
 
-/* Front sensor: CSIS link 6 on PHY slice 5 (3-trio C-PHY). */
+/* Rear main: CSIS link 1 on PHY slice 1; front: link 6 on slice 5 (both 3-trio C-PHY). */
 &camera_fe {
 	status = "okay";
 
 	ports {
 		#address-cells = <1>;
 		#size-cells = <0>;
+
+		port@1 {
+			reg = <1>;
+			camera_fe_in1: endpoint {
+				remote-endpoint = <&rear_camera_out>;
+				bus-type = <MEDIA_BUS_TYPE_CSI2_CPHY>;
+				data-lanes = <1 2 3>;
+			};
+		};
 
 		port@6 {
 			reg = <6>;
@@ -179,16 +188,16 @@
 	};
 };
 
-/* Rear main camera ("boitata", a Samsung part; 4-lane D-PHY). OIS left off. */
+/* Rear main camera ("boitata", Samsung S5KGNK). OIS left off. */
 &hsi2c_5 {
 	rear_camera: camera@3d {
-		compatible = "google,boitata";
+		compatible = "samsung,s5kgnk";
 		reg = <0x3d>;
 		reset-gpios = <&gpp10 2 GPIO_ACTIVE_HIGH>;
 		clocks = <&cmu_top CLK_GOUT_CMU_CIS_CLK3>;
 		clock-names = "mclk";
 		assigned-clocks = <&cmu_top CLK_GOUT_CMU_CIS_CLK3>;
-		assigned-clock-rates = <26000000>;
+		assigned-clock-rates = <24000000>;
 		pinctrl-0 = <&sensor_mclk4_fn>;
 		pinctrl-1 = <&sensor_mclk4_out>;
 		pinctrl-names = "default", "sleep";
@@ -200,5 +209,13 @@
 		vddio-supply = <&s_ldo12_reg>;
 		ldo5-supply = <&slg51002_ldo5>;
 		ldo4-supply = <&slg51002_ldo4>;
+
+		port {
+			rear_camera_out: endpoint {
+				remote-endpoint = <&camera_fe_in1>;
+				bus-type = <MEDIA_BUS_TYPE_CSI2_CPHY>;
+				data-lanes = <1 2 3>;
+			};
+		};
 	};
 };
