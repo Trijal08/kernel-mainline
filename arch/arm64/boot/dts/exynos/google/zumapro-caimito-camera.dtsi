@@ -8,6 +8,7 @@
  */
 
 #include <dt-bindings/clock/google,zuma.h>
+#include <dt-bindings/media/video-interfaces.h>
 
 / {
 	/* Rear main sensor core rail, a buck switched by S2MPG14 gpio 0 (CAM_LVBUCK_EN) */
@@ -132,7 +133,7 @@
 	status = "okay";
 
 	front_camera: camera@1a {
-		compatible = "google,taotie-front";
+		compatible = "sony,imx858";
 		reg = <0x1a>;
 		reset-gpios = <&gpp6 2 GPIO_ACTIVE_HIGH>;
 		clocks = <&cmu_top CLK_GOUT_CMU_CIS_CLK1>;
@@ -148,6 +149,33 @@
 		vdig-supply = <&slg51002_gpio1>;
 		vddio-supply = <&s_ldo12_reg>;
 		af-supply = <&slg51002_gpio2>;
+
+		port {
+			front_camera_out: endpoint {
+				remote-endpoint = <&camera_fe_in6>;
+				bus-type = <MEDIA_BUS_TYPE_CSI2_CPHY>;
+				data-lanes = <1 2 3>;
+			};
+		};
+	};
+};
+
+/* Front sensor: CSIS link 6 on PHY slice 5 (3-trio C-PHY). */
+&camera_fe {
+	status = "okay";
+
+	ports {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		port@6 {
+			reg = <6>;
+			camera_fe_in6: endpoint {
+				remote-endpoint = <&front_camera_out>;
+				bus-type = <MEDIA_BUS_TYPE_CSI2_CPHY>;
+				data-lanes = <1 2 3>;
+			};
+		};
 	};
 };
 
