@@ -1186,6 +1186,17 @@
 			reg = <0x0 0x92e00000 0x01200000>;
 			no-map;
 		};
+		/*
+		 * Camera frames: 13 MB contiguous each. The ISPFE SysMMUs do not
+		 * translate for the front end yet (every burst page-faults), so
+		 * the capture driver allocates from this pool instead.
+		 */
+		camera_cma: camera-pool {
+			compatible = "shared-dma-pool";
+			reusable;
+			size = <0x4000000>;
+			alignment = <0x400000>;
+		};
 
 		aoc_reserve: aoc@94000000 {
 			reg = <0x0 0x94000000 0x03000000>;
@@ -1933,6 +1944,23 @@
 			reg = <0x1C1C0000 0x10000>;
 			interrupts = <GIC_SPI 498 IRQ_TYPE_LEVEL_HIGH 0>;
 			power-domains = <&pd_ispfe>;
+		};
+
+		camera_fe: camera-fe@1c040000 {
+			compatible = "google,zumapro-ispfe";
+			reg = <0x1c040000 0xd0000>,
+			      <0x1c300000 0x100000>,
+			      <0x1c020500 0x4>;
+			reg-names = "csis", "ispfe", "sysreg";
+			interrupts = <GIC_SPI 479 IRQ_TYPE_LEVEL_HIGH 0>;
+			clocks = <&acpm_ipc GS101_CLK_ACPM_DVFS_CAM>,
+				 <&acpm_ipc GS101_CLK_ACPM_DVFS_INTCAM>,
+				 <&acpm_ipc GS101_CLK_ACPM_DVFS_TNR>;
+			clock-names = "cam", "intcam", "tnr";
+			power-domains = <&pd_ispfe>;
+			samsung,pmu-syscon = <&pmu_system_controller>;
+			memory-region = <&camera_cma>;
+			status = "disabled";
 		};
 
 		sysmmu_ispfe_s2: iommu@1C190000 {
