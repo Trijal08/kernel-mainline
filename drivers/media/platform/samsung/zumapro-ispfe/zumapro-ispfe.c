@@ -4,9 +4,10 @@
  * and the ISPFE "logical channel" Bayer WDMA, exposed as raw V4L2 capture
  * nodes fed straight from the sensors.
  *
- * One sensor per port; port N is CSIS link N, captured through logical
- * channel N. The register-level bring-up is the vendor HAL's, read off the
- * stock device (see the Pixel 9 Pro port notes).
+ * One sensor per port.  The front camera's link is captured through its own
+ * logical channel; the rear main arrives via the csis0/1 combo macro and is
+ * captured from CSIS link 0 (see ispfe_combo_up).  The register-level bring-up
+ * is the vendor HAL's, read off the stock device (see the Pixel 9 Pro notes).
  */
 #include <linux/clk.h>
 #include <linux/delay.h>
@@ -40,6 +41,17 @@
 #define LINK_FE_INT_MSK		0x28
 #define LINK_ISP_CONFIG_CH(c)	(0x40 + (c) * 0x10)
 #define LINK_ISP_RESOL_CH(c)	(0x44 + (c) * 0x10)
+#define LINK_START		0x500
+#define LINK_LRTE_CONFIG	0x600
+#define LINK_DBG_OPTION_SUITE	0x690
+
+/*
+ * The rear main sensor's 3-trio C-PHY is received by the csis0/csis1 combo
+ * macro and delivered on CSIS link 0, regardless of the link the port binds
+ * to.  SYSREG bit 0 releases that macro; the loch captures from link 0.
+ */
+#define ISPFE_COMBO_LINK	0
+#define ISPFE_COMBO_SYSREG_BIT	0
 
 /* DC-PHY, inside the CSIS block */
 #define PHY_BASE		0xc0000
@@ -105,8 +117,9 @@
 
 /*
  * Which PHY slice a link's lanes sit on, the lane analog words that differ
- * per slice, and the link control word. The rear main also has a second
- * slice written (lanes left disabled), as the vendor HAL leaves it.
+ * per slice, and the link control word.  The rear main is a combo: its pair
+ * slice is brought up alongside the primary and the image arrives on link 0
+ * (combo != 0), at the combo geometry (sensor active area plus margin).
  */
 struct ispfe_link_cfg {
 	u8 link;
@@ -117,12 +130,15 @@ struct ispfe_link_cfg {
 	u16 pair_ana_con0, pair_ana_con1;
 	u16 pd_lines;		/* VC1 PDAF lines the sensor sends per frame */
 	u16 w, h;		/* until the sensor is bound */
+	u8 combo;		/* rear: receive via the csis0/1 combo on link 0 */
+	u16 combo_w, combo_h;	/* combo stream geometry (link 0 + loch resol) */
 };
 
 static const struct ispfe_link_cfg ispfe_links[] = {
 	{ .link = 1, .slice = 0x17, .pair = 0x12, .phy_reset = 1, .cmn_ctrl = 0x205e01,
 	  .ana_con0 = 0x3, .ana_con1 = 0xf4a9, .pair_ana_con0 = 0x11, .pair_ana_con1 = 0xf239,
-	  .pd_lines = 756, .w = 4032, .h = 3024 },	/* rear main S5KGNK, 3-trio C-PHY */
+	  .pd_lines = 756, .w = 4032, .h = 3024,
+	  .combo = 1, .combo_w = 4080, .combo_h = 3072 },	/* rear main S5KGNK, 3-trio C-PHY */
 	{ .link = 6, .slice = 0x31, .phy_reset = 5, .cmn_ctrl = 0x205e01,
 	  .ana_con0 = 0x1, .ana_con1 = 0xf23b,
 	  .pd_lines = 684, .w = 3840, .h = 2736 },	/* front IMX858, 3-trio C-PHY */
@@ -277,6 +293,11 @@ static void ispfe_phy_down(struct ispfe_ch *ch)
 		lane_wr(ch, ch->cfg->slice, lane, PHY_LANE_GNR_CON0, 0);
 	writel(0, fe->csis + PHY_SLICE(ch->cfg->slice) + PHY_LANE_GNR_CON0);
 	writel(readl(fe->sysreg) & ~BIT(ch->cfg->phy_reset), fe->sysreg);
+	if (ch->cfg->combo) {
+		for (lane = 0; lane < 3; lane++)
+			lane_wr(ch, ch->cfg->pair, lane, PHY_LANE_GNR_CON0, 0);
+		writel(readl(fe->sysreg) & ~BIT(ISPFE_COMBO_SYSREG_BIT), fe->sysreg);
+	}
 }
 
 static void ispfe_link_up(struct ispfe_ch *ch, u32 width, u32 height)
@@ -299,6 +320,39 @@ static void ispfe_link_up(struct ispfe_ch *ch, u32 width, u32 height)
 	link_wr(ch, LINK_CMN_CTRL, ch->cfg->cmn_ctrl);
 	for (lane = 0; lane < 3; lane++)
 		lane_wr(ch, ch->cfg->slice, lane, PHY_LANE_GNR_CON0, 3);
+}
+
+/*
+ * Rear main combo: the sensor streams through the csis0/1 combo macro, which
+ * delivers the image on CSIS link 0.  Release the combo macro (SYSREG bit 0),
+ * enable the pair slice's lanes, and configure link 0 at the combo geometry.
+ * The pair slice's analog is already set in ispfe_phy_up.  The primary slice
+ * and its link stay up too (the combo shares their analog), but carry nothing.
+ */
+static void ispfe_combo_up(struct ispfe_ch *ch)
+{
+	struct ispfe *fe = ch->fe;
+	void __iomem *l0 = fe->csis + LINK(ISPFE_COMBO_LINK);
+	u32 w = ch->cfg->combo_w, h = ch->cfg->combo_h;
+	int lane;
+
+	writel(readl(fe->sysreg) | BIT(ISPFE_COMBO_SYSREG_BIT), fe->sysreg);
+	for (lane = 0; lane < 3; lane++)
+		lane_wr(ch, ch->cfg->pair, lane, PHY_LANE_GNR_CON0, 1);
+	writel(0, l0 + LINK_DBG_OPTION_SUITE);
+	writel(0x30ac, l0 + LINK_ISP_CONFIG_CH(0));
+	writel(h << 16 | w, l0 + LINK_ISP_RESOL_CH(0));
+	writel(0x130ac, l0 + LINK_ISP_CONFIG_CH(1));
+	writel(0x3000ff0, l0 + LINK_ISP_RESOL_CH(1));
+	writel(0xb048, l0 + LINK_ISP_CONFIG_CH(2));
+	writel(0x40ff0, l0 + LINK_ISP_RESOL_CH(2));
+	writel(0x80020002, l0 + LINK_LRTE_CONFIG);
+	writel(0xf, l0 + LINK_UPD_SDW);		/* latch the shadow bank */
+	writel(ch->cfg->cmn_ctrl, l0 + LINK_CMN_CTRL);
+	writel(0, l0 + LINK_FS_INT_MSK);
+	writel(0, l0 + LINK_FE_INT_MSK);
+	writel(0x1, l0 + LINK_START);
+	msleep(50);	/* combo C-PHY lock settle */
 }
 
 static void ispfe_arm(struct ispfe_ch *ch, struct ispfe_buf *buf)
@@ -328,9 +382,12 @@ static void ispfe_loch_up(struct ispfe_ch *ch)
 {
 	struct ispfe *fe = ch->fe;
 	u32 bit = BIT(ch->cfg->link);
+	u32 src = ch->cfg->combo ? ISPFE_COMBO_LINK : ch->cfg->link;
+	u32 resol = ch->cfg->combo ? (ch->cfg->combo_h << 16 | ch->cfg->combo_w)
+				   : (ch->sensor_h << 16 | ch->sensor_w);
 
 	writel(bit, fe->core + CORE_FRAME_ID_CLR);
-	loch_wr(ch, LOCH_ISP_RESOL, ch->sensor_h << 16 | ch->sensor_w);
+	loch_wr(ch, LOCH_ISP_RESOL, resol);
 	loch_wr(ch, LOCH_BATCH_CTL, 0);
 	loch_wr(ch, LOCH_BATCH_MSK_SOF, 1);
 	loch_wr(ch, LOCH_BATCH_MSK_EOF, 1);
@@ -342,7 +399,7 @@ static void ispfe_loch_up(struct ispfe_ch *ch)
 	loch_wr(ch, LOCH_WDMA_STRIDE, ch->pix.bytesperline);
 	loch_wr(ch, LOCH_WDMA_MEM_FORMAT, ch->fmt->mem_format);
 	loch_wr(ch, LOCH_WDMA_CROP_EN, 0);
-	loch_wr(ch, LOCH_CTL, LOCH_CTL_LINK(ch->cfg->link) | LOCH_CTL_FMT_RAW10);
+	loch_wr(ch, LOCH_CTL, LOCH_CTL_LINK(src) | LOCH_CTL_FMT_RAW10);
 	loch_wr(ch, LOCH_WDMA_CTX_EN, 1);
 	writel(readl(fe->core + CORE_LOCH_INT_IMR) | bit, fe->core + CORE_LOCH_INT_IMR);
 	writel(bit, fe->core + CORE_LOCH_EN_SET);
@@ -518,6 +575,8 @@ static int ispfe_start_streaming(struct vb2_queue *vq, unsigned int count)
 	writel(0xf, fe->core + FE_HW_MODE_CFG0);
 	writel(1, fe->core + FE_HW_MODE_CFG2);
 	usleep_range(1000, 2000);
+	if (ch->cfg->combo)
+		ispfe_combo_up(ch);
 	ispfe_link_up(ch, ch->sensor_w, ch->sensor_h);
 	ch->sequence = 0;
 	ispfe_loch_up(ch);
