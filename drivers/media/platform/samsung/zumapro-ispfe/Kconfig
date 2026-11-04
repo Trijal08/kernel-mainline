@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: GPL-2.0-only
+
+config VIDEO_ZUMAPRO_ISPFE
+	tristate "Google zumapro (Tensor G4) camera front end"
+	depends on V4L_PLATFORM_DRIVERS
+	depends on VIDEO_DEV && OF
+	depends on ARCH_EXYNOS || COMPILE_TEST
+	select MEDIA_CONTROLLER
+	select VIDEO_V4L2_SUBDEV_API
+	select VIDEOBUF2_DMA_CONTIG
+	select V4L2_FWNODE
+	help
+	  MIPI CSI-2 DC-PHY, CSIS link and ISPFE Bayer WDMA of the Google
+	  Tensor G4 SoC, as a raw capture device fed straight from the sensor.
+
+	  To compile this driver as a module, choose M here: the module will
+	  be called zumapro-ispfe.

@@ -190,6 +190,15 @@ config VIDEO_IMX219
 	  To compile this driver as a module, choose M here: the
 	  module will be called imx219.
 
+config VIDEO_IMX858
+	tristate "Sony IMX858 sensor support"
+	select V4L2_CCI_I2C
+	help
+	  This is a Video4Linux2 sensor driver for the Sony IMX858 camera.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called imx858.
+
 config VIDEO_IMX258
 	tristate "Sony IMX258 sensor support"
 	select V4L2_CCI_I2C
@@ -857,6 +866,15 @@ config VIDEO_S5K6A3
 	help
 	  This is a V4L2 sensor driver for Samsung S5K6A3 raw
 	  camera sensor.
+
+config VIDEO_S5KGNK
+	tristate "Samsung S5KGNK sensor support"
+	select V4L2_CCI_I2C
+	help
+	  This is a Video4Linux2 sensor driver for the Samsung S5KGNK camera.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called s5kgnk.
 
 config VIDEO_S5KJN1
 	tristate "Samsung S5KJN1 sensor support"
