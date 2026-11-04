@@ -1187,14 +1187,19 @@
 			no-map;
 		};
 		/*
-		 * Camera frames: 13 MB contiguous each. The ISPFE SysMMUs do not
-		 * translate for the front end yet (every burst page-faults), so
-		 * the capture driver allocates from this pool instead.
+		 * Camera frames, allocated contiguously because the ISPFE
+		 * SysMMUs do not translate for the front end yet (every burst
+		 * page-faults). A rear-main frame is ~15 MB and a front frame
+		 * ~13 MB; a camera switch holds both cameras' buffer sets at
+		 * once (libcamera reqbufs the new stream before freeing the
+		 * old), so size for 4+4 buffers plus fragmentation headroom.
+		 * reusable: the pages are lent back to the page allocator when
+		 * the camera is idle.
 		 */
 		camera_cma: camera-pool {
 			compatible = "shared-dma-pool";
 			reusable;
-			size = <0x4000000>;
+			size = <0xa000000>;
 			alignment = <0x0 0x400000>;
 		};
 
