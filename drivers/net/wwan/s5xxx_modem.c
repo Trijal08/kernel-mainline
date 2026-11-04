@@ -40,6 +40,7 @@
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/iopoll.h>
+#include <linux/irq.h>
 #include <linux/list.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
@@ -1353,11 +1354,38 @@ static irqreturn_t s5xxx_cp2ap_wakeup_irq(int irq, void *data)
 	struct s5xxx_modem *sm = data;
 
 	/*
-	 * Latch the level at edge time: the CP pulses CP2AP_WAKEUP faster than the
-	 * workqueue can read it, so reading the GPIO in pm_work misses a brief park.
-	 * cp2ap_wakeup is a memory-mapped SoC GPIO, so gpiod_get_value never sleeps.
+	 * Latch the level: the CP pulses CP2AP_WAKEUP faster than the workqueue
+	 * can read it, so reading the GPIO in pm_work misses a brief park.
+	 * cp2ap_wakeup is a memory-mapped SoC GPIO, so gpiod_get_value never
+	 * sleeps.
 	 */
 	int up = gpiod_get_value(sm->cp2ap_wakeup);
+
+	/*
+	 * Level-triggered with a polarity flip -- mask, re-arm on the level we are
+	 * NOT in, unmask -- a port of downstream ap_wakeup_handler()
+	 * (modem_ctrl_s5100.c), which registers this line IRQF_TRIGGER_LOW and
+	 * calls irq_set_type(gpio_val ? IRQF_TRIGGER_LOW : IRQF_TRIGGER_HIGH)
+	 * between mif_disable_irq() and mif_enable_irq().
+	 *
+	 * This was double-edge (RISING | FALLING), and an edge is a transient you
+	 * can lose: with IRQF_NO_AUTOEN, a CP2AP_WAKEUP that is **already high**
+	 * when the line is armed raises no edge at all, so cp_wants_up stays false
+	 * and s5xxx_pm_work() never relinks.  The CP then waits for a link the AP
+	 * will never bring up while the AP waits for an edge that already
+	 * happened: control messages strand in the FMT tx ring, every SIT command
+	 * times out, and the 5s "ctrl tx while parked" nudge cannot help because
+	 * AP2CP_WAKEUP is high from the first nudge, so it drives no new edge
+	 * either.  Observed on hardware: 3328 bytes stranded, 35 consecutive SIT
+	 * timeouts, cp_active still 1 (the CP never crashed).
+	 *
+	 * A level cannot be lost.  Arming for the opposite level cannot storm
+	 * either: by construction it does not match the level just read, and if
+	 * the line moved in between, the re-fire is a real transition.
+	 */
+	disable_irq_nosync(irq);
+	irq_set_irq_type(irq, up ? IRQF_TRIGGER_LOW : IRQF_TRIGGER_HIGH);
+	enable_irq(irq);
 
 	WRITE_ONCE(sm->cp_wants_up, up);
 	dev_dbg_ratelimited(sm->dev, "CP2AP_WAKEUP irq: level %d\n", up);
@@ -3753,8 +3781,21 @@ static void s5xxx_online(struct s5xxx_modem *sm)
 	 */
 	mutex_lock(&sm->pcie_onoff_lock);
 	if (!sm->pm_armed) {
+		/*
+		 * Arm against the level the line is NOT in, so an already-raised
+		 * CP2AP_WAKEUP is seen the moment the IRQ is enabled rather than
+		 * waiting for an edge that has been and gone.  The request_irq()
+		 * default (HIGH) covers the common case; this makes it explicit and
+		 * correct when the CP asked for the link before we got here.
+		 */
+		int up = gpiod_get_value_cansleep(sm->cp2ap_wakeup);
+
+		irq_set_irq_type(sm->cp2ap_irq,
+				 up ? IRQF_TRIGGER_LOW : IRQF_TRIGGER_HIGH);
+		WRITE_ONCE(sm->cp_wants_up, up);
 		enable_irq(sm->cp2ap_irq);
 		sm->pm_armed = true;
+		dev_info(sm->dev, "CP2AP_WAKEUP armed, level %d\n", up);
 	}
 	mutex_unlock(&sm->pcie_onoff_lock);
 
@@ -6024,9 +6065,14 @@ static int s5xxx_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 		ret = dev_err_probe(dev, sm->cp2ap_irq, "CP2AP_WAKEUP to irq\n");
 		goto err_wq;
 	}
+	/*
+	 * Level, not edge: see s5xxx_cp2ap_wakeup_irq().  Armed for HIGH so that a
+	 * line the CP has already raised fires as soon as the IRQ is enabled; the
+	 * handler flips the polarity from there.
+	 */
 	ret = request_irq(sm->cp2ap_irq, s5xxx_cp2ap_wakeup_irq,
-			  IRQF_TRIGGER_RISING | IRQF_TRIGGER_FALLING |
-			  IRQF_NO_AUTOEN, "s5xxx-cp2ap-wakeup", sm);
+			  IRQF_TRIGGER_HIGH | IRQF_NO_AUTOEN,
+			  "s5xxx-cp2ap-wakeup", sm);
 	if (ret) {
 		dev_err(dev, "CP2AP_WAKEUP request_irq: %d\n", ret);
 		goto err_wq;
