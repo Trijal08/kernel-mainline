@@ -185,6 +185,7 @@ struct ispfe_ch {
 	spinlock_t qlock;
 	struct list_head queued;
 	struct ispfe_buf *active;
+	bool live;		/* qlock: the WDMA may be armed */
 	unsigned int sequence;
 };
 
@@ -203,6 +204,8 @@ struct ispfe {
 
 	struct mutex hw_lock;	/* streaming count and the shared bring-up */
 	int streaming;
+	bool powered;		/* the irq handler may touch registers */
+	int irq;
 	struct ispfe_ch ch[ISPFE_MAX_CH];
 	int nch;
 };
@@ -426,6 +429,10 @@ static irqreturn_t ispfe_ch_irq(struct ispfe_ch *ch)
 		return IRQ_HANDLED;
 
 	spin_lock(&ch->qlock);
+	if (!ch->live) {
+		spin_unlock(&ch->qlock);
+		return IRQ_HANDLED;
+	}
 	buf = ch->active;
 	ch->active = NULL;
 	if (buf) {
@@ -446,8 +453,8 @@ static irqreturn_t ispfe_irq(int irq, void *data)
 	irqreturn_t ret = IRQ_NONE;
 	int i;
 
-	/* shared line: the block is unpowered, so untouchable, unless streaming */
-	if (!READ_ONCE(fe->streaming))
+	/* shared line: an unclocked read wedges the SoC */
+	if (!READ_ONCE(fe->powered))
 		return IRQ_NONE;
 	for (i = 0; i < fe->nch; i++)
 		if (ispfe_ch_irq(&fe->ch[i]) == IRQ_HANDLED)
@@ -478,6 +485,7 @@ static int ispfe_hw_get(struct ispfe *fe)
 	regmap_update_bits(fe->pmu, PMU_MIPI_PHY_CON, BIT(0), BIT(0));
 	for (i = 0; i < ARRAY_SIZE(bias); i++)
 		writel(bias[i], fe->csis + PHY_BIAS_CON(i));
+	WRITE_ONCE(fe->powered, true);
 	goto out;
 err:
 	fe->streaming--;
@@ -492,6 +500,8 @@ static void ispfe_hw_put(struct ispfe *fe)
 
 	mutex_lock(&fe->hw_lock);
 	if (!--fe->streaming) {
+		WRITE_ONCE(fe->powered, false);
+		synchronize_irq(fe->irq);
 		regmap_update_bits(fe->pmu, PMU_MIPI_PHY_CON, BIT(0), 0);
 		for (i = 0; i < fe->nclks; i++)
 			clk_set_rate(fe->clks[i].clk, ISPFE_RATE_IDLE);
@@ -535,7 +545,7 @@ static void ispfe_buf_queue(struct vb2_buffer *vb)
 
 	spin_lock_irqsave(&ch->qlock, flags);
 	list_add_tail(&buf->list, &ch->queued);
-	if (vb2_is_streaming(vb->vb2_queue))
+	if (ch->live)
 		ispfe_arm_next(ch);
 	spin_unlock_irqrestore(&ch->qlock, flags);
 }
@@ -555,6 +565,18 @@ static void ispfe_return_buffers(struct ispfe_ch *ch, enum vb2_buffer_state stat
 		vb2_buffer_done(&buf->vb.vb2_buf, state);
 	}
 	spin_unlock_irqrestore(&ch->qlock, flags);
+}
+
+/* no re-arm from the irq once the WDMA is off */
+static void ispfe_ch_down(struct ispfe_ch *ch)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&ch->qlock, flags);
+	ch->live = false;
+	spin_unlock_irqrestore(&ch->qlock, flags);
+	ispfe_loch_down(ch);
+	ispfe_phy_down(ch);
 }
 
 static int ispfe_start_streaming(struct vb2_queue *vq, unsigned int count)
@@ -581,6 +603,7 @@ static int ispfe_start_streaming(struct vb2_queue *vq, unsigned int count)
 	ch->sequence = 0;
 	ispfe_loch_up(ch);
 	spin_lock_irqsave(&ch->qlock, flags);
+	ch->live = true;
 	ispfe_arm_next(ch);
 	spin_unlock_irqrestore(&ch->qlock, flags);
 
@@ -590,8 +613,7 @@ static int ispfe_start_streaming(struct vb2_queue *vq, unsigned int count)
 	return 0;
 
 err_hw:
-	ispfe_loch_down(ch);
-	ispfe_phy_down(ch);
+	ispfe_ch_down(ch);
 	ispfe_hw_put(fe);
 err_pipeline:
 	video_device_pipeline_stop(&ch->vdev);
@@ -605,8 +627,7 @@ static void ispfe_stop_streaming(struct vb2_queue *vq)
 	struct ispfe_ch *ch = vb2_get_drv_priv(vq);
 
 	v4l2_subdev_call(ch->sensor, video, s_stream, 0);
-	ispfe_loch_down(ch);
-	ispfe_phy_down(ch);
+	ispfe_ch_down(ch);
 	ispfe_hw_put(ch->fe);
 	video_device_pipeline_stop(&ch->vdev);
 	ispfe_return_buffers(ch, VB2_BUF_STATE_ERROR);
@@ -886,6 +907,7 @@ static int ispfe_probe(struct platform_device *pdev)
 	irq = platform_get_irq(pdev, 0);
 	if (irq < 0)
 		return irq;
+	fe->irq = irq;
 	ret = devm_request_irq(dev, irq, ispfe_irq, IRQF_SHARED, dev_name(dev), fe);
 	if (ret)
 		return ret;
