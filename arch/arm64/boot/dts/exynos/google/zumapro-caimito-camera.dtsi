@@ -50,6 +50,9 @@
 		regulators {
 			slg51002_ldo1: ldo1 {
 				regulator-name = "cam_ldo1";
+				/* rear S5KGNK: stock programs 2.25V; chip reset default 2.85V breaks C-PHY TX */
+				regulator-min-microvolt = <2250000>;
+				regulator-max-microvolt = <2250000>;
 				vin1_2-supply = <&cam_pp3200_bb>;
 			};
 			slg51002_ldo2: ldo2 {
@@ -62,10 +65,14 @@
 			};
 			slg51002_ldo4: ldo4 {
 				regulator-name = "cam_ldo4";
+				regulator-min-microvolt = <2950000>;
+				regulator-max-microvolt = <2950000>;
 				vin4-supply = <&cam_pp3200_bb>;
 			};
 			slg51002_ldo5: ldo5 {
 				regulator-name = "cam_ldo5";
+				regulator-min-microvolt = <2900000>;
+				regulator-max-microvolt = <2900000>;
 				vin5-supply = <&cam_pp3200_bb>;
 			};
 			slg51002_ldo6: ldo6 {
