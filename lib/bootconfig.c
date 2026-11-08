@@ -1134,8 +1134,31 @@ static int __init xbc_parse_tree(void)
 	if (!ret) {
 		while (p < xbc_data + xbc_data_size - 1 && *p == '\0')
 			p++;
-		if (p < xbc_data + xbc_data_size - 1)
+		if (p < xbc_data + xbc_data_size - 1) {
+			/*
+			 * Something follows the configuration and its padding.
+			 * Hiding data there must not go unreported, but refusing
+			 * the whole blob throws away everything that did parse,
+			 * and a bootloader can put us here with no say from the
+			 * kernel: Pixel 9 (zumapro) assembles its bootconfig in a
+			 * fixed 32 KiB buffer and writes the buffer size into the
+			 * trailer, so the data it declares spans the trailer's own
+			 * 20 bytes. Every androidboot.* key is then lost -- the
+			 * boot slot, the serial, the CDT hardware id -- for 20
+			 * bytes of magic at the end that nothing was going to read
+			 * as configuration anyway.
+			 *
+			 * So warn with the offset and keep the parsed tree. The
+			 * tools/bootconfig validator still rejects it outright,
+			 * which is where a malformed file should be caught.
+			 */
+#ifdef __KERNEL__
+			pr_warn("bootconfig: ignoring unexpected data after null character at %d\n",
+				(int)(p - xbc_data));
+#else
 			ret = xbc_parse_error("Unexpected data after null character", p);
+#endif
+		}
 	}
 
 	return ret;
