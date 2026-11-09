@@ -54,21 +54,14 @@
 		 * so the safe operating range sits well below those.
 		 *
 		 * The switch-on has to sit above the temperature the phone
-		 * actually idles at, or the reset never fires and the integral
-		 * can stay latched -- see the trips below. This board idles at
-		 * 41-42 C skin with a compositor running, measured, so 43 C is
-		 * the floor for it, and the control point has to be far enough
-		 * above that for the derived gains to stay sane: a 45 C target
-		 * would leave a 2 C band and a near-relay k_po of 1280.
+		 * idles at, or the reset never fires and the integral can stay
+		 * latched -- see the trips below.
 		 *
-		 * 50 C is therefore a consequence of this board idling warm,
-		 * not a judgement that 50 C is a pleasant thing to hold. It
-		 * sits under the vendor's own 56 C notify point. The honest fix
-		 * is the idle temperature itself -- a phone with nothing to do
-		 * should be nearer 33 C than 42 C -- and that is a separate
-		 * problem: the panel runs at 120 Hz regardless, the GPU keeps
-		 * its clocks up, and there is no cluster or system idle state.
-		 * Lower this once those land.
+		 * With integral_cutoff at 0 this is a proportional controller
+		 * below the control point, so skin settles under it: 48 C held
+		 * ~46.3 C over a 300 s all-core load, against Android's ~48 C.
+		 * The cooler phone is deliberate. integral_cutoff 2 C closed
+		 * the gap but wound up, overshot to 50.3 C and went bang-bang.
 		 */
 		/*
 		 * This also sets the controller's gains, which is the reason it is
@@ -80,8 +73,8 @@
 		 * few seconds -- the big core swinging between 700MHz and its
 		 * ceiling while the skin sat a degree under the control point.
 		 *
-		 * 1000 puts k_pu within a few percent of the 300 the vendor uses
-		 * for the same set of actors and cuts the integral gain to a third.
+		 * 1000 over the 5 C band gives k_pu 400, in the 300-400 range of
+		 * the vendor's per-cluster skin controllers.
 		 * Its own k_i is 5, which this cannot reach from here.
 		 */
 		sustainable-power = <1000>;
@@ -122,7 +115,7 @@
 			};
 
 			skin_alert: throttle {
-				temperature = <50000>;
+				temperature = <48000>;
 				hysteresis = <2000>;
 				type = "passive";
 			};
