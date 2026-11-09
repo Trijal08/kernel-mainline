@@ -192,11 +192,17 @@ struct s2mpg1415_meter {
 #define S2MPG1415_NTC_CODE_MASK		GENMASK(11, 0)
 /* Writing this to a channel's LPF coefficient bypasses the filter. */
 #define S2MPG1415_NTC_LPF_BYPASS	0x80
+/*
+ * The vendor's coefficient for every channel on caimito. Unfiltered, the
+ * skin thermistor jumps several degrees in seconds under load.
+ */
+#define S2MPG1415_NTC_LPF_COEFF		0x0d
 /* Reconfiguring the channels needs the meter engine reset first. */
 #define S2MPG1415_NTC_METER_RESET	0x4f
 #define S2MPG1415_NTC_SETTLE_US		100
 #define S2MPG1415_NTC_SETTLE_MAX_US	10000
 #define S2MPG1415_NTC_READY_MS		50
+#define S2MPG1415_NTC_READY_TIMEOUT_MS	1000
 
 /* Falling code, rising temperature in millidegrees Celsius. */
 struct s2mpg1415_ntc_pt {
@@ -304,23 +310,32 @@ static int s2mpg1415_ntc_millic(u16 code)
 				       t[i - 1].code - t[i].code);
 }
 
-static int s2mpg1415_ntc_get_temp(struct thermal_zone_device *tz, int *temp)
+static int s2mpg1415_ntc_read_code(struct s2mpg1415_meter *meter,
+				   unsigned int chan, u16 *code)
 {
-	struct s2mpg1415_ntc *ntc = thermal_zone_device_priv(tz);
 	u8 buf[S2MPG1415_NTC_BUF];
 	unsigned int reg;
-	u16 code;
 	int ret;
 
-	reg = S2MPG15_METER_LPF_DATA_NTC0_1 + S2MPG1415_NTC_BUF * ntc->chan;
-	ret = regmap_bulk_read(ntc->meter->regmap, reg, buf, sizeof(buf));
+	reg = S2MPG15_METER_LPF_DATA_NTC0_1 + S2MPG1415_NTC_BUF * chan;
+	ret = regmap_bulk_read(meter->regmap, reg, buf, sizeof(buf));
 	if (ret)
 		return ret;
 
-	code = (buf[0] | (buf[1] << 8)) & S2MPG1415_NTC_CODE_MASK;
+	*code = (buf[0] | (buf[1] << 8)) & S2MPG1415_NTC_CODE_MASK;
 	/* The engine reads back all-zero until its first conversion lands. */
-	if (!code)
-		return -EAGAIN;
+	return *code ? 0 : -EAGAIN;
+}
+
+static int s2mpg1415_ntc_get_temp(struct thermal_zone_device *tz, int *temp)
+{
+	struct s2mpg1415_ntc *ntc = thermal_zone_device_priv(tz);
+	u16 code;
+	int ret;
+
+	ret = s2mpg1415_ntc_read_code(ntc->meter, ntc->chan, &code);
+	if (ret)
+		return ret;
 
 	*temp = s2mpg1415_ntc_millic(code);
 	return 0;
@@ -583,6 +598,33 @@ static int s2mpg1415_meter_init_ntc(struct device *dev,
 
 	/* First conversions land a few tens of milliseconds later. */
 	msleep(S2MPG1415_NTC_READY_MS);
+
+	/*
+	 * Only filter a channel once it holds a real conversion, as the vendor
+	 * does: a code of 0 is the hot end of the scale, and a filter seeded
+	 * from it can read past the critical trip.
+	 */
+	for (chan = 0; chan < S2MPG1415_NTC_CHANNELS; chan++) {
+		u16 code;
+		int err;
+
+		if (!(enabled & BIT(chan)))
+			continue;
+
+		ret = read_poll_timeout(s2mpg1415_ntc_read_code, err,
+					err != -EAGAIN,
+					S2MPG1415_NTC_READY_MS * USEC_PER_MSEC,
+					S2MPG1415_NTC_READY_TIMEOUT_MS * USEC_PER_MSEC,
+					false, meter, chan, &code);
+		if (!ret)
+			ret = err;
+		if (!ret)
+			ret = regmap_write(meter->regmap,
+					   S2MPG15_METER_NTC_LPF_C0_0 + chan,
+					   S2MPG1415_NTC_LPF_COEFF);
+		if (ret)
+			dev_warn(dev, "NTC%u left unfiltered: %d\n", chan, ret);
+	}
 
 	dev_info(dev, "thermistor channels %#x enabled\n", enabled);
 	return 0;
