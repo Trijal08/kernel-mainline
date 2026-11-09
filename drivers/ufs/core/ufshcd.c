@@ -9942,7 +9942,9 @@ static int ufshcd_setup_clocks(struct ufs_hba *hba, bool on)
 	if (ret)
 		return ret;
 
-	if (!ufshcd_is_clkscaling_supported(hba))
+	/* Without gating, clocks stay on whenever the HBA is runtime-active. */
+	if (!ufshcd_is_clkscaling_supported(hba) &&
+	    ufshcd_is_clkgating_allowed(hba))
 		ufshcd_pm_qos_update(hba, on);
 out:
 	if (ret) {
