@@ -718,8 +718,21 @@ static void exynos_zuma_pcie_pme_turn_off(struct dw_pcie_rp *pp)
 	exynos_pcie_writel(elbi, 0, PCIE_XMIT_PME_TURNOFF);
 }
 
+/*
+ * APP_XFER_PENDING is a standing L1-exit request to the core.  The vendor
+ * drops it once enumeration and the ATU are done; left set, an armed ASPM L1
+ * thrashes L1 -> Recovery -> L0 every few tens of microseconds.
+ */
+static void exynos_zuma_pcie_post_init(struct dw_pcie_rp *pp)
+{
+	struct dw_pcie *pci = to_dw_pcie_from_pp(pp);
+
+	exynos_pcie_writel(pci->elbi_base, 0, PCIE_ZUMA_APP_XFER_PENDING);
+}
+
 static const struct dw_pcie_host_ops exynos_zuma_pcie_host_ops = {
 	.init = exynos_zuma_pcie_host_init,
+	.post_init = exynos_zuma_pcie_post_init,
 	.deinit = exynos_pcie_host_exit,
 	.pme_turn_off = exynos_zuma_pcie_pme_turn_off,
 };
