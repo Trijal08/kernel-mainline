@@ -111,7 +111,8 @@ DEFINE_DRM_GEM_FOPS(exynos_drm_driver_fops);
  */
 static struct drm_driver exynos_drm_driver = {
 	.driver_features	= DRIVER_MODESET | DRIVER_GEM
-				  | DRIVER_ATOMIC | DRIVER_RENDER,
+				  | DRIVER_ATOMIC | DRIVER_RENDER
+				  | DRIVER_SYNCOBJ,
 	.open			= exynos_drm_open,
 	.postclose		= exynos_drm_postclose,
 	.dumb_create		= exynos_drm_gem_dumb_create,
