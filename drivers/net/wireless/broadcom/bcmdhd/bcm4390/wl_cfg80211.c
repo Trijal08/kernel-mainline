@@ -8687,7 +8687,7 @@ wl_cfg80211_block_arp(struct net_device *dev, int enable)
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)) || defined(WL_MLO_BKPORT)
 static s32
 wl_cfg80211_add_key(struct wiphy *wiphy, struct wireless_dev *wdev,
-	int link_id, u8 key_idx, bool pairwise, const u8 *mac_addr,
+	int link_id, u8 key_idx, enum nl80211_key_type key_type, const u8 *mac_addr,
 	struct key_params *params)
 #else
 static s32
@@ -8932,7 +8932,7 @@ exit:
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)) || defined(WL_MLO_BKPORT)
 static s32
 wl_cfg80211_del_key(struct wiphy *wiphy, struct wireless_dev *wdev,
-	int link_id, u8 key_idx, bool pairwise, const u8 *mac_addr)
+	int link_id, u8 key_idx, enum nl80211_key_type key_type, const u8 *mac_addr)
 #else
 static s32
 wl_cfg80211_del_key(struct wiphy *wiphy, struct net_device *dev,
@@ -9006,7 +9006,7 @@ wl_cfg80211_del_key(struct wiphy *wiphy, struct net_device *dev,
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)) || defined(WL_MLO_BKPORT)
 static s32
 wl_cfg80211_get_key(struct wiphy *wiphy, struct wireless_dev *wdev,
-	int link_id, u8 key_idx, bool pairwise, const u8 *mac_addr, void *cookie,
+	int link_id, u8 key_idx, enum nl80211_key_type key_type, const u8 *mac_addr, void *cookie,
 	void (*callback) (void *cookie, struct key_params * params))
 #else
 static s32
