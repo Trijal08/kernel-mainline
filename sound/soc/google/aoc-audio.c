@@ -1477,7 +1477,7 @@ static snd_pcm_uframes_t aoc_pcm_pointer(struct snd_soc_component *comp,
 	struct snd_pcm_runtime *rt = substream->runtime;
 	struct aoc_audio_stream *s = rt->private_data;
 	u32 buf_bytes = frames_to_bytes(rt, rt->buffer_size);
-	u32 taken, pos;
+	u32 taken, pos, hold;
 
 	/* Capture position is what we have moved into the buffer ourselves. */
 	if (!s->playback)
@@ -1494,18 +1494,26 @@ static snd_pcm_uframes_t aoc_pcm_pointer(struct snd_soc_component *comp,
 	 * Reported as-is, that start-up gulp lands the hardware pointer exactly
 	 * on appl_ptr whenever the application committed less than a ring
 	 * before starting, and the core reads an empty buffer and raises an
-	 * XRUN on the very first pointer read.  Recovery re-prepares and the
-	 * next start does the same, so the stream never plays a sample: with
-	 * PipeWire prefilling three 512-frame quanta for a desktop notification
-	 * it wedged there permanently, while a client that happened to prefill
-	 * more ran fine.
+	 * XRUN on the very first pointer read.
 	 *
-	 * So hold the pointer back by the ring: a frame counts as played once
-	 * the AOC has taken a ring's worth beyond it, which is the most that
-	 * can still be sitting in front of the renderer.  It costs the ring's
-	 * worth of reported latency, which the stream genuinely has.
+	 * So hold the pointer back -- but by a period, not by the ring.  The
+	 * holdback is a delay before the core sees any progress at all, and an
+	 * application only writes once it does, so a holdback worth several
+	 * periods starves the stream it is meant to protect: it waits, the ring
+	 * runs dry, and the AOC's renderer waits for data rather than
+	 * underrunning, so the result is playback that runs slow.  Measured
+	 * against a 48 kHz stream, by how many periods the ring came to:
+	 *
+	 *	holdback 1 period   47990 pushed / 47977 consumed frames/s
+	 *	holdback 2 periods  34796 pushed / 34905 consumed frames/s
+	 *	holdback 8 periods      0 pushed /     0 consumed frames/s
+	 *
+	 * One period is all the core needs: it keeps the hardware pointer off
+	 * appl_ptr, which is what the XRUN came from, and costs a period of
+	 * reported latency, which the stream genuinely has.
 	 */
-	pos = taken > s->ring ? taken - s->ring : 0;
+	hold = frames_to_bytes(rt, rt->period_size);
+	pos = taken > hold ? taken - hold : 0;
 	dev_dbg(s->dev,
 		"pointer: taken %u ring %u played %u -> %lu of %lu, hw %lu pushed %lu\n",
 		taken, s->ring, pos,
