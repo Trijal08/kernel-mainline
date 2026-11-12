@@ -146,6 +146,7 @@
 #define QUIRK_HAS_PMU_CNT_EN			BIT(4)
 #define QUIRK_HAS_DBGACK_BIT			BIT(5)
 #define QUIRK_HAS_32BIT_CNT			BIT(6)
+#define QUIRK_START_AT_BOOT			BIT(7)
 
 /* These quirks require that we have a PMU register map */
 #define QUIRKS_HAVE_PMUREG \
@@ -186,7 +187,10 @@ MODULE_PARM_DESC(soft_noboot, "Watchdog action, set to 1 to ignore reboots, 0 to
  * reset.
  * @cnt_en_reg: Offset in pmureg for the register that enables WDT counter.
  * @cnt_en_bit: Bit number for "watchdog counter enable" in cnt_en register.
- * @quirks: A bitfield of quirks.
+ * @quirks: A bitfield of quirks. QUIRK_START_AT_BOOT marks a SoC whose
+ *	watchdog has to be counting before anything opens the device, because
+ *	its expiry is the platform's only warm reset and so the only way a
+ *	panic leaves DRAM -- and the log in it -- intact.
  */
 
 struct s3c2410_wdt_variant {
@@ -377,7 +381,7 @@ static const struct s3c2410_wdt_variant drv_data_zuma_cl0 = {
 	.cnt_en_bit = ZUMA_CLUSTER_CNT_EN_BIT,
 	.quirks = QUIRK_HAS_PMU_RST_STAT | QUIRK_HAS_PMU_MASK_RESET |
 		  QUIRK_HAS_PMU_CNT_EN | QUIRK_HAS_WTCLRINT_REG |
-		  QUIRK_HAS_DBGACK_BIT,
+		  QUIRK_HAS_DBGACK_BIT | QUIRK_START_AT_BOOT,
 };
 
 static const struct s3c2410_wdt_variant drv_data_zuma_cl1 = {
@@ -390,7 +394,7 @@ static const struct s3c2410_wdt_variant drv_data_zuma_cl1 = {
 	.cnt_en_bit = ZUMA_CLUSTER_CNT_EN_BIT,
 	.quirks = QUIRK_HAS_PMU_RST_STAT | QUIRK_HAS_PMU_MASK_RESET |
 		  QUIRK_HAS_PMU_CNT_EN | QUIRK_HAS_WTCLRINT_REG |
-		  QUIRK_HAS_DBGACK_BIT,
+		  QUIRK_HAS_DBGACK_BIT | QUIRK_START_AT_BOOT,
 };
 
 static const struct s3c2410_wdt_variant drv_data_exynosautov920_cl0 = {
@@ -899,7 +903,7 @@ static int s3c2410wdt_probe(struct platform_device *pdev)
 	 * If we're not enabling the watchdog, then ensure it is disabled if it
 	 * has been left running from the bootloader or other source.
 	 */
-	if (tmr_atboot) {
+	if (tmr_atboot || (wdt->drv_data->quirks & QUIRK_START_AT_BOOT)) {
 		dev_info(dev, "starting watchdog timer\n");
 		s3c2410wdt_start(&wdt->wdt_device);
 		set_bit(WDOG_HW_RUNNING, &wdt->wdt_device.status);
