@@ -2994,8 +2994,18 @@
 			#thermal-sensor-cells = <1>;
 		};
 
+		/*
+		 * Keep both watchdogs running.  A panic stops petting them, and
+		 * the expiry is the only reset on this SoC that the PMU turns
+		 * into a warm one: the contents of DRAM survive it, so the
+		 * ramoops region above is still there to be read on the next
+		 * boot.  Left to itself the kernel sits in the panic loop until
+		 * the PMIC gives up and pulls the rails (a "master disconnect"
+		 * cold reset), which loses the log that explains the panic.
+		 * Timeout matches the vendor's.
+		 */
 		watchdog_cl0: watchdog@10060000 {
-			compatible = "google,gs101-wdt";
+			compatible = "google,zuma-wdt";
 			reg = <0x10060000 0x100>;
 			clocks = <&cmu_misc CLK_GOUT_MISC_WDT_CLUSTER0_PCLK>,
 				 <&ext_24_5m>;
@@ -3003,12 +3013,11 @@
 			interrupts = <GIC_SPI 767 IRQ_TYPE_LEVEL_HIGH 0>;
 			samsung,syscon-phandle = <&pmu_system_controller>;
 			samsung,cluster-index = <0>;
-
-			status = "disabled";
+			timeout-sec = <30>;
 		};
 
 		watchdog_cl1: watchdog@10070000 {
-			compatible = "google,gs101-wdt";
+			compatible = "google,zuma-wdt";
 			reg = <0x10070000 0x100>;
 			clocks = <&cmu_misc CLK_GOUT_MISC_WDT_CLUSTER1_PCLK>,
 				 <&ext_24_5m>;
@@ -3016,8 +3025,7 @@
 			interrupts = <GIC_SPI 768 IRQ_TYPE_LEVEL_HIGH 0>;
 			samsung,syscon-phandle = <&pmu_system_controller>;
 			samsung,cluster-index = <1>;
-
-			status = "disabled";
+			timeout-sec = <30>;
 		};
 
 		// trng: rng@10141400 {
