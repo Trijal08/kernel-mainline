@@ -48,6 +48,13 @@
 #define  BRCMU_CHSPEC_D11N_BND_5G	0x1000
 #define  BRCMU_CHSPEC_D11N_BND_2G	0x2000
 
+/* 320 MHz does not fit a centre channel in eight bits, so it carries an index
+ * into a table of the six 6G centre channels instead, and takes bit 7 for the
+ * fourth sideband bit it needs.
+ */
+#define BRCMU_CHSPEC_D11AC_320_CH_MASK	0x0007
+#define BRCMU_CHSPEC_D11AC_320_CH_SHIFT	0
+
 /* bit 8~16 for dot 11ac IO types
  * bit 8~10 sideband
  * bit 11~13 bandwidth
@@ -114,6 +121,7 @@ enum brcmu_chan_bw {
 	BRCMU_CHAN_BW_80,
 	BRCMU_CHAN_BW_80P80,
 	BRCMU_CHAN_BW_160,
+	BRCMU_CHAN_BW_320,
 };
 
 enum brcmu_chan_sb {
@@ -132,6 +140,25 @@ enum brcmu_chan_sb {
 	BRCMU_CHAN_SB_LU = BRCMU_CHAN_SB_LLU,
 	BRCMU_CHAN_SB_UL = BRCMU_CHAN_SB_LUL,
 	BRCMU_CHAN_SB_UU = BRCMU_CHAN_SB_LUU,
+	/* 320 MHz has sixteen 20 MHz sub-channels; the first eight are the
+	 * three-bit names above.
+	 */
+	BRCMU_CHAN_SB_LLLL = BRCMU_CHAN_SB_LLL,
+	BRCMU_CHAN_SB_LLLU = BRCMU_CHAN_SB_LLU,
+	BRCMU_CHAN_SB_LLUL = BRCMU_CHAN_SB_LUL,
+	BRCMU_CHAN_SB_LLUU = BRCMU_CHAN_SB_LUU,
+	BRCMU_CHAN_SB_LULL = BRCMU_CHAN_SB_ULL,
+	BRCMU_CHAN_SB_LULU = BRCMU_CHAN_SB_ULU,
+	BRCMU_CHAN_SB_LUUL = BRCMU_CHAN_SB_UUL,
+	BRCMU_CHAN_SB_LUUU = BRCMU_CHAN_SB_UUU,
+	BRCMU_CHAN_SB_ULLL,
+	BRCMU_CHAN_SB_ULLU,
+	BRCMU_CHAN_SB_ULUL,
+	BRCMU_CHAN_SB_ULUU,
+	BRCMU_CHAN_SB_UULL,
+	BRCMU_CHAN_SB_UULU,
+	BRCMU_CHAN_SB_UUUL,
+	BRCMU_CHAN_SB_UUUU,
 };
 
 /**
