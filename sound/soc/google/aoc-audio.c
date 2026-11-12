@@ -110,15 +110,10 @@ struct aoc_audio_stream {
 	/*
 	 * Cleared before the tick is cancelled on STOP.  hrtimer_try_to_cancel()
 	 * cannot wait -- .trigger runs atomically -- so a tick already past its
-	 * check, or a period_work already queued, still runs after the stream has
-	 * stopped, and the snd_pcm_period_elapsed() that work does would land on
-	 * a stopped stream.
-	 *
-	 * This closes that window and no more.  It cannot help across a restart:
-	 * by the time work queued before the stop runs, .trigger(START) has set
-	 * the flag again, so the work proceeds and reports a position from
-	 * before the re-base.  Waiting the work out in .prepare() is what
-	 * actually stops that; see the comment there.
+	 * check still runs after the stream has stopped, and would hand the ring
+	 * another period.  This keeps the refill out of a stopped stream and ends
+	 * the timer; the position report needs no such flag, because the core
+	 * drops it under the stream lock if the stream is no longer running.
 	 */
 	bool running;
 };
@@ -490,18 +485,21 @@ static void aoc_pcm_push(struct aoc_audio_stream *s);
 static void aoc_pcm_pull(struct aoc_audio_stream *s);
 
 /*
- * Reporting a period is all this does.  On a nonatomic PCM
- * snd_pcm_period_elapsed() takes the mutex an application holds across its
- * write, so this can be kept waiting for as long as a write takes -- which is
- * why it must not be what moves the data.  See aoc_pcm_tick().
+ * Reporting a period is all this does.  The links are nonatomic, because the
+ * AOC's control commands round-trip and .trigger has to wait for them, and on
+ * a nonatomic PCM snd_pcm_period_elapsed() takes a mutex -- the same one an
+ * application holds across its write.  So it cannot be called from the timer,
+ * and it cannot be what moves the data either: it can be kept waiting for as
+ * long as a write takes.  See aoc_pcm_tick().
+ *
+ * A stop needs no handshake with this.  snd_pcm_period_elapsed() rechecks
+ * snd_pcm_running() under the stream lock and does nothing if the stream has
+ * gone, which is the only place that check is not already stale.
  */
 static void aoc_pcm_period_work(struct work_struct *w)
 {
 	struct aoc_audio_stream *s = container_of(w, struct aoc_audio_stream,
 						  period_work);
-
-	if (!READ_ONCE(s->running))
-		return;
 
 	snd_pcm_period_elapsed(s->substream);
 }
@@ -511,10 +509,8 @@ static enum hrtimer_restart aoc_pcm_tick(struct hrtimer *t)
 	struct aoc_audio_stream *s = container_of(t, struct aoc_audio_stream,
 						  tick);
 
-	hrtimer_forward_now(t, ns_to_ktime(s->tick_ns));
-
 	if (!READ_ONCE(s->running))
-		return HRTIMER_RESTART;
+		return HRTIMER_NORESTART;
 
 	/*
 	 * Move the data from here, not from the work.  aoc_service_write() only
@@ -537,6 +533,8 @@ static enum hrtimer_restart aoc_pcm_tick(struct hrtimer *t)
 		aoc_pcm_pull(s);
 
 	queue_work(system_highpri_wq, &s->period_work);
+
+	hrtimer_forward_now(t, ns_to_ktime(s->tick_ns));
 
 	return HRTIMER_RESTART;
 }
@@ -604,7 +602,7 @@ static int aoc_pcm_close(struct snd_soc_component *comp,
 
 	if (s) {
 		hrtimer_cancel(&s->tick);
-		cancel_work_sync(&s->period_work);
+		disable_work_sync(&s->period_work);
 		kfree(s);
 		substream->runtime->private_data = NULL;
 	}
@@ -642,10 +640,12 @@ static int aoc_pcm_prepare(struct snd_soc_component *comp,
 	 * the only place that can wait.
 	 *
 	 * Letting that work land after the re-base is what kept a recovered
-	 * stream broken.  Its snd_pcm_period_elapsed() reports a hardware
-	 * position that means nothing yet, the core reads that as the hardware
-	 * having overrun the application, and the XRUN it raises re-prepares
-	 * and arms the very same race again.  Measured on komodo: PipeWire
+	 * stream broken, and it is the one case the core cannot drop for us:
+	 * the stream is running again by the time the work gets in, so its
+	 * snd_pcm_running() check passes.  The position the stale work then
+	 * reports means nothing yet, the core reads it as the hardware having
+	 * overrun the application, and the XRUN it raises re-prepares and arms
+	 * the very same race again.  Measured on komodo: PipeWire
 	 * recovering the speaker sink about sixteen times a second, silent, for
 	 * as long as the stream stayed open, and a suspend/resume of the sink
 	 * -- which closes the PCM, where this wait already happens -- clearing
