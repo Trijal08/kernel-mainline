@@ -3063,7 +3063,18 @@ brcmf_cfg80211_get_station(struct wiphy *wiphy, struct wireless_dev *wdev,
 					       &sta_info_le,
 					       sizeof(sta_info_le));
 		if (err < 0) {
-			bphy_err(drvr, "GET STA INFO failed, %d\n", err);
+			/* Asking about a station we are not associated to is
+			 * routine -- a status poll can land either side of a
+			 * connect -- and the firmware simply has no entry to
+			 * report. Only a connected station failing is a fault.
+			 */
+			if (test_bit(BRCMF_VIF_STATUS_CONNECTED,
+				     &ifp->vif->sme_state))
+				bphy_err(drvr, "GET STA INFO failed, %d\n",
+					 err);
+			else
+				brcmf_dbg(CONN, "GET STA INFO failed, %d\n",
+					  err);
 			goto done;
 		}
 	}
