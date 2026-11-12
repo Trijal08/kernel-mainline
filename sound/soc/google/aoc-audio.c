@@ -339,6 +339,15 @@ struct cmd_audio_input_set_param {
 	__le32 val;
 } __packed;
 
+/* The card's links, in the order aoc_dai_link_tmpl[] declares them. */
+enum {
+	AOC_LINK_PLAYBACK,
+	AOC_LINK_CAPTURE,
+	AOC_LINK_VOICE,
+	AOC_LINK_TDM0,
+	AOC_LINK_COUNT,
+};
+
 struct aoc_audio {
 	struct device *aoc_dev;			/* the AOC platform device */
 	struct snd_soc_card card;
@@ -350,6 +359,16 @@ struct aoc_audio {
 	int mic_soft_gain_db;			/* record soft gain, dB */
 	bool mic_muted;				/* capture switch, off */
 	bool voice_mic_on;			/* the modem's mic input is running */
+	/*
+	 * The links and the components they name, per card rather than per
+	 * driver.  Probe fills in the device tree node and the codecs it finds
+	 * there, so a table shared between instances would carry one card's
+	 * resolution into the next -- including from a probe that deferred into
+	 * the one that succeeds.
+	 */
+	struct snd_soc_dai_link links[AOC_LINK_COUNT];
+	struct snd_soc_dai_link_component cpus[AOC_LINK_COUNT];
+	struct snd_soc_dai_link_component platform;
 };
 
 /* Per-open stream state. */
@@ -1960,11 +1979,13 @@ static const struct snd_soc_ops aoc_tdm0_ops = {
 	.hw_params = aoc_tdm0_hw_params,
 };
 
-static struct snd_soc_dai_link_component aoc_fe_cpu = { .dai_name = "aoc-fe" };
-static struct snd_soc_dai_link_component aoc_cap_cpu = { .dai_name = "aoc-fe-cap" };
-static struct snd_soc_dai_link_component aoc_voice_cpu = { .dai_name = "aoc-voice" };
-static struct snd_soc_dai_link_component aoc_be_cpu = { .dai_name = "aoc-tdm0" };
-static struct snd_soc_dai_link_component aoc_platform;
+/* The CPU DAI each link names.  Resolved onto aoc_audio::cpus at probe. */
+static const char * const aoc_cpu_dai_names[AOC_LINK_COUNT] = {
+	[AOC_LINK_PLAYBACK]	= "aoc-fe",
+	[AOC_LINK_CAPTURE]	= "aoc-fe-cap",
+	[AOC_LINK_VOICE]	= "aoc-voice",
+	[AOC_LINK_TDM0]		= "aoc-tdm0",
+};
 
 /*
  * What the AOC puts on the TDM for a call.  The link configures the amplifiers
@@ -1979,16 +2000,14 @@ static const struct snd_soc_pcm_stream aoc_voice_c2c_params = {
 	.channels_max = AOC_TDM0_CHANNELS,
 };
 
-static struct snd_soc_dai_link aoc_dai_links[] = {
+static const struct snd_soc_dai_link aoc_dai_link_tmpl[AOC_LINK_COUNT] = {
 	{
 		.name = "aoc-playback0",
 		.stream_name = "aoc-playback0",
 		.id = 0,
-		.cpus = &aoc_fe_cpu,
 		.num_cpus = 1,
 		.codecs = &snd_soc_dummy_dlc,
 		.num_codecs = 1,
-		.platforms = &aoc_platform,
 		.num_platforms = 1,
 		.dynamic = 1,
 		.playback_only = 1,
@@ -2003,11 +2022,9 @@ static struct snd_soc_dai_link aoc_dai_links[] = {
 		.name = "aoc-capture0",
 		.stream_name = "aoc-capture0",
 		.id = 1,
-		.cpus = &aoc_cap_cpu,
 		.num_cpus = 1,
 		.codecs = &snd_soc_dummy_dlc,
 		.num_codecs = 1,
-		.platforms = &aoc_platform,
 		.num_platforms = 1,
 		.capture_only = 1,
 		.nonatomic = true,
@@ -2025,10 +2042,8 @@ static struct snd_soc_dai_link aoc_dai_links[] = {
 		.stream_name = "aoc-voice",
 		/* Internal now, but keep the vendor's telephony device number. */
 		.id = 4,
-		.cpus = &aoc_voice_cpu,
 		.num_cpus = 1,
 		/* .codecs comes from the device tree: the amplifiers */
-		.platforms = &aoc_platform,
 		.num_platforms = 1,
 		.c2c_params = &aoc_voice_c2c_params,
 		.num_c2c_params = 1,
@@ -2043,7 +2058,6 @@ static struct snd_soc_dai_link aoc_dai_links[] = {
 	{
 		.name = "aoc-tdm0",
 		.stream_name = "TDM_0_RX Playback",
-		.cpus = &aoc_be_cpu,
 		.num_cpus = 1,
 		/* .codecs comes from the device tree: the amplifiers */
 		.no_pcm = 1,
@@ -2147,12 +2161,20 @@ static int aoc_audio_probe(struct platform_device *pdev)
 		goto err_put;
 	}
 
-	/* Resolve the CPU DAIs and platform to our own component (by DT node). */
-	aoc_fe_cpu.of_node = dev->of_node;
-	aoc_cap_cpu.of_node = dev->of_node;
-	aoc_voice_cpu.of_node = dev->of_node;
-	aoc_be_cpu.of_node = dev->of_node;
-	aoc_platform.of_node = dev->of_node;
+	/*
+	 * Take a copy of the link template for this card and point every link
+	 * at this card's own components, all of which live in the AOC's own
+	 * device tree node.
+	 */
+	memcpy(aud->links, aoc_dai_link_tmpl, sizeof(aud->links));
+	aud->platform.of_node = dev->of_node;
+	for (i = 0; i < AOC_LINK_COUNT; i++) {
+		aud->cpus[i].dai_name = aoc_cpu_dai_names[i];
+		aud->cpus[i].of_node = dev->of_node;
+		aud->links[i].cpus = &aud->cpus[i];
+		if (aud->links[i].num_platforms)
+			aud->links[i].platforms = &aud->platform;
+	}
 
 	/*
 	 * The amplifiers listening to the TDM.  They are the codecs of both the
@@ -2164,12 +2186,10 @@ static int aoc_audio_probe(struct platform_device *pdev)
 		ret = dev_err_probe(dev, -EINVAL, "no speakers node\n");
 		goto err_put;
 	}
-	for (i = 0; i < ARRAY_SIZE(aoc_dai_links); i++) {
-		if (strcmp(aoc_dai_links[i].name, "aoc-tdm0") &&
-		    strcmp(aoc_dai_links[i].name, "aoc-voice"))
+	for (i = 0; i < AOC_LINK_COUNT; i++) {
+		if (i != AOC_LINK_VOICE && i != AOC_LINK_TDM0)
 			continue;
-		ret = snd_soc_of_get_dai_link_codecs(dev, np,
-						     &aoc_dai_links[i]);
+		ret = snd_soc_of_get_dai_link_codecs(dev, np, &aud->links[i]);
 		if (ret)
 			break;
 	}
@@ -2182,8 +2202,8 @@ static int aoc_audio_probe(struct platform_device *pdev)
 	aud->card.name = "aoc-audio";
 	aud->card.owner = THIS_MODULE;
 	aud->card.dev = dev;
-	aud->card.dai_link = aoc_dai_links;
-	aud->card.num_links = ARRAY_SIZE(aoc_dai_links);
+	aud->card.dai_link = aud->links;
+	aud->card.num_links = AOC_LINK_COUNT;
 	aud->card.dapm_widgets = aoc_dapm_widgets;
 	aud->card.num_dapm_widgets = ARRAY_SIZE(aoc_dapm_widgets);
 	aud->card.dapm_routes = aoc_dapm_routes;
