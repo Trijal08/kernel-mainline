@@ -24,6 +24,7 @@
 #include <linux/completion.h>
 #include <linux/delay.h>
 #include <linux/hrtimer.h>
+#include <linux/math64.h>
 #include <linux/workqueue.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
@@ -356,6 +357,7 @@ struct aoc_audio_stream {
 	struct aoc_service *svc;
 	struct snd_pcm_substream *substream;
 	struct hrtimer tick;			/* the AOC does not interrupt us */
+	u64 tick_ns;				/* half a period; see hw_params */
 	struct work_struct period_work;		/* the tick cannot enter the core */
 	u32 prev_consumed;
 	bool playback;
@@ -1196,7 +1198,19 @@ static const struct snd_pcm_hardware aoc_pcm_hw = {
 	.buffer_bytes_max = AOC_PCM_BUFFER_BYTES,
 	.period_bytes_min = 256,
 	.period_bytes_max = 65536,
-	.periods_min = 2,
+	/*
+	 * Two periods leaves a client one period of slack between being told a
+	 * period elapsed and having to have written the next one.  Nothing here
+	 * is interrupt driven -- the report comes from a timer, by way of a
+	 * workqueue, because a nonatomic PCM cannot be completed from either --
+	 * so that slack is what absorbs every delay in the chain, and one
+	 * period of it is not enough: playback skipped under load for want of
+	 * it.  Ask for four, which costs latency no one can hear on a media
+	 * stream and is still a small fraction of buffer_bytes_max.  A call
+	 * does not come through here at all; it is a codec-to-codec link the
+	 * AOC drives itself.
+	 */
+	.periods_min = 4,
 	.periods_max = 64,
 };
 
@@ -1229,13 +1243,13 @@ static enum hrtimer_restart aoc_pcm_tick(struct hrtimer *t)
 						  tick);
 	u32 consumed;
 
-	hrtimer_forward_now(t, ns_to_ktime(AOC_PCM_TICK_NS));
+	hrtimer_forward_now(t, ns_to_ktime(s->tick_ns));
 
 	consumed = aoc_service_progress(s->svc, s->playback);
 	if (consumed != s->prev_consumed) {
 		s->prev_consumed = consumed;
 		/* the link is nonatomic: the core must not be entered here */
-		schedule_work(&s->period_work);
+		queue_work(system_highpri_wq, &s->period_work);
 	}
 	return HRTIMER_RESTART;
 }
@@ -1265,6 +1279,7 @@ static int aoc_pcm_open(struct snd_soc_component *comp,
 	s->substream = substream;
 	s->playback = playback;
 	s->ring = aoc_service_ring_size(svc, playback);
+	s->tick_ns = AOC_PCM_TICK_NS;
 	s->dev = comp->dev;
 	spin_lock_init(&s->ring_lock);
 	hrtimer_setup(&s->tick, aoc_pcm_tick, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
@@ -1275,11 +1290,11 @@ static int aoc_pcm_open(struct snd_soc_component *comp,
 	snd_soc_set_runtime_hwparams(substream, &aoc_pcm_hw);
 
 	/*
-	 * A period shorter than the tick is a promise this driver cannot keep:
-	 * it would have the core expect a position update it has no way to
-	 * produce until the next poll.  Ask for at least one tick's worth, and
-	 * for the period to be a whole number of ticks, so every period
-	 * boundary is one the tick can actually land on.
+	 * A period shorter than a tick is a promise this driver cannot keep: it
+	 * would have the core expect a position update there is no way to
+	 * produce until the next poll.  Ask for at least one tick's worth; the
+	 * tick itself is then retuned to the period that gets negotiated, so
+	 * every boundary is one it lands on.  See aoc_pcm_hw_params().
 	 */
 	return snd_pcm_hw_constraint_minmax(substream->runtime,
 					    SNDRV_PCM_HW_PARAM_PERIOD_TIME,
@@ -1500,6 +1515,24 @@ static int aoc_pcm_hw_params(struct snd_soc_component *comp,
 		return ret;
 	}
 
+	/*
+	 * Beat on the period that was negotiated, not on an interval of this
+	 * driver's choosing.  The tick is the only thing that reports a period
+	 * elapsed, and a client sleeps until it hears one, so a tick that does
+	 * not divide the period reports every boundary late by a margin that
+	 * walks -- asking for 1024 frames at 48 kHz wants 21.33 ms, which a
+	 * fixed 10 ms tick can only answer 4 to 9 ms after the fact, and that
+	 * is most of the slack a two-period buffer has.
+	 *
+	 * Halve it so a boundary still coincides with a tick but there are two
+	 * chances to hit it: one tick delayed behind something else no longer
+	 * lands past the boundary it was meant to report, and the ring gets
+	 * topped up twice as often as it strictly needs.
+	 */
+	s->tick_ns = max_t(u64, div_u64((u64)params_period_size(params) *
+					NSEC_PER_SEC, params_rate(params) * 2),
+			   NSEC_PER_MSEC);
+
 	/* A stream describes its ring to the AOC before anything is bound to it. */
 	ret = aoc_audio_ep_setup(aud, s->source, params_channels(params),
 				 params_rate(params), params_width(params),
@@ -1575,7 +1608,7 @@ static int aoc_pcm_trigger(struct snd_soc_component *comp,
 
 	if (on) {
 		WRITE_ONCE(s->running, true);
-		hrtimer_start(&s->tick, ns_to_ktime(AOC_PCM_TICK_NS),
+		hrtimer_start(&s->tick, ns_to_ktime(s->tick_ns),
 			      HRTIMER_MODE_REL);
 	} else {
 		WRITE_ONCE(s->running, false);
