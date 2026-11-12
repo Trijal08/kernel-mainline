@@ -1328,7 +1328,16 @@ brcmf_msgbuf_process_rx_complete(struct brcmf_msgbuf *msgbuf, void *buf)
 		ifp = msgbuf->drvr->mon_if;
 
 		if (!ifp) {
-			bphy_err(drvr, "Received unexpected monitor pkt\n");
+			/* The firmware hands up a copy of the management
+			 * frames it exchanges while associating, whether or
+			 * not anything asked for them. With no monitor
+			 * interface there is nowhere to put an 802.11 frame,
+			 * so drop it -- but quietly. Measured on a BCM4390:
+			 * 25 of these per association attempt, and an
+			 * unthrottled error per packet in the RX path costs
+			 * far more than the frames are worth.
+			 */
+			brcmf_dbg(MSGBUF, "802.11 frame with no monitor if\n");
 			brcmu_pkt_buf_free_skb(skb);
 			return;
 		}
