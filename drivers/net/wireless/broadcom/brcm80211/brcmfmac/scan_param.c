@@ -20,14 +20,44 @@
  * ~iwd-scan-interval under sustained traffic, sometimes cascading into a link
  * drop + rescan. A positive home_time makes the firmware service the home
  * channel between channels so the association and the datapath stay alive
- * during the scan (roaming still works). Ignored by the firmware when not
- * associated (no home channel), so it is safe for the initial connect scan.
- * 0 or -1 restores the firmware default. */
+ * during the scan (roaming still works). 0 or -1 restores the firmware
+ * default.
+ *
+ * Only ever asked for while associated -- see brcmf_scan_param_home_time().
+ */
 static int brcmf_scan_home_time = 45;
 module_param_named(scan_home_time, brcmf_scan_home_time, int, 0644);
-MODULE_PARM_DESC(scan_home_time, "Home-channel dwell (ms) between scanned channels so a background scan does not freeze the datapath (default 45; 0/-1 = firmware default)");
+MODULE_PARM_DESC(scan_home_time, "Home-channel dwell (ms) between scanned channels so a background scan does not freeze the datapath (default 45, applied only while associated; 0/-1 = firmware default)");
 
-static void brcmf_scan_param_set_defaults(u8 (*bssid)[ETH_ALEN], s8 *bss_type, __le32 *channel_num,
+/*
+ * A home-channel dwell only means anything while associated, because only then
+ * is there a home channel to come back to. Asking for one on an unassociated
+ * escan wedges the BCM4390's scan engine: it returns every partial result and
+ * then never sends the completion event, so the scan dies on the host's 10s
+ * timeout instead. That is fatal to the first connect after a cold firmware
+ * start -- measured as 5 "brcmf_escan_timeout: timer expired" on a boot, a
+ * SET_SSID that times out behind them, and ~60-150s before anything
+ * associates. Dropping the dwell on an unassociated scan clears it: the same
+ * scan then reports "Completed scan: Done" and the first connect succeeds.
+ *
+ * The vendor driver never puts a positive home_time on an escan at all -- it
+ * passes -1 on every path and keeps its own value for the join command -- so
+ * this is also what parity looks like.
+ */
+static s32 brcmf_scan_param_home_time(struct brcmf_cfg80211_info *cfg)
+{
+	struct brcmf_if *ifp = brcmf_get_ifp(cfg->pub, 0);
+
+	if (brcmf_scan_home_time <= 0 || !ifp || !ifp->vif ||
+	    !test_bit(BRCMF_VIF_STATUS_CONNECTED, &ifp->vif->sme_state))
+		return -1;
+
+	return brcmf_scan_home_time;
+}
+
+static void brcmf_scan_param_set_defaults(struct brcmf_cfg80211_info *cfg,
+					  u8 (*bssid)[ETH_ALEN], s8 *bss_type,
+					  __le32 *channel_num,
 					  __le32 *nprobes, __le32 *active_time,
 					  __le32 *passive_time,
 					  __le32 *home_time)
@@ -38,8 +68,7 @@ static void brcmf_scan_param_set_defaults(u8 (*bssid)[ETH_ALEN], s8 *bss_type, _
 	*nprobes = cpu_to_le32(-1);
 	*active_time = cpu_to_le32(-1);
 	*passive_time = cpu_to_le32(-1);
-	*home_time = cpu_to_le32(brcmf_scan_home_time > 0 ?
-				 brcmf_scan_home_time : -1);
+	*home_time = cpu_to_le32(brcmf_scan_param_home_time(cfg));
 }
 
 static void brcmf_scan_param_copy_chanspecs(
@@ -135,10 +164,13 @@ brcmf_scan_param_get_prepped_struct_v1(struct brcmf_cfg80211_info *cfg,
 		bphy_err(cfg, "Could not allocate scan params\n");
 		return NULL;
 	}
-	brcmf_scan_param_set_defaults(&params_le->bssid,
-		&params_le->bss_type, &params_le->channel_num,
-		&params_le->nprobes, &params_le->active_time,
-		&params_le->passive_time, &params_le->home_time);
+	brcmf_scan_param_set_defaults(cfg, &params_le->bssid,
+				      &params_le->bss_type,
+				      &params_le->channel_num,
+				      &params_le->nprobes,
+				      &params_le->active_time,
+				      &params_le->passive_time,
+				      &params_le->home_time);
 
 	/* Scan abort */
 	if (!request) {
@@ -209,10 +241,13 @@ brcmf_scan_param_get_prepped_struct_v2(struct brcmf_cfg80211_info *cfg,
 		return NULL;
 	}
 	params_le->version = cpu_to_le16(BRCMF_SCAN_PARAMS_VERSION_V2);
-	brcmf_scan_param_set_defaults(&params_le->bssid,
-		&params_le->bss_type, &params_le->channel_num,
-		&params_le->nprobes, &params_le->active_time,
-		&params_le->passive_time, &params_le->home_time);
+	brcmf_scan_param_set_defaults(cfg, &params_le->bssid,
+				      &params_le->bss_type,
+				      &params_le->channel_num,
+				      &params_le->nprobes,
+				      &params_le->active_time,
+				      &params_le->passive_time,
+				      &params_le->home_time);
 
 	/* Scan abort */
 	if (!request) {
@@ -289,10 +324,13 @@ brcmf_scan_param_get_prepped_struct_v3(struct brcmf_cfg80211_info *cfg,
 
 	params_le->version = cpu_to_le16(BRCMF_SCAN_PARAMS_VERSION_V3);
 	params_le->ssid_type = 0;
-	brcmf_scan_param_set_defaults(&params_le->bssid,
-		&params_le->bss_type, &params_le->channel_num,
-		&params_le->nprobes, &params_le->active_time,
-		&params_le->passive_time, &params_le->home_time);
+	brcmf_scan_param_set_defaults(cfg, &params_le->bssid,
+				      &params_le->bss_type,
+				      &params_le->channel_num,
+				      &params_le->nprobes,
+				      &params_le->active_time,
+				      &params_le->passive_time,
+				      &params_le->home_time);
 
 	/* Scan abort */
 	if (!request) {
@@ -374,10 +412,13 @@ brcmf_scan_param_get_prepped_struct_v4(struct brcmf_cfg80211_info *cfg,
 	}
 	params_le->version = cpu_to_le16(BRCMF_SCAN_PARAMS_VERSION_V4);
 	params_le->ssid_type = 0;
-	brcmf_scan_param_set_defaults(&params_le->bssid,
-		&params_le->bss_type, &params_le->channel_num,
-		&params_le->nprobes, &params_le->active_time,
-		&params_le->passive_time, &params_le->home_time);
+	brcmf_scan_param_set_defaults(cfg, &params_le->bssid,
+				      &params_le->bss_type,
+				      &params_le->channel_num,
+				      &params_le->nprobes,
+				      &params_le->active_time,
+				      &params_le->passive_time,
+				      &params_le->home_time);
 
 	/* Scan abort */
 	if (!request) {
