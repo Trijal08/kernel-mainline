@@ -528,7 +528,6 @@ static const struct aoc_voice_raw_cmd aoc_voice_pre[] = {
 	 */
 };
 
-
 static const struct aoc_voice_raw_cmd aoc_voice_post_bind[] = {
 	{ true,  0x00f9,  4, { 0x00, 0x00, 0x00, 0x00 } },
 	{ true,  0x00fe,  4, { 0x00, 0x00, 0x00, 0x00 } },
@@ -538,7 +537,6 @@ static const struct aoc_voice_raw_cmd aoc_voice_post_bind[] = {
 static const struct aoc_voice_raw_cmd aoc_voice_teardown[] = {
 	{ false, 0x0115,  1, { 0x00 } },		/* DSP mode back to AMBIENT */
 };
-
 
 /* Replay a captured command table verbatim on its own control channel. */
 static int aoc_voice_replay(struct aoc_audio *aud,
@@ -712,7 +710,6 @@ static int aoc_audio_bind(struct aoc_audio *aud, u8 src, u8 dst, bool on)
 	cmd.bind = on ? 1 : 0;
 	return aoc_audio_cmd(aud, &cmd, sizeof(cmd), rsp, sizeof(rsp));
 }
-
 
 /* Set one block/component parameter on the AOC's output graph. */
 static int aoc_audio_set_param(struct aoc_audio *aud, u8 block, u8 component,
@@ -1278,7 +1275,7 @@ static int aoc_pcm_open(struct snd_soc_component *comp,
 	if (!svc)
 		return dev_err_probe(comp->dev, -ENODEV, "no %s service\n", name);
 
-	s = kzalloc(sizeof(*s), GFP_KERNEL);
+	s = kzalloc_obj(*s);
 	if (!s)
 		return -ENOMEM;
 	s->svc = svc;
@@ -1905,8 +1902,10 @@ static int aoc_tdm0_fixup(struct snd_soc_pcm_runtime *rtd,
 		hw_param_interval(params, SNDRV_PCM_HW_PARAM_CHANNELS);
 	struct snd_mask *fmt = hw_param_mask(params, SNDRV_PCM_HW_PARAM_FORMAT);
 
-	rate->min = rate->max = AOC_TDM0_RATE;
-	channels->min = channels->max = AOC_TDM0_CHANNELS;
+	rate->min = AOC_TDM0_RATE;
+	rate->max = AOC_TDM0_RATE;
+	channels->min = AOC_TDM0_CHANNELS;
+	channels->max = AOC_TDM0_CHANNELS;
 	snd_mask_none(fmt);
 	snd_mask_set_format(fmt, AOC_TDM0_FORMAT);
 	return 0;
