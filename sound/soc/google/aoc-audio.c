@@ -359,7 +359,6 @@ struct aoc_audio_stream {
 	struct hrtimer tick;			/* the AOC does not interrupt us */
 	u64 tick_ns;				/* half a period; see hw_params */
 	struct work_struct period_work;		/* the tick cannot enter the core */
-	u32 prev_consumed;
 	bool playback;
 	u32 ring;				/* AOC ring size in bytes */
 	struct device *dev;			/* for the debug lines below */
@@ -1241,16 +1240,23 @@ static enum hrtimer_restart aoc_pcm_tick(struct hrtimer *t)
 {
 	struct aoc_audio_stream *s = container_of(t, struct aoc_audio_stream,
 						  tick);
-	u32 consumed;
 
 	hrtimer_forward_now(t, ns_to_ktime(s->tick_ns));
 
-	consumed = aoc_service_progress(s->svc, s->playback);
-	if (consumed != s->prev_consumed) {
-		s->prev_consumed = consumed;
-		/* the link is nonatomic: the core must not be entered here */
-		queue_work(system_highpri_wq, &s->period_work);
-	}
+	/*
+	 * Queue unconditionally.  Waiting for the AOC's byte counter to move
+	 * before topping the ring up cannot work: once the ring has drained
+	 * the counter stops, so no work is queued, so nothing is pushed, so
+	 * the counter never moves again.  The stall sustains itself, and
+	 * because the AOC's renderer waits for data rather than underrunning,
+	 * it comes out as playback that runs slow instead of as a gap.
+	 *
+	 * The work is idempotent and the workqueue coalesces it, so queueing
+	 * every tick costs nothing when there is nothing to do.  The link is
+	 * nonatomic, so the core cannot be entered from the timer itself.
+	 */
+	queue_work(system_highpri_wq, &s->period_work);
+
 	return HRTIMER_RESTART;
 }
 
@@ -1290,11 +1296,11 @@ static int aoc_pcm_open(struct snd_soc_component *comp,
 	snd_soc_set_runtime_hwparams(substream, &aoc_pcm_hw);
 
 	/*
-	 * A period shorter than a tick is a promise this driver cannot keep: it
-	 * would have the core expect a position update there is no way to
-	 * produce until the next poll.  Ask for at least one tick's worth; the
-	 * tick itself is then retuned to the period that gets negotiated, so
-	 * every boundary is one it lands on.  See aoc_pcm_hw_params().
+	 * The position comes from a poll, not an interrupt, so a period shorter
+	 * than the poll would have the core expect an update there is no way to
+	 * produce.  The tick is set from the period that gets negotiated --
+	 * see aoc_pcm_hw_params() -- so this only has to rule out a period the
+	 * timer could not resolve at all.
 	 */
 	return snd_pcm_hw_constraint_minmax(substream->runtime,
 					    SNDRV_PCM_HW_PARAM_PERIOD_TIME,
@@ -1360,7 +1366,6 @@ static int aoc_pcm_prepare(struct snd_soc_component *comp,
 	cancel_work_sync(&s->period_work);
 
 	s->base = aoc_service_progress(s->svc, s->playback);
-	s->prev_consumed = s->base;
 	s->pushed = 0;
 	dev_dbg(s->dev, "prepare: base %u buffer %lu period %lu\n",
 		s->base, substream->runtime->buffer_size,
@@ -1524,13 +1529,12 @@ static int aoc_pcm_hw_params(struct snd_soc_component *comp,
 	 * fixed 10 ms tick can only answer 4 to 9 ms after the fact, and that
 	 * is most of the slack a two-period buffer has.
 	 *
-	 * Halve it so a boundary still coincides with a tick but there are two
-	 * chances to hit it: one tick delayed behind something else no longer
-	 * lands past the boundary it was meant to report, and the ring gets
-	 * topped up twice as often as it strictly needs.
+	 * One tick per period, which is what an interrupt-driven endpoint would
+	 * give: a boundary always coincides with a tick, and the fixed cost of
+	 * reporting one is paid once per period rather than twice.
 	 */
 	s->tick_ns = max_t(u64, div_u64((u64)params_period_size(params) *
-					NSEC_PER_SEC, params_rate(params) * 2),
+					NSEC_PER_SEC, params_rate(params)),
 			   NSEC_PER_MSEC);
 
 	/* A stream describes its ring to the AOC before anything is bound to it. */
