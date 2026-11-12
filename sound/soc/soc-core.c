@@ -388,6 +388,16 @@ static struct snd_soc_pcm_runtime *soc_new_pcm_runtime(
 		return NULL;
 	}
 
+	/*
+	 * components[] is annotated with __counted_by(num_components), so
+	 * devm_kzalloc_flex() has set that counter to the number of elements
+	 * it allocated room for. snd_soc_rtd_add_component() fills the array
+	 * one entry at a time and counts up from zero, so start it there:
+	 * otherwise the first component lands at components[allocated] and the
+	 * entries the core reads back stay NULL.
+	 */
+	rtd->num_components = 0;
+
 	rtd->dev = dev;
 	INIT_LIST_HEAD(&rtd->list);
 	for_each_pcm_streams(stream) {
