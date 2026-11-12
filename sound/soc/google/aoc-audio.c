@@ -1685,15 +1685,17 @@ static int aoc_amps_hw_params(struct snd_soc_pcm_runtime *rtd,
 
 	for_each_rtd_codec_dais(rtd, i, codec_dai) {
 		/*
-		 * Slot 0 carries the left channel and slot 1 the right, so an
-		 * amplifier's slot follows from the side it drives rather than
-		 * from its place in the list.  The other slot goes to its second
-		 * receive channel, which is what its firmware wants for
-		 * cross-channel work.
+		 * Slot 0 carries the left channel and slot 1 the right, and the
+		 * device tree lists the amplifiers in that order, so an
+		 * amplifier's slot is its place in the list.  The other slot
+		 * goes to its second receive channel, which is what its
+		 * firmware wants for cross-channel work.
+		 *
+		 * Taking it from the list rather than from a property of the
+		 * codec's own node keeps this out of another driver's binding.
 		 */
-		bool right = of_property_read_bool(codec_dai->dev->of_node,
-						   "cirrus,right-channel-amp");
-		unsigned int rx_slot[2] = { right, !right };
+		unsigned int slot = i % AOC_TDM0_CHANNELS;
+		unsigned int rx_slot[2] = { slot, !slot };
 
 		/*
 		 * The AOC owns the clocks, so the amplifiers recover theirs from
