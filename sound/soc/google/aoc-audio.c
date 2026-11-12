@@ -456,11 +456,7 @@ static const struct snd_kcontrol_new aoc_controls[] = {
 	},
 };
 
-/*
- * Ask the AOC what it makes of the speaker.  The AP can see that the AOC is
- * draining the ring and clocking the TDM, but not whether it is putting
- * anything on it; this is the only view of that.
- */
+/* What a stream may ask of the AOC's ring. */
 static const struct snd_pcm_hardware aoc_pcm_hw = {
 	/*
 	 * BATCH is not decoration: the AOC never interrupts, so the position
