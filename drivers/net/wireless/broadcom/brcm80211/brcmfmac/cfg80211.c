@@ -1141,7 +1141,19 @@ brcmf_run_escan(struct brcmf_cfg80211_info *cfg, struct brcmf_if *ifp,
 	kfree(prepped_params);
 	params->version = cpu_to_le32(drvr->scan_param_handler.version);
 	params->action = cpu_to_le16(WL_ESCAN_ACTION_START);
-	params->sync_id = cpu_to_le16(0x1234);
+	/*
+	 * Name every scan differently. The sync id is how the firmware tells
+	 * one scan from the next, and it comes back in every result; a constant
+	 * leaves a new request indistinguishable from the one being torn down,
+	 * so the firmware can fold the two together -- taking the request
+	 * without complaint and then never completing it. Observed on a
+	 * BCM4390 as a scan that reports BCME_BUSY to itself once a second for
+	 * as long as the host waits, ending in the host's own timeout, with
+	 * every later scan going the same way.
+	 */
+	if (++cfg->escan_info.sync_id == 0)
+		cfg->escan_info.sync_id = 1;
+	params->sync_id = cpu_to_le16(cfg->escan_info.sync_id);
 
 	err = brcmf_fil_iovar_data_set(ifp, "escan", params, params_size);
 	if (err) {
@@ -3625,6 +3637,20 @@ brcmf_cfg80211_escan_handler(struct brcmf_if *ifp,
 			bphy_err(drvr, "Invalid escan result (NULL pointer)\n");
 			goto exit;
 		}
+		/*
+		 * A result from a scan we have already finished with. The
+		 * firmware can still be draining one when the next is armed,
+		 * and folding its BSSes into the new scan's buffer reports
+		 * them against the wrong request.
+		 */
+		if (le16_to_cpu(escan_result_le->sync_id) !=
+		    cfg->escan_info.sync_id) {
+			brcmf_dbg(SCAN, "stale result, sync_id %u want %u\n",
+				  le16_to_cpu(escan_result_le->sync_id),
+				  cfg->escan_info.sync_id);
+			goto exit;
+		}
+
 		escan_buflen = le32_to_cpu(escan_result_le->buflen);
 		if (escan_buflen > BRCMF_ESCAN_BUF_SIZE ||
 		    escan_buflen > e->datalen ||

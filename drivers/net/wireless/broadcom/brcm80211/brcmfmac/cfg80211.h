@@ -301,6 +301,7 @@ enum wl_escan_state {
 
 struct escan_info {
 	u32 escan_state;
+	u16 sync_id;
 	u8 *escan_buf;
 	struct wiphy *wiphy;
 	struct brcmf_if *ifp;
