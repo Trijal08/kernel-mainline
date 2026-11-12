@@ -163,6 +163,11 @@ static const struct s2mpg1415_chip s2mpg15_chip = {
 	.has_ntc = true,
 };
 
+/* Also the width of the per-channel arrays below; see the NTC section. */
+#define S2MPG1415_NTC_CHANNELS		8
+
+struct s2mpg1415_ntc;
+
 struct s2mpg1415_meter {
 	struct regmap *regmap;
 	const struct s2mpg1415_chip *chip;
@@ -170,6 +175,16 @@ struct s2mpg1415_meter {
 	struct mutex lock;
 	/* NULL when the device tree gives the meter block no interrupt. */
 	struct regmap_irq_chip_data *irq_data;
+	/*
+	 * Set once the NTC channels are enabled and have produced a real
+	 * conversion.  Until then the data registers hold whatever the
+	 * bootloader left behind, and a stale code is indistinguishable from
+	 * a measured one.
+	 */
+	bool ntc_ready;
+	/* Registered thermistor channels, and which of them are converting. */
+	struct s2mpg1415_ntc *ntc[S2MPG1415_NTC_CHANNELS];
+	unsigned int ntc_enabled;
 };
 
 /*
@@ -187,7 +202,6 @@ struct s2mpg1415_meter {
  * ---------------------------------------------------------------------------
  */
 
-#define S2MPG1415_NTC_CHANNELS		8
 #define S2MPG1415_NTC_BUF		2	/* bytes per channel */
 #define S2MPG1415_NTC_CODE_MASK		GENMASK(11, 0)
 /* Writing this to a channel's LPF coefficient bypasses the filter. */
@@ -203,6 +217,27 @@ struct s2mpg1415_meter {
 #define S2MPG1415_NTC_SETTLE_MAX_US	10000
 #define S2MPG1415_NTC_READY_MS		50
 #define S2MPG1415_NTC_READY_TIMEOUT_MS	1000
+
+/*
+ * Treat a channel's filter as running once its output agrees with the
+ * conversion it is filtering. The band is wide because the reference is a
+ * snapshot taken before the filter went in, and a thermistor next to
+ * something that is powering up moves a few degrees while the rest of the
+ * channels are brought up. What this has to catch is a filter left reading
+ * the hot end of the calibration, which is wrong by thirty degrees or more.
+ */
+#define S2MPG1415_NTC_FILTER_TOL_MILLIC	10000
+#define S2MPG1415_NTC_FILTER_TIMEOUT_MS	1000
+
+/*
+ * The thermistors sit against the case and are the slowest sensors on the
+ * board: none of them moves several degrees between two samples. A jump that
+ * large is the meter glitching, which the vendor filters as well
+ * (filter_spurious_samples in its device tree). Hold the previous reading once
+ * and believe the new one only if it repeats, so that a single bad sample
+ * cannot trip a critical trip point.
+ */
+#define S2MPG1415_NTC_SLEW_MILLIC	5000
 
 /* Falling code, rising temperature in millidegrees Celsius. */
 struct s2mpg1415_ntc_pt {
@@ -228,6 +263,10 @@ struct s2mpg1415_ntc {
 	struct s2mpg1415_meter *meter;
 	struct thermal_zone_device *tz;
 	unsigned int chan;
+	/* Previous reading, and whether one was held back as suspect. */
+	int last_millic;
+	bool have_last;
+	bool suspect;
 };
 
 /*
@@ -323,8 +362,41 @@ static int s2mpg1415_ntc_read_code(struct s2mpg1415_meter *meter,
 		return ret;
 
 	*code = (buf[0] | (buf[1] << 8)) & S2MPG1415_NTC_CODE_MASK;
-	/* The engine reads back all-zero until its first conversion lands. */
-	return *code ? 0 : -EAGAIN;
+
+	/*
+	 * The engine reads back all-zero until its first conversion lands, and
+	 * anything below the calibration's hot end is not a measurement
+	 * either: codes fall as the temperature rises, so every one of them
+	 * clamps to the table's last point, 131 C, which is past the critical
+	 * trip on every zone that reads this channel. Rejecting only zero
+	 * leaves 1..0x9e decoding as a reading hot enough to shut the machine
+	 * down. Treat the whole range as "not converting".
+	 */
+	if (*code < s2mpg15_ntc_map[ARRAY_SIZE(s2mpg15_ntc_map) - 1].code)
+		return -EAGAIN;
+
+	return 0;
+}
+
+/*
+ * Return 0 once a channel's filtered output has reached @millic, -EAGAIN while
+ * it is still on its way there.
+ */
+static int s2mpg1415_ntc_settled(struct s2mpg1415_meter *meter,
+				 unsigned int chan, int millic)
+{
+	u16 code;
+	int ret;
+
+	ret = s2mpg1415_ntc_read_code(meter, chan, &code);
+	if (ret)
+		return ret;
+
+	if (abs(s2mpg1415_ntc_millic(code) - millic) >
+	    S2MPG1415_NTC_FILTER_TOL_MILLIC)
+		return -EAGAIN;
+
+	return 0;
 }
 
 static int s2mpg1415_ntc_get_temp(struct thermal_zone_device *tz, int *temp)
@@ -333,11 +405,39 @@ static int s2mpg1415_ntc_get_temp(struct thermal_zone_device *tz, int *temp)
 	u16 code;
 	int ret;
 
+	/*
+	 * The zones are registered before the channels are enabled, and
+	 * registration reads the temperature straight away.  A stale non-zero
+	 * code from the bootloader decodes to the hot end of the scale, which
+	 * is past the critical trip -- enough to shut the machine down during
+	 * probe.  Report nothing until the engine is known to be converting.
+	 */
+	if (!ntc->meter->ntc_ready)
+		return -EAGAIN;
+
 	ret = s2mpg1415_ntc_read_code(ntc->meter, ntc->chan, &code);
 	if (ret)
 		return ret;
 
 	*temp = s2mpg1415_ntc_millic(code);
+
+	/*
+	 * Hold a lone jump upwards for one sample. If the heat is real the next
+	 * reading confirms it, which costs one polling interval on a sensor
+	 * that takes seconds to move; if it was a glitch, nothing downstream
+	 * ever sees it.
+	 */
+	if (ntc->have_last && !ntc->suspect &&
+	    *temp - ntc->last_millic > S2MPG1415_NTC_SLEW_MILLIC) {
+		ntc->suspect = true;
+		*temp = ntc->last_millic;
+		return 0;
+	}
+
+	ntc->suspect = false;
+	ntc->last_millic = *temp;
+	ntc->have_last = true;
+
 	return 0;
 }
 
@@ -552,6 +652,7 @@ static int s2mpg1415_meter_init_ntc(struct device *dev,
 					     "cannot register NTC%u\n", chan);
 		}
 		ntc->tz = tz;
+		meter->ntc[chan] = ntc;
 
 		if (meter->irq_data) {
 			ret = s2mpg1415_ntc_request_irqs(dev, ntc);
@@ -600,13 +701,14 @@ static int s2mpg1415_meter_init_ntc(struct device *dev,
 	msleep(S2MPG1415_NTC_READY_MS);
 
 	/*
-	 * Only filter a channel once it holds a real conversion, as the vendor
-	 * does: a code of 0 is the hot end of the scale, and a filter seeded
-	 * from it can read past the critical trip.
+	 * Wait for each channel to hold a real conversion, and keep what it
+	 * reads. The channels stay unfiltered here, as the vendor leaves them:
+	 * the filters go in once the meter is configured, which is the last
+	 * thing the probe does. See s2mpg1415_meter_enable_ntc_lpf().
 	 */
 	for (chan = 0; chan < S2MPG1415_NTC_CHANNELS; chan++) {
+		int err, millic;
 		u16 code;
-		int err;
 
 		if (!(enabled & BIT(chan)))
 			continue;
@@ -618,15 +720,105 @@ static int s2mpg1415_meter_init_ntc(struct device *dev,
 					false, meter, chan, &code);
 		if (!ret)
 			ret = err;
-		if (!ret)
-			ret = regmap_write(meter->regmap,
-					   S2MPG15_METER_NTC_LPF_C0_0 + chan,
-					   S2MPG1415_NTC_LPF_COEFF);
-		if (ret)
-			dev_warn(dev, "NTC%u left unfiltered: %d\n", chan, ret);
+		if (ret) {
+			dev_warn(dev, "NTC%u never converted: %d\n", chan, ret);
+			continue;
+		}
+
+		/*
+		 * What the channel reads with its filter still bypassed. This
+		 * is the reading the zone would have got before the filter was
+		 * programmed, so it is also the baseline the first filtered
+		 * sample has to be plausible against.
+		 */
+		millic = s2mpg1415_ntc_millic(code);
+		meter->ntc[chan]->last_millic = millic;
+		meter->ntc[chan]->have_last = true;
+		dev_dbg(dev, "NTC%u unfiltered code %#05x = %d mC\n",
+			 chan, code, millic);
 	}
 
-	dev_info(dev, "thermistor channels %#x enabled\n", enabled);
+	meter->ntc_enabled = enabled;
+
+	return 0;
+}
+
+/**
+ * s2mpg1415_meter_enable_ntc_lpf() - put the thermistor filters in the path.
+ * @dev:	the meter device.
+ * @meter:	the meter.
+ *
+ * Programming a channel's filter coefficient has to come last, once the meter
+ * engine is configured and running. Resetting the engine or toggling METER_EN
+ * underneath a channel whose filter is already enabled corrupts that channel's
+ * filtered output -- it comes back reading the hot end of the calibration,
+ * which is past the critical trip on the skin zone -- and the vendor hits the
+ * same thing (b/322027909 in its ODPM driver, which drops the filters around
+ * every meter reset and restores them afterwards). Its bring-up is ordered the
+ * same way: METER_EN first, filters last.
+ *
+ * Return: 0 on success, -errno otherwise.
+ */
+static int s2mpg1415_meter_enable_ntc_lpf(struct device *dev,
+					  struct s2mpg1415_meter *meter)
+{
+	unsigned int chan;
+	int ret;
+
+	if (!meter->ntc_enabled)
+		return 0;
+
+	for (chan = 0; chan < S2MPG1415_NTC_CHANNELS; chan++) {
+		int err, millic;
+		u16 code;
+
+		if (!(meter->ntc_enabled & BIT(chan)))
+			continue;
+
+		millic = meter->ntc[chan]->last_millic;
+
+		ret = regmap_write(meter->regmap,
+				   S2MPG15_METER_NTC_LPF_C0_0 + chan,
+				   S2MPG1415_NTC_LPF_COEFF);
+		if (ret) {
+			dev_warn(dev, "NTC%u left unfiltered: %d\n", chan, ret);
+			continue;
+		}
+
+		/*
+		 * Let the filter produce an output and check it against the
+		 * conversion it is filtering before any zone is allowed to
+		 * read it.
+		 */
+		ret = read_poll_timeout(s2mpg1415_ntc_settled, err,
+					err != -EAGAIN,
+					S2MPG1415_NTC_READY_MS * USEC_PER_MSEC,
+					S2MPG1415_NTC_FILTER_TIMEOUT_MS * USEC_PER_MSEC,
+					true, meter, chan, millic);
+		if (!ret)
+			ret = err;
+		if (ret) {
+			/*
+			 * Put the channel back the way the engine resets it.
+			 * An unfiltered thermistor is noisier than the vendor
+			 * runs it, but it is a reading; a filter that never
+			 * settled is not.
+			 */
+			dev_warn(dev, "NTC%u filter did not settle (%d), bypassed\n",
+				 chan, ret);
+			regmap_write(meter->regmap,
+				     S2MPG15_METER_NTC_LPF_C0_0 + chan,
+				     S2MPG1415_NTC_LPF_BYPASS);
+		} else if (!s2mpg1415_ntc_read_code(meter, chan, &code)) {
+			dev_dbg(dev, "NTC%u filtered code %#05x = %d mC\n",
+				 chan, code, s2mpg1415_ntc_millic(code));
+		}
+	}
+
+	meter->ntc_ready = true;
+
+	dev_info(dev, "thermistor channels %#x enabled\n", meter->ntc_enabled);
+
 	return 0;
 }
 
@@ -818,6 +1010,11 @@ static int s2mpg1415_meter_probe(struct platform_device *pdev)
 				 (ext_en ? EXT_METER_EN : 0));
 	if (ret)
 		return dev_err_probe(dev, ret, "cannot enable the meter\n");
+
+	/* Only now that the engine is running is it safe to filter the NTCs. */
+	ret = s2mpg1415_meter_enable_ntc_lpf(dev, meter);
+	if (ret)
+		return ret;
 
 	debugfs_create_file(meter->chip->name, 0400, NULL, meter,
 			    &s2mpg1415_meter_fops);
