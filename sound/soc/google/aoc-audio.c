@@ -1217,6 +1217,12 @@ static const struct snd_pcm_hardware aoc_pcm_hw = {
 static void aoc_pcm_push(struct aoc_audio_stream *s);
 static void aoc_pcm_pull(struct aoc_audio_stream *s);
 
+/*
+ * Reporting a period is all this does.  On a nonatomic PCM
+ * snd_pcm_period_elapsed() takes the mutex an application holds across its
+ * write, so this can be kept waiting for as long as a write takes -- which is
+ * why it must not be what moves the data.  See aoc_pcm_tick().
+ */
 static void aoc_pcm_period_work(struct work_struct *w)
 {
 	struct aoc_audio_stream *s = container_of(w, struct aoc_audio_stream,
@@ -1225,11 +1231,6 @@ static void aoc_pcm_period_work(struct work_struct *w)
 	if (!READ_ONCE(s->running))
 		return;
 
-	/* move the data first: top the playback ring up, or drain the capture ring */
-	if (s->playback)
-		aoc_pcm_push(s);
-	else
-		aoc_pcm_pull(s);
 	snd_pcm_period_elapsed(s->substream);
 }
 
@@ -1240,18 +1241,29 @@ static enum hrtimer_restart aoc_pcm_tick(struct hrtimer *t)
 
 	hrtimer_forward_now(t, ns_to_ktime(s->tick_ns));
 
+	if (!READ_ONCE(s->running))
+		return HRTIMER_RESTART;
+
 	/*
-	 * Queue unconditionally.  Waiting for the AOC's byte counter to move
-	 * before topping the ring up cannot work: once the ring has drained
-	 * the counter stops, so no work is queued, so nothing is pushed, so
-	 * the counter never moves again.  The stall sustains itself, and
-	 * because the AOC's renderer waits for data rather than underrunning,
-	 * it comes out as playback that runs slow instead of as a gap.
+	 * Move the data from here, not from the work.  aoc_service_write() only
+	 * copies into the ring and rings a doorbell, so it is safe under the
+	 * ring lock this takes, and keeping it here is what makes the refill
+	 * punctual: the work can be held off for as long as an application's
+	 * write holds the PCM mutex, and a refill behind that lock starves the
+	 * AOC.  Its renderer waits for data rather than underrunning, so a
+	 * starved ring comes out as playback that runs slow rather than as a
+	 * gap -- measured at 72% of nominal with a 21 ms period, and exact only
+	 * once the period grew past how long the work could be delayed.
 	 *
-	 * The work is idempotent and the workqueue coalesces it, so queueing
-	 * every tick costs nothing when there is nothing to do.  The link is
-	 * nonatomic, so the core cannot be entered from the timer itself.
+	 * Report the period from the work, which is the only part that has to
+	 * enter the core.  Dropping one of those to coalescing costs an
+	 * application a late wakeup; dropping a refill costs it the stream.
 	 */
+	if (s->playback)
+		aoc_pcm_push(s);
+	else
+		aoc_pcm_pull(s);
+
 	queue_work(system_highpri_wq, &s->period_work);
 
 	return HRTIMER_RESTART;
