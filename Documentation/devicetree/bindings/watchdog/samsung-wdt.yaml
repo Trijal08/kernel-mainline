@@ -19,6 +19,7 @@ properties:
     oneOf:
       - enum:
           - google,gs101-wdt                      # for Google gs101
+          - google,zuma-wdt                      # for Google zuma, zumapro
           - samsung,s3c6410-wdt                   # for S3C6410, S5PV210 and Exynos4
           - samsung,exynos5250-wdt                # for Exynos5250
           - samsung,exynos5420-wdt                # for Exynos5420
@@ -75,6 +76,7 @@ allOf:
           contains:
             enum:
               - google,gs101-wdt
+              - google,zuma-wdt
               - samsung,exynos850-wdt
               - samsung,exynosautov9-wdt
               - samsung,exynosautov920-wdt
