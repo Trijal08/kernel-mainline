@@ -1982,6 +1982,45 @@ static struct snd_soc_dai_link aoc_dai_links[] = {
 	},
 };
 
+/*
+ * Refuse a card whose links did not all bind. The DPCM open path reaches the
+ * card lock through dai->component->card without checking it, so a link whose
+ * component never bound panics the machine the first time anything opens the
+ * PCM rather than failing the open. Better to have no card at all.
+ */
+static int aoc_card_late_probe(struct snd_soc_card *card)
+{
+	struct snd_soc_pcm_runtime *rtd;
+	struct snd_soc_dai *dai;
+	int i, ret = 0;
+
+	for_each_card_rtds(card, rtd) {
+		bool unbound = false;
+
+		/*
+		 * A dummy DAI's component is never bound to the card: the core
+		 * returns early for it before taking that reference. Its NULL
+		 * card is not evidence of anything, so skip it.
+		 */
+		for_each_rtd_cpu_dais(rtd, i, dai)
+			if (!snd_soc_dai_is_dummy(dai) &&
+			    (!dai->component || !dai->component->card))
+				unbound = true;
+		for_each_rtd_codec_dais(rtd, i, dai)
+			if (!snd_soc_dai_is_dummy(dai) &&
+			    (!dai->component || !dai->component->card))
+				unbound = true;
+
+		if (unbound) {
+			dev_err(card->dev, "%s: bound to no card\n",
+				rtd->dai_link->name);
+			ret = -ENODEV;
+		}
+	}
+
+	return ret;
+}
+
 static int aoc_audio_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -2076,6 +2115,7 @@ static int aoc_audio_probe(struct platform_device *pdev)
 	aud->card.num_dapm_routes = ARRAY_SIZE(aoc_dapm_routes);
 	aud->card.controls = aoc_controls;
 	aud->card.num_controls = ARRAY_SIZE(aoc_controls);
+	aud->card.late_probe = aoc_card_late_probe;
 
 	ret = devm_snd_soc_register_card(dev, &aud->card);
 	if (ret) {
