@@ -1848,6 +1848,15 @@ static struct snd_soc_dai_driver aoc_dais[] = {
 			.rates = SNDRV_PCM_RATE_44100 | SNDRV_PCM_RATE_48000,
 			.formats = SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S32_LE,
 		},
+	},
+	{
+		/*
+		 * Capture's own DAI.  One DAI cannot serve two links: it holds a
+		 * single widget per direction and a single runtime's worth of
+		 * state, so naming it from both the playback and the capture
+		 * link has the second bind overwrite the first.
+		 */
+		.name = "aoc-fe-cap",
 		.capture = {
 			.stream_name = "AOC Capture",
 			.channels_min = 1,
@@ -1950,7 +1959,7 @@ static const struct snd_soc_ops aoc_tdm0_ops = {
 };
 
 static struct snd_soc_dai_link_component aoc_fe_cpu = { .dai_name = "aoc-fe" };
-static struct snd_soc_dai_link_component aoc_cap_cpu = { .dai_name = "aoc-fe" };
+static struct snd_soc_dai_link_component aoc_cap_cpu = { .dai_name = "aoc-fe-cap" };
 static struct snd_soc_dai_link_component aoc_voice_cpu = { .dai_name = "aoc-voice" };
 static struct snd_soc_dai_link_component aoc_be_cpu = { .dai_name = "aoc-tdm0" };
 static struct snd_soc_dai_link_component aoc_platform;
