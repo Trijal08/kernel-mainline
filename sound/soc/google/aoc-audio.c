@@ -1213,19 +1213,7 @@ static const struct snd_pcm_hardware aoc_pcm_hw = {
 	.buffer_bytes_max = AOC_PCM_BUFFER_BYTES,
 	.period_bytes_min = 256,
 	.period_bytes_max = 65536,
-	/*
-	 * Two periods leaves a client one period of slack between being told a
-	 * period elapsed and having to have written the next one.  Nothing here
-	 * is interrupt driven -- the report comes from a timer, by way of a
-	 * workqueue, because a nonatomic PCM cannot be completed from either --
-	 * so that slack is what absorbs every delay in the chain, and one
-	 * period of it is not enough: playback skipped under load for want of
-	 * it.  Ask for four, which costs latency no one can hear on a media
-	 * stream and is still a small fraction of buffer_bytes_max.  A call
-	 * does not come through here at all; it is a codec-to-codec link the
-	 * AOC drives itself.
-	 */
-	.periods_min = 4,
+	.periods_min = 2,
 	.periods_max = 64,
 };
 
