@@ -212,7 +212,8 @@ static struct ieee80211_channel __wl_5ghz_channels[] = {
 	CHAN5G(60), CHAN5G(64), CHAN5G(100), CHAN5G(104), CHAN5G(108),
 	CHAN5G(112), CHAN5G(116), CHAN5G(120), CHAN5G(124), CHAN5G(128),
 	CHAN5G(132), CHAN5G(136), CHAN5G(140), CHAN5G(144), CHAN5G(149),
-	CHAN5G(153), CHAN5G(157), CHAN5G(161), CHAN5G(165)
+	CHAN5G(153), CHAN5G(157), CHAN5G(161), CHAN5G(165), CHAN5G(169),
+	CHAN5G(173), CHAN5G(177)
 };
 
 static struct ieee80211_channel __wl_6ghz_channels[] = {
@@ -6183,6 +6184,9 @@ static int brcmf_cfg80211_get_channel(struct wiphy *wiphy,
 	case BRCMU_CHAN_BW_160:
 		width = NL80211_CHAN_WIDTH_160;
 		break;
+	case BRCMU_CHAN_BW_320:
+		width = NL80211_CHAN_WIDTH_320;
+		break;
 	}
 
 	freq = ieee80211_channel_to_frequency(ch.control_ch_num, band);
@@ -7642,6 +7646,9 @@ static int brcmf_construct_chaninfo(struct brcmf_cfg80211_info *cfg,
 		 * HT40 upper, HT40 lower, and VHT80.
 		 */
 		switch (ch.bw) {
+		case BRCMU_CHAN_BW_320:
+			channel->flags &= ~IEEE80211_CHAN_NO_320MHZ;
+			break;
 		case BRCMU_CHAN_BW_160:
 			channel->flags &= ~IEEE80211_CHAN_NO_160MHZ;
 			break;
@@ -7662,7 +7669,8 @@ static int brcmf_construct_chaninfo(struct brcmf_cfg80211_info *cfg,
 			 */
 			channel->flags = IEEE80211_CHAN_NO_HT40 |
 					 IEEE80211_CHAN_NO_80MHZ |
-					 IEEE80211_CHAN_NO_160MHZ;
+					 IEEE80211_CHAN_NO_160MHZ |
+					 IEEE80211_CHAN_NO_320MHZ;
 			ch.bw = BRCMU_CHAN_BW_20;
 			cfg->d11inf.encchspec(&ch);
 			chaninfo = ch.chspec;
