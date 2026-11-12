@@ -185,6 +185,9 @@ struct s2mpg1415_meter {
 	/* Registered thermistor channels, and which of them are converting. */
 	struct s2mpg1415_ntc *ntc[S2MPG1415_NTC_CHANNELS];
 	unsigned int ntc_enabled;
+	/* Stall detection, under @lock. */
+	u16 ntc_code[S2MPG1415_NTC_CHANNELS];
+	unsigned long ntc_changed;
 };
 
 /*
@@ -217,6 +220,12 @@ struct s2mpg1415_meter {
 #define S2MPG1415_NTC_SETTLE_MAX_US	10000
 #define S2MPG1415_NTC_READY_MS		50
 #define S2MPG1415_NTC_READY_TIMEOUT_MS	1000
+
+/* The engine has been seen to stop converting; 0 disables the restart. */
+static unsigned int ntc_stall_s = 600;
+module_param(ntc_stall_s, uint, 0644);
+MODULE_PARM_DESC(ntc_stall_s,
+		 "Restart the meter after this many seconds without a new NTC code");
 
 /*
  * Treat a channel's filter as running once its output agrees with the
@@ -399,11 +408,109 @@ static int s2mpg1415_ntc_settled(struct s2mpg1415_meter *meter,
 	return 0;
 }
 
+static int s2mpg1415_meter_enable_ntc_lpf(struct device *dev,
+					  struct s2mpg1415_meter *meter);
+
+/*
+ * Reset the meter engine, enable the thermistor channels with their filters
+ * bypassed and wait for each to convert. The sequence is the vendor's,
+ * including putting the power meter back. Called with @lock held.
+ */
+static int s2mpg1415_ntc_restart(struct device *dev,
+				 struct s2mpg1415_meter *meter)
+{
+	unsigned int chan;
+	int ret;
+
+	for (chan = 0; chan < S2MPG1415_NTC_CHANNELS; chan++) {
+		ret = regmap_write(meter->regmap,
+				   S2MPG15_METER_NTC_LPF_C0_0 + chan,
+				   S2MPG1415_NTC_LPF_BYPASS);
+		if (ret)
+			return ret;
+	}
+	meter->ntc_changed = jiffies;
+
+	usleep_range(S2MPG1415_NTC_SETTLE_US, S2MPG1415_NTC_SETTLE_MAX_US);
+	ret = regmap_write(meter->regmap, S2MPG15_METER_CTRL3, 0);
+	if (ret)
+		return ret;
+
+	usleep_range(S2MPG1415_NTC_SETTLE_US, S2MPG1415_NTC_SETTLE_MAX_US);
+	ret = regmap_write(meter->regmap, S2MPG15_METER_CTRL5,
+			   S2MPG1415_NTC_METER_RESET);
+	if (ret)
+		return ret;
+
+	usleep_range(S2MPG1415_NTC_SETTLE_US, S2MPG1415_NTC_SETTLE_MAX_US);
+	ret = regmap_write(meter->regmap, S2MPG15_METER_CTRL3,
+			   meter->ntc_enabled);
+	if (ret)
+		return ret;
+
+	ret = regmap_update_bits(meter->regmap, S2MPG14_METER_CTRL5,
+				 METER_MODE_HI, 0);
+	if (ret)
+		return ret;
+
+	ret = regmap_write_bits(meter->regmap, S2MPG14_METER_CTRL1,
+				METER_EN, METER_EN);
+	if (ret)
+		return ret;
+
+	/* First conversions land a few tens of milliseconds later. */
+	msleep(S2MPG1415_NTC_READY_MS);
+
+	/*
+	 * Wait for each channel to hold a real conversion, and keep what it
+	 * reads. The channels stay unfiltered here, as the vendor leaves them:
+	 * the filters go in once the meter is configured, which is the last
+	 * thing the probe does. See s2mpg1415_meter_enable_ntc_lpf().
+	 */
+	for (chan = 0; chan < S2MPG1415_NTC_CHANNELS; chan++) {
+		int err, millic;
+		u16 code;
+
+		if (!(meter->ntc_enabled & BIT(chan)))
+			continue;
+
+		ret = read_poll_timeout(s2mpg1415_ntc_read_code, err,
+					err != -EAGAIN,
+					S2MPG1415_NTC_READY_MS * USEC_PER_MSEC,
+					S2MPG1415_NTC_READY_TIMEOUT_MS * USEC_PER_MSEC,
+					false, meter, chan, &code);
+		if (!ret)
+			ret = err;
+		if (ret) {
+			dev_warn(dev, "NTC%u never converted: %d\n", chan, ret);
+			continue;
+		}
+
+		/*
+		 * What the channel reads with its filter still bypassed. This
+		 * is the reading the zone would have got before the filter was
+		 * programmed, so it is also the baseline the first filtered
+		 * sample has to be plausible against.
+		 */
+		millic = s2mpg1415_ntc_millic(code);
+		meter->ntc[chan]->last_millic = millic;
+		meter->ntc[chan]->have_last = true;
+		dev_dbg(dev, "NTC%u unfiltered code %#05x = %d mC\n",
+			 chan, code, millic);
+	}
+
+	return 0;
+}
+
 static int s2mpg1415_ntc_get_temp(struct thermal_zone_device *tz, int *temp)
 {
 	struct s2mpg1415_ntc *ntc = thermal_zone_device_priv(tz);
+	struct s2mpg1415_meter *meter = ntc->meter;
+	unsigned int stall_s = READ_ONCE(ntc_stall_s);
 	u16 code;
 	int ret;
+
+	guard(mutex)(&meter->lock);
 
 	/*
 	 * The zones are registered before the channels are enabled, and
@@ -412,12 +519,27 @@ static int s2mpg1415_ntc_get_temp(struct thermal_zone_device *tz, int *temp)
 	 * is past the critical trip -- enough to shut the machine down during
 	 * probe.  Report nothing until the engine is known to be converting.
 	 */
-	if (!ntc->meter->ntc_ready)
+	if (!meter->ntc_ready)
 		return -EAGAIN;
 
-	ret = s2mpg1415_ntc_read_code(ntc->meter, ntc->chan, &code);
+	ret = s2mpg1415_ntc_read_code(meter, ntc->chan, &code);
 	if (ret)
 		return ret;
+
+	if (code != meter->ntc_code[ntc->chan]) {
+		meter->ntc_code[ntc->chan] = code;
+		meter->ntc_changed = jiffies;
+	} else if (stall_s &&
+		   time_after(jiffies, meter->ntc_changed + stall_s * HZ)) {
+		struct device *dev = regmap_get_device(meter->regmap);
+
+		dev_warn(dev, "no new NTC code for %u s, restarting the meter\n",
+			 stall_s);
+		ret = s2mpg1415_ntc_restart(dev, meter);
+		if (!ret)
+			ret = s2mpg1415_meter_enable_ntc_lpf(dev, meter);
+		return ret ?: -EAGAIN;
+	}
 
 	*temp = s2mpg1415_ntc_millic(code);
 
@@ -668,77 +790,14 @@ static int s2mpg1415_meter_init_ntc(struct device *dev,
 	if (!enabled)
 		return 0;
 
-	/* The filter has to be out of the way across the reset. */
-	for (chan = 0; chan < S2MPG1415_NTC_CHANNELS; chan++) {
-		ret = regmap_write(meter->regmap,
-				   S2MPG15_METER_NTC_LPF_C0_0 + chan,
-				   S2MPG1415_NTC_LPF_BYPASS);
-		if (ret)
-			return dev_err_probe(dev, ret,
-					     "cannot bypass NTC%u filter\n",
-					     chan);
-	}
-
-	usleep_range(S2MPG1415_NTC_SETTLE_US, S2MPG1415_NTC_SETTLE_MAX_US);
-	ret = regmap_write(meter->regmap, S2MPG15_METER_CTRL3, 0);
-	if (!ret) {
-		usleep_range(S2MPG1415_NTC_SETTLE_US,
-			     S2MPG1415_NTC_SETTLE_MAX_US);
-		ret = regmap_write(meter->regmap, S2MPG15_METER_CTRL5,
-				   S2MPG1415_NTC_METER_RESET);
-	}
-	if (!ret) {
-		usleep_range(S2MPG1415_NTC_SETTLE_US,
-			     S2MPG1415_NTC_SETTLE_MAX_US);
-		ret = regmap_write(meter->regmap, S2MPG15_METER_CTRL3, enabled);
+	scoped_guard(mutex, &meter->lock) {
+		meter->ntc_enabled = enabled;
+		ret = s2mpg1415_ntc_restart(dev, meter);
 	}
 	if (ret)
 		return dev_err_probe(dev, ret,
 				     "cannot enable NTC channels %#x\n",
 				     enabled);
-
-	/* First conversions land a few tens of milliseconds later. */
-	msleep(S2MPG1415_NTC_READY_MS);
-
-	/*
-	 * Wait for each channel to hold a real conversion, and keep what it
-	 * reads. The channels stay unfiltered here, as the vendor leaves them:
-	 * the filters go in once the meter is configured, which is the last
-	 * thing the probe does. See s2mpg1415_meter_enable_ntc_lpf().
-	 */
-	for (chan = 0; chan < S2MPG1415_NTC_CHANNELS; chan++) {
-		int err, millic;
-		u16 code;
-
-		if (!(enabled & BIT(chan)))
-			continue;
-
-		ret = read_poll_timeout(s2mpg1415_ntc_read_code, err,
-					err != -EAGAIN,
-					S2MPG1415_NTC_READY_MS * USEC_PER_MSEC,
-					S2MPG1415_NTC_READY_TIMEOUT_MS * USEC_PER_MSEC,
-					false, meter, chan, &code);
-		if (!ret)
-			ret = err;
-		if (ret) {
-			dev_warn(dev, "NTC%u never converted: %d\n", chan, ret);
-			continue;
-		}
-
-		/*
-		 * What the channel reads with its filter still bypassed. This
-		 * is the reading the zone would have got before the filter was
-		 * programmed, so it is also the baseline the first filtered
-		 * sample has to be plausible against.
-		 */
-		millic = s2mpg1415_ntc_millic(code);
-		meter->ntc[chan]->last_millic = millic;
-		meter->ntc[chan]->have_last = true;
-		dev_dbg(dev, "NTC%u unfiltered code %#05x = %d mC\n",
-			 chan, code, millic);
-	}
-
-	meter->ntc_enabled = enabled;
 
 	return 0;
 }
@@ -908,6 +967,11 @@ static int s2mpg1415_meter_show(struct seq_file *s, void *unused)
 }
 DEFINE_SHOW_ATTRIBUTE(s2mpg1415_meter);
 
+static void s2mpg1415_meter_debugfs_remove(void *dentry)
+{
+	debugfs_remove(dentry);
+}
+
 static int s2mpg1415_meter_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -1012,14 +1076,15 @@ static int s2mpg1415_meter_probe(struct platform_device *pdev)
 		return dev_err_probe(dev, ret, "cannot enable the meter\n");
 
 	/* Only now that the engine is running is it safe to filter the NTCs. */
-	ret = s2mpg1415_meter_enable_ntc_lpf(dev, meter);
+	scoped_guard(mutex, &meter->lock)
+		ret = s2mpg1415_meter_enable_ntc_lpf(dev, meter);
 	if (ret)
 		return ret;
 
-	debugfs_create_file(meter->chip->name, 0400, NULL, meter,
-			    &s2mpg1415_meter_fops);
-
-	return 0;
+	return devm_add_action_or_reset(dev, s2mpg1415_meter_debugfs_remove,
+					debugfs_create_file(meter->chip->name,
+							    0400, NULL, meter,
+							    &s2mpg1415_meter_fops));
 }
 
 static const struct platform_device_id s2mpg1415_meter_id[] = {
