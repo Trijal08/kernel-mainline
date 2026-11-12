@@ -1660,6 +1660,17 @@ enum {
 	BRCMF_HE_CMD_DEFCAP = 18,
 };
 
+/* EHT top level command IDs */
+enum {
+	BRCMF_EHT_CMD_ENABLE = 0,
+	BRCMF_EHT_CMD_FEATURES = 2,
+	BRCMF_EHT_CMD_SIGMCS = 3,
+	BRCMF_EHT_CMD_NUMLTF = 4,
+	BRCMF_EHT_CMD_NONHT_PUNC_PATT = 5,
+	BRCMF_EHT_CMD_PUNC_PATT = 6,
+	BRCMF_EHT_CMD_TESTBED_MODE = 7,
+};
+
 #define BRCMF_HE_VER_1 1
 
 struct brcmf_he_bsscolor {

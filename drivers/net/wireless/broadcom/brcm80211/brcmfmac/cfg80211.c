@@ -8059,6 +8059,73 @@ static void brcmf_update_he_cap(struct ieee80211_supported_band *band,
 	band->iftype_data = data;
 }
 
+/* Does the firmware's own channel list offer 320 MHz anywhere in this band?
+ * brcmf_construct_chaninfo() clears the flag per channel from the chanspecs the
+ * firmware reports, so this asks the hardware rather than assuming.
+ */
+static bool brcmf_band_has_320mhz(struct ieee80211_supported_band *band)
+{
+	int i;
+
+	for (i = 0; i < band->n_channels; i++)
+		if (!(band->channels[i].flags & (IEEE80211_CHAN_DISABLED |
+						 IEEE80211_CHAN_NO_320MHZ)))
+			return true;
+
+	return false;
+}
+
+static void brcmf_update_eht_cap(struct ieee80211_supported_band *band,
+				 struct ieee80211_sband_iftype_data *data,
+				 u32 bw_cap[4], u32 nss)
+{
+	struct ieee80211_sta_eht_cap *eht_cap = &data->eht_cap;
+	struct ieee80211_eht_cap_elem_fixed *elem = &eht_cap->eht_cap_elem;
+	struct ieee80211_eht_mcs_nss_supp *mcs = &eht_cap->eht_mcs_nss_supp;
+	u8 rx_tx_nss;
+
+	/* EHT is defined on top of HE: an EHT element without HE caps beside
+	 * it is not a valid advertisement, and brcmf_update_he_cap() is what
+	 * claims the iftype entry both of them share.
+	 */
+	if (!data->he_cap.has_he)
+		return;
+
+	eht_cap->has_eht = true;
+
+	elem->mac_cap_info[0] =
+		IEEE80211_EHT_MAC_CAP0_OM_CONTROL |
+		FIELD_PREP(IEEE80211_EHT_MAC_CAP0_MAX_MPDU_LEN_MASK,
+			   IEEE80211_EHT_MAC_CAP0_MAX_MPDU_LEN_11454);
+
+	elem->phy_cap_info[0] = IEEE80211_EHT_PHY_CAP0_242_TONE_RU_GT20MHZ |
+				IEEE80211_EHT_PHY_CAP0_NDP_4_EHT_LFT_32_GI |
+				IEEE80211_EHT_PHY_CAP0_SU_BEAMFORMEE;
+
+	/* 320 MHz is a 6 GHz-only width. */
+	if (band->band == NL80211_BAND_6GHZ && brcmf_band_has_320mhz(band))
+		elem->phy_cap_info[0] |= IEEE80211_EHT_PHY_CAP0_320MHZ_IN_6GHZ;
+
+	elem->phy_cap_info[5] =
+		FIELD_PREP(IEEE80211_EHT_PHY_CAP5_COMMON_NOMINAL_PKT_PAD_MASK,
+			   IEEE80211_EHT_PHY_CAP5_COMMON_NOMINAL_PKT_PAD_20US);
+
+	/* Each MCS group is one octet: receive streams low, transmit high, so
+	 * a stream count has to fit a nibble.
+	 */
+	nss = clamp_t(u32, nss, 1, 8);
+	rx_tx_nss = nss | (nss << 4);
+
+	memset(mcs->bw._80.rx_tx_max_nss, rx_tx_nss,
+	       sizeof(mcs->bw._80.rx_tx_max_nss));
+	if (bw_cap[band->band] & WLC_BW_160MHZ_BIT)
+		memset(mcs->bw._160.rx_tx_max_nss, rx_tx_nss,
+		       sizeof(mcs->bw._160.rx_tx_max_nss));
+	if (elem->phy_cap_info[0] & IEEE80211_EHT_PHY_CAP0_320MHZ_IN_6GHZ)
+		memset(mcs->bw._320.rx_tx_max_nss, rx_tx_nss,
+		       sizeof(mcs->bw._320.rx_tx_max_nss));
+}
+
 static int brcmf_setup_wiphybands(struct brcmf_cfg80211_info *cfg)
 {
 	struct brcmf_pub *drvr = cfg->pub;
@@ -8079,7 +8146,8 @@ static int brcmf_setup_wiphybands(struct brcmf_cfg80211_info *cfg)
 	u32 rxstreams = 0;
 	u32 txbf_bfe_cap = 0;
 	u32 txbf_bfr_cap = 0;
-	u8 he_enable;
+	u8 he_enable = 0;
+	u8 eht_enable = 0;
 	struct brcmf_he_defcap he_cap;
 	u32 ldpc_cap = 0;
 	u32 stbc_rx = 0;
@@ -8098,6 +8166,13 @@ static int brcmf_setup_wiphybands(struct brcmf_cfg80211_info *cfg)
 				   "default HE mac cap\n");
 		brcmf_dbg_hex_dump(BRCMF_INFO_ON(), he_cap.phy_cap, 11,
 				   "default HE phy cap\n");
+
+		/* EHT sits on top of HE, so only ask once HE is up. A chip
+		 * without the "eht" iovar just fails the get and stays off.
+		 */
+		if (brcmf_fil_xtlv_int8_get(ifp, "eht", BRCMF_EHT_CMD_ENABLE,
+					    &eht_enable))
+			eht_enable = 0;
 	}
 	err = brcmf_fil_iovar_int_get(ifp, "nmode", &nmode);
 	if (err) {
@@ -8105,10 +8180,10 @@ static int brcmf_setup_wiphybands(struct brcmf_cfg80211_info *cfg)
 	}
 	brcmf_get_bwcap(ifp, bw_cap, he_enable != 0);
 	brcmf_dbg(INFO,
-		  "nmode=%d, vhtmode=%d, bw_cap=(%d, %d, %d), he_enable=%d\n",
+		  "nmode=%d, vhtmode=%d, bw_cap=(%d, %d, %d), he_enable=%d, eht_enable=%d\n",
 		  nmode, vhtmode, bw_cap[NL80211_BAND_2GHZ],
 		  bw_cap[NL80211_BAND_5GHZ], bw_cap[NL80211_BAND_6GHZ],
-		  he_enable);
+		  he_enable, eht_enable);
 
 	err = brcmf_fil_iovar_int_get(ifp, "rxchain", &rxchain);
 	if (err) {
@@ -8172,6 +8247,9 @@ static int brcmf_setup_wiphybands(struct brcmf_cfg80211_info *cfg)
 					     ldpc_cap, stbc_rx, stbc_tx);
 		if (he_enable)
 			brcmf_update_he_cap(band, &sdata[band->band]);
+		if (eht_enable)
+			brcmf_update_eht_cap(band, &sdata[band->band], bw_cap,
+					     nrxchain);
 	}
 
 	return 0;
