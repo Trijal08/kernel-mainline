@@ -1297,7 +1297,15 @@ static int aoc_pcm_open(struct snd_soc_component *comp,
 	s->tick_ns = AOC_PCM_TICK_NS;
 	s->dev = comp->dev;
 	spin_lock_init(&s->ring_lock);
-	hrtimer_setup(&s->tick, aoc_pcm_tick, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+	/*
+	 * A hard timer, so that it runs from the interrupt and not from the
+	 * timer softirq: a soft one is allowed to be deferred and batched with
+	 * whatever else is due, which on an otherwise idle phone means waiting
+	 * for the next convenient tick.  This one carries the ring refill and
+	 * has a deadline of one period, so it cannot be moved.
+	 */
+	hrtimer_setup(&s->tick, aoc_pcm_tick, CLOCK_MONOTONIC,
+		      HRTIMER_MODE_REL_HARD);
 	INIT_WORK(&s->period_work, aoc_pcm_period_work);
 	s->source = playback ? AOC_PLAYBACK_SOURCE : AOC_CAPTURE_SOURCE;
 	substream->runtime->private_data = s;
@@ -1622,7 +1630,7 @@ static int aoc_pcm_trigger(struct snd_soc_component *comp,
 	if (on) {
 		WRITE_ONCE(s->running, true);
 		hrtimer_start(&s->tick, ns_to_ktime(s->tick_ns),
-			      HRTIMER_MODE_REL);
+			      HRTIMER_MODE_REL_HARD);
 	} else {
 		WRITE_ONCE(s->running, false);
 		hrtimer_try_to_cancel(&s->tick);
