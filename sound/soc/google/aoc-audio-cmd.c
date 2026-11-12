@@ -23,6 +23,12 @@
 /* Switching the DSP's mode reloads blocks, well past that reply window. */
 #define AOC_CMD_DSP_MODE_TIMEOUT_MS	700
 
+/*
+ * Replies are read only to drain the channel -- nothing here inspects one --
+ * so this is just a bound on what a reply can be, not a described layout.
+ */
+#define AOC_CMD_RSP_MAX		64
+
 /* The AOC replied on the control channel. */
 void aoc_audio_ctrl_isr(struct aoc_service *svc, void *priv)
 {
@@ -41,7 +47,7 @@ static int aoc_audio_cmd_to(struct aoc_audio *aud, struct aoc_service *ctrl,
 			    void *rsp, size_t rsp_len, unsigned int timeout_ms)
 {
 	struct device *dev = aud->card.dev;
-	char drain[64];
+	char drain[AOC_CMD_RSP_MAX];
 	unsigned int i;
 	int ret;
 
@@ -170,7 +176,7 @@ static int aoc_voice_replay(struct aoc_audio *aud,
 			struct aoc_cmd_hdr hdr;
 			u8 pay[25];
 		} __packed cmd = { };
-		char rsp[64];
+		char rsp[AOC_CMD_RSP_MAX];
 		size_t len = sizeof(cmd.hdr) + tbl[i].len;
 
 		cmd.hdr.type = AOC_CMD_TYPE_CMD;
@@ -195,7 +201,7 @@ static int aoc_voice_replay(struct aoc_audio *aud,
 int aoc_audio_source(struct aoc_audio *aud, u8 source, bool on)
 {
 	struct cmd_audio_output_source cmd = { };
-	char rsp[64];
+	char rsp[AOC_CMD_RSP_MAX];
 
 	cmd.hdr.type = AOC_CMD_TYPE_CMD;
 	cmd.hdr.len = cpu_to_le16(sizeof(cmd));
@@ -213,7 +219,7 @@ int aoc_audio_ep_setup(struct aoc_audio *aud, u8 source,
 {
 	struct cmd_audio_output_ep_setup cmd = { };
 	struct cmd_audio_output_ep_setup2 cmd2 = { };
-	char rsp[64];
+	char rsp[AOC_CMD_RSP_MAX];
 	int ret;
 
 	cmd.hdr.type = AOC_CMD_TYPE_CMD;
@@ -252,7 +258,7 @@ int aoc_voice_mic_set(struct aoc_audio *aud, bool on)
 {
 	struct cmd_audio_input_modem_input_start2 start = { };
 	struct aoc_cmd_hdr stop = { };
-	char rsp[64];
+	char rsp[AOC_CMD_RSP_MAX];
 
 	if (!aud->ctrl_in)
 		return -ENODEV;
@@ -290,7 +296,7 @@ struct cmd_audio_output_dsp_mode {
 int aoc_audio_dsp_mode(struct aoc_audio *aud, u8 mode)
 {
 	struct cmd_audio_output_dsp_mode cmd = { };
-	char rsp[64];
+	char rsp[AOC_CMD_RSP_MAX];
 
 	cmd.hdr.type = AOC_CMD_TYPE_CMD;
 	cmd.hdr.len = cpu_to_le16(sizeof(cmd));
@@ -307,7 +313,7 @@ int aoc_audio_dsp_mode(struct aoc_audio *aud, u8 mode)
 int aoc_audio_modem(struct aoc_audio *aud, bool on)
 {
 	struct aoc_cmd_hdr cmd = { };
-	char rsp[64];
+	char rsp[AOC_CMD_RSP_MAX];
 
 	cmd.type = AOC_CMD_TYPE_CMD;
 	cmd.len = cpu_to_le16(sizeof(cmd));
@@ -320,7 +326,7 @@ int aoc_audio_modem(struct aoc_audio *aud, bool on)
 int aoc_audio_bind(struct aoc_audio *aud, u8 src, u8 dst, bool on)
 {
 	struct cmd_audio_output_bind cmd = { };
-	char rsp[64];
+	char rsp[AOC_CMD_RSP_MAX];
 
 	cmd.hdr.type = AOC_CMD_TYPE_CMD;
 	cmd.hdr.len = cpu_to_le16(sizeof(cmd));
@@ -336,7 +342,7 @@ int aoc_audio_set_param(struct aoc_audio *aud, u8 block, u8 component,
 			u32 key, u32 val)
 {
 	struct cmd_audio_output_set_param cmd = { };
-	char rsp[64];
+	char rsp[AOC_CMD_RSP_MAX];
 
 	cmd.hdr.type = AOC_CMD_TYPE_CMD;
 	cmd.hdr.len = cpu_to_le16(sizeof(cmd));
@@ -352,7 +358,7 @@ int aoc_audio_set_param(struct aoc_audio *aud, u8 block, u8 component,
 int aoc_audio_out_volume(struct aoc_audio *aud, u8 src, u8 dst, u32 vol)
 {
 	struct cmd_audio_output_set_param cmd = { };
-	char rsp[64];
+	char rsp[AOC_CMD_RSP_MAX];
 
 	cmd.hdr.type = AOC_CMD_TYPE_CMD;
 	cmd.hdr.len = cpu_to_le16(sizeof(cmd));
@@ -372,7 +378,7 @@ int aoc_audio_mic_gain(struct aoc_audio *aud)
 {
 	struct cmd_audio_input_hw_gain hw = { };
 	struct cmd_audio_input_set_param soft = { };
-	char rsp[64];
+	char rsp[AOC_CMD_RSP_MAX];
 	int ret;
 
 	if (!aud->ctrl_in)
@@ -406,7 +412,7 @@ int aoc_audio_mic_setup(struct aoc_audio *aud, u8 channel,
 {
 	struct cmd_audio_input_mic_params cmd = { };
 	struct cmd_audio_input_mic_params2 cmd2 = { };
-	char rsp[64];
+	char rsp[AOC_CMD_RSP_MAX];
 	unsigned int i;
 	int ret;
 
@@ -449,7 +455,7 @@ int aoc_audio_mic(struct aoc_audio *aud, bool on)
 {
 	struct cmd_audio_input_start cmd = { };
 	struct aoc_cmd_hdr data = { };
-	char rsp[64];
+	char rsp[AOC_CMD_RSP_MAX];
 	int ret;
 
 	cmd.hdr.type = AOC_CMD_TYPE_CMD;
