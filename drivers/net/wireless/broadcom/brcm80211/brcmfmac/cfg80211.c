@@ -7132,7 +7132,11 @@ static void *brcmf_mlo_collect_links(struct brcmf_cfg80211_info *cfg,
 			  le16_to_cpu(st->version));
 		goto single_link;
 	}
-	if (st->mode == BRCMF_MLO_MODE_NONE || st->num_links_operative < 2) {
+	/* Go by the link count alone. The firmware documents multi-link as
+	 * operative when mode is non-zero, but reports mode 255 with no links
+	 * on a plain association, so mode says nothing useful on its own.
+	 */
+	if (st->num_links_operative < 2) {
 		brcmf_dbg(CONN, "MLO not operative: mode %u, %u link(s)\n",
 			  st->mode, st->num_links_operative);
 		goto single_link;

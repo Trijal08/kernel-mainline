@@ -1689,8 +1689,6 @@ enum {
  */
 #define BRCMF_MLO_STATUS_VER_2		2
 
-/* mode is zero unless multi-link is operative on the interface */
-#define BRCMF_MLO_MODE_NONE		0
 
 /**
  * struct brcmf_mlo_link_peer_le - peer addresses on one link
