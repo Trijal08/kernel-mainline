@@ -1690,6 +1690,63 @@ enum {
 #define BRCMF_MLO_STATUS_VER_2		2
 
 
+#define BRCMF_MLO_CONFIG_VER_1		1
+
+/* mode of operation asked for in the config */
+#define BRCMF_MLO_MODE_AUTO		2
+#define BRCMF_MLO_MODE_INVALID		0xff
+
+/**
+ * struct brcmf_mlo_cap_le - reply to the MLO capability subcommand
+ *
+ * @version: structure version
+ * @length: length of the reply
+ * @max_mlo_links: most links the firmware will put in a multi-link association
+ * @max_str_links: most links it will run simultaneously
+ * @max_emlsr_links: most links it will run in eMLSR
+ * @cap_flags: capability bits
+ */
+struct brcmf_mlo_cap_le {
+	__le16 version;
+	__le16 length;
+	u8 max_mlo_links;
+	u8 max_str_links;
+	u8 max_emlsr_links;
+	u8 cap_flags;
+};
+
+/**
+ * struct brcmf_mlo_link_config_le - one link we are offering the firmware
+ *
+ * @link_addr: the address to use on this link
+ * @chanspec: channel to use, left unset for a station
+ */
+struct brcmf_mlo_link_config_le {
+	u8 link_addr[ETH_ALEN];
+	__le16 chanspec;
+};
+
+/**
+ * struct brcmf_mlo_config_le - multi-link configuration
+ *
+ * @version: structure version, see BRCMF_MLO_CONFIG_VER_1
+ * @length: length of this structure including @link_config
+ * @flags: preference flags, none of which are needed to ask for the default
+ * @num_links: entries in @link_config, zero to turn multi-link off
+ * @mode: see BRCMF_MLO_MODE_AUTO
+ * @mld_addr: the MLD address to associate with
+ * @link_config: an address per link the firmware may bring up
+ */
+struct brcmf_mlo_config_le {
+	__le16 version;
+	__le16 length;
+	__le32 flags;
+	u8 num_links;
+	u8 mode;
+	u8 mld_addr[ETH_ALEN];
+	struct brcmf_mlo_link_config_le link_config[];
+};
+
 /**
  * struct brcmf_mlo_link_peer_le - peer addresses on one link
  *

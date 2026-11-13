@@ -2220,6 +2220,72 @@ static void brcmf_set_join_pref(struct brcmf_if *ifp,
 		bphy_err(drvr, "Set join_pref error (%d)\n", err);
 }
 
+/*
+ * Offer the firmware a multi-link configuration, or withdraw it.
+ *
+ * Without one it associates on a single link whatever the AP offers, so this
+ * is what makes a multi-link association possible at all. What is handed over
+ * is an MLD address -- ours, the one the interface already uses -- and an
+ * address per link the firmware may bring up; it decides how many it actually
+ * uses from the AP it finds. The link addresses are derived from the MLD
+ * address the way the vendor driver derives them, by counting up the last
+ * octet, so they stay within the address the interface owns.
+ *
+ * Quiet about a firmware that has no multi-link: there is nothing wrong with
+ * that and the association that follows is an ordinary one.
+ */
+static int brcmf_mlo_config(struct brcmf_cfg80211_info *cfg,
+			    struct brcmf_if *ifp, bool enable)
+{
+	struct brcmf_mlo_config_le *mlo;
+	u8 links = cfg->mlo_max_links;
+	size_t len;
+	int i, err;
+
+	if (!links)
+		return 0;
+
+	len = sizeof(*mlo) + links * sizeof(mlo->link_config[0]);
+	mlo = kzalloc(len, GFP_KERNEL);
+	if (!mlo)
+		return -ENOMEM;
+
+	mlo->version = cpu_to_le16(BRCMF_MLO_CONFIG_VER_1);
+	mlo->length = cpu_to_le16(len);
+
+	if (!enable) {
+		mlo->num_links = 0;
+		mlo->mode = BRCMF_MLO_MODE_INVALID;
+	} else {
+		mlo->num_links = links;
+		mlo->mode = BRCMF_MLO_MODE_AUTO;
+		memcpy(mlo->mld_addr, ifp->ndev->dev_addr, ETH_ALEN);
+
+		for (i = 0; i < links; i++) {
+			u8 *addr = mlo->link_config[i].link_addr;
+
+			memcpy(addr, mlo->mld_addr, ETH_ALEN);
+			/* one link shares the MLD address, the rest count up */
+			if (links > 1)
+				addr[ETH_ALEN - 1] =
+					(mlo->mld_addr[ETH_ALEN - 1] + i + 1) %
+					256;
+		}
+	}
+
+	err = brcmf_fil_xtlv_data_set(ifp, "mlo", BRCMF_MLO_CMD_CONFIG,
+				      mlo, len);
+	if (err)
+		brcmf_dbg(CONN, "MLO config (%s) failed: %d\n",
+			  enable ? "on" : "off", err);
+	else
+		brcmf_dbg(CONN, "MLO config: mode %u, %u link(s)\n",
+			  mlo->mode, mlo->num_links);
+
+	kfree(mlo);
+	return err;
+}
+
 static s32
 brcmf_cfg80211_connect(struct wiphy *wiphy, struct net_device *ndev,
 		       struct cfg80211_connect_params *params)
@@ -2284,6 +2350,11 @@ brcmf_cfg80211_connect(struct wiphy *wiphy, struct net_device *ndev,
 		brcmf_dbg(TRACE, "Applied Vndr IEs for Assoc request\n");
 
 	set_bit(BRCMF_VIF_STATUS_CONNECTING, &ifp->vif->sme_state);
+
+	/* has to be in place before the join, the firmware builds the
+	 * association from it
+	 */
+	brcmf_mlo_config(cfg, ifp, true);
 
 	if (chan) {
 		cfg->channel =
@@ -2446,6 +2517,8 @@ brcmf_cfg80211_disconnect(struct wiphy *wiphy, struct net_device *ndev,
 		bphy_err(drvr, "failed to clear APF packet filter: %d\n",
 			 apf_err);
 	cfg80211_disconnected(ndev, reason_code, NULL, 0, true, GFP_KERNEL);
+
+	brcmf_mlo_config(cfg, ifp, false);
 
 	memcpy(&scbval.ea, &profile->bssid, ETH_ALEN);
 	scbval.val = cpu_to_le32(reason_code);
@@ -8344,6 +8417,7 @@ static int brcmf_setup_wiphybands(struct brcmf_cfg80211_info *cfg)
 	u32 txbf_bfr_cap = 0;
 	u8 he_enable = 0;
 	u8 eht_enable = 0;
+	struct brcmf_mlo_cap_le mlo_cap;
 	struct brcmf_he_defcap he_cap;
 	u32 ldpc_cap = 0;
 	u32 stbc_rx = 0;
@@ -8369,6 +8443,15 @@ static int brcmf_setup_wiphybands(struct brcmf_cfg80211_info *cfg)
 		if (brcmf_fil_xtlv_int8_get(ifp, "eht", BRCMF_EHT_CMD_ENABLE,
 					    &eht_enable))
 			eht_enable = 0;
+
+		/* How many links the firmware will put in an association, and
+		 * so how many addresses it wants offered. Zero leaves
+		 * multi-link alone entirely.
+		 */
+		if (eht_enable &&
+		    !brcmf_fil_xtlv_data_get(ifp, "mlo", BRCMF_MLO_CMD_CAP,
+					     &mlo_cap, sizeof(mlo_cap)))
+			cfg->mlo_max_links = mlo_cap.max_mlo_links;
 	}
 	err = brcmf_fil_iovar_int_get(ifp, "nmode", &nmode);
 	if (err) {
@@ -8376,10 +8459,10 @@ static int brcmf_setup_wiphybands(struct brcmf_cfg80211_info *cfg)
 	}
 	brcmf_get_bwcap(ifp, bw_cap, he_enable != 0);
 	brcmf_dbg(INFO,
-		  "nmode=%d, vhtmode=%d, bw_cap=(%d, %d, %d), he_enable=%d, eht_enable=%d\n",
+		  "nmode=%d, vhtmode=%d, bw_cap=(%d, %d, %d), he_enable=%d, eht_enable=%d, mlo_links=%u\n",
 		  nmode, vhtmode, bw_cap[NL80211_BAND_2GHZ],
 		  bw_cap[NL80211_BAND_5GHZ], bw_cap[NL80211_BAND_6GHZ],
-		  he_enable, eht_enable);
+		  he_enable, eht_enable, cfg->mlo_max_links);
 
 	err = brcmf_fil_iovar_int_get(ifp, "rxchain", &rxchain);
 	if (err) {
