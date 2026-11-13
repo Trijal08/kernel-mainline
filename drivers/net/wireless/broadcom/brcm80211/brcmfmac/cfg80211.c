@@ -3306,6 +3306,14 @@ brcmf_cfg80211_get_station(struct wiphy *wiphy, struct wireless_dev *wdev,
 			sinfo->filled |= BIT_ULL(NL80211_STA_INFO_RX_BYTES);
 			sinfo->rx_bytes = le64_to_cpu(sta_info_le.rx_tot_bytes);
 		}
+		/* counted from version 5, where the retry statistics the
+		 * firmware keeps for a station begin
+		 */
+		if (struct_ver >= 5) {
+			sinfo->filled |= BIT_ULL(NL80211_STA_INFO_TX_RETRIES);
+			sinfo->tx_retries =
+				le32_to_cpu(sta_info_le.tx_pkts_retries);
+		}
 
 		for (i = 0; i < BRCMF_ANT_MAX; i++) {
 			if (sta_info_le.rssi[i] == 0 ||
@@ -3354,6 +3362,9 @@ brcmf_cfg80211_get_station(struct wiphy *wiphy, struct wireless_dev *wdev,
 			brcmf_convert_ratespec_to_rateinfo(
 				le32_to_cpu(sta_info_le.v7.rx_rspec),
 				&sinfo->rxrate);
+			sinfo->filled |= BIT_ULL(NL80211_STA_INFO_RX_DURATION);
+			sinfo->rx_duration =
+				le32_to_cpu(sta_info_le.v7.rx_dur_total);
 		} else {
 			/* We didn't get the fields we were expecting, fallback to nrate */
 			u32 nrate = 0;
