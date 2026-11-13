@@ -8461,6 +8461,10 @@ static void brcmf_update_eht_cap(struct ieee80211_supported_band *band,
 	struct ieee80211_sta_eht_cap *eht_cap = &data->eht_cap;
 	struct ieee80211_eht_cap_elem_fixed *elem = &eht_cap->eht_cap_elem;
 	struct ieee80211_eht_mcs_nss_supp *mcs = &eht_cap->eht_mcs_nss_supp;
+	const u8 he_widths =
+		IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_40MHZ_IN_2G |
+		IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_40MHZ_80MHZ_IN_5G |
+		IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_160MHZ_IN_5G;
 	u8 rx_tx_nss;
 
 	/* EHT is defined on top of HE: an EHT element without HE caps beside
@@ -8525,6 +8529,19 @@ static void brcmf_update_eht_cap(struct ieee80211_supported_band *band,
 	 */
 	nss = clamp_t(u32, nss, 1, 8);
 	rx_tx_nss = nss | (nss << 4);
+
+	/* Which of the two maps is in the element is decided by the widths
+	 * advertised, and a band with nothing above 20 MHz describes its
+	 * rates in the shorter one, which carries MCS 7 as well. Read the
+	 * widths back the same way the element is built from them so the map
+	 * that is filled is the map that is sent.
+	 */
+	if (!(data->he_cap.he_cap_elem.phy_cap_info[0] & he_widths) &&
+	    !(elem->phy_cap_info[0] & IEEE80211_EHT_PHY_CAP0_320MHZ_IN_6GHZ)) {
+		memset(mcs->only_20mhz.rx_tx_max_nss, rx_tx_nss,
+		       sizeof(mcs->only_20mhz.rx_tx_max_nss));
+		return;
+	}
 
 	memset(mcs->bw._80.rx_tx_max_nss, rx_tx_nss,
 	       sizeof(mcs->bw._80.rx_tx_max_nss));
