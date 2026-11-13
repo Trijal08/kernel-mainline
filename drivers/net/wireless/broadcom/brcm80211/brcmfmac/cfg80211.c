@@ -3238,7 +3238,12 @@ brcmf_cfg80211_get_station(struct wiphy *wiphy, struct wireless_dev *wdev,
 	err = brcmf_fil_iovar_data_get(ifp, "tdls_sta_info",
 				       &sta_info_le,
 				       sizeof(sta_info_le));
-	is_tdls_peer = !err;
+	/* Firmware that answers this for any station it knows, rather than
+	 * only for a TDLS peer, would have every association reported as one.
+	 * The one station that certainly is not a TDLS peer is the AP the
+	 * interface is associated to.
+	 */
+	is_tdls_peer = !err && memcmp(mac, ifp->vif->profile.bssid, ETH_ALEN);
 	if (err) {
 		err = brcmf_fil_iovar_data_get(ifp, "sta_info",
 					       &sta_info_le,
