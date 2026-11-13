@@ -3469,6 +3469,7 @@ static s32 brcmf_inform_single_bss(struct brcmf_cfg80211_info *cfg,
 	size_t notify_ielen;
 	enum cfg80211_bss_frame_type ftype;
 	struct cfg80211_inform_bss bss_data = {};
+	u64 tsf;
 
 	if (le32_to_cpu(bi->length) > WL_BSS_INFO_MAX) {
 		bphy_err(drvr, "Bss info is larger than buffer. Discarding\n");
@@ -3534,9 +3535,13 @@ static s32 brcmf_inform_single_bss(struct brcmf_cfg80211_info *cfg,
 	ftype = bi->flags & BRCMF_BSS_FLAGS_FROM_BEACON ?
 		CFG80211_BSS_FTYPE_BEACON : CFG80211_BSS_FTYPE_PRESP;
 
+	/* the timestamp the frame carried, which is the AP's clock */
+	tsf = (u64)le32_to_cpu(bi->timestamp[1]) << 32 |
+	      le32_to_cpu(bi->timestamp[0]);
+
 	bss = cfg80211_inform_bss_data(wiphy, &bss_data, ftype,
 				       (const u8 *)bi->BSSID,
-				       0, notify_capability,
+				       tsf, notify_capability,
 				       notify_interval, notify_ie,
 				       notify_ielen, GFP_KERNEL);
 
