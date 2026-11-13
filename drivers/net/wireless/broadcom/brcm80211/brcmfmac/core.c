@@ -736,10 +736,22 @@ static int brcmf_net_mon_open(struct net_device *ndev)
 {
 	struct brcmf_if *ifp = netdev_priv(ndev);
 	struct brcmf_pub *drvr = ifp->drvr;
+	struct brcmf_if *sta_ifp = brcmf_get_ifp(drvr, 0);
 	u32 monitor;
 	int err;
 
 	brcmf_dbg(TRACE, "Enter\n");
+
+	/* The firmware will not be put into monitor mode while it has an
+	 * association to keep, and refuses the command without saying why,
+	 * which reaches whoever brought the interface up as an error with no
+	 * information in it. Say what the matter is instead.
+	 */
+	if (sta_ifp && sta_ifp->vif &&
+	    test_bit(BRCMF_VIF_STATUS_CONNECTED, &sta_ifp->vif->sme_state)) {
+		bphy_err(drvr, "monitor mode needs the station disconnected\n");
+		return -EBUSY;
+	}
 
 	err = brcmf_fil_cmd_int_get(ifp, BRCMF_C_GET_MONITOR, &monitor);
 	if (err) {
