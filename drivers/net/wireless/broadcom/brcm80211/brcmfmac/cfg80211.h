@@ -47,7 +47,16 @@
  * problematic on some systems and should be avoided.
  */
 #define BRCMF_ESCAN_BUF_SIZE		65000
-#define BRCMF_ESCAN_TIMER_INTERVAL_MS	10000	/* E-Scan timeout */
+/*
+ * E-Scan timeout. The firmware does not fail a scan it cannot start yet: while
+ * its scan engine is busy it retries internally, once a second, and has been
+ * seen still retrying thirteen seconds in. Give it as long as the vendor
+ * driver does -- a 14s base, plus 6s on a chip that supports 6GHz, which is
+ * the band that makes a scan long -- so a scan is not killed before the
+ * firmware has given up on it.
+ */
+#define BRCMF_ESCAN_TIMER_INTERVAL_MS	14000
+#define BRCMF_ESCAN_TIMER_INTERVAL_6G_MS	6000
 
 #define WL_ESCAN_ACTION_START		1
 #define WL_ESCAN_ACTION_CONTINUE	2

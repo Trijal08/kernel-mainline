@@ -1193,6 +1193,20 @@ brcmf_do_escan(struct brcmf_if *ifp, struct cfg80211_scan_request *request)
 	return err;
 }
 
+/* How long to wait for a scan before giving up on it, matching what the vendor
+ * driver allows: see BRCMF_ESCAN_TIMER_INTERVAL_MS. 6GHz is counted separately
+ * because it is what makes a scan long, and the vendor sizes it that way too.
+ */
+static unsigned int brcmf_escan_timeout_ms(struct brcmf_cfg80211_info *cfg)
+{
+	unsigned int timeout = BRCMF_ESCAN_TIMER_INTERVAL_MS;
+
+	if (cfg_to_wiphy(cfg)->bands[NL80211_BAND_6GHZ])
+		timeout += BRCMF_ESCAN_TIMER_INTERVAL_6G_MS;
+
+	return timeout;
+}
+
 static s32
 brcmf_cfg80211_scan(struct wiphy *wiphy, struct cfg80211_scan_request *request)
 {
@@ -1251,7 +1265,7 @@ brcmf_cfg80211_scan(struct wiphy *wiphy, struct cfg80211_scan_request *request)
 
 	/* Arm scan timeout timer */
 	mod_timer(&cfg->escan_timeout,
-		  jiffies + msecs_to_jiffies(BRCMF_ESCAN_TIMER_INTERVAL_MS));
+		  jiffies + msecs_to_jiffies(brcmf_escan_timeout_ms(cfg)));
 
 	return 0;
 
