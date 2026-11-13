@@ -332,6 +332,9 @@ struct brcmf_pkt_filter_enable_le {
  * Applications MUST CHECK ie_offset field and length field to access IEs and
  * next bss_info structure in a vector (in struct brcmf_scan_results)
  */
+/* flags reported alongside a BSS: where the firmware heard it from */
+#define BRCMF_BSS_FLAGS_FROM_BEACON	BIT(0)
+
 struct brcmf_bss_info_le {
 	__le32 version;		/* version field */
 	__le32 length;		/* byte length of data in this record,
@@ -363,7 +366,7 @@ struct brcmf_bss_info_le {
 	u8 reserved1[3];	/* Reserved for expansion of BSS properties */
 	__le16 vht_rxmcsmap;	/* VHT rx mcs map (802.11ac IE, VHT_CAP_MCS_MAP_*) */
 	__le16 vht_txmcsmap;	/* VHT tx mcs map (802.11ac IE, VHT_CAP_MCS_MAP_*) */
-	u8 flags;		/* flags */
+	u8 flags;		/* flags, see BRCMF_BSS_FLAGS_* */
 	u8 vht_cap;		/* BSS is vht capable */
 	u8 reserved2[2];	/* Reserved for expansion of BSS properties */
 	u8 basic_mcs[BRCMF_MCSSET_LEN];	/* 802.11N BSS required MCS set */
