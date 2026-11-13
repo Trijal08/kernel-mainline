@@ -7059,6 +7059,142 @@ brcmf_fwsup_is_authorized(struct brcmf_cfg80211_profile *profile,
 }
 
 static s32
+/* The status reply grows with the number of operative links and their peers. */
+#define BRCMF_MLO_STATUS_BUFLEN		512
+
+static enum nl80211_band brcmf_chan_band_to_nl80211(u8 band)
+{
+	switch (band) {
+	case BRCMU_CHAN_BAND_2G:
+		return NL80211_BAND_2GHZ;
+	case BRCMU_CHAN_BAND_6G:
+		return NL80211_BAND_6GHZ;
+	case BRCMU_CHAN_BAND_5G:
+	default:
+		return NL80211_BAND_5GHZ;
+	}
+}
+
+static void brcmf_mlo_drop_links(struct wiphy *wiphy,
+				 struct cfg80211_connect_resp_params *cr)
+{
+	unsigned int link;
+
+	for (link = 0; link < ARRAY_SIZE(cr->links); link++) {
+		if (!(cr->valid_links & BIT(link)))
+			continue;
+		if (cr->links[link].bss)
+			cfg80211_put_bss(wiphy, cr->links[link].bss);
+		cr->links[link].bss = NULL;
+		cr->links[link].addr = NULL;
+		cr->links[link].bssid = NULL;
+	}
+	cr->valid_links = 0;
+	cr->ap_mld_addr = NULL;
+}
+
+/*
+ * Describe a multi-link association to cfg80211.
+ *
+ * The firmware runs the association itself, so there is nothing to drive from
+ * here: by the time a connect completes it already knows which links came up,
+ * and what is missing is only saying so. Ask it, and translate the answer into
+ * the link set a connect result carries.
+ *
+ * Returns the buffer the reported addresses point into -- cfg80211 does not
+ * copy them, so it has to outlive cfg80211_connect_done() and be freed after
+ * it -- or NULL for an ordinary single-link association, where nothing was
+ * filled in.
+ */
+static void *brcmf_mlo_collect_links(struct brcmf_cfg80211_info *cfg,
+				     struct brcmf_if *ifp,
+				     struct cfg80211_connect_resp_params *cr)
+{
+	struct wiphy *wiphy = cfg_to_wiphy(cfg);
+	struct brcmf_mlo_status_le *st;
+	u8 *pos, *end;
+	void *buf;
+	int i;
+
+	buf = kzalloc(BRCMF_MLO_STATUS_BUFLEN, GFP_KERNEL);
+	if (!buf)
+		return NULL;
+
+	if (brcmf_fil_xtlv_data_get(ifp, "mlo", BRCMF_MLO_CMD_STATUS, buf,
+				    BRCMF_MLO_STATUS_BUFLEN))
+		goto single_link;
+
+	st = buf;
+	if (le16_to_cpu(st->version) != BRCMF_MLO_STATUS_VER_2) {
+		brcmf_dbg(CONN, "MLO status v%u carries no peer addresses\n",
+			  le16_to_cpu(st->version));
+		goto single_link;
+	}
+	if (st->mode == BRCMF_MLO_MODE_NONE || st->num_links_operative < 2)
+		goto single_link;
+
+	end = (u8 *)buf + min_t(u16, le16_to_cpu(st->length),
+				BRCMF_MLO_STATUS_BUFLEN);
+	pos = st->link_status;
+
+	for (i = 0; i < st->num_links_operative; i++) {
+		struct brcmf_mlo_link_status_le *link = (void *)pos;
+		struct ieee80211_channel *chan = NULL;
+		struct brcmu_chan ch;
+		size_t link_len;
+		u32 freq;
+
+		/* the entries are variable length, so check before reading */
+		if (pos + sizeof(*link) > end)
+			break;
+		link_len = sizeof(*link) +
+			   link->num_peers * sizeof(link->peer[0]);
+		if (!link->num_peers || pos + link_len > end)
+			break;
+
+		if (link->link_id >= ARRAY_SIZE(cr->links)) {
+			brcmf_dbg(CONN, "MLO: ignoring link id %u\n",
+				  link->link_id);
+			goto next;
+		}
+
+		ch.chspec = le16_to_cpu(link->chanspec);
+		cfg->d11inf.decchspec(&ch);
+		freq = ieee80211_channel_to_frequency(ch.control_ch_num,
+						      brcmf_chan_band_to_nl80211(ch.band));
+		if (freq)
+			chan = ieee80211_get_channel(wiphy, freq);
+
+		cr->links[link->link_id].addr = link->link_addr;
+		cr->links[link->link_id].bssid = link->peer[0].link_addr;
+		cr->links[link->link_id].bss =
+			cfg80211_get_bss(wiphy, chan, link->peer[0].link_addr,
+					 NULL, 0, IEEE80211_BSS_TYPE_ESS,
+					 IEEE80211_PRIVACY_ANY);
+		cr->valid_links |= BIT(link->link_id);
+		if (!cr->ap_mld_addr)
+			cr->ap_mld_addr = link->peer[0].mld_addr;
+next:
+		pos += link_len;
+	}
+
+	/* One link is not a multi-link association, whatever the firmware
+	 * counted, and cfg80211 would rather hear about it as an ordinary one.
+	 */
+	if (hweight16(cr->valid_links) < 2) {
+		brcmf_mlo_drop_links(wiphy, cr);
+		goto single_link;
+	}
+
+	brcmf_dbg(CONN, "MLO: %u links up, AP MLD %pM\n",
+		  hweight16(cr->valid_links), cr->ap_mld_addr);
+	return buf;
+
+single_link:
+	kfree(buf);
+	return NULL;
+}
+
 brcmf_bss_connect_done(struct brcmf_cfg80211_info *cfg,
 		       struct net_device *ndev, const struct brcmf_event_msg *e,
 		       bool completed)
@@ -7067,6 +7203,8 @@ brcmf_bss_connect_done(struct brcmf_cfg80211_info *cfg,
 	struct brcmf_cfg80211_profile *profile = &ifp->vif->profile;
 	struct brcmf_cfg80211_connect_info *conn_info = cfg_to_conn(cfg);
 	struct cfg80211_connect_resp_params conn_params;
+	const u8 *port_addr;
+	void *mlo_buf = NULL;
 	bool authorized;
 
 	brcmf_dbg(TRACE, "Enter\n");
@@ -7089,17 +7227,25 @@ brcmf_bss_connect_done(struct brcmf_cfg80211_info *cfg,
 			bphy_err(ifp->drvr, "connect failed: event %u status %u reason %u\n",
 				 e->event_code, e->status, e->reason);
 		}
-		conn_params.links[0].bssid = profile->bssid;
+		if (completed)
+			mlo_buf = brcmf_mlo_collect_links(cfg, ifp,
+							  &conn_params);
+		if (!conn_params.valid_links)
+			conn_params.links[0].bssid = profile->bssid;
 		conn_params.req_ie = conn_info->req_ie;
 		conn_params.req_ie_len = conn_info->req_ie_len;
 		conn_params.resp_ie = conn_info->resp_ie;
 		conn_params.resp_ie_len = conn_info->resp_ie_len;
 		authorized = completed &&
 			     brcmf_fwsup_is_authorized(profile, &conn_params);
+		/* the port belongs to the MLD, not to one of its links */
+		port_addr = conn_params.valid_links ? conn_params.ap_mld_addr
+						    : profile->bssid;
 		cfg80211_connect_done(ndev, &conn_params, GFP_KERNEL);
 		if (authorized)
-			cfg80211_port_authorized(ndev, profile->bssid, NULL, 0,
+			cfg80211_port_authorized(ndev, port_addr, NULL, 0,
 						 GFP_KERNEL);
+		kfree(mlo_buf);
 		brcmf_dbg(CONN, "Report connect result - connection %s\n",
 			  completed ? "succeeded" : "failed");
 	}
