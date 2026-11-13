@@ -2317,6 +2317,45 @@ static int brcmf_mlo_config(struct brcmf_cfg80211_info *cfg,
 	return err;
 }
 
+/*
+ * Let the association that follows use EHT, or hold it back.
+ *
+ * The firmware carries a standing set of EHT sub-features, one bit of which
+ * keeps a station interface off EHT, and it comes up with that bit set. It
+ * also outlives the connection it was set for, so a connection asking for EHT
+ * to be left out would otherwise take EHT away from every connection after
+ * it. Say which way this connection wants it, and only write when that is a
+ * change -- the firmware is told this on the way into every join.
+ */
+static void brcmf_eht_config(struct brcmf_cfg80211_info *cfg,
+			     struct brcmf_if *ifp, bool enable)
+{
+	u32 features = 0;
+	u32 wanted;
+
+	if (!cfg->eht)
+		return;
+
+	if (brcmf_fil_xtlv_int_get(ifp, "eht", BRCMF_EHT_CMD_FEATURES,
+				   &features))
+		return;
+
+	wanted = features;
+	if (enable)
+		wanted &= ~BRCMF_EHT_FEATURE_STA_DISABLE;
+	else
+		wanted |= BRCMF_EHT_FEATURE_STA_DISABLE;
+
+	if (wanted == features)
+		return;
+
+	if (brcmf_fil_xtlv_int_set(ifp, "eht", BRCMF_EHT_CMD_FEATURES, wanted))
+		brcmf_dbg(CONN, "EHT features 0x%08x not taken\n", wanted);
+	else
+		brcmf_dbg(CONN, "EHT features 0x%08x -> 0x%08x\n", features,
+			  wanted);
+}
+
 static s32
 brcmf_cfg80211_connect(struct wiphy *wiphy, struct net_device *ndev,
 		       struct cfg80211_connect_params *params)
@@ -2334,6 +2373,7 @@ brcmf_cfg80211_connect(struct wiphy *wiphy, struct net_device *ndev,
 	const struct brcmf_vs_tlv *wpa_ie;
 	const void *ie;
 	u32 ie_len;
+	bool eht;
 	s32 err = 0;
 
 	brcmf_dbg(TRACE, "Enter\n");
@@ -2382,10 +2422,12 @@ brcmf_cfg80211_connect(struct wiphy *wiphy, struct net_device *ndev,
 
 	set_bit(BRCMF_VIF_STATUS_CONNECTING, &ifp->vif->sme_state);
 
-	/* has to be in place before the join, the firmware builds the
-	 * association from it
+	/* both have to be in place before the join, the firmware builds the
+	 * association from them
 	 */
-	brcmf_mlo_config(cfg, ifp, brcmf_mlo_sec_supported(params));
+	eht = !(params->flags & ASSOC_REQ_DISABLE_EHT);
+	brcmf_eht_config(cfg, ifp, eht);
+	brcmf_mlo_config(cfg, ifp, eht && brcmf_mlo_sec_supported(params));
 
 	if (chan) {
 		cfg->channel =
@@ -8519,6 +8561,7 @@ static int brcmf_setup_wiphybands(struct brcmf_cfg80211_info *cfg)
 		if (brcmf_fil_xtlv_int8_get(ifp, "eht", BRCMF_EHT_CMD_ENABLE,
 					    &eht_enable))
 			eht_enable = 0;
+		cfg->eht = eht_enable != 0;
 
 		/* How many links the firmware will put in an association, and
 		 * so how many addresses it wants offered. Zero leaves

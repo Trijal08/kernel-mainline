@@ -1671,6 +1671,12 @@ enum {
 	BRCMF_EHT_CMD_TESTBED_MODE = 7,
 };
 
+/* Sub-features taken and reported by BRCMF_EHT_CMD_FEATURES. The firmware
+ * holds on to these across connections, so what is asked for here is still
+ * in force for the connection after this one.
+ */
+#define BRCMF_EHT_FEATURE_STA_DISABLE	BIT(2)
+
 /* MLO top level command IDs */
 enum {
 	BRCMF_MLO_CMD_ENABLE = 0,
