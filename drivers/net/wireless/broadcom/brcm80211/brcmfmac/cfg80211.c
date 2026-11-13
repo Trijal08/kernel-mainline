@@ -8347,7 +8347,10 @@ static bool brcmf_band_has_320mhz(struct ieee80211_supported_band *band)
 /* What the part can actually do, as the vendor driver advertises it: sounding
  * streams it can receive at 80 and 160 MHz, the beamforming Nc it supports, and
  * the EHT-LTF count. Two of the three are split across an octet boundary in the
- * capability element, hence the shifts at the second half of each.
+ * capability element: the low bits go in one octet and the rest in the next,
+ * so each half is masked or shifted down to just the bits it carries. Handing
+ * a whole value to both halves does not build -- FIELD_PREP rejects a value
+ * too wide for its field, where the vendor's open-coded masking truncates it.
  */
 #define BRCMF_EHT_BFE_SS_80MHZ		7
 #define BRCMF_EHT_BFE_SS_160MHZ		7
@@ -8379,7 +8382,7 @@ static void brcmf_update_eht_cap(struct ieee80211_supported_band *band,
 		IEEE80211_EHT_PHY_CAP0_NDP_4_EHT_LFT_32_GI |
 		IEEE80211_EHT_PHY_CAP0_SU_BEAMFORMEE |
 		FIELD_PREP(IEEE80211_EHT_PHY_CAP0_BEAMFORMEE_SS_80MHZ_MASK,
-			   BRCMF_EHT_BFE_SS_80MHZ);
+			   BRCMF_EHT_BFE_SS_80MHZ & 0x1);
 
 	/* 320 MHz is a 6 GHz-only width. */
 	if (band->band == NL80211_BAND_6GHZ && brcmf_band_has_320mhz(band))
@@ -8411,7 +8414,7 @@ static void brcmf_update_eht_cap(struct ieee80211_supported_band *band,
 		FIELD_PREP(IEEE80211_EHT_PHY_CAP5_COMMON_NOMINAL_PKT_PAD_MASK,
 			   IEEE80211_EHT_PHY_CAP5_COMMON_NOMINAL_PKT_PAD_16US) |
 		FIELD_PREP(IEEE80211_EHT_PHY_CAP5_MAX_NUM_SUPP_EHT_LTF_MASK,
-			   BRCMF_EHT_MAX_LTF);
+			   BRCMF_EHT_MAX_LTF & 0x3);
 
 	/* and so does the EHT-LTF count */
 	elem->phy_cap_info[6] =
