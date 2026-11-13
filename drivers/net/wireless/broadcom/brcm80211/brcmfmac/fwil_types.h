@@ -1671,6 +1671,79 @@ enum {
 	BRCMF_EHT_CMD_TESTBED_MODE = 7,
 };
 
+/* MLO top level command IDs */
+enum {
+	BRCMF_MLO_CMD_ENABLE = 0,
+	BRCMF_MLO_CMD_CONFIG = 1,
+	BRCMF_MLO_CMD_STATUS = 2,
+	BRCMF_MLO_CMD_EMLSR_CTRL = 3,
+	BRCMF_MLO_CMD_TID_MAP = 4,
+	BRCMF_MLO_CMD_CAP = 5,
+	BRCMF_MLO_CMD_ACT_LINK_BMAP = 6,
+	BRCMF_MLO_CMD_MULTILINK_ACTIVE = 7,
+};
+
+/* Only version 2 of the status carries the peer addresses, and those are the
+ * AP side of each link -- which is the half cfg80211 needs. Version 1 reports
+ * the local addresses alone and cannot be reported as an MLO association.
+ */
+#define BRCMF_MLO_STATUS_VER_2		2
+
+/* mode is zero unless multi-link is operative on the interface */
+#define BRCMF_MLO_MODE_NONE		0
+
+/**
+ * struct brcmf_mlo_link_peer_le - peer addresses on one link
+ *
+ * @link_addr: the peer's address on this link, i.e. the BSSID of a STA's AP
+ * @mld_addr: the peer's MLD address, zero if the peer is not an MLD
+ */
+struct brcmf_mlo_link_peer_le {
+	u8 link_addr[ETH_ALEN];
+	u8 mld_addr[ETH_ALEN];
+};
+
+/**
+ * struct brcmf_mlo_link_status_le - one operative link
+ *
+ * @link_id: link id, assigned by the AP
+ * @link_idx: the firmware's own link config index
+ * @link_addr: our address on this link
+ * @chanspec: the link's channel
+ * @num_peers: peers on this link, one for a STA
+ * @link_pwrst: power state of the link
+ * @peer: @num_peers peer entries
+ */
+struct brcmf_mlo_link_status_le {
+	u8 link_id;
+	u8 link_idx;
+	u8 link_addr[ETH_ALEN];
+	__le16 chanspec;
+	u8 num_peers;
+	u8 link_pwrst;
+	struct brcmf_mlo_link_peer_le peer[];
+};
+
+/**
+ * struct brcmf_mlo_status_le - reply to the MLO status subcommand
+ *
+ * @version: structure version, see BRCMF_MLO_STATUS_VER_2
+ * @length: length of the reply
+ * @mld_addr: our MLD address while multi-link is operative
+ * @mode: operating mode, see BRCMF_MLO_MODE_NONE
+ * @num_links_operative: number of entries in @link_status
+ * @link_status: struct brcmf_mlo_link_status_le entries, which are variable
+ *	length, so they have to be walked rather than indexed
+ */
+struct brcmf_mlo_status_le {
+	__le16 version;
+	__le16 length;
+	u8 mld_addr[ETH_ALEN];
+	u8 mode;
+	u8 num_links_operative;
+	u8 link_status[];
+};
+
 #define BRCMF_HE_VER_1 1
 
 struct brcmf_he_bsscolor {
