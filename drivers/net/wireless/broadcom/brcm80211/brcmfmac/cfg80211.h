@@ -408,6 +408,7 @@ struct brcmf_cfg80211_info {
 	struct brcmf_cfg80211_connect_info conn_info;
 	struct brcmf_pmk_list_le pmk_list;
 	unsigned long scan_status;
+	u8 mlo_max_links;
 	struct brcmf_pub *pub;
 	u32 channel;
 	u32 int_escan_map;
