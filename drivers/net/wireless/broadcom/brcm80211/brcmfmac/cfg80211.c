@@ -3881,8 +3881,24 @@ brcmf_cfg80211_escan_handler(struct brcmf_if *ifp,
 				((unsigned char *)bss +
 				le32_to_cpu(bss->length)) : list->bss_info_le;
 			if (brcmf_compare_update_same_bss(cfg, bss,
-							  bss_info_le))
+							  bss_info_le)) {
+				/* The buffer holds one record per BSS and
+				 * this one is already in it, so the elements
+				 * that came with this report are about to be
+				 * dropped. Where the two were heard
+				 * differently -- one in a beacon, one in a
+				 * probe response -- they do not carry the
+				 * same elements, and what is kept would be
+				 * all that is ever reported. cfg80211 holds
+				 * both and prefers the probe response, so
+				 * hand it this one on the way out.
+				 */
+				if ((bss->flags ^ bss_info_le->flags) &
+				    BRCMF_BSS_FLAGS_FROM_BEACON)
+					brcmf_inform_single_bss(cfg,
+								bss_info_le);
 				goto exit;
+			}
 		}
 		memcpy(&cfg->escan_info.escan_buf[list->buflen], bss_info_le,
 		       bi_length);
