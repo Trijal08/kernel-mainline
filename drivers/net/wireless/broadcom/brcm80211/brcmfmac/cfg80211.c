@@ -2597,8 +2597,6 @@ brcmf_cfg80211_disconnect(struct wiphy *wiphy, struct net_device *ndev,
 			 apf_err);
 	cfg80211_disconnected(ndev, reason_code, NULL, 0, true, GFP_KERNEL);
 
-	brcmf_mlo_config(cfg, ifp, false);
-
 	memcpy(&scbval.ea, &profile->bssid, ETH_ALEN);
 	scbval.val = cpu_to_le32(reason_code);
 	err = brcmf_fil_cmd_data_set(ifp, BRCMF_C_DISASSOC,
@@ -2607,6 +2605,11 @@ brcmf_cfg80211_disconnect(struct wiphy *wiphy, struct net_device *ndev,
 		bphy_err(drvr, "error (%d)\n", err);
 	else
 		err = apf_err;
+
+	/* only now that the association is gone will the firmware take the
+	 * multi-link configuration back
+	 */
+	brcmf_mlo_config(cfg, ifp, false);
 
 	brcmf_dbg(TRACE, "Exit\n");
 	return err;
