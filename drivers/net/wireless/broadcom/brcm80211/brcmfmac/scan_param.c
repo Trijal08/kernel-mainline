@@ -5,7 +5,6 @@
 #include <linux/gcd.h>
 #include <net/cfg80211.h>
 
-#include <linux/moduleparam.h>
 #include "core.h"
 #include "debug.h"
 #include "fwil_types.h"
@@ -20,14 +19,11 @@
  * ~iwd-scan-interval under sustained traffic, sometimes cascading into a link
  * drop + rescan. A positive home_time makes the firmware service the home
  * channel between channels so the association and the datapath stay alive
- * during the scan (roaming still works). 0 or -1 restores the firmware
- * default.
+ * during the scan (roaming still works).
  *
  * Only ever asked for while associated -- see brcmf_scan_param_home_time().
  */
-static int brcmf_scan_home_time = 45;
-module_param_named(scan_home_time, brcmf_scan_home_time, int, 0644);
-MODULE_PARM_DESC(scan_home_time, "Home-channel dwell (ms) between scanned channels so a background scan does not freeze the datapath (default 45, applied only while associated; 0/-1 = firmware default)");
+#define BRCMF_SCAN_HOME_TIME_MS		45
 
 /*
  * A home-channel dwell only means anything while associated, because only then
@@ -48,11 +44,11 @@ static s32 brcmf_scan_param_home_time(struct brcmf_cfg80211_info *cfg)
 {
 	struct brcmf_if *ifp = brcmf_get_ifp(cfg->pub, 0);
 
-	if (brcmf_scan_home_time <= 0 || !ifp || !ifp->vif ||
+	if (!ifp || !ifp->vif ||
 	    !test_bit(BRCMF_VIF_STATUS_CONNECTED, &ifp->vif->sme_state))
 		return -1;
 
-	return brcmf_scan_home_time;
+	return BRCMF_SCAN_HOME_TIME_MS;
 }
 
 static void brcmf_scan_param_set_defaults(struct brcmf_cfg80211_info *cfg,
