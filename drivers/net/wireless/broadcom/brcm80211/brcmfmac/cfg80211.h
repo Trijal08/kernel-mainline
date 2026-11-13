@@ -376,6 +376,8 @@ struct brcmf_cfg80211_wowl {
  * @conn_info: association info.
  * @pmk_list: wpa2 pmk list.
  * @scan_status: scan activity on the dongle.
+ * @eht: firmware has EHT and takes the EHT sub-feature commands.
+ * @mlo_max_links: links the firmware will put in an association, zero for none.
  * @pub: common driver information.
  * @channel: current channel.
  * @int_escan_map: bucket map for which internal e-scan is done.
@@ -408,6 +410,7 @@ struct brcmf_cfg80211_info {
 	struct brcmf_cfg80211_connect_info conn_info;
 	struct brcmf_pmk_list_le pmk_list;
 	unsigned long scan_status;
+	bool eht;
 	u8 mlo_max_links;
 	struct brcmf_pub *pub;
 	u32 channel;
