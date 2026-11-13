@@ -7058,7 +7058,6 @@ brcmf_fwsup_is_authorized(struct brcmf_cfg80211_profile *profile,
 	return false;
 }
 
-static s32
 /* The status reply grows with the number of operative links and their peers. */
 #define BRCMF_MLO_STATUS_BUFLEN		512
 
@@ -7195,6 +7194,7 @@ single_link:
 	return NULL;
 }
 
+static s32
 brcmf_bss_connect_done(struct brcmf_cfg80211_info *cfg,
 		       struct net_device *ndev, const struct brcmf_event_msg *e,
 		       bool completed)
