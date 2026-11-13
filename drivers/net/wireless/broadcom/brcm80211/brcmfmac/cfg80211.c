@@ -2221,6 +2221,37 @@ static void brcmf_set_join_pref(struct brcmf_if *ifp,
 }
 
 /*
+ * Whether a multi-link association is allowed to carry this connection.
+ *
+ * 802.11be only permits one under the stronger key managements -- SAE, and
+ * then only deriving the password element by hash-to-element, OWE, or
+ * 802.1X -- so a PSK network cannot have one however willing both ends are.
+ * Offering the firmware a multi-link configuration for a connection that is
+ * not allowed to use it gains nothing and is what the vendor driver avoids to
+ * keep away from interoperability trouble.
+ */
+static bool brcmf_mlo_sec_supported(struct cfg80211_connect_params *params)
+{
+	/* open: nothing to object to here, the firmware prunes what it cannot
+	 * actually do on the bands in front of it
+	 */
+	if (!params->crypto.n_akm_suites)
+		return true;
+
+	switch (params->crypto.akm_suites[0]) {
+	case WLAN_AKM_SUITE_SAE:
+	case WLAN_AKM_SUITE_FT_OVER_SAE:
+		return params->crypto.sae_pwe != NL80211_SAE_PWE_HUNT_AND_PECK;
+	case WLAN_AKM_SUITE_OWE:
+	case WLAN_AKM_SUITE_8021X:
+	case WLAN_AKM_SUITE_8021X_SHA256:
+		return true;
+	default:
+		return false;
+	}
+}
+
+/*
  * Offer the firmware a multi-link configuration, or withdraw it.
  *
  * Without one it associates on a single link whatever the AP offers, so this
@@ -2354,7 +2385,7 @@ brcmf_cfg80211_connect(struct wiphy *wiphy, struct net_device *ndev,
 	/* has to be in place before the join, the firmware builds the
 	 * association from it
 	 */
-	brcmf_mlo_config(cfg, ifp, true);
+	brcmf_mlo_config(cfg, ifp, brcmf_mlo_sec_supported(params));
 
 	if (chan) {
 		cfg->channel =
