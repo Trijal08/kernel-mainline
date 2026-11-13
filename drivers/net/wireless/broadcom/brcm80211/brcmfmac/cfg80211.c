@@ -2223,15 +2223,21 @@ static void brcmf_set_join_pref(struct brcmf_if *ifp,
 /*
  * Whether a multi-link association is allowed to carry this connection.
  *
- * 802.11be only permits one under the stronger key managements -- SAE, and
- * then only deriving the password element by hash-to-element, OWE, or
- * 802.1X -- so a PSK network cannot have one however willing both ends are.
- * Offering the firmware a multi-link configuration for a connection that is
- * not allowed to use it gains nothing and is what the vendor driver avoids to
- * keep away from interoperability trouble.
+ * Two things have to agree. A multi-link association reaches userspace as a
+ * set of links rather than one, which userspace has to be ready to read, so
+ * only offer one where it has said it is. And 802.11be only permits one under
+ * the stronger key managements -- SAE, and then only deriving the password
+ * element by hash-to-element, OWE, or 802.1X -- so a PSK network cannot have
+ * one however willing both ends are. Offering the firmware a multi-link
+ * configuration for a connection that is not allowed to use it gains nothing
+ * and is what the vendor driver avoids to keep away from interoperability
+ * trouble.
  */
-static bool brcmf_mlo_sec_supported(struct cfg80211_connect_params *params)
+static bool brcmf_mlo_allowed(struct cfg80211_connect_params *params)
 {
+	if (!(params->flags & CONNECT_REQ_MLO_SUPPORT))
+		return false;
+
 	/* open: nothing to object to here, the firmware prunes what it cannot
 	 * actually do on the bands in front of it
 	 */
@@ -2427,7 +2433,7 @@ brcmf_cfg80211_connect(struct wiphy *wiphy, struct net_device *ndev,
 	 */
 	eht = !(params->flags & ASSOC_REQ_DISABLE_EHT);
 	brcmf_eht_config(cfg, ifp, eht);
-	brcmf_mlo_config(cfg, ifp, eht && brcmf_mlo_sec_supported(params));
+	brcmf_mlo_config(cfg, ifp, eht && brcmf_mlo_allowed(params));
 
 	if (chan) {
 		cfg->channel =
