@@ -7113,15 +7113,18 @@ static void *brcmf_mlo_collect_links(struct brcmf_cfg80211_info *cfg,
 	struct brcmf_mlo_status_le *st;
 	u8 *pos, *end;
 	void *buf;
-	int i;
+	int err, i;
 
 	buf = kzalloc(BRCMF_MLO_STATUS_BUFLEN, GFP_KERNEL);
 	if (!buf)
 		return NULL;
 
-	if (brcmf_fil_xtlv_data_get(ifp, "mlo", BRCMF_MLO_CMD_STATUS, buf,
-				    BRCMF_MLO_STATUS_BUFLEN))
+	err = brcmf_fil_xtlv_data_get(ifp, "mlo", BRCMF_MLO_CMD_STATUS, buf,
+				      BRCMF_MLO_STATUS_BUFLEN);
+	if (err) {
+		brcmf_dbg(CONN, "no MLO status (%d)\n", err);
 		goto single_link;
+	}
 
 	st = buf;
 	if (le16_to_cpu(st->version) != BRCMF_MLO_STATUS_VER_2) {
@@ -7129,8 +7132,11 @@ static void *brcmf_mlo_collect_links(struct brcmf_cfg80211_info *cfg,
 			  le16_to_cpu(st->version));
 		goto single_link;
 	}
-	if (st->mode == BRCMF_MLO_MODE_NONE || st->num_links_operative < 2)
+	if (st->mode == BRCMF_MLO_MODE_NONE || st->num_links_operative < 2) {
+		brcmf_dbg(CONN, "MLO not operative: mode %u, %u link(s)\n",
+			  st->mode, st->num_links_operative);
 		goto single_link;
+	}
 
 	end = (u8 *)buf + min_t(u16, le16_to_cpu(st->length),
 				BRCMF_MLO_STATUS_BUFLEN);
