@@ -53,6 +53,10 @@
 #define BRCMF_C_GET_REVINFO			98
 #define BRCMF_C_GET_MONITOR			107
 #define BRCMF_C_SET_MONITOR			108
+/* set in what BRCMF_C_GET_MONITOR reports when the host, rather than
+ * the firmware, has to turn monitor packets into radiotap
+ */
+#define BRCMF_MONITOR_HOST_RADIOTAP		BIT(31)
 #define BRCMF_C_GET_CURR_RATESET		114
 #define BRCMF_C_GET_AP				117
 #define BRCMF_C_SET_AP				118

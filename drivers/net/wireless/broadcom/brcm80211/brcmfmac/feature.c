@@ -313,9 +313,28 @@ int brcmf_feat_attach(struct brcmf_pub *drvr)
 	struct brcmf_pno_macaddr_le pfn_mac;
 	struct brcmf_gscan_config gscan_cfg;
 	u32 wowl_cap;
+	u32 monitor;
 	s32 err;
 
 	brcmf_feat_firmware_capabilities(ifp);
+
+	/* Monitor packets reach the host either already turned into radiotap
+	 * or in the shape the hardware received them, and reading them the
+	 * wrong way round makes a capture of nothing. A firmware that has
+	 * monitor mode answers for it: the command reports a bit set when
+	 * the host is the one that has to do the conversion, and clear when
+	 * the frames arrive converted. Ask it, unless the capability list
+	 * has already said which, so a firmware named in the overrides below
+	 * keeps the answer it is known to need.
+	 */
+	if (brcmf_feat_is_enabled(ifp, BRCMF_FEAT_MONITOR) &&
+	    !brcmf_feat_is_enabled(ifp, BRCMF_FEAT_MONITOR_FMT_RADIOTAP) &&
+	    !brcmf_feat_is_enabled(ifp, BRCMF_FEAT_MONITOR_FMT_HW_RX_HDR) &&
+	    !brcmf_fil_cmd_int_get(ifp, BRCMF_C_GET_MONITOR, &monitor) &&
+	    !(monitor & BRCMF_MONITOR_HOST_RADIOTAP)) {
+		brcmf_dbg(INFO, "enabling feature: MONITOR_FMT_RADIOTAP\n");
+		ifp->drvr->feat_flags |= BIT(BRCMF_FEAT_MONITOR_FMT_RADIOTAP);
+	}
 	memset(&gscan_cfg, 0, sizeof(gscan_cfg));
 	if (drvr->bus_if->chip != BRCM_CC_43430_CHIP_ID &&
 	    drvr->bus_if->chip != BRCM_CC_4345_CHIP_ID &&
