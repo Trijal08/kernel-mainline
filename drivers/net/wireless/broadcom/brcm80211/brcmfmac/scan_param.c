@@ -51,6 +51,28 @@ static s32 brcmf_scan_param_home_time(struct brcmf_cfg80211_info *cfg)
 	return BRCMF_SCAN_HOME_TIME_MS;
 }
 
+/*
+ * Whether this scan has to listen rather than ask.
+ *
+ * A channel the regulatory domain marks no-IR may not be probed until
+ * something has been heard on it, which is what DFS channels require. The
+ * firmware takes one scan type for the whole request, so a request covering
+ * such a channel has to be passive throughout; probing it would be skipped
+ * and the access points on it never found. That is not theoretical: with the
+ * AP on channel 60 the station saw nothing on 5GHz at all, while it had
+ * associated on channel 44 minutes earlier.
+ */
+static bool brcmf_scan_param_needs_passive(struct cfg80211_scan_request *request)
+{
+	int i;
+
+	for (i = 0; i < request->n_channels; i++)
+		if (request->channels[i]->flags & IEEE80211_CHAN_NO_IR)
+			return true;
+
+	return false;
+}
+
 static void brcmf_scan_param_set_defaults(struct brcmf_cfg80211_info *cfg,
 					  u8 (*bssid)[ETH_ALEN], s8 *bss_type,
 					  __le32 *channel_num,
@@ -206,6 +228,10 @@ brcmf_scan_param_get_prepped_struct_v1(struct brcmf_cfg80211_info *cfg,
 		brcmf_dbg(SCAN, "Performing passive scan\n");
 		scan_type = BRCMF_SCANTYPE_PASSIVE;
 	}
+	if (brcmf_scan_param_needs_passive(request)) {
+		brcmf_dbg(SCAN, "no-IR channel in the request, listening\n");
+		scan_type = BRCMF_SCANTYPE_PASSIVE;
+	}
 	scan_type |= brcmf_nl80211_scan_flags_to_scan_flags(request->flags);
 	params_le->scan_type =scan_type;
 	/* Adding mask to channel numbers */
@@ -284,6 +310,10 @@ brcmf_scan_param_get_prepped_struct_v2(struct brcmf_cfg80211_info *cfg,
 
 	} else {
 		brcmf_dbg(SCAN, "Performing passive scan\n");
+		scan_type = BRCMF_SCANTYPE_PASSIVE;
+	}
+	if (brcmf_scan_param_needs_passive(request)) {
+		brcmf_dbg(SCAN, "no-IR channel in the request, listening\n");
 		scan_type = BRCMF_SCANTYPE_PASSIVE;
 	}
 	scan_type |= brcmf_nl80211_scan_flags_to_scan_flags(request->flags);
@@ -370,6 +400,10 @@ brcmf_scan_param_get_prepped_struct_v3(struct brcmf_cfg80211_info *cfg,
 		brcmf_dbg(SCAN, "Performing passive scan\n");
 		scan_type = BRCMF_SCANTYPE_PASSIVE;
 	}
+	if (brcmf_scan_param_needs_passive(request)) {
+		brcmf_dbg(SCAN, "no-IR channel in the request, listening\n");
+		scan_type = BRCMF_SCANTYPE_PASSIVE;
+	}
 	scan_type |= brcmf_nl80211_scan_flags_to_scan_flags(request->flags);
 	params_le->scan_type = cpu_to_le32(scan_type);
 	params_le->length = cpu_to_le16(length);
@@ -454,6 +488,10 @@ brcmf_scan_param_get_prepped_struct_v4(struct brcmf_cfg80211_info *cfg,
 		brcmf_scan_param_copy_ssids(ptr, request->ssids, n_ssids);
 	} else {
 		brcmf_dbg(SCAN, "Performing passive scan\n");
+		scan_type = BRCMF_SCANTYPE_PASSIVE;
+	}
+	if (brcmf_scan_param_needs_passive(request)) {
+		brcmf_dbg(SCAN, "no-IR channel in the request, listening\n");
 		scan_type = BRCMF_SCANTYPE_PASSIVE;
 	}
 	scan_type |= brcmf_nl80211_scan_flags_to_scan_flags(request->flags);

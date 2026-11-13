@@ -8493,6 +8493,7 @@ static int brcmf_setup_wiphybands(struct brcmf_cfg80211_info *cfg)
 	u8 he_enable = 0;
 	u8 eht_enable = 0;
 	struct brcmf_mlo_cap_le mlo_cap;
+	struct brcmf_fil_country_le ccreq = {};
 	struct brcmf_he_defcap he_cap;
 	u32 ldpc_cap = 0;
 	u32 stbc_rx = 0;
@@ -8532,12 +8533,19 @@ static int brcmf_setup_wiphybands(struct brcmf_cfg80211_info *cfg)
 	if (err) {
 		bphy_err(drvr, "nmode error (%d)\n", err);
 	}
+	/* The country decides which channels are usable and which of them need
+	 * listening to rather than probing, so it belongs next to the rest of
+	 * what the bands were built from.
+	 */
+	(void)brcmf_fil_iovar_data_get(ifp, "country", &ccreq, sizeof(ccreq));
+
 	brcmf_get_bwcap(ifp, bw_cap, he_enable != 0);
 	brcmf_dbg(INFO,
-		  "nmode=%d, vhtmode=%d, bw_cap=(%d, %d, %d), he_enable=%d, eht_enable=%d, mlo_links=%u\n",
+		  "nmode=%d, vhtmode=%d, bw_cap=(%d, %d, %d), he_enable=%d, eht_enable=%d, mlo_links=%u, ccode=%.2s/%d\n",
 		  nmode, vhtmode, bw_cap[NL80211_BAND_2GHZ],
 		  bw_cap[NL80211_BAND_5GHZ], bw_cap[NL80211_BAND_6GHZ],
-		  he_enable, eht_enable, cfg->mlo_max_links);
+		  he_enable, eht_enable, cfg->mlo_max_links,
+		  ccreq.ccode, le32_to_cpu(ccreq.rev));
 
 	err = brcmf_fil_iovar_int_get(ifp, "rxchain", &rxchain);
 	if (err) {
