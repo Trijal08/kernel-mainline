@@ -8297,7 +8297,8 @@ static void brcmf_update_vht_cap(struct ieee80211_supported_band *band,
 }
 
 static void brcmf_update_he_cap(struct ieee80211_supported_band *band,
-				struct ieee80211_sband_iftype_data *data)
+				struct ieee80211_sband_iftype_data *data,
+				u32 bw_cap[4])
 {
 	int idx = 1;
 	struct ieee80211_sta_he_cap *he_cap = &data->he_cap;
@@ -8332,12 +8333,26 @@ static void brcmf_update_he_cap(struct ieee80211_supported_band *band,
 
 	he_cap_elem->mac_cap_info[4] = IEEE80211_HE_MAC_CAP4_AMSDU_IN_AMPDU;
 
-	/* HE PHY Capabilities Information */
-	he_cap_elem->phy_cap_info[0] =
-		IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_40MHZ_IN_2G |
-		IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_40MHZ_80MHZ_IN_5G |
-		IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_160MHZ_IN_5G;
-	;
+	/* HE PHY Capabilities Information
+	 *
+	 * The channel width set is per band, and each band has only its own
+	 * bits: 40 MHz belongs to 2.4 GHz, 40/80 and 160 MHz to the bands
+	 * above it. Which ones are true is what the firmware reported for
+	 * that band rather than the widest the standard allows.
+	 */
+	he_cap_elem->phy_cap_info[0] = 0;
+	if (band->band == NL80211_BAND_2GHZ) {
+		if (bw_cap[band->band] & WLC_BW_40MHZ_BIT)
+			he_cap_elem->phy_cap_info[0] |=
+				IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_40MHZ_IN_2G;
+	} else {
+		if (bw_cap[band->band] & WLC_BW_80MHZ_BIT)
+			he_cap_elem->phy_cap_info[0] |=
+				IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_40MHZ_80MHZ_IN_5G;
+		if (bw_cap[band->band] & WLC_BW_160MHZ_BIT)
+			he_cap_elem->phy_cap_info[0] |=
+				IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_160MHZ_IN_5G;
+	}
 
 	he_cap_elem->phy_cap_info[1] =
 		IEEE80211_HE_PHY_CAP1_LDPC_CODING_IN_PAYLOAD;
@@ -8660,7 +8675,7 @@ static int brcmf_setup_wiphybands(struct brcmf_cfg80211_info *cfg)
 					     txbf_bfe_cap, txbf_bfr_cap,
 					     ldpc_cap, stbc_rx, stbc_tx);
 		if (he_enable)
-			brcmf_update_he_cap(band, &sdata[band->band]);
+			brcmf_update_he_cap(band, &sdata[band->band], bw_cap);
 		if (eht_enable)
 			brcmf_update_eht_cap(band, &sdata[band->band], bw_cap,
 					     nrxchain);
