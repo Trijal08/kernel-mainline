@@ -9023,6 +9023,7 @@ static int brcmf_setup_wiphy(struct wiphy *wiphy, struct brcmf_if *ifp)
 	bool gscan;
 	__le32 bandlist[16];
 	u32 n_bands;
+	u32 rrm = 0;
 	int err, i;
 
 	wiphy->max_scan_ssids = WL_NUM_SCAN_MAX;
@@ -9093,6 +9094,15 @@ static int brcmf_setup_wiphy(struct wiphy *wiphy, struct brcmf_if *ifp)
 	    brcmf_feat_is_enabled(ifp, BRCMF_FEAT_OKC))
 		wiphy_ext_feature_set(wiphy,
 				      NL80211_EXT_FEATURE_FAST_ROAM_OFFLOAD);
+
+	/* Radio resource measurement, if the firmware has any of it. The
+	 * iovar reads back the measurement capabilities it will advertise,
+	 * which is what goes in the RM Enabled Capabilities element of an
+	 * association request -- so a firmware with none of them has nothing
+	 * to offer a userspace that asks for it.
+	 */
+	if (!brcmf_fil_iovar_int_get(ifp, "rrm", &rrm) && rrm)
+		wiphy_ext_feature_set(wiphy, NL80211_EXT_FEATURE_RRM);
 
 	/* High accuracy and low power scans are always supported. */
 	wiphy_ext_feature_set(wiphy, NL80211_EXT_FEATURE_HIGH_ACCURACY_SCAN);
