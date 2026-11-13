@@ -8344,6 +8344,16 @@ static bool brcmf_band_has_320mhz(struct ieee80211_supported_band *band)
 	return false;
 }
 
+/* What the part can actually do, as the vendor driver advertises it: sounding
+ * streams it can receive at 80 and 160 MHz, the beamforming Nc it supports, and
+ * the EHT-LTF count. Two of the three are split across an octet boundary in the
+ * capability element, hence the shifts at the second half of each.
+ */
+#define BRCMF_EHT_BFE_SS_80MHZ		7
+#define BRCMF_EHT_BFE_SS_160MHZ		7
+#define BRCMF_EHT_MAX_NC		1
+#define BRCMF_EHT_MAX_LTF		9
+
 static void brcmf_update_eht_cap(struct ieee80211_supported_band *band,
 				 struct ieee80211_sband_iftype_data *data,
 				 u32 bw_cap[4], u32 nss)
@@ -8362,22 +8372,53 @@ static void brcmf_update_eht_cap(struct ieee80211_supported_band *band,
 
 	eht_cap->has_eht = true;
 
-	elem->mac_cap_info[0] =
-		IEEE80211_EHT_MAC_CAP0_OM_CONTROL |
-		FIELD_PREP(IEEE80211_EHT_MAC_CAP0_MAX_MPDU_LEN_MASK,
-			   IEEE80211_EHT_MAC_CAP0_MAX_MPDU_LEN_11454);
+	elem->mac_cap_info[0] = IEEE80211_EHT_MAC_CAP0_OM_CONTROL;
 
-	elem->phy_cap_info[0] = IEEE80211_EHT_PHY_CAP0_242_TONE_RU_GT20MHZ |
-				IEEE80211_EHT_PHY_CAP0_NDP_4_EHT_LFT_32_GI |
-				IEEE80211_EHT_PHY_CAP0_SU_BEAMFORMEE;
+	elem->phy_cap_info[0] =
+		IEEE80211_EHT_PHY_CAP0_242_TONE_RU_GT20MHZ |
+		IEEE80211_EHT_PHY_CAP0_NDP_4_EHT_LFT_32_GI |
+		IEEE80211_EHT_PHY_CAP0_SU_BEAMFORMEE |
+		FIELD_PREP(IEEE80211_EHT_PHY_CAP0_BEAMFORMEE_SS_80MHZ_MASK,
+			   BRCMF_EHT_BFE_SS_80MHZ);
 
 	/* 320 MHz is a 6 GHz-only width. */
 	if (band->band == NL80211_BAND_6GHZ && brcmf_band_has_320mhz(band))
 		elem->phy_cap_info[0] |= IEEE80211_EHT_PHY_CAP0_320MHZ_IN_6GHZ;
 
+	/* the sounding-stream counts straddle the octet boundary */
+	elem->phy_cap_info[1] =
+		FIELD_PREP(IEEE80211_EHT_PHY_CAP1_BEAMFORMEE_SS_80MHZ_MASK,
+			   BRCMF_EHT_BFE_SS_80MHZ >> 1) |
+		FIELD_PREP(IEEE80211_EHT_PHY_CAP1_BEAMFORMEE_SS_160MHZ_MASK,
+			   BRCMF_EHT_BFE_SS_160MHZ);
+
+	elem->phy_cap_info[3] = IEEE80211_EHT_PHY_CAP3_NG_16_SU_FEEDBACK |
+				IEEE80211_EHT_PHY_CAP3_NG_16_MU_FEEDBACK |
+				IEEE80211_EHT_PHY_CAP3_CODEBOOK_4_2_SU_FDBK |
+				IEEE80211_EHT_PHY_CAP3_CODEBOOK_7_5_MU_FDBK |
+				IEEE80211_EHT_PHY_CAP3_TRIG_SU_BF_FDBK |
+				IEEE80211_EHT_PHY_CAP3_TRIG_MU_BF_PART_BW_FDBK |
+				IEEE80211_EHT_PHY_CAP3_TRIG_CQI_FDBK;
+
+	elem->phy_cap_info[4] =
+		FIELD_PREP(IEEE80211_EHT_PHY_CAP4_MAX_NC_MASK,
+			   BRCMF_EHT_MAX_NC);
+
 	elem->phy_cap_info[5] =
+		IEEE80211_EHT_PHY_CAP5_NON_TRIG_CQI_FEEDBACK |
+		IEEE80211_EHT_PHY_CAP5_TX_LESS_242_TONE_RU_SUPP |
+		IEEE80211_EHT_PHY_CAP5_RX_LESS_242_TONE_RU_SUPP |
 		FIELD_PREP(IEEE80211_EHT_PHY_CAP5_COMMON_NOMINAL_PKT_PAD_MASK,
-			   IEEE80211_EHT_PHY_CAP5_COMMON_NOMINAL_PKT_PAD_20US);
+			   IEEE80211_EHT_PHY_CAP5_COMMON_NOMINAL_PKT_PAD_16US) |
+		FIELD_PREP(IEEE80211_EHT_PHY_CAP5_MAX_NUM_SUPP_EHT_LTF_MASK,
+			   BRCMF_EHT_MAX_LTF);
+
+	/* and so does the EHT-LTF count */
+	elem->phy_cap_info[6] =
+		FIELD_PREP(IEEE80211_EHT_PHY_CAP6_MAX_NUM_SUPP_EHT_LTF_MASK,
+			   BRCMF_EHT_MAX_LTF >> 2);
+
+	elem->phy_cap_info[7] = IEEE80211_EHT_PHY_CAP7_20MHZ_STA_RX_NDP_WIDER_BW;
 
 	/* Each MCS group is one octet: receive streams low, transmit high, so
 	 * a stream count has to fit a nibble.
