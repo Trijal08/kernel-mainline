@@ -8856,10 +8856,10 @@ static int brcmf_setup_ifmodes(struct wiphy *wiphy, struct brcmf_if *ifp)
 	struct ieee80211_iface_limit *c0_limits = NULL;
 	struct ieee80211_iface_limit *p2p_limits = NULL;
 	struct ieee80211_iface_limit *mbss_limits = NULL;
-	bool mon_flag, mbss, p2p, rsdb, mchan;
+	bool mon, mbss, p2p, rsdb, mchan;
 	int i, c, n_combos, n_limits;
 
-	mon_flag = brcmf_feat_is_enabled(ifp, BRCMF_FEAT_MONITOR_FLAG);
+	mon = brcmf_feat_is_enabled(ifp, BRCMF_FEAT_MONITOR);
 	mbss = brcmf_feat_is_enabled(ifp, BRCMF_FEAT_MBSS);
 	p2p = brcmf_feat_is_enabled(ifp, BRCMF_FEAT_P2P);
 	rsdb = brcmf_feat_is_enabled(ifp, BRCMF_FEAT_RSDB);
@@ -8873,7 +8873,7 @@ static int brcmf_setup_ifmodes(struct wiphy *wiphy, struct brcmf_if *ifp)
 	wiphy->interface_modes = BIT(NL80211_IFTYPE_STATION) |
 				 BIT(NL80211_IFTYPE_ADHOC) |
 				 BIT(NL80211_IFTYPE_AP);
-	if (mon_flag)
+	if (mon)
 		wiphy->interface_modes |= BIT(NL80211_IFTYPE_MONITOR);
 	if (p2p)
 		wiphy->interface_modes |= BIT(NL80211_IFTYPE_P2P_CLIENT) |
@@ -8882,7 +8882,7 @@ static int brcmf_setup_ifmodes(struct wiphy *wiphy, struct brcmf_if *ifp)
 
 	c = 0;
 	i = 0;
-	n_limits = 1 + mon_flag + (p2p ? 2 : 0) + (rsdb || !p2p);
+	n_limits = 1 + mon + (p2p ? 2 : 0) + (rsdb || !p2p);
 	c0_limits = kzalloc_objs(*c0_limits, n_limits);
 	if (!c0_limits)
 		goto err;
@@ -8890,7 +8890,7 @@ static int brcmf_setup_ifmodes(struct wiphy *wiphy, struct brcmf_if *ifp)
 	combo[c].num_different_channels = 1 + (rsdb || (p2p && mchan));
 	c0_limits[i].max = 1 + (p2p && mchan);
 	c0_limits[i++].types = BIT(NL80211_IFTYPE_STATION);
-	if (mon_flag) {
+	if (mon) {
 		c0_limits[i].max = 1;
 		c0_limits[i++].types = BIT(NL80211_IFTYPE_MONITOR);
 	}
@@ -8942,19 +8942,19 @@ static int brcmf_setup_ifmodes(struct wiphy *wiphy, struct brcmf_if *ifp)
 	if (mbss) {
 		c++;
 		i = 0;
-		n_limits = 1 + mon_flag;
+		n_limits = 1 + mon;
 		mbss_limits = kzalloc_objs(*mbss_limits, n_limits);
 		if (!mbss_limits)
 			goto err;
 		mbss_limits[i].max = 4;
 		mbss_limits[i++].types = BIT(NL80211_IFTYPE_AP);
-		if (mon_flag) {
+		if (mon) {
 			mbss_limits[i].max = 1;
 			mbss_limits[i++].types = BIT(NL80211_IFTYPE_MONITOR);
 		}
 		combo[c].beacon_int_infra_match = true;
 		combo[c].num_different_channels = 1;
-		combo[c].max_interfaces = 4 + mon_flag;
+		combo[c].max_interfaces = 4 + mon;
 		combo[c].n_limits = i;
 		combo[c].limits = mbss_limits;
 	}
