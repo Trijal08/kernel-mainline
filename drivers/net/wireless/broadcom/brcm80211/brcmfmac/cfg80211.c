@@ -3467,6 +3467,7 @@ static s32 brcmf_inform_single_bss(struct brcmf_cfg80211_info *cfg,
 	u16 notify_interval;
 	u8 *notify_ie;
 	size_t notify_ielen;
+	enum cfg80211_bss_frame_type ftype;
 	struct cfg80211_inform_bss bss_data = {};
 
 	if (le32_to_cpu(bi->length) > WL_BSS_INFO_MAX) {
@@ -3523,8 +3524,17 @@ static s32 brcmf_inform_single_bss(struct brcmf_cfg80211_info *cfg,
 	brcmf_dbg(CONN, "Beacon interval: %d\n", notify_interval);
 	brcmf_dbg(CONN, "Signal: %d\n", bss_data.signal);
 
-	bss = cfg80211_inform_bss_data(wiphy, &bss_data,
-				       CFG80211_BSS_FTYPE_UNKNOWN,
+	/* A probe response answers with more than a beacon advertises, and the
+	 * firmware says which of the two this was. Pass that on: cfg80211
+	 * keeps the elements of each apart and reports the probe response's,
+	 * where calling every result an unknown frame files all of them as
+	 * beacon elements -- so for a BSS that keeps being heard, a beacon
+	 * overwrites what a probe response had already told us.
+	 */
+	ftype = bi->flags & BRCMF_BSS_FLAGS_FROM_BEACON ?
+		CFG80211_BSS_FTYPE_BEACON : CFG80211_BSS_FTYPE_PRESP;
+
+	bss = cfg80211_inform_bss_data(wiphy, &bss_data, ftype,
 				       (const u8 *)bi->BSSID,
 				       0, notify_capability,
 				       notify_interval, notify_ie,
