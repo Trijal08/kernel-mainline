@@ -3353,26 +3353,49 @@ brcmf_cfg80211_get_station(struct wiphy *wiphy, struct wireless_dev *wdev,
 			}
 		}
 	}
-	/* Some version 7 structs have ratespecs from the last packet. */
+	/* Version 7 carries a ratespec for each direction and how long the
+	 * station has been received for. Ask only for as much as each of
+	 * those needs: a reply is as long as the firmware chose to make it,
+	 * and one that stops short of the fields this driver knows about
+	 * still holds the earlier ones.
+	 */
 	if (struct_ver >= 7) {
-		if (info_len >= sizeof(sta_info_le)) {
-			brcmf_convert_ratespec_to_rateinfo(
-				le32_to_cpu(sta_info_le.v7.tx_rspec),
-				&sinfo->txrate);
-			brcmf_convert_ratespec_to_rateinfo(
-				le32_to_cpu(sta_info_le.v7.rx_rspec),
-				&sinfo->rxrate);
+		u32 tx_rspec = 0;
+		u32 rx_rspec = 0;
+
+		if (info_len >= offsetofend(struct brcmf_sta_info_le,
+					    v7.rx_rspec)) {
+			tx_rspec = le32_to_cpu(sta_info_le.v7.tx_rspec);
+			rx_rspec = le32_to_cpu(sta_info_le.v7.rx_rspec);
+		}
+
+		/* A ratespec the firmware did not fill in is zero, which
+		 * describes no rate at all, so it is not an answer either.
+		 */
+		if (rx_rspec)
+			brcmf_convert_ratespec_to_rateinfo(rx_rspec,
+							   &sinfo->rxrate);
+
+		if (tx_rspec) {
+			brcmf_convert_ratespec_to_rateinfo(tx_rspec,
+							   &sinfo->txrate);
+		} else {
+			/* Without one, the transmit rate has to come from the
+			 * rate the station is set to
+			 */
+			u32 nrate = 0;
+
+			err = brcmf_fil_iovar_int_get(ifp, "nrate", &nrate);
+			if (!err)
+				brcmf_convert_ratespec_to_rateinfo(
+					nrate, &sinfo->txrate);
+		}
+
+		if (info_len >= offsetofend(struct brcmf_sta_info_le,
+					    v7.rx_dur_total)) {
 			sinfo->filled |= BIT_ULL(NL80211_STA_INFO_RX_DURATION);
 			sinfo->rx_duration =
 				le32_to_cpu(sta_info_le.v7.rx_dur_total);
-		} else {
-			/* We didn't get the fields we were expecting, fallback to nrate */
-			u32 nrate = 0;
-			err = brcmf_fil_iovar_int_get(ifp, "nrate", &nrate);
-			if (!err) {
-				brcmf_convert_ratespec_to_rateinfo(
-					nrate, &sinfo->txrate);
-			}
 		}
 	}
 done:
