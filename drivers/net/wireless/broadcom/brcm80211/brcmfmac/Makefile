@@ -23,6 +23,7 @@ brcmfmac-objs += \
 		fwvid.o \
 		feature.o \
 		btcoex.o \
+		ftm.o \
 		vendor.o \
 		pno.o \
 		join_param.o \
