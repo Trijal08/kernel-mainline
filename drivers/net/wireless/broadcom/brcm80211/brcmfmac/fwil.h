@@ -43,6 +43,7 @@
 #define BRCMF_C_REASSOC				53
 #define BRCMF_C_SET_ROAM_TRIGGER		55
 #define BRCMF_C_SET_ROAM_DELTA			57
+#define BRCMF_C_SET_MACLIST			70
 #define BRCMF_C_GET_BCNPRD			75
 #define BRCMF_C_SET_BCNPRD			76
 #define BRCMF_C_GET_DTIMPRD			77
@@ -51,6 +52,8 @@
 #define BRCMF_C_GET_PM				85
 #define BRCMF_C_SET_PM				86
 #define BRCMF_C_GET_REVINFO			98
+#define BRCMF_C_GET_MACMODE			105
+#define BRCMF_C_SET_MACMODE			106
 #define BRCMF_C_GET_MONITOR			107
 #define BRCMF_C_SET_MONITOR			108
 /* set in what BRCMF_C_GET_MONITOR reports when the host, rather than

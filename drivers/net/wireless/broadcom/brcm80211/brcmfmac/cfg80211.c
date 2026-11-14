@@ -6709,6 +6709,64 @@ static int brcmf_cfg80211_set_tid_config(struct wiphy *wiphy,
 	return 0;
 }
 
+/* BRCMF_C_SET_MACMODE values: which way the MAC filter list is read */
+#define BRCMF_MACMODE_DISABLED	0
+#define BRCMF_MACMODE_DENY	1	/* deny the listed, allow the rest */
+#define BRCMF_MACMODE_ALLOW	2	/* allow the listed, deny the rest */
+
+/* BRCMF_C_SET_MACLIST payload: a count followed by that many MAC addresses */
+struct brcmf_maclist_le {
+	__le32 count;
+	u8 ea[][ETH_ALEN];
+};
+
+static int brcmf_cfg80211_set_mac_acl(struct wiphy *wiphy,
+				      struct net_device *ndev,
+				      const struct cfg80211_acl_data *params)
+{
+	struct brcmf_if *ifp = netdev_priv(ndev);
+	struct brcmf_pub *drvr = ifp->drvr;
+	struct brcmf_maclist_le *maclist;
+	u32 macmode = BRCMF_MACMODE_DISABLED;
+	int i, n = 0, err, len;
+
+	/* ACCEPT_UNLESS_LISTED is a deny list (block the named); its mirror,
+	 * DENY_UNLESS_LISTED, is an allow list (only the named may join).
+	 */
+	if (params) {
+		if (params->acl_policy == NL80211_ACL_POLICY_DENY_UNLESS_LISTED)
+			macmode = BRCMF_MACMODE_ALLOW;
+		else if (params->acl_policy ==
+				NL80211_ACL_POLICY_ACCEPT_UNLESS_LISTED &&
+			 params->n_acl_entries)
+			macmode = BRCMF_MACMODE_DENY;
+		n = params->n_acl_entries;
+	}
+
+	len = sizeof(*maclist) + n * ETH_ALEN;
+	maclist = kzalloc(len, GFP_KERNEL);
+	if (!maclist)
+		return -ENOMEM;
+
+	maclist->count = cpu_to_le32(n);
+	for (i = 0; i < n; i++)
+		memcpy(maclist->ea[i], params->mac_addrs[i].addr, ETH_ALEN);
+
+	/* install the list first, then turn on the mode that consumes it */
+	err = brcmf_fil_cmd_data_set(ifp, BRCMF_C_SET_MACLIST, maclist, len);
+	if (err) {
+		bphy_err(drvr, "SET_MACLIST failed (%d)\n", err);
+		goto out;
+	}
+	err = brcmf_fil_cmd_int_set(ifp, BRCMF_C_SET_MACMODE, macmode);
+	if (err)
+		bphy_err(drvr, "SET_MACMODE failed (%d)\n", err);
+
+out:
+	kfree(maclist);
+	return err;
+}
+
 static int brcmf_cfg80211_crit_proto_start(struct wiphy *wiphy,
 					   struct wireless_dev *wdev,
 					   enum nl80211_crit_proto_id proto,
@@ -6937,6 +6995,7 @@ static struct cfg80211_ops brcmf_cfg80211_ops = {
 	.set_bitrate_mask = brcmf_cfg80211_set_bitrate_mask,
 	.update_ft_ies = brcmf_cfg80211_update_ft_ies,
 	.set_tid_config = brcmf_cfg80211_set_tid_config,
+	.set_mac_acl = brcmf_cfg80211_set_mac_acl,
 	.set_wiphy_params = brcmf_cfg80211_set_wiphy_params,
 	.join_ibss = brcmf_cfg80211_join_ibss,
 	.leave_ibss = brcmf_cfg80211_leave_ibss,
@@ -9385,6 +9444,9 @@ static int brcmf_setup_wiphy(struct wiphy *wiphy, struct brcmf_if *ifp)
 	/* Per-TID config: only A-MPDU on/off is backed by a firmware iovar. */
 	wiphy->tid_config_support.vif = BIT(NL80211_TID_CONFIG_ATTR_AMPDU_CTRL);
 	wiphy->tid_config_support.peer = BIT(NL80211_TID_CONFIG_ATTR_AMPDU_CTRL);
+
+	/* AP MAC address filter (BRCMF_C_SET_MACLIST), up to the firmware max. */
+	wiphy->max_acl_mac_addrs = 10;
 
 	wiphy->mgmt_stypes = brcmf_txrx_stypes;
 	wiphy->max_remain_on_channel_duration = 5000;
