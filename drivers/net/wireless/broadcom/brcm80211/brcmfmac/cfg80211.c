@@ -6738,6 +6738,8 @@ static struct cfg80211_ops brcmf_cfg80211_ops = {
 		brcmf_cfg80211_update_mgmt_frame_registrations,
 	.mgmt_tx = brcmf_cfg80211_mgmt_tx,
 	.set_cqm_rssi_range_config = brcmf_cfg80211_set_cqm_rssi_range_config,
+	.start_pmsr = brcmf_ftm_start,
+	.abort_pmsr = brcmf_ftm_abort,
 	.remain_on_channel = brcmf_p2p_remain_on_channel,
 	.cancel_remain_on_channel = brcmf_cfg80211_cancel_remain_on_channel,
 	.get_channel = brcmf_cfg80211_get_channel,
@@ -7784,6 +7786,7 @@ static void brcmf_register_event_handlers(struct brcmf_cfg80211_info *cfg)
 	brcmf_fweh_register(cfg->pub, BRCMF_E_PSK_SUP,
 			    brcmf_notify_connect_status);
 	brcmf_fweh_register(cfg->pub, BRCMF_E_RSSI, brcmf_notify_rssi);
+	brcmf_fweh_register(cfg->pub, BRCMF_E_PROXD, brcmf_ftm_event);
 
 	brcmf_fwvid_register_event_handlers(cfg->pub);
 }
@@ -9103,6 +9106,9 @@ static int brcmf_setup_wiphy(struct wiphy *wiphy, struct brcmf_if *ifp)
 	 */
 	if (!brcmf_fil_iovar_int_get(ifp, "rrm", &rrm) && rrm)
 		wiphy_ext_feature_set(wiphy, NL80211_EXT_FEATURE_RRM);
+
+	/* Peer measurement (FTM), if the firmware carries the engine. */
+	brcmf_ftm_attach(wiphy_to_cfg(wiphy), ifp);
 
 	/* High accuracy and low power scans are always supported. */
 	wiphy_ext_feature_set(wiphy, NL80211_EXT_FEATURE_HIGH_ACCURACY_SCAN);
