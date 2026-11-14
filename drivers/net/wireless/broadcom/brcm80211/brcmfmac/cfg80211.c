@@ -770,6 +770,38 @@ static int brcmf_mon_del_vif(struct wiphy *wiphy, struct wireless_dev *wdev)
 	return 0;
 }
 
+static int brcmf_cfg80211_set_monitor_channel(struct wiphy *wiphy,
+					      struct net_device *dev,
+					      struct cfg80211_chan_def *chandef)
+{
+	struct brcmf_cfg80211_info *cfg = wiphy_to_cfg(wiphy);
+	struct brcmf_pub *drvr = cfg->pub;
+	struct brcmf_if *ifp;
+	u32 channel;
+	int err;
+
+	/* cfg80211 only reaches here with a monitor interface up, and it is
+	 * the one passed; fall back to the tracked monitor interface so a
+	 * stored-channel caller still has somewhere to aim.
+	 */
+	ifp = dev ? netdev_priv(dev) : cfg->pub->mon_if;
+	if (!ifp)
+		return -ENODEV;
+
+	/* Monitor mode has no BSS, so the firmware refuses the chanspec
+	 * iovar; the plain channel command is what retunes the radio while
+	 * monitoring. It carries only the control channel, so a capture is
+	 * 20 MHz wide on whichever channel is chosen.
+	 */
+	channel = ieee80211_frequency_to_channel(chandef->chan->center_freq);
+	err = brcmf_fil_cmd_int_set(ifp, BRCMF_C_SET_CHANNEL, channel);
+	if (err)
+		bphy_err(drvr, "set monitor channel %u failed: %d\n", channel,
+			 err);
+
+	return err;
+}
+
 static struct wireless_dev *brcmf_cfg80211_add_iface(struct wiphy *wiphy,
 						     const char *name,
 						     unsigned char name_assign_type,
@@ -6738,6 +6770,7 @@ static struct cfg80211_ops brcmf_cfg80211_ops = {
 		brcmf_cfg80211_update_mgmt_frame_registrations,
 	.mgmt_tx = brcmf_cfg80211_mgmt_tx,
 	.set_cqm_rssi_range_config = brcmf_cfg80211_set_cqm_rssi_range_config,
+	.set_monitor_channel = brcmf_cfg80211_set_monitor_channel,
 	.start_pmsr = brcmf_ftm_start,
 	.abort_pmsr = brcmf_ftm_abort,
 	.remain_on_channel = brcmf_p2p_remain_on_channel,
