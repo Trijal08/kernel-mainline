@@ -827,6 +827,8 @@ static struct wireless_dev *brcmf_cfg80211_add_iface(struct wiphy *wiphy,
 		return ERR_PTR(-EOPNOTSUPP);
 	case NL80211_IFTYPE_MONITOR:
 		return brcmf_mon_add_vif(wiphy, name);
+	case NL80211_IFTYPE_NAN:
+		return brcmf_nan_add_vif(wiphy, name);
 	case NL80211_IFTYPE_STATION:
 	case NL80211_IFTYPE_AP:
 		wdev = brcmf_apsta_add_vif(wiphy, name, params, type);
@@ -1020,6 +1022,8 @@ int brcmf_cfg80211_del_iface(struct wiphy *wiphy, struct wireless_dev *wdev)
 		return -EOPNOTSUPP;
 	case NL80211_IFTYPE_MONITOR:
 		return brcmf_mon_del_vif(wiphy, wdev);
+	case NL80211_IFTYPE_NAN:
+		return brcmf_nan_del_vif(wiphy, wdev);
 	case NL80211_IFTYPE_STATION:
 	case NL80211_IFTYPE_AP:
 		return brcmf_cfg80211_del_apsta_iface(wiphy, wdev);
@@ -6773,6 +6777,11 @@ static struct cfg80211_ops brcmf_cfg80211_ops = {
 	.set_monitor_channel = brcmf_cfg80211_set_monitor_channel,
 	.start_pmsr = brcmf_ftm_start,
 	.abort_pmsr = brcmf_ftm_abort,
+	.start_nan = brcmf_nan_start,
+	.stop_nan = brcmf_nan_stop,
+	.add_nan_func = brcmf_nan_add_func,
+	.del_nan_func = brcmf_nan_del_func,
+	.nan_change_conf = brcmf_nan_change_conf,
 	.remain_on_channel = brcmf_p2p_remain_on_channel,
 	.cancel_remain_on_channel = brcmf_cfg80211_cancel_remain_on_channel,
 	.get_channel = brcmf_cfg80211_get_channel,
@@ -7819,6 +7828,7 @@ static void brcmf_register_event_handlers(struct brcmf_cfg80211_info *cfg)
 	brcmf_fweh_register(cfg->pub, BRCMF_E_PSK_SUP,
 			    brcmf_notify_connect_status);
 	brcmf_fweh_register(cfg->pub, BRCMF_E_RSSI, brcmf_notify_rssi);
+	brcmf_fweh_register(cfg->pub, BRCMF_E_NAN, brcmf_nan_event);
 	brcmf_fweh_register(cfg->pub, BRCMF_E_PROXD, brcmf_ftm_event);
 
 	brcmf_fwvid_register_event_handlers(cfg->pub);
@@ -7873,6 +7883,7 @@ static s32 wl_init_priv(struct brcmf_cfg80211_info *cfg)
 	cfg->scan_request = NULL;
 	cfg->pwr_save = true;
 	cfg->dongle_up = false;		/* dongle is not up yet */
+	brcmf_nan_init(cfg);
 	err = brcmf_init_priv_mem(cfg);
 	if (err)
 		return err;
@@ -8892,7 +8903,7 @@ static int brcmf_setup_ifmodes(struct wiphy *wiphy, struct brcmf_if *ifp)
 	struct ieee80211_iface_limit *c0_limits = NULL;
 	struct ieee80211_iface_limit *p2p_limits = NULL;
 	struct ieee80211_iface_limit *mbss_limits = NULL;
-	bool mon, mbss, p2p, rsdb, mchan;
+	bool mon, mbss, p2p, rsdb, mchan, nan;
 	int i, c, n_combos, n_limits;
 
 	mon = brcmf_feat_is_enabled(ifp, BRCMF_FEAT_MONITOR);
@@ -8900,6 +8911,7 @@ static int brcmf_setup_ifmodes(struct wiphy *wiphy, struct brcmf_if *ifp)
 	p2p = brcmf_feat_is_enabled(ifp, BRCMF_FEAT_P2P);
 	rsdb = brcmf_feat_is_enabled(ifp, BRCMF_FEAT_RSDB);
 	mchan = brcmf_feat_is_enabled(ifp, BRCMF_FEAT_MCHAN);
+	nan = brcmf_feat_is_enabled(ifp, BRCMF_FEAT_NAN);
 
 	n_combos = 1 + !!(p2p && !rsdb) + !!mbss;
 	combo = kzalloc_objs(*combo, n_combos);
@@ -8915,10 +8927,12 @@ static int brcmf_setup_ifmodes(struct wiphy *wiphy, struct brcmf_if *ifp)
 		wiphy->interface_modes |= BIT(NL80211_IFTYPE_P2P_CLIENT) |
 					  BIT(NL80211_IFTYPE_P2P_GO) |
 					  BIT(NL80211_IFTYPE_P2P_DEVICE);
+	if (nan)
+		wiphy->interface_modes |= BIT(NL80211_IFTYPE_NAN);
 
 	c = 0;
 	i = 0;
-	n_limits = 1 + mon + (p2p ? 2 : 0) + (rsdb || !p2p);
+	n_limits = 1 + mon + nan + (p2p ? 2 : 0) + (rsdb || !p2p);
 	c0_limits = kzalloc_objs(*c0_limits, n_limits);
 	if (!c0_limits)
 		goto err;
@@ -8930,6 +8944,15 @@ static int brcmf_setup_ifmodes(struct wiphy *wiphy, struct brcmf_if *ifp)
 		c0_limits[i].max = 1;
 		c0_limits[i++].types = BIT(NL80211_IFTYPE_MONITOR);
 	}
+	if (nan) {
+		/* A single non-netdev NAN management interface, like the
+		 * P2P device below. It does not count against the concurrent
+		 * data interfaces -- the firmware runs the NAN engine on its
+		 * own -- so it only needs a slot of its own in the combination.
+		 */
+		c0_limits[i].max = 1;
+		c0_limits[i++].types = BIT(NL80211_IFTYPE_NAN);
+	}
 	if (p2p) {
 		c0_limits[i].max = 1;
 		c0_limits[i++].types = BIT(NL80211_IFTYPE_P2P_DEVICE);
@@ -8940,13 +8963,13 @@ static int brcmf_setup_ifmodes(struct wiphy *wiphy, struct brcmf_if *ifp)
 	if (p2p && rsdb) {
 		c0_limits[i].max = 2;
 		c0_limits[i++].types = BIT(NL80211_IFTYPE_AP);
-		combo[c].max_interfaces = 4;
+		combo[c].max_interfaces = 4 + nan;
 	} else if (p2p) {
 		combo[c].max_interfaces = i;
 	} else if (rsdb) {
 		c0_limits[i].max = 2;
 		c0_limits[i++].types = BIT(NL80211_IFTYPE_AP);
-		combo[c].max_interfaces = 3;
+		combo[c].max_interfaces = 3 + nan;
 	} else {
 		c0_limits[i].max = 1;
 		c0_limits[i++].types = BIT(NL80211_IFTYPE_AP);
@@ -9142,6 +9165,9 @@ static int brcmf_setup_wiphy(struct wiphy *wiphy, struct brcmf_if *ifp)
 
 	/* Peer measurement (FTM), if the firmware carries the engine. */
 	brcmf_ftm_attach(wiphy_to_cfg(wiphy), ifp);
+
+	/* NAN (Wi-Fi Aware), if the firmware carries the engine. */
+	brcmf_nan_attach(wiphy_to_cfg(wiphy), ifp);
 
 	/* High accuracy and low power scans are always supported. */
 	wiphy_ext_feature_set(wiphy, NL80211_EXT_FEATURE_HIGH_ACCURACY_SCAN);
