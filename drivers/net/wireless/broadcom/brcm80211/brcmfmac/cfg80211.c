@@ -231,7 +231,11 @@ static struct ieee80211_channel __wl_6ghz_channels[] = {
 	CHAN6G(217),	CHAN6G(221), CHAN6G(225), CHAN6G(229), CHAN6G(233),
 };
 
-struct ieee80211_sband_iftype_data sdata[NUM_NL80211_BANDS];
+/* Two iftype_data entries per band: one for station mode, one for AP mode.
+ * They have to be separate because cfg80211 rejects an EHT entry that lists
+ * AP and non-AP interface types together.
+ */
+struct ieee80211_sband_iftype_data sdata[NUM_NL80211_BANDS][2];
 
 /* Band templates duplicated per wiphy. The channel info
  * above is added to the band during setup.
@@ -8815,11 +8819,23 @@ static int brcmf_setup_wiphybands(struct brcmf_cfg80211_info *cfg)
 			brcmf_update_vht_cap(band, bw_cap, txstreams, rxstreams,
 					     txbf_bfe_cap, txbf_bfr_cap,
 					     ldpc_cap, stbc_rx, stbc_tx);
-		if (he_enable)
-			brcmf_update_he_cap(band, &sdata[band->band], bw_cap);
-		if (eht_enable)
-			brcmf_update_eht_cap(band, &sdata[band->band], bw_cap,
-					     nrxchain);
+		if (he_enable) {
+			brcmf_update_he_cap(band, sdata[band->band], bw_cap);
+			if (eht_enable)
+				brcmf_update_eht_cap(band, sdata[band->band],
+						     bw_cap, nrxchain);
+			/* Offer the HE/EHT capabilities to AP mode as well, as
+			 * a second iftype_data entry copied from the station
+			 * one. SoftAP needs them -- a 6 GHz AP in particular
+			 * cannot start without an advertised HE 6 GHz
+			 * capability, there being no legacy PHY on that band.
+			 */
+			sdata[band->band][1] = sdata[band->band][0];
+			sdata[band->band][1].types_mask =
+				BIT(NL80211_IFTYPE_AP);
+			band->iftype_data = sdata[band->band];
+			band->n_iftype_data = 2;
+		}
 	}
 
 	return 0;
