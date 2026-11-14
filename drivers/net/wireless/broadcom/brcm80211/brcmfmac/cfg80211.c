@@ -6520,6 +6520,12 @@ static int brcmf_cfg80211_get_channel(struct wiphy *wiphy,
 	return 0;
 }
 
+static void brcmf_cfg80211_abort_scan(struct wiphy *wiphy,
+				      struct wireless_dev *wdev)
+{
+	brcmf_abort_scanning(wiphy_to_cfg(wiphy));
+}
+
 static int brcmf_cfg80211_crit_proto_start(struct wiphy *wiphy,
 					   struct wireless_dev *wdev,
 					   enum nl80211_crit_proto_id proto,
@@ -6743,6 +6749,7 @@ static struct cfg80211_ops brcmf_cfg80211_ops = {
 	.del_virtual_intf = brcmf_cfg80211_del_iface,
 	.change_virtual_intf = brcmf_cfg80211_change_iface,
 	.scan = brcmf_cfg80211_scan,
+	.abort_scan = brcmf_cfg80211_abort_scan,
 	.set_wiphy_params = brcmf_cfg80211_set_wiphy_params,
 	.join_ibss = brcmf_cfg80211_join_ibss,
 	.leave_ibss = brcmf_cfg80211_leave_ibss,
