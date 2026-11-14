@@ -6530,6 +6530,185 @@ static void brcmf_cfg80211_abort_scan(struct wiphy *wiphy,
 	brcmf_abort_scanning(wiphy_to_cfg(wiphy));
 }
 
+/* Only get_antenna is offered: on this firmware a chain *reduction* wedges
+ * the radio -- it then refuses to go back up (every command, including a
+ * direct txchain write, returns -EIO) until the driver is reloaded -- so
+ * set_antenna is deliberately not wired.
+ */
+static int brcmf_cfg80211_get_antenna(struct wiphy *wiphy, int radio_idx,
+				      u32 *tx_ant, u32 *rx_ant)
+{
+	struct brcmf_cfg80211_info *cfg = wiphy_to_cfg(wiphy);
+	struct brcmf_if *ifp = netdev_priv(cfg_to_ndev(cfg));
+	u32 tx, rx;
+	int err;
+
+	err = brcmf_fil_iovar_int_get(ifp, "txchain", &tx);
+	if (err)
+		return err;
+	err = brcmf_fil_iovar_int_get(ifp, "rxchain", &rx);
+	if (err)
+		return err;
+
+	*tx_ant = tx;
+	*rx_ant = rx;
+	return 0;
+}
+
+/* The firmware fixes a single rate (a ratespec); a cfg80211 mask is a set of
+ * allowed rates. Only "exactly one rate" (fix it) and "unrestricted" (auto)
+ * map cleanly, so count the selected rates: one -> encode it, anything else
+ * -> 0, which the firmware reads as auto.
+ */
+static u32 brcmf_rspec_from_bitrate_mask(const struct cfg80211_bitrate_mask *mask,
+					 struct ieee80211_supported_band *sband,
+					 enum nl80211_band band)
+{
+	u32 legacy = mask->control[band].legacy;
+	unsigned int n = 0;
+	int i, m;
+
+	n += hweight32(legacy);
+	for (i = 0; i < IEEE80211_HT_MCS_MASK_LEN; i++)
+		n += hweight8(mask->control[band].ht_mcs[i]);
+	for (i = 0; i < NL80211_VHT_NSS_MAX; i++)
+		n += hweight16(mask->control[band].vht_mcs[i]);
+	for (i = 0; i < NL80211_HE_NSS_MAX; i++)
+		n += hweight16(mask->control[band].he_mcs[i]);
+	for (i = 0; i < NL80211_EHT_NSS_MAX; i++)
+		n += hweight16(mask->control[band].eht_mcs[i]);
+
+	if (n != 1)
+		return 0;
+
+	/* exactly one rate is selected: find it, newest PHY format first. The
+	 * array index is the 0-based stream count, the ratespec NSS field is
+	 * 1-based, so add one; HT carries the stream count inside the MCS.
+	 */
+	for (i = 0; i < NL80211_EHT_NSS_MAX; i++)
+		if (mask->control[band].eht_mcs[i]) {
+			m = ffs(mask->control[band].eht_mcs[i]) - 1;
+			return BRCMF_RSPEC_ENCODE_EHT |
+			       ((i + 1) << BRCMF_RSPEC_NSS_SHIFT) | m;
+		}
+	for (i = 0; i < NL80211_HE_NSS_MAX; i++)
+		if (mask->control[band].he_mcs[i]) {
+			m = ffs(mask->control[band].he_mcs[i]) - 1;
+			return BRCMF_RSPEC_ENCODE_HE |
+			       ((i + 1) << BRCMF_RSPEC_NSS_SHIFT) | m;
+		}
+	for (i = 0; i < NL80211_VHT_NSS_MAX; i++)
+		if (mask->control[band].vht_mcs[i]) {
+			m = ffs(mask->control[band].vht_mcs[i]) - 1;
+			return BRCMF_RSPEC_ENCODE_VHT |
+			       ((i + 1) << BRCMF_RSPEC_NSS_SHIFT) | m;
+		}
+	for (i = 0; i < IEEE80211_HT_MCS_MASK_LEN; i++)
+		if (mask->control[band].ht_mcs[i]) {
+			m = i * 8 + (ffs(mask->control[band].ht_mcs[i]) - 1);
+			return BRCMF_RSPEC_ENCODE_HT | m;
+		}
+	if (legacy) {
+		i = ffs(legacy) - 1;
+		if (sband && i < sband->n_bitrates)
+			return BRCMF_RSPEC_ENCODE_RATE |
+			       (sband->bitrates[i].bitrate / 5);
+	}
+	return 0;
+}
+
+static int brcmf_cfg80211_set_bitrate_mask(struct wiphy *wiphy,
+					   struct net_device *ndev,
+					   unsigned int link_id, const u8 *peer,
+					   const struct cfg80211_bitrate_mask *mask)
+{
+	struct brcmf_if *ifp = netdev_priv(ndev);
+	struct brcmf_pub *drvr = ifp->drvr;
+	static const char * const rate_iovar[NUM_NL80211_BANDS] = {
+		[NL80211_BAND_2GHZ] = "2g_rate",
+		[NL80211_BAND_5GHZ] = "5g_rate",
+		[NL80211_BAND_6GHZ] = "6g_rate",
+	};
+	enum nl80211_band band;
+	int err;
+
+	for (band = 0; band < NUM_NL80211_BANDS; band++) {
+		struct ieee80211_supported_band *sband = wiphy->bands[band];
+		u32 rspec;
+
+		if (!sband || !rate_iovar[band])
+			continue;
+		rspec = brcmf_rspec_from_bitrate_mask(mask, sband, band);
+		err = brcmf_fil_iovar_int_set(ifp, rate_iovar[band], rspec);
+		if (err) {
+			bphy_err(drvr, "%s set 0x%08x failed (%d)\n",
+				 rate_iovar[band], rspec, err);
+			return err;
+		}
+	}
+	return 0;
+}
+
+static int brcmf_cfg80211_update_ft_ies(struct wiphy *wiphy,
+					struct net_device *ndev,
+					struct cfg80211_update_ft_ies_params *ftie)
+{
+	struct brcmf_if *ifp = netdev_priv(ndev);
+
+	/* 802.11r fast transition is offloaded: the firmware builds the MDE
+	 * and FTIE itself, so there is nothing to push down. Succeed when the
+	 * firmware carries the engine, so an FT association is not refused.
+	 */
+	if (!brcmf_feat_is_enabled(ifp, BRCMF_FEAT_FBT))
+		return -EOPNOTSUPP;
+
+	return 0;
+}
+
+/* ampdu_tid iovar payload: per-TID A-MPDU aggregation on/off */
+struct brcmf_ampdu_tid_ctl_le {
+	u8 tid;
+	u8 enable;
+};
+
+static int brcmf_cfg80211_set_tid_config(struct wiphy *wiphy,
+					 struct net_device *ndev,
+					 struct cfg80211_tid_config *tid_conf)
+{
+	struct brcmf_if *ifp = netdev_priv(ndev);
+	struct brcmf_pub *drvr = ifp->drvr;
+	struct brcmf_ampdu_tid_ctl_le ctl;
+	unsigned int i;
+	int tid, err;
+
+	/* Only per-TID A-MPDU on/off is wired -- the one per-TID knob the
+	 * firmware exposes (ampdu_tid). tid_config_support advertises just
+	 * that, so cfg80211 rejects every other attribute before it reaches
+	 * here.
+	 */
+	for (i = 0; i < tid_conf->n_tid_conf; i++) {
+		const struct cfg80211_tid_cfg *tc = &tid_conf->tid_conf[i];
+
+		if (!(tc->mask & BIT(NL80211_TID_CONFIG_ATTR_AMPDU_CTRL)))
+			continue;
+
+		for (tid = 0; tid < 8; tid++) {
+			if (!(tc->tids & BIT(tid)))
+				continue;
+			ctl.tid = tid;
+			ctl.enable = tc->ampdu == NL80211_TID_CONFIG_ENABLE;
+			err = brcmf_fil_iovar_data_set(ifp, "ampdu_tid", &ctl,
+						       sizeof(ctl));
+			if (err) {
+				bphy_err(drvr, "ampdu_tid %d failed (%d)\n",
+					 tid, err);
+				return err;
+			}
+		}
+	}
+	return 0;
+}
+
 static int brcmf_cfg80211_crit_proto_start(struct wiphy *wiphy,
 					   struct wireless_dev *wdev,
 					   enum nl80211_crit_proto_id proto,
@@ -6754,6 +6933,10 @@ static struct cfg80211_ops brcmf_cfg80211_ops = {
 	.change_virtual_intf = brcmf_cfg80211_change_iface,
 	.scan = brcmf_cfg80211_scan,
 	.abort_scan = brcmf_cfg80211_abort_scan,
+	.get_antenna = brcmf_cfg80211_get_antenna,
+	.set_bitrate_mask = brcmf_cfg80211_set_bitrate_mask,
+	.update_ft_ies = brcmf_cfg80211_update_ft_ies,
+	.set_tid_config = brcmf_cfg80211_set_tid_config,
 	.set_wiphy_params = brcmf_cfg80211_set_wiphy_params,
 	.join_ibss = brcmf_cfg80211_join_ibss,
 	.leave_ibss = brcmf_cfg80211_leave_ibss,
@@ -8769,31 +8952,30 @@ static int brcmf_setup_wiphybands(struct brcmf_cfg80211_info *cfg)
 		else
 			bphy_err(drvr, "rxchain error (%d)\n", err);
 
-		nrxchain = 1;
 		rxchain = 1;
-	} else {
-		for (nrxchain = 0; rxchain; nrxchain++)
-			rxchain = rxchain & (rxchain - 1);
 	}
+	/* available_antennas is the chain bitmap cfg80211 expects; the count
+	 * loop below consumes rxchain, so take the bitmap from it first.
+	 */
+	wiphy->available_antennas_rx = rxchain;
+	for (nrxchain = 0; rxchain; nrxchain++)
+		rxchain = rxchain & (rxchain - 1);
 	brcmf_dbg(INFO, "nrxchain=%d\n", nrxchain);
+
 	err = brcmf_fil_iovar_int_get(ifp, "txchain", &txchain);
 	if (err) {
-		/* rxchain unsupported by firmware of older chips */
+		/* txchain unsupported by firmware of older chips */
 		if (err == -EBADE)
-			bphy_info_once(drvr, "rxchain unsupported\n");
+			bphy_info_once(drvr, "txchain unsupported\n");
 		else
-			bphy_err(drvr, "rxchain error (%d)\n", err);
+			bphy_err(drvr, "txchain error (%d)\n", err);
 
-		ntxchain = 1;
 		txchain = 1;
-	} else {
-		for (ntxchain = 0; txchain; ntxchain++)
-			txchain = txchain & (txchain - 1);
 	}
+	wiphy->available_antennas_tx = txchain;
+	for (ntxchain = 0; txchain; ntxchain++)
+		txchain = txchain & (txchain - 1);
 	brcmf_dbg(INFO, "ntxchain=%d\n", ntxchain);
-
-	wiphy->available_antennas_rx = nrxchain;
-	wiphy->available_antennas_tx = ntxchain;
 
 	err = brcmf_construct_chaninfo(cfg, bw_cap);
 	if (err) {
@@ -9199,6 +9381,10 @@ static int brcmf_setup_wiphy(struct wiphy *wiphy, struct brcmf_if *ifp)
 	wiphy_ext_feature_set(wiphy, NL80211_EXT_FEATURE_LOW_POWER_SCAN);
 	wiphy_ext_feature_set(wiphy, NL80211_EXT_FEATURE_LOW_SPAN_SCAN);
 	wiphy->features |= NL80211_FEATURE_LOW_PRIORITY_SCAN;
+
+	/* Per-TID config: only A-MPDU on/off is backed by a firmware iovar. */
+	wiphy->tid_config_support.vif = BIT(NL80211_TID_CONFIG_ATTR_AMPDU_CTRL);
+	wiphy->tid_config_support.peer = BIT(NL80211_TID_CONFIG_ATTR_AMPDU_CTRL);
 
 	wiphy->mgmt_stypes = brcmf_txrx_stypes;
 	wiphy->max_remain_on_channel_duration = 5000;
