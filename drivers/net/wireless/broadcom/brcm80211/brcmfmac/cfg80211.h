@@ -14,6 +14,7 @@
 #include "fwil_types.h"
 #include "p2p.h"
 #include "ftm.h"
+#include "nan.h"
 
 #define	DOT11_MGMT_HDR_LEN		24	/* d11 management header len */
 
@@ -380,6 +381,7 @@ struct brcmf_cfg80211_wowl {
  * @eht: firmware has EHT and takes the EHT sub-feature commands.
  * @mlo_max_links: links the firmware will put in an association, zero for none.
  * @ftm: in-flight peer measurement (FTM) state.
+ * @nan: NAN (Wi-Fi Aware) interface state.
  * @pub: common driver information.
  * @channel: current channel.
  * @int_escan_map: bucket map for which internal e-scan is done.
@@ -415,6 +417,7 @@ struct brcmf_cfg80211_info {
 	bool eht;
 	u8 mlo_max_links;
 	struct brcmf_ftm ftm;
+	struct brcmf_nan nan;
 	struct brcmf_pub *pub;
 	u32 channel;
 	u32 int_escan_map;

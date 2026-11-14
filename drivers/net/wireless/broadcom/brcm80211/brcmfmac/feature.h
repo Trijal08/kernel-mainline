@@ -23,6 +23,7 @@
  * GSCAN: enhanced scan offload feature.
  * FWSUP: Firmware supplicant.
  * MONITOR: firmware can pass monitor packets to host.
+ * NAN: firmware supports Neighbor Awareness Networking.
  * MONITOR_FLAG: firmware flags monitor packets.
  * MONITOR_FMT_RADIOTAP: firmware provides monitor packets with radiotap header
  * MONITOR_FMT_HW_RX_HDR: firmware provides monitor packets with hw/ucode header
@@ -69,6 +70,7 @@
 	BRCMF_FEAT_DEF(OKC) \
 	BRCMF_FEAT_DEF(EVENT_MSGS_EXT) \
 	BRCMF_FEAT_DEF(GCMP) \
+	BRCMF_FEAT_DEF(NAN) \
 	BRCMF_FEAT_DEF(WOWL_ANY)
 
 /*
