@@ -19,6 +19,12 @@
 #include <linux/compat.h>
 #include <linux/uio.h>
 #include <linux/file.h>
+#include <linux/vmalloc.h>
+#include <linux/proc_fs.h>
+#include <linux/ktime.h>
+#include <linux/sizes.h>
+#include <linux/spinlock.h>
+#include <linux/unaligned.h>
 
 #include <linux/virtio.h>
 #include <linux/virtio_ids.h>
@@ -432,6 +438,110 @@ static struct tipc_msg_buf *vds_get_txbuf(struct tipc_virtio_dev *vds,
 	return mb;
 }
 
+/*
+ * ---------------------------------------------------------------------------
+ * /proc/trustydump -- a timestamped capture of every tipc message crossing the
+ * AP<->Trusty boundary, in the same record container the modem's /proc sitdump
+ * (drivers/net/wwan/s5xxx_modem.c) uses so one parser reads both:
+ *
+ *     [u64 ts_ns][u16 len][u16 tag][len bytes: the framed tipc message]
+ *
+ * ts_ns is ktime_get_boottime_ns(); @tag is the direction, TRUSTY_DUMP_TX (0)
+ * for AP->Trusty and TRUSTY_DUMP_RX (1) for Trusty->AP.  The payload is the
+ * whole framed message -- the 16-byte struct tipc_msg_hdr {src, dst, reserved,
+ * shm_cnt, len, flags} followed by its data -- so the stream is self-describing:
+ * the CONN_REQ (outbound, carries the service name) and CONN_RSP (inbound) let a
+ * parser map an address to a port such as com.android.trusty.qfs and demux the
+ * per-service traffic.  @shm_cnt in the header says how many FF-A/DMA-BUF
+ * handles the message carries alongside (the bulk command/image data), which a
+ * message-only capture does not follow into the shared buffer.
+ *
+ * The buffer is a ring of whole records: when the write cursor reaches the end
+ * it starts a new lap at offset 0 and drops the oldest records, so what is kept
+ * is always the most recent traffic.  A record is never split across the wrap.
+ * Holding the dump open freezes the ring so a reader sees a consistent file.
+ * The capture runs from init like the modem /proc sitdump; /proc/trustydump is
+ * read-only and there is no enable/disable.
+ */
+#define TRUSTY_DUMP_SIZE	SZ_4M
+#define TRUSTY_DUMP_REC_HDR	12
+#define TRUSTY_DUMP_TX		0	/* AP -> Trusty */
+#define TRUSTY_DUMP_RX		1	/* Trusty -> AP */
+
+static struct trusty_dump {
+	u8		*buf;
+	size_t		size;
+	size_t		head;		/* where the next record goes */
+	size_t		tail;		/* oldest record kept */
+	size_t		limit;		/* end of the previous lap */
+	bool		wrapped;	/* head is on a lap below tail */
+	u64		dropped;	/* records not recorded at all */
+	u64		evicted;	/* records overwritten by a lap */
+	unsigned int	readers;	/* dumps open; freezes the ring */
+	spinlock_t	lock;		/* also taken from the rx callback */
+} trusty_dump = {
+	.lock = __SPIN_LOCK_UNLOCKED(trusty_dump.lock),
+};
+
+/* Caller holds trusty_dump.lock.  Mirrors s5xxx_cap_room(). */
+static bool trusty_dump_room(struct trusty_dump *d, size_t need)
+{
+	if (need > d->size)
+		return false;
+
+	for (;;) {
+		if (!d->wrapped) {
+			if (d->size - d->head >= need)
+				return true;
+			if (d->readers)
+				return false;
+			d->limit = d->head;
+			d->head = 0;
+			d->wrapped = true;
+			continue;
+		}
+		/* Wrapped, so the tail is what the cursor runs into. */
+		if (d->tail - d->head >= need)
+			return true;
+		if (d->readers)
+			return false;
+		d->tail += TRUSTY_DUMP_REC_HDR +
+			   get_unaligned_le16(d->buf + d->tail + 8);
+		d->evicted++;
+		if (d->tail >= d->limit) {
+			d->tail = 0;
+			d->wrapped = false;
+		}
+	}
+}
+
+/* One framed tipc message @msg of @len bytes, direction @dir. */
+static void trusty_dump_record(const void *msg, u32 len, u16 dir)
+{
+	struct trusty_dump *d = &trusty_dump;
+	size_t need = TRUSTY_DUMP_REC_HDR + len;
+	unsigned long flags;
+	u8 *p;
+
+	if (!len || len > U16_MAX)
+		return;
+
+	spin_lock_irqsave(&d->lock, flags);
+	if (!d->buf || !trusty_dump_room(d, need)) {
+		if (d->buf)
+			d->dropped++;
+		spin_unlock_irqrestore(&d->lock, flags);
+		return;
+	}
+	p = d->buf + d->head;
+	put_unaligned_le64(ktime_get_boottime_ns(), p);
+	put_unaligned_le16((u16)len, p + 8);
+	put_unaligned_le16(dir, p + 10);
+	memcpy(p + TRUSTY_DUMP_REC_HDR, msg, len);
+	d->head += need;
+	spin_unlock_irqrestore(&d->lock, flags);
+}
+
 static int vds_queue_txbuf(struct tipc_virtio_dev *vds,
 			   struct tipc_msg_buf *mb)
 {
@@ -441,6 +551,8 @@ static int vds_queue_txbuf(struct tipc_virtio_dev *vds,
 
 	mutex_lock(&vds->lock);
 	if (vds->state == VDS_ONLINE) {
+		/* Capture the framed message on its way out (AP -> Trusty). */
+		trusty_dump_record(mb->buf_va, mb->wpos, TRUSTY_DUMP_TX);
 		/*
 		 * Premapped: the descriptor address is the FF-A handle the secure
 		 * world resolves, not a CPU/DMA address.  Per-device dma_ops (the
@@ -2066,6 +2178,9 @@ static int _handle_rxbuf(struct tipc_virtio_dev *vds,
 	mb_reset(rxbuf);
 	mb_put_data(rxbuf, rxlen);
 
+	/* Capture the framed message as it arrives (Trusty -> AP). */
+	trusty_dump_record(rxbuf->buf_va, rxlen, TRUSTY_DUMP_RX);
+
 	/* get message header */
 	msg = mb_get_data(rxbuf, sizeof(*msg));
 	if (mb_avail_data(rxbuf) != msg->len) {
@@ -2281,10 +2396,91 @@ static struct virtio_driver virtio_tipc_driver = {
 	.remove		= tipc_virtio_remove,
 };
 
+/*
+ * Holding the dump open stops the ring overwriting itself, so the file a reader
+ * walks is consistent and the records it gains while reading are only appended.
+ */
+static int trusty_dump_open(struct inode *inode, struct file *file)
+{
+	struct trusty_dump *d = &trusty_dump;
+	unsigned long flags;
+
+	spin_lock_irqsave(&d->lock, flags);
+	d->readers++;
+	spin_unlock_irqrestore(&d->lock, flags);
+	return 0;
+}
+
+static int trusty_dump_release(struct inode *inode, struct file *file)
+{
+	struct trusty_dump *d = &trusty_dump;
+	unsigned long flags;
+
+	spin_lock_irqsave(&d->lock, flags);
+	d->readers--;
+	spin_unlock_irqrestore(&d->lock, flags);
+	return 0;
+}
+
+/* The capture, as a plain file of records, oldest first (two regions on a lap). */
+static ssize_t trusty_dump_read(struct file *file, char __user *buf,
+				size_t count, loff_t *ppos)
+{
+	struct trusty_dump *d = &trusty_dump;
+	size_t off[2], seg[2], pos, done = 0;
+	unsigned long flags;
+	int i;
+
+	if (*ppos < 0)
+		return -EINVAL;
+	pos = *ppos;
+
+	spin_lock_irqsave(&d->lock, flags);
+	if (!d->buf) {
+		spin_unlock_irqrestore(&d->lock, flags);
+		return 0;
+	}
+	off[0] = d->tail;
+	seg[0] = (d->wrapped ? d->limit : d->head) - d->tail;
+	off[1] = 0;
+	seg[1] = d->wrapped ? d->head : 0;
+	spin_unlock_irqrestore(&d->lock, flags);
+
+	for (i = 0; i < 2 && count; i++) {
+		size_t n;
+
+		if (pos >= seg[i]) {
+			pos -= seg[i];
+			continue;
+		}
+		n = min(count, seg[i] - pos);
+		if (copy_to_user(buf + done, d->buf + off[i] + pos, n))
+			return done ? (ssize_t)done : -EFAULT;
+		done += n;
+		count -= n;
+		pos = 0;
+	}
+	*ppos += done;
+	return done;
+}
+
+static const struct proc_ops trusty_dump_proc_ops = {
+	.proc_open	= trusty_dump_open,
+	.proc_read	= trusty_dump_read,
+	.proc_release	= trusty_dump_release,
+	.proc_lseek	= default_llseek,
+};
+
 static int __init tipc_init(void)
 {
 	int ret;
 	dev_t dev;
+
+	/* Capture from init, like the modem sitdump -- there is no on/off. */
+	trusty_dump.buf = vmalloc(TRUSTY_DUMP_SIZE);
+	if (trusty_dump.buf)
+		trusty_dump.size = TRUSTY_DUMP_SIZE;
+	proc_create("trustydump", 0400, NULL, &trusty_dump_proc_ops);
 
 	ret = alloc_chrdev_region(&dev, 0, MAX_DEVICES, KBUILD_MODNAME);
 	if (ret) {
@@ -2322,6 +2518,8 @@ static void __exit tipc_exit(void)
 	unregister_virtio_driver(&virtio_tipc_driver);
 	class_destroy(tipc_class);
 	unregister_chrdev_region(MKDEV(tipc_major, 0), MAX_DEVICES);
+	remove_proc_entry("trustydump", NULL);
+	vfree(trusty_dump.buf);
 }
 
 void trusty_register_func_for_dma_buf(
