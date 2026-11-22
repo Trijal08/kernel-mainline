@@ -490,7 +490,8 @@ brcmf_scan_param_get_prepped_struct_v4(struct brcmf_cfg80211_info *cfg,
 		brcmf_dbg(SCAN, "Performing passive scan\n");
 		scan_type = BRCMF_SCANTYPE_PASSIVE;
 	}
-	if (brcmf_scan_param_needs_passive(request)) {
+	if (request == cfg->escan_info.passive_request ||
+	    brcmf_scan_param_needs_passive(request)) {
 		brcmf_dbg(SCAN, "no-IR channel in the request, listening\n");
 		scan_type = BRCMF_SCANTYPE_PASSIVE;
 	}

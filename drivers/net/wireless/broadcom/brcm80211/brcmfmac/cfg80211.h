@@ -311,6 +311,10 @@ enum wl_escan_state {
 };
 
 struct escan_info {
+	/* Serialize scan start, firmware events, timeout and abort. */
+	struct mutex lock;
+	struct cfg80211_scan_request *passive_request;
+	bool passive_started;
 	u32 escan_state;
 	u16 sync_id;
 	u8 *escan_buf;

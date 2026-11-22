@@ -5,6 +5,7 @@
 
 /* Toplevel file. Relies on dhd_linux.c to send commands to the dongle. */
 
+#include <linux/cleanup.h>
 #include <linux/kernel.h>
 #include <linux/etherdevice.h>
 #include <linux/module.h>
@@ -892,9 +893,8 @@ bool brcmf_is_apmode_operating(struct wiphy *wiphy)
 	return ret;
 }
 
-s32 brcmf_notify_escan_complete(struct brcmf_cfg80211_info *cfg,
-				struct brcmf_if *ifp, bool aborted,
-				bool fw_abort)
+static s32 brcmf_finish_escan(struct brcmf_cfg80211_info *cfg,
+			      struct brcmf_if *ifp, bool aborted, bool fw_abort)
 {
 	struct brcmf_pub *drvr = cfg->pub;
 	struct cfg80211_scan_request *scan_request;
@@ -908,20 +908,22 @@ s32 brcmf_notify_escan_complete(struct brcmf_cfg80211_info *cfg,
 	/* to this functon and might cause a double cfg80211_scan_done      */
 	scan_request = cfg->scan_request;
 	cfg->scan_request = NULL;
+	kfree(cfg->escan_info.passive_request);
+	cfg->escan_info.passive_request = NULL;
+	cfg->escan_info.passive_started = false;
 
 	timer_delete_sync(&cfg->escan_timeout);
 
 	if (fw_abort) {
 		u32 len;
 		void *data = drvr->scan_param_handler.get_struct_for_request(cfg, &len, NULL);
-		if (!data){
-			bphy_err(drvr, "Scan abort failed to prepare abort struct\n");
-			return 0;
+		if (data) {
+			brcmf_dbg(SCAN, "ABORT scan in firmware\n");
+			err = brcmf_fil_cmd_data_set(ifp, BRCMF_C_SCAN, data, len);
+			kfree(data);
+		} else {
+			err = -ENOMEM;
 		}
-		/* Do a scan abort to stop the driver's scan engine */
-		brcmf_dbg(SCAN, "ABORT scan in firmware\n");
-		err = brcmf_fil_cmd_data_set(ifp, BRCMF_C_SCAN, data, len);
-		kfree(data);
 		if (err)
 			bphy_err(drvr, "Scan abort failed\n");
 	}
@@ -1040,6 +1042,13 @@ int brcmf_cfg80211_del_iface(struct wiphy *wiphy, struct wireless_dev *wdev)
 		return -EINVAL;
 	}
 	return -EOPNOTSUPP;
+}
+
+s32 brcmf_notify_escan_complete(struct brcmf_cfg80211_info *cfg,
+				struct brcmf_if *ifp, bool aborted, bool fw_abort)
+{
+	guard(mutex)(&cfg->escan_info.lock);
+	return brcmf_finish_escan(cfg, ifp, aborted, fw_abort);
 }
 
 static s32
@@ -1233,6 +1242,66 @@ brcmf_do_escan(struct brcmf_if *ifp, struct cfg80211_scan_request *request)
 	return err;
 }
 
+static s32 brcmf_start_scan(struct brcmf_if *ifp,
+			    struct cfg80211_scan_request *request)
+{
+	struct brcmf_cfg80211_info *cfg = ifp->drvr->config;
+	struct escan_info *escan = &cfg->escan_info;
+	struct cfg80211_scan_request *active, *passive;
+	u32 n_passive = 0;
+	u32 i;
+	s32 err;
+
+	if (cfg->pub->bus_if->chip != BRCM_CC_4390_CHIP_ID ||
+	    cfg->pub->scan_param_handler.version != BRCMF_SCAN_PARAMS_VERSION_V4 ||
+	    escan->run != brcmf_run_escan ||
+	    request->wdev->iftype != NL80211_IFTYPE_STATION ||
+	    !request->n_ssids || request->n_6ghz_params)
+		return brcmf_do_escan(ifp, request);
+
+	for (i = 0; i < request->n_channels; i++)
+		n_passive += !!(request->channels[i]->flags & IEEE80211_CHAN_NO_IR);
+
+	if (!n_passive || n_passive == request->n_channels)
+		return brcmf_do_escan(ifp, request);
+
+	active = kmalloc(struct_size(active, channels, request->n_channels),
+			 GFP_KERNEL);
+	if (!active)
+		return -ENOMEM;
+
+	passive = kmalloc(struct_size(passive, channels, request->n_channels),
+			  GFP_KERNEL);
+	if (!passive) {
+		kfree(active);
+		return -ENOMEM;
+	}
+
+	*active = *request;
+	*passive = *request;
+	active->n_channels = 0;
+	passive->n_channels = 0;
+	for (i = 0; i < request->n_channels; i++) {
+		struct ieee80211_channel *chan = request->channels[i];
+
+		if (chan->flags & IEEE80211_CHAN_NO_IR)
+			passive->channels[passive->n_channels++] = chan;
+		else
+			active->channels[active->n_channels++] = chan;
+	}
+
+	brcmf_dbg(SCAN, "split scan: %u active channels, %u passive channels\n",
+		  active->n_channels, passive->n_channels);
+	escan->passive_request = passive;
+	err = brcmf_do_escan(ifp, active);
+	kfree(active);
+	if (err) {
+		kfree(passive);
+		escan->passive_request = NULL;
+	}
+	return err;
+}
+
 /* How long to wait for a scan before giving up on it, matching what the vendor
  * driver allows: see BRCMF_ESCAN_TIMER_INTERVAL_MS. 6GHz is counted separately
  * because it is what makes a scan long, and the vendor sizes it that way too.
@@ -1255,6 +1324,7 @@ brcmf_cfg80211_scan(struct wiphy *wiphy, struct cfg80211_scan_request *request)
 	struct brcmf_cfg80211_vif *vif;
 	s32 err = 0;
 
+	guard(mutex)(&cfg->escan_info.lock);
 	brcmf_dbg(TRACE, "Enter\n");
 	vif = container_of(request->wdev, struct brcmf_cfg80211_vif, wdev);
 	if (!check_vif_up(vif))
@@ -1299,7 +1369,7 @@ brcmf_cfg80211_scan(struct wiphy *wiphy, struct cfg80211_scan_request *request)
 	if (vif == cfg->p2p.bss_idx[P2PAPI_BSSCFG_DEVICE].vif)
 		vif = cfg->p2p.bss_idx[P2PAPI_BSSCFG_PRIMARY].vif;
 
-	err = brcmf_do_escan(vif->ifp, request);
+	err = brcmf_start_scan(vif->ifp, request);
 	if (err)
 		goto scan_out;
 
@@ -3788,17 +3858,23 @@ update_bss_info_out:
 	return err;
 }
 
-void brcmf_abort_scanning(struct brcmf_cfg80211_info *cfg)
+static void brcmf_abort_escan(struct brcmf_cfg80211_info *cfg)
 {
 	struct escan_info *escan = &cfg->escan_info;
 
 	set_bit(BRCMF_SCAN_STATUS_ABORT, &cfg->scan_status);
 	if (cfg->int_escan_map || cfg->scan_request) {
 		escan->escan_state = WL_ESCAN_STATE_IDLE;
-		brcmf_notify_escan_complete(cfg, escan->ifp, true, true);
+		brcmf_finish_escan(cfg, escan->ifp, true, true);
 	}
 	clear_bit(BRCMF_SCAN_STATUS_BUSY, &cfg->scan_status);
 	clear_bit(BRCMF_SCAN_STATUS_ABORT, &cfg->scan_status);
+}
+
+void brcmf_abort_scanning(struct brcmf_cfg80211_info *cfg)
+{
+	guard(mutex)(&cfg->escan_info.lock);
+	brcmf_abort_escan(cfg);
 }
 
 static void brcmf_cfg80211_escan_timeout_worker(struct work_struct *work)
@@ -3807,8 +3883,13 @@ static void brcmf_cfg80211_escan_timeout_worker(struct work_struct *work)
 			container_of(work, struct brcmf_cfg80211_info,
 				     escan_timeout_work);
 
+	guard(mutex)(&cfg->escan_info.lock);
+	if ((!cfg->scan_request && !cfg->int_escan_map) ||
+	    timer_pending(&cfg->escan_timeout))
+		return;
+
 	brcmf_inform_bss(cfg);
-	brcmf_notify_escan_complete(cfg, cfg->escan_info.ifp, true, true);
+	brcmf_finish_escan(cfg, cfg->escan_info.ifp, true, true);
 }
 
 static void brcmf_escan_timeout(struct timer_list *t)
@@ -3878,6 +3959,10 @@ brcmf_cfg80211_escan_handler(struct brcmf_if *ifp,
 	u32 i;
 	bool aborted;
 
+	struct escan_info *escan = &cfg->escan_info;
+	s32 err;
+
+	guard(mutex)(&escan->lock);
 	status = e->status;
 
 	if (status == BRCMF_E_STATUS_ABORT)
@@ -3990,13 +4075,30 @@ brcmf_cfg80211_escan_handler(struct brcmf_if *ifp,
 		list->buflen += bi_length;
 		list->count++;
 	} else {
+		/* Some firmware sends no result header with a terminal event. */
+		if (escan->passive_request && data &&
+		    e->datalen >= WL_ESCAN_RESULTS_FIXED_SIZE &&
+		    le16_to_cpu(((struct brcmf_escan_result_le *)data)->sync_id) !=
+		    escan->sync_id)
+			goto exit;
+
+		if (status == BRCMF_E_STATUS_SUCCESS && escan->passive_request &&
+		    !escan->passive_started) {
+			escan->passive_started = true;
+			err = escan->run(cfg, escan->ifp, escan->passive_request);
+			if (!err)
+				goto exit;
+
+			status = BRCMF_E_STATUS_FAIL;
+		}
+
 		cfg->escan_info.escan_state = WL_ESCAN_STATE_IDLE;
 		if (brcmf_p2p_scan_finding_common_channel(cfg, NULL))
 			goto exit;
 		if (cfg->int_escan_map || cfg->scan_request) {
 			brcmf_inform_bss(cfg);
 			aborted = status != BRCMF_E_STATUS_SUCCESS;
-			brcmf_notify_escan_complete(cfg, ifp, aborted, false);
+			brcmf_finish_escan(cfg, ifp, aborted, false);
 		} else
 			brcmf_dbg(SCAN, "Ignored scan complete result 0x%x\n",
 				  status);
@@ -4007,6 +4109,7 @@ exit:
 
 static void brcmf_init_escan(struct brcmf_cfg80211_info *cfg)
 {
+	mutex_init(&cfg->escan_info.lock);
 	brcmf_fweh_register(cfg->pub, BRCMF_E_ESCAN_RESULT,
 			    brcmf_cfg80211_escan_handler);
 	cfg->escan_info.escan_state = WL_ESCAN_STATE_IDLE;
@@ -4075,12 +4178,13 @@ static int brcmf_start_internal_escan(struct brcmf_if *ifp, u32 fwmap,
 	struct brcmf_cfg80211_info *cfg = ifp->drvr->config;
 	int err;
 
+	guard(mutex)(&cfg->escan_info.lock);
 	if (test_bit(BRCMF_SCAN_STATUS_BUSY, &cfg->scan_status)) {
 		if (cfg->int_escan_map)
 			brcmf_dbg(SCAN, "aborting internal scan: map=%u\n",
 				  cfg->int_escan_map);
 		/* Abort any on-going scan */
-		brcmf_abort_scanning(cfg);
+		brcmf_abort_escan(cfg);
 	}
 
 	brcmf_dbg(SCAN, "start internal scan: map=%u\n", fwmap);
