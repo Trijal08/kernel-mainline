@@ -578,6 +578,22 @@ config MCHP_LAN966X_PCI
 	    - lan966x-miim (MDIO_MSCC_MIIM)
 	    - lan966x-switch (LAN966X_SWITCH)
 
+config QCOM_QBT_HANDLER
+	tristate "Qualcomm ultrasonic fingerprint IPC handler"
+	depends on OF
+	depends on GPIOLIB
+	help
+	  Say Y here to enable the application-processor side driver for a
+	  Qualcomm ultrasonic under-display fingerprint sensor (such as the
+	  QFS4008). The sensor itself is driven by secure firmware over a
+	  TrustZone-owned SPI bus; this driver only relays the firmware's IPC
+	  "doorbell" interrupt - and, on boards that wire one, a finger-detect
+	  GPIO - to userspace via the /dev/qbt_ipc and /dev/qbt_fd character
+	  devices.
+
+	  To compile this driver as a module, choose M here: the module will
+	  be called qcom-qbt-handler.
+
 config TC9564_PCI
 	tristate "Toshiba TC9564 PCI function support"
 	depends on PCI_DYNAMIC_OF_NODES

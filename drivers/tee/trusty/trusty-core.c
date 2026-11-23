@@ -11,6 +11,8 @@
  */
 
 #include <linux/arm-smccc.h>
+#include <linux/cpu.h>
+#include <linux/cpuhotplug.h>
 #include <linux/delay.h>
 #include <linux/dma-mapping.h>
 #include <linux/kthread.h>
@@ -19,6 +21,7 @@
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_platform.h>
+#include <linux/percpu.h>
 #include <linux/platform_device.h>
 #include <linux/sched.h>
 #include <linux/scatterlist.h>
@@ -36,6 +39,24 @@
 #endif
 
 static struct platform_driver trusty_driver;
+static int trusty_cpuhp_slot = -1;	/* dynamic cpuhp state for the nop threads */
+
+struct trusty_state;
+
+/*
+ * One per cpu.  The secure world runs cooperatively and schedules its own
+ * threads across all cpus, so when it has pending work it must be re-entered on
+ * each cpu, not just one; a single nop thread deadlocks any secure computation
+ * that fans out (e.g. the ultrasonic fingerprint capture).  Each cpu gets a
+ * bound nop thread, woken on that cpu, that enters Trusty with SMC_SC_NOP.
+ */
+struct trusty_work {
+	struct trusty_state *s;
+	unsigned int cpu;
+	struct task_struct *nop_thread;
+	wait_queue_head_t nop_event_wait;
+	bool signaled;			/* this cpu was signaled (nop_lock) */
+};
 
 struct trusty_state {
 	struct device *dev;
@@ -46,12 +67,13 @@ struct trusty_state {
 	char *version_str;
 	bool trusty_panicked;
 
-	/* nop machinery: lets the secure world run its own pending work */
-	struct task_struct *nop_thread;
-	wait_queue_head_t nop_event_wait;
+	/* per-cpu nop machinery: lets the secure world run pending work on
+	 * every cpu (see struct trusty_work)
+	 */
+	struct trusty_work __percpu *nop_works;
 	struct list_head nop_queue;
-	spinlock_t nop_lock;		/* protects nop_queue and nop_signaled */
-	bool nop_signaled;
+	spinlock_t nop_lock;		/* protects nop_queue and per-cpu signaled */
+	struct hlist_node cpuhp_node;
 
 	/* FF-A memory sharing (api >= TRUSTY_API_VERSION_MEM_OBJ) */
 	void *ffa_tx;
@@ -274,19 +296,23 @@ int trusty_call_notifier_unregister(struct device *dev,
 EXPORT_SYMBOL_GPL(trusty_call_notifier_unregister);
 
 /*
- * The nop mechanism.  When the secure world has pending work it cannot do on
- * its own (it has no timer tick in the normal world), a consumer enqueues a nop
- * and the nop thread enters Trusty with SMC_SC_NOP until it reports idle.  A
- * single thread is enough here; the SMP fan-out the vendor driver adds is a
- * throughput optimisation, not a correctness requirement.
+ * The nop mechanism.  The secure world has no timer tick in the normal world
+ * and schedules its threads across all cpus, so when it has pending work a
+ * consumer enqueues a nop and the per-cpu nop thread on each signaled cpu enters
+ * Trusty with SMC_SC_NOP until it reports idle.  A nop may be signaled for a
+ * specific cpu (e.g. by trusty-irq, from the cpu that took the secure irq), so
+ * the fan-out across cpus is a correctness requirement, not just throughput:
+ * one thread cannot drive a secure computation that runs on several cpus.
  */
-static bool trusty_dequeue_nop_locked(struct trusty_state *s, u32 *args)
+static bool dequeue_nop(struct trusty_state *s, u32 *args)
 {
 	struct trusty_nop *nop;
+	struct trusty_work *tw;
 	unsigned long flags;
 	bool ret;
 
 	spin_lock_irqsave(&s->nop_lock, flags);
+	tw = this_cpu_ptr(s->nop_works);
 	if (!list_empty(&s->nop_queue)) {
 		nop = list_first_entry(&s->nop_queue, struct trusty_nop, node);
 		list_del_init(&nop->node);
@@ -298,39 +324,62 @@ static bool trusty_dequeue_nop_locked(struct trusty_state *s, u32 *args)
 		args[0] = 0;
 		args[1] = 0;
 		args[2] = 0;
-		ret = s->nop_signaled;
+		ret = tw->signaled;
 	}
-	s->nop_signaled = false;
+	tw->signaled = false;
 	spin_unlock_irqrestore(&s->nop_lock, flags);
 
 	return ret;
 }
 
-static int trusty_nop_thread(void *data)
+static void trusty_nop_work_func(struct trusty_work *tw)
 {
-	struct trusty_state *s = data;
+	struct trusty_state *s = tw->s;
 	u32 args[3];
+	u32 last_arg0;
+	int ret;
+	bool do_nop = dequeue_nop(s, args);
 
-	while (!kthread_should_stop()) {
-		wait_event_interruptible(s->nop_event_wait,
-					 s->nop_signaled ||
-					 !list_empty_careful(&s->nop_queue) ||
-					 kthread_should_stop());
+	while (do_nop) {
+		if (kthread_should_park())
+			kthread_parkme();
 
-		while (trusty_dequeue_nop_locked(s, args)) {
-			int ret;
+		last_arg0 = args[0];
+		ret = trusty_std_call32(s->dev, SMC_SC_NOP,
+					args[0], args[1], args[2]);
 
-			if (kthread_should_stop())
-				return 0;
-			do {
-				ret = trusty_std_call32(s->dev, SMC_SC_NOP,
-							args[0], args[1],
-							args[2]);
-			} while (ret == SM_ERR_NOP_INTERRUPTED);
-			if (ret != SM_ERR_NOP_DONE)
-				dev_err(s->dev, "SMC_SC_NOP failed %d\n", ret);
+		do_nop = dequeue_nop(s, args);
+
+		if (ret == SM_ERR_NOP_INTERRUPTED) {
+			do_nop = true;
+		} else if (ret != SM_ERR_NOP_DONE) {
+			dev_err(s->dev, "SMC_SC_NOP %x failed %d\n",
+				last_arg0, ret);
+			/* a non-default nop handler erroring must not stop us */
+			if (last_arg0)
+				do_nop = true;
 		}
 	}
+}
+
+static int trusty_nop_thread(void *context)
+{
+	struct trusty_work *tw = context;
+	DEFINE_WAIT_FUNC(wait, woken_wake_function);
+
+	add_wait_queue(&tw->nop_event_wait, &wait);
+	for (;;) {
+		if (kthread_should_stop())
+			break;
+
+		wait_woken(&wait, TASK_INTERRUPTIBLE, MAX_SCHEDULE_TIMEOUT);
+
+		if (kthread_should_park())
+			kthread_parkme();
+
+		trusty_nop_work_func(tw);
+	}
+	remove_wait_queue(&tw->nop_event_wait, &wait);
 
 	return 0;
 }
@@ -338,17 +387,42 @@ static int trusty_nop_thread(void *data)
 void trusty_enqueue_nop(struct device *dev, struct trusty_nop *nop)
 {
 	struct trusty_state *s = platform_get_drvdata(to_platform_device(dev));
+	struct trusty_work *tw;
 	unsigned long flags;
 
-	spin_lock_irqsave(&s->nop_lock, flags);
-	if (nop && list_empty(&nop->node))
-		list_add_tail(&nop->node, &s->nop_queue);
-	s->nop_signaled = true;
-	spin_unlock_irqrestore(&s->nop_lock, flags);
-
-	wake_up_interruptible(&s->nop_event_wait);
+	preempt_disable();
+	tw = this_cpu_ptr(s->nop_works);
+	if (nop) {
+		spin_lock_irqsave(&s->nop_lock, flags);
+		if (list_empty(&nop->node))
+			list_add_tail(&nop->node, &s->nop_queue);
+		spin_unlock_irqrestore(&s->nop_lock, flags);
+	}
+	tw->signaled = true;
+	wake_up_interruptible(&tw->nop_event_wait);
+	preempt_enable();
 }
 EXPORT_SYMBOL_GPL(trusty_enqueue_nop);
+
+static int trusty_cpu_up(unsigned int cpu, struct hlist_node *node)
+{
+	struct trusty_state *s = container_of(node, struct trusty_state,
+					      cpuhp_node);
+	struct trusty_work *tw = this_cpu_ptr(s->nop_works);
+
+	kthread_unpark(tw->nop_thread);
+	return 0;
+}
+
+static int trusty_cpu_down(unsigned int cpu, struct hlist_node *node)
+{
+	struct trusty_state *s = container_of(node, struct trusty_state,
+					      cpuhp_node);
+	struct trusty_work *tw = this_cpu_ptr(s->nop_works);
+
+	kthread_park(tw->nop_thread);
+	return 0;
+}
 
 void trusty_dequeue_nop(struct device *dev, struct trusty_nop *nop)
 {
@@ -742,6 +816,7 @@ static int trusty_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct trusty_state *s;
+	unsigned int cpu;
 	int ret;
 
 	s = devm_kzalloc(dev, sizeof(*s), GFP_KERNEL);
@@ -753,7 +828,6 @@ static int trusty_probe(struct platform_device *pdev)
 	mutex_init(&s->share_memory_msg_lock);
 	init_completion(&s->cpu_idle_completion);
 	ATOMIC_INIT_NOTIFIER_HEAD(&s->notifier);
-	init_waitqueue_head(&s->nop_event_wait);
 	INIT_LIST_HEAD(&s->nop_queue);
 	spin_lock_init(&s->nop_lock);
 	platform_set_drvdata(pdev, s);
@@ -781,10 +855,38 @@ static int trusty_probe(struct platform_device *pdev)
 	if (ret)
 		goto err_free_version;
 
-	s->nop_thread = kthread_run(trusty_nop_thread, s, "trusty-nop");
-	if (IS_ERR(s->nop_thread)) {
-		ret = PTR_ERR(s->nop_thread);
+	s->nop_works = alloc_percpu(struct trusty_work);
+	if (!s->nop_works) {
+		ret = -ENOMEM;
 		goto err_free_msg_buf;
+	}
+	for_each_possible_cpu(cpu) {
+		struct trusty_work *tw = per_cpu_ptr(s->nop_works, cpu);
+
+		tw->s = s;
+		tw->cpu = cpu;
+		tw->nop_thread = ERR_PTR(-EINVAL);
+		init_waitqueue_head(&tw->nop_event_wait);
+		tw->signaled = false;
+	}
+	for_each_possible_cpu(cpu) {
+		struct trusty_work *tw = per_cpu_ptr(s->nop_works, cpu);
+
+		/* created parked and bound; the cpuhp up callback unparks it */
+		tw->nop_thread = kthread_create_on_cpu(trusty_nop_thread, tw,
+						       cpu, "trusty-nop-%d");
+		if (IS_ERR(tw->nop_thread)) {
+			ret = PTR_ERR(tw->nop_thread);
+			goto err_stop_threads;
+		}
+		kthread_set_per_cpu(tw->nop_thread, cpu);
+		kthread_park(tw->nop_thread);
+	}
+
+	ret = cpuhp_state_add_instance(trusty_cpuhp_slot, &s->cpuhp_node);
+	if (ret < 0) {
+		dev_err(dev, "cpuhp_state_add_instance failed: %d\n", ret);
+		goto err_stop_threads;
 	}
 
 	/* Bring up the child nodes (irq, log, virtio) once they exist. */
@@ -794,6 +896,14 @@ static int trusty_probe(struct platform_device *pdev)
 
 	return 0;
 
+err_stop_threads:
+	for_each_possible_cpu(cpu) {
+		struct trusty_work *tw = per_cpu_ptr(s->nop_works, cpu);
+
+		if (!IS_ERR(tw->nop_thread))
+			kthread_stop(tw->nop_thread);
+	}
+	free_percpu(s->nop_works);
 err_free_msg_buf:
 	trusty_free_msg_buf(s, dev);
 err_free_version:
@@ -804,9 +914,18 @@ err_free_version:
 static void trusty_remove(struct platform_device *pdev)
 {
 	struct trusty_state *s = platform_get_drvdata(pdev);
+	unsigned int cpu;
 
 	of_platform_depopulate(&pdev->dev);
-	kthread_stop(s->nop_thread);
+
+	cpuhp_state_remove_instance(trusty_cpuhp_slot, &s->cpuhp_node);
+	for_each_possible_cpu(cpu) {
+		struct trusty_work *tw = per_cpu_ptr(s->nop_works, cpu);
+
+		kthread_stop(tw->nop_thread);
+	}
+	free_percpu(s->nop_works);
+
 	trusty_free_msg_buf(s, &pdev->dev);
 	s->dev->dma_parms = NULL;
 	mutex_destroy(&s->share_memory_msg_lock);
@@ -828,7 +947,34 @@ static struct platform_driver trusty_driver = {
 		.of_match_table = trusty_of_match,
 	},
 };
-module_platform_driver(trusty_driver);
+
+static int __init trusty_driver_init(void)
+{
+	int ret;
+
+	/* one dynamic cpuhp state shared by the per-cpu nop threads */
+	ret = cpuhp_setup_state_multi(CPUHP_AP_ONLINE_DYN, "trusty:online",
+				      trusty_cpu_up, trusty_cpu_down);
+	if (ret < 0)
+		return ret;
+	trusty_cpuhp_slot = ret;
+
+	ret = platform_driver_register(&trusty_driver);
+	if (ret < 0) {
+		cpuhp_remove_multi_state(trusty_cpuhp_slot);
+		trusty_cpuhp_slot = -1;
+	}
+	return ret;
+}
+module_init(trusty_driver_init);
+
+static void __exit trusty_driver_exit(void)
+{
+	platform_driver_unregister(&trusty_driver);
+	cpuhp_remove_multi_state(trusty_cpuhp_slot);
+	trusty_cpuhp_slot = -1;
+}
+module_exit(trusty_driver_exit);
 
 MODULE_DESCRIPTION("Trusty TEE core (SMC interface)");
 MODULE_LICENSE("GPL");

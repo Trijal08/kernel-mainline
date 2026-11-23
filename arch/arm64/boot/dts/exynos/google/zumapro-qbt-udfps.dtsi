@@ -1,0 +1,29 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * Qualcomm ultrasonic under-display fingerprint sensor, shared by the
+ * caimito boards (Pixel 9 / 9 Pro / 9 Pro XL: tokay, caiman, komodo).
+ *
+ * The sensor is driven by secure firmware over a TrustZone-owned SPI bus and
+ * is invisible to Linux. The AP only sees the IPC "doorbell" interrupt on
+ * gpa7-6 and must keep the sensor's 1.85 V supply (S2MPG15 LDO22) on: the
+ * secure firmware cannot enable the rail itself and nothing in Linux consumes
+ * it, so without regulator-always-on the disable-unused sweep drops it and the
+ * trusted app's first sensor read over SPI hangs. The Fold (comet) uses a side
+ * capacitive sensor instead and must not include this file.
+ *
+ * Copyright 2025 Trijal Saha <trijalsaha2012@gmail.com>
+ */
+
+#include <dt-bindings/interrupt-controller/irq.h>
+
+/ {
+	qbt_handler: fingerprint {
+		compatible = "qcom,qbt-handler";
+		interrupt-parent = <&gpa7>;
+		interrupts = <6 IRQ_TYPE_EDGE_FALLING>;
+	};
+};
+
+&s_ldo22_reg {
+	regulator-always-on;
+};

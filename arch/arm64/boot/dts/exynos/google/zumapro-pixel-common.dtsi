@@ -385,6 +385,19 @@
 			s_ldo17_reg: ldo17s {
 				regulator-name = "L17S_UWB";
 			};
+
+			/*
+			 * Qualcomm ultrasonic under-display fingerprint sensor
+			 * supply (L22S_UDFPS, 1.85 V from OTP).  The sensor's SPI
+			 * bus is TrustZone-owned, so Linux has no consumer for the
+			 * rail and the secure firmware cannot bring it up itself;
+			 * zumapro-qbt-udfps.dtsi holds it always-on on the boards
+			 * that carry the sensor.  Enable-only, like the sub-PMIC
+			 * sensor rails above.
+			 */
+			s_ldo22_reg: ldo22s {
+				regulator-name = "L22S_UDFPS";
+			};
 		};
 
 		/*

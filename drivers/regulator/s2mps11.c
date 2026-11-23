@@ -1982,6 +1982,13 @@ static const struct regulator_desc s2mpg15_regulators[] = {
 	regulator_desc_s2mpg15_ldo_en(12),
 	regulator_desc_s2mpg15_ldo_en(16),
 	regulator_desc_s2mpg15_ldo_en(17),
+	/*
+	 * L22S_UDFPS (1.85 V): the Qualcomm ultrasonic fingerprint sensor's
+	 * supply.  OTP-set level, switched only; held always-on by
+	 * zumapro-qbt-udfps.dtsi since the sensor's SPI is TrustZone-owned and
+	 * nothing in Linux consumes the rail.
+	 */
+	regulator_desc_s2mpg15_ldo_en(22),
 };
 
 static int s2mps14_pmic_enable_ext_control(struct s2mps11_info *s2mps11,

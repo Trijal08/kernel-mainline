@@ -14,6 +14,7 @@
 #include "zumapro-caimito-cs40l26.dtsi"
 #include "zumapro-caimito-thermal.dtsi"
 #include "zumapro-caimito-camera.dtsi"
+#include "zumapro-qbt-udfps.dtsi"
 
 / {
 	model = "Pixel 9 Pro";

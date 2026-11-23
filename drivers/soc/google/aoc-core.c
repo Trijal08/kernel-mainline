@@ -36,6 +36,8 @@
 #include <linux/seq_file.h>
 #include <linux/sizes.h>
 #include <linux/slab.h>
+#include <linux/mutex.h>
+#include <linux/kstrtox.h>
 
 #include <linux/soc/google/aoc.h>
 #include <linux/soc/samsung/exynos-gsa.h>
@@ -168,6 +170,7 @@ struct aoc_data {
 		int block;
 	} mbox_irq[3];
 	atomic_t mbox_irqs;		/* AOC->AP interrupts seen (diagnostic) */
+	struct mutex control_lock;	/* serializes control-service requests */
 
 	/* The core's own console, which is the only view of what it is doing. */
 	struct aoc_service *log_svc;
@@ -1360,6 +1363,149 @@ static int aoc_map_regs(struct aoc_data *aoc, struct platform_device *pdev)
 	return 0;
 }
 
+/*
+ * UDFPS (ultrasonic under-display fingerprint) clock-source control, ported
+ * from the vendor aoc_control_dev.c.  The sensor's acoustic timing is driven by
+ * a clock the AOC selects - the oscillator or the display - and the fingerprint
+ * HAL sets the source and reads back the resulting frequency.  Without it the
+ * trusted app's first capture (loadBGEBins) has no ultrasonic clock and never
+ * returns.  The commands ride the same "control" queue as the version self-test.
+ */
+#define CMD_UDFPS_SET_CLOCK_SOURCE_ID		210
+#define CMD_UDFPS_GET_CLOCK_FREQUENCY_ID	211
+enum {
+	AOC_UDFPS_SOURCE_NONE,
+	AOC_UDFPS_SOURCE_OSC,
+	AOC_UDFPS_SOURCE_DISP,
+	AOC_UDFPS_SOURCE_TOT,
+};
+struct cmd_udfps_set_clock_source {
+	struct aoc_cmd_hdr hdr;
+	u8 clock_source;
+} __packed;
+struct cmd_udfps_get_clock_frequency {
+	struct aoc_cmd_hdr hdr;
+	__le32 clock_freq_in_u32;
+	u8 clock_source;
+} __packed;
+
+/*
+ * Serialized request/response on the AOC "control" queue.  @reply may be NULL
+ * for a write-only command and may alias @cmd.  Returns the reply length, 0 for
+ * a write-only command, or a negative errno.
+ */
+static int aoc_control_xfer(struct aoc_data *aoc, const void *cmd, size_t cmd_len,
+			    void *reply, size_t reply_len)
+{
+	struct aoc_service *ctrl;
+	char scratch[64];
+	int ret, i;
+
+	ctrl = aoc_service_lookup(aoc, "control");
+	if (!ctrl)
+		return -ENODEV;
+	if (svc_type(ctrl->hdr) != SVC_TYPE_QUEUE)
+		return -ENXIO;
+
+	mutex_lock(&aoc->control_lock);
+
+	/* Drop any stale reply left in the channel (bounded). */
+	for (i = 0; i < 64 && aoc_service_can_read(ctrl); i++)
+		aoc_service_read(ctrl, scratch, sizeof(scratch));
+
+	ret = aoc_service_write(ctrl, cmd, cmd_len);
+	if (ret < 0)
+		goto out;
+
+	if (!reply || !reply_len) {
+		ret = 0;
+		goto out;
+	}
+
+	ret = -ETIMEDOUT;
+	for (i = 0; i < 100; i++) {		/* up to ~1 s */
+		if (aoc_service_can_read(ctrl)) {
+			ret = aoc_service_read(ctrl, reply, reply_len);
+			break;
+		}
+		usleep_range(10000, 11000);
+	}
+out:
+	mutex_unlock(&aoc->control_lock);
+	return ret;
+}
+
+static ssize_t udfps_set_clock_source_store(struct device *dev,
+		struct device_attribute *attr, const char *buf, size_t count)
+{
+	struct aoc_data *aoc = dev_get_drvdata(dev);
+	struct cmd_udfps_set_clock_source cmd = { };
+	u8 src;
+	int ret;
+
+	ret = kstrtou8(buf, 10, &src);
+	if (ret < 0)
+		return ret;
+	if (src >= AOC_UDFPS_SOURCE_TOT)
+		return -EINVAL;
+
+	cmd.hdr.parent.type = AOC_DATA_TYPE_CMD;
+	cmd.hdr.parent.len = cpu_to_le16(sizeof(cmd));
+	cmd.hdr.id = cpu_to_le16(CMD_UDFPS_SET_CLOCK_SOURCE_ID);
+	cmd.clock_source = src;
+
+	ret = aoc_control_xfer(aoc, &cmd, sizeof(cmd), NULL, 0);
+	return ret < 0 ? ret : count;
+}
+static DEVICE_ATTR_WO(udfps_set_clock_source);
+
+static ssize_t udfps_get_freq(struct device *dev, u8 src, char *buf)
+{
+	struct aoc_data *aoc = dev_get_drvdata(dev);
+	struct cmd_udfps_get_clock_frequency cmd = { };
+	int ret;
+
+	cmd.hdr.parent.type = AOC_DATA_TYPE_CMD;
+	cmd.hdr.parent.len = cpu_to_le16(sizeof(cmd));
+	cmd.hdr.id = cpu_to_le16(CMD_UDFPS_GET_CLOCK_FREQUENCY_ID);
+	cmd.clock_source = src;
+
+	ret = aoc_control_xfer(aoc, &cmd, sizeof(cmd), &cmd, sizeof(cmd));
+	if (ret < 0)
+		return ret;
+	if (ret < (int)sizeof(cmd))
+		return -EIO;
+	return sysfs_emit(buf, "%u\n", le32_to_cpu(cmd.clock_freq_in_u32));
+}
+static ssize_t udfps_get_osc_freq_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	return udfps_get_freq(dev, AOC_UDFPS_SOURCE_OSC, buf);
+}
+static DEVICE_ATTR_RO(udfps_get_osc_freq);
+static ssize_t udfps_get_disp_freq_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	return udfps_get_freq(dev, AOC_UDFPS_SOURCE_DISP, buf);
+}
+static DEVICE_ATTR_RO(udfps_get_disp_freq);
+
+/* The HAL reads/writes these under .../<aoc>/control/, matching the vendor. */
+static struct attribute *aoc_control_attrs[] = {
+	&dev_attr_udfps_set_clock_source.attr,
+	&dev_attr_udfps_get_osc_freq.attr,
+	&dev_attr_udfps_get_disp_freq.attr,
+	NULL,
+};
+static const struct attribute_group aoc_control_group = {
+	.name = "control",
+	.attrs = aoc_control_attrs,
+};
+static const struct attribute_group *aoc_dev_groups[] = {
+	&aoc_control_group,
+	NULL,
+};
+
 static int aoc_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -1375,6 +1521,7 @@ static int aoc_probe(struct platform_device *pdev)
 		return -ENOMEM;
 	aoc->dev = dev;
 	INIT_DELAYED_WORK(&aoc->log_work, aoc_log_work);
+	mutex_init(&aoc->control_lock);
 	platform_set_drvdata(pdev, aoc);
 
 	ret = aoc_boot_attach(aoc);
@@ -1539,6 +1686,7 @@ static struct platform_driver aoc_driver = {
 	.driver = {
 		.name = "google-aoc",
 		.of_match_table = aoc_of_match,
+		.dev_groups = aoc_dev_groups,
 	},
 };
 module_platform_driver(aoc_driver);

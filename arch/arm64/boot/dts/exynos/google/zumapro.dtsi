@@ -885,6 +885,18 @@
 	trusty: trusty {
 		compatible = "android,trusty-smc-v1";
 
+		/*
+		 * Delivers the hardware interrupts Trusty owns: the normal world
+		 * takes them first and re-enters the secure world (via a nop) to
+		 * service them.  Without it a secure wait on an interrupt or timer
+		 * (e.g. the ultrasonic fingerprint capture) never completes.  The
+		 * ipi-range maps the secure IPI ids 8..15 onto GIC SGIs from 8.
+		 */
+		trusty_irq: irq {
+			compatible = "android,trusty-irq-v1";
+			ipi-range = <8 15 8>;
+		};
+
 		trusty_virtio: virtio {
 			compatible = "android,trusty-virtio-v1";
 		};

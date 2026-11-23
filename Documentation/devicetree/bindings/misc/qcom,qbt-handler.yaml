@@ -1,0 +1,61 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/misc/qcom,qbt-handler.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Qualcomm ultrasonic fingerprint IPC handler
+
+maintainers:
+  - Trijal Saha <trijalsaha2012@gmail.com>
+
+description:
+  Application-processor side of a Qualcomm ultrasonic under-display
+  fingerprint sensor (such as the QFS4008). The sensor itself is driven by
+  secure firmware over a TrustZone-owned SPI bus and is invisible to Linux.
+  This node describes only the signals the application processor sees: the
+  IPC "doorbell" interrupt raised by the secure firmware when fingerprint
+  data is ready and, on boards that wire them, a finger-detect input and a
+  secondary-interrupt output.
+
+properties:
+  compatible:
+    const: qcom,qbt-handler
+
+  interrupts:
+    maxItems: 1
+    description:
+      IPC doorbell interrupt raised by the secure firmware when fingerprint
+      data is ready.
+
+  qcom,finger-detect-gpios:
+    maxItems: 1
+    description:
+      Optional wake-up-on-finger (WUHB) finger-detect input. Absent on
+      under-display designs that derive finger presence from the touchscreen.
+
+  qcom,intr2-gpios:
+    maxItems: 1
+    description:
+      Optional secondary interrupt, driven as an output towards the sensor.
+
+  pinctrl-0: true
+
+  pinctrl-names:
+    const: default
+
+required:
+  - compatible
+  - interrupts
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/interrupt-controller/irq.h>
+
+    fingerprint {
+        compatible = "qcom,qbt-handler";
+        interrupt-parent = <&gpa7>;
+        interrupts = <6 IRQ_TYPE_EDGE_FALLING>;
+    };
