@@ -35,8 +35,10 @@
 #include <linux/poll.h>
 #include <linux/pm_wakeup.h>
 #include <linux/slab.h>
+#include <linux/spinlock.h>
 #include <linux/uaccess.h>
 #include <linux/wait.h>
+#include <linux/workqueue.h>
 
 #include <uapi/linux/qbt_handler.h>
 
@@ -50,6 +52,49 @@
 
 #define QBT_TOUCH_FD_VERSION_2	2
 #define QBT_TOUCH_FD_VERSION_3	3
+
+/* Maximum multitouch slots snooped from the touchscreen. */
+#define QBT_MT_MAX_SLOTS		10
+/* Hold the system awake while a touch is processed into a finger-detect event. */
+#define QBT_TOUCH_WAKELOCK_TIMEOUT_MS	100
+
+/*
+ * struct qbt_touch_slot - latest coordinates of one multitouch slot, as
+ * accumulated from the touchscreen's EV_ABS stream.
+ * @id: tracking id, or negative once the finger in this slot lifts.
+ */
+struct qbt_touch_slot {
+	int		x;
+	int		y;
+	int		id;
+	bool		updated;
+};
+
+/*
+ * struct qbt_touch_fd - finger-detect-by-touch state.
+ *
+ * Under-display ultrasonic sensors have no hardware finger-detect line; finger
+ * presence is derived by snooping the touchscreen and reporting touches that
+ * fall inside the sensor's area-of-interest (AoI) to the secure HAL through
+ * /dev/qbt_fd. @up_config is an enlarged AoI used for finger-up hysteresis so a
+ * reported-down finger is not dropped by small movements.
+ *
+ * @lock guards @current_events against the work; the remaining per-slot arrays
+ * are touched only by the (singly-scheduled) work.
+ */
+struct qbt_touch_fd {
+	struct qbt_touch_config_v3	config;
+	struct qbt_touch_config_v3	up_config;
+	struct work_struct		work;
+	spinlock_t			lock;
+	struct qbt_touch_slot		current_events[QBT_MT_MAX_SLOTS];
+	struct qbt_touch_slot		last_events[QBT_MT_MAX_SLOTS];
+	int				delta_x[QBT_MT_MAX_SLOTS];
+	int				delta_y[QBT_MT_MAX_SLOTS];
+	bool				finger_in[QBT_MT_MAX_SLOTS];
+	int				slot_state[QBT_MT_MAX_SLOTS];
+	int				current_slot;
+};
 
 struct qbt_drvdata {
 	struct device		*dev;
@@ -87,8 +132,10 @@ struct qbt_drvdata {
 
 	struct wakeup_source	*ws;
 
-	/* touch finger-detect config, programmed by the HAL */
-	struct qbt_touch_config_v3 touch_config;
+	/* finger-detect-by-touch: the snooped touchscreen and derived state */
+	struct input_dev	*touch_dev;
+	bool			fd_enabled;
+	struct qbt_touch_fd	touch;
 
 	/* bounce buffer for /dev/qbt_fd reads (too large for the stack) */
 	struct qbt_fd_userspace_buf *fd_scratch;
@@ -112,6 +159,285 @@ static void qbt_queue_fd_event(struct qbt_drvdata *drvdata,
 		dev_warn(drvdata->dev, "FD event fifo full, dropping event\n");
 	mutex_unlock(&drvdata->fd_events_mutex);
 	wake_up_interruptible(&drvdata->fd_wait);
+}
+
+/*
+ * Finger-detect by touchscreen snooping.
+ *
+ * The driver attaches as an input handler to the touchscreen, accumulates the
+ * multitouch slot state from its EV_ABS stream, and - from a workqueue - turns
+ * touches that fall inside the sensor's area-of-interest into finger
+ * down/up/move events delivered to the secure HAL via /dev/qbt_fd. This is how
+ * finger presence is detected on under-display designs that have no hardware
+ * finger-detect line.
+ */
+
+static bool qbt_touch_in_aoi(const struct qbt_touch_slot *slot,
+			     const struct qbt_touch_config_v3 *cfg)
+{
+	return slot->x >= cfg->left && slot->x <= cfg->right &&
+	       slot->y >= cfg->top  && slot->y <= cfg->bottom;
+}
+
+/*
+ * Accumulate movement since the last report and only let a move through once it
+ * exceeds the configured radius, to throttle the move-event rate.
+ */
+static bool qbt_touch_radius_ok(struct qbt_touch_fd *fd, int slot,
+				int cur_x, int cur_y, int last_x, int last_y)
+{
+	fd->delta_x[slot] += cur_x - last_x;
+	fd->delta_y[slot] += cur_y - last_y;
+
+	if (!fd->config.rad_filter_enable ||
+	    abs(fd->delta_x[slot]) > fd->config.rad_x ||
+	    abs(fd->delta_y[slot]) > fd->config.rad_y) {
+		fd->delta_x[slot] = 0;
+		fd->delta_y[slot] = 0;
+		return true;
+	}
+
+	return false;
+}
+
+static void qbt_touch_work_func(struct work_struct *work)
+{
+	struct qbt_touch_fd *fd = container_of(work, struct qbt_touch_fd, work);
+	struct qbt_drvdata *drvdata = container_of(fd, struct qbt_drvdata, touch);
+	struct qbt_touch_slot snapshot[QBT_MT_MAX_SLOTS];
+	unsigned long flags;
+	int slot, i;
+
+	/* Snapshot the accumulated slot state, then clear the updated flags. */
+	spin_lock_irqsave(&fd->lock, flags);
+	memcpy(snapshot, fd->current_events, sizeof(snapshot));
+	for (slot = 0; slot < QBT_MT_MAX_SLOTS; slot++)
+		fd->current_events[slot].updated = false;
+	spin_unlock_irqrestore(&fd->lock, flags);
+
+	for (slot = 0; slot < QBT_MT_MAX_SLOTS; slot++) {
+		struct qbt_touch_slot *cur = &snapshot[slot];
+		struct qbt_touch_slot old_last = fd->last_events[slot];
+		bool *finger_in = &fd->finger_in[slot];
+		struct qbt_fd_event evt = {};
+		struct timespec64 ts;
+		int state;
+
+		if (!cur->updated)
+			continue;
+
+		/* Derive the finger state from the tracking-id transition. */
+		if (cur->id < 0)
+			state = QBT_EVENT_FINGER_UP;
+		else if (old_last.id < 0)
+			state = QBT_EVENT_FINGER_DOWN;
+		else if (old_last.id == cur->id)
+			state = QBT_EVENT_FINGER_MOVE;
+		else
+			state = QBT_EVENT_FINGER_DOWN;
+
+		fd->last_events[slot] = *cur;
+
+		/*
+		 * Gate on the AoI: a finger must first appear inside the small
+		 * AoI to count as down, and is only reported up once it leaves
+		 * the enlarged AoI (hysteresis).
+		 */
+		if (!*finger_in) {
+			if (cur->id >= 0 && qbt_touch_in_aoi(cur, &fd->config)) {
+				state = QBT_EVENT_FINGER_DOWN;
+				*finger_in = true;
+			} else {
+				continue;
+			}
+		} else if (cur->id < 0) {
+			*finger_in = false;
+		} else if (!qbt_touch_in_aoi(cur, &fd->up_config)) {
+			state = QBT_EVENT_FINGER_UP;
+			*finger_in = false;
+		}
+
+		if (state == QBT_EVENT_FINGER_MOVE &&
+		    !qbt_touch_radius_ok(fd, slot, cur->x, cur->y,
+					 old_last.x, old_last.y))
+			continue;
+
+		/* Drive the optional INTR2 line from the aggregate down state. */
+		if (state != QBT_EVENT_FINGER_MOVE) {
+			bool any_down = false;
+
+			fd->slot_state[slot] = state;
+			for (i = 0; i < QBT_MT_MAX_SLOTS; i++)
+				if (fd->slot_state[i] == QBT_EVENT_FINGER_DOWN) {
+					any_down = true;
+					break;
+				}
+			if (fd->config.intr2_enable && drvdata->intr2_gpio)
+				gpiod_set_value(drvdata->intr2_gpio, any_down);
+		}
+
+		if (!fd->config.touch_fd_enable)
+			continue;
+
+		ktime_get_ts64(&ts);
+		evt.timestamp.tv_sec = ts.tv_sec;
+		evt.timestamp.tv_nsec = ts.tv_nsec;
+		evt.x = cur->x;
+		evt.y = cur->y;
+		evt.id = slot;
+		evt.state = state;
+		evt.touch_valid = true;
+		qbt_queue_fd_event(drvdata, &evt);
+	}
+}
+
+/*
+ * Input-handler event callback. Runs in the input core's event path (atomic,
+ * the device's event_lock held), so it only accumulates slot state and defers
+ * the work to a workqueue on each SYN_REPORT.
+ */
+static void qbt_touch_event(struct input_handle *handle, unsigned int type,
+			    unsigned int code, int value)
+{
+	struct qbt_drvdata *drvdata = handle->private;
+	struct qbt_touch_fd *fd = &drvdata->touch;
+	struct qbt_touch_slot *slot;
+	unsigned long flags;
+	bool report;
+	int tw, dw;
+
+	if (type != EV_SYN && type != EV_ABS)
+		return;
+
+	spin_lock_irqsave(&fd->lock, flags);
+
+	if (code == SYN_REPORT) {
+		report = fd->config.touch_fd_enable || fd->config.intr2_enable;
+		spin_unlock_irqrestore(&fd->lock, flags);
+		if (report && drvdata->fd_enabled) {
+			__pm_wakeup_event(drvdata->ws,
+					  QBT_TOUCH_WAKELOCK_TIMEOUT_MS);
+			schedule_work(&fd->work);
+		}
+		return;
+	}
+
+	if (code == ABS_MT_SLOT) {
+		fd->current_slot = value;
+		goto out;
+	}
+
+	if (fd->current_slot < 0 || fd->current_slot >= QBT_MT_MAX_SLOTS)
+		goto out;
+	slot = &fd->current_events[fd->current_slot];
+
+	switch (code) {
+	case ABS_MT_TRACKING_ID:
+		slot->id = value;
+		slot->updated = true;
+		break;
+	case ABS_MT_POSITION_X:
+	case ABS_MT_POSITION_Y:
+		/*
+		 * Map raw touch units onto the display coordinate space the HAL
+		 * programmed the AoI in (both axes scaled by the X range, as the
+		 * reference driver does).
+		 */
+		tw = input_abs_get_max(handle->dev, ABS_MT_POSITION_X) + 1;
+		dw = fd->config.left + fd->config.right;
+		if (tw > 0 && dw > 0)
+			value = value * dw / tw;
+		if (code == ABS_MT_POSITION_X)
+			slot->x = abs(value);
+		else
+			slot->y = abs(value);
+		slot->updated = true;
+		break;
+	default:
+		break;
+	}
+
+out:
+	spin_unlock_irqrestore(&fd->lock, flags);
+}
+
+static int qbt_touch_connect(struct input_handler *handler,
+			     struct input_dev *dev,
+			     const struct input_device_id *id)
+{
+	struct qbt_drvdata *drvdata = handler->private;
+	struct input_handle *handle;
+	int rc;
+
+	/* Only snoop a real (direct) multitouch touchscreen, and only one. */
+	if (!test_bit(INPUT_PROP_DIRECT, dev->propbit) ||
+	    !test_bit(ABS_MT_POSITION_X, dev->absbit))
+		return -ENODEV;
+	if (drvdata->touch_dev)
+		return -ENODEV;
+
+	handle = kzalloc(sizeof(*handle), GFP_KERNEL);
+	if (!handle)
+		return -ENOMEM;
+
+	handle->dev = dev;
+	handle->handler = handler;
+	handle->name = "qbt_touch";
+	handle->private = drvdata;
+
+	rc = input_register_handle(handle);
+	if (rc)
+		goto err_free;
+
+	rc = input_open_device(handle);
+	if (rc)
+		goto err_unregister;
+
+	drvdata->touch_dev = dev;
+	dev_dbg(drvdata->dev, "snooping touchscreen %s\n", dev_name(&dev->dev));
+	return 0;
+
+err_unregister:
+	input_unregister_handle(handle);
+err_free:
+	kfree(handle);
+	return rc;
+}
+
+static void qbt_touch_disconnect(struct input_handle *handle)
+{
+	struct qbt_drvdata *drvdata = handle->private;
+
+	if (drvdata->touch_dev == handle->dev)
+		drvdata->touch_dev = NULL;
+	input_close_device(handle);
+	input_unregister_handle(handle);
+	kfree(handle);
+}
+
+static const struct input_device_id qbt_touch_ids[] = {
+	{
+		.flags = INPUT_DEVICE_ID_MATCH_EVBIT,
+		.evbit = { BIT_MASK(EV_ABS) },
+	},
+	{ }
+};
+MODULE_DEVICE_TABLE(input, qbt_touch_ids);
+
+static struct input_handler qbt_touch_handler = {
+	.event		= qbt_touch_event,
+	.connect	= qbt_touch_connect,
+	.disconnect	= qbt_touch_disconnect,
+	.name		= "qbt_touch",
+	.id_table	= qbt_touch_ids,
+};
+
+static void qbt_touch_handler_unregister(void *data)
+{
+	struct qbt_drvdata *drvdata = data;
+
+	input_unregister_handler(&qbt_touch_handler);
+	cancel_work_sync(&drvdata->touch.work);
 }
 
 static irqreturn_t qbt_ipc_irq_handler(int irq, void *dev_id)
@@ -278,8 +604,10 @@ static __poll_t qbt_poll(struct file *file, struct poll_table_struct *wait)
 static int qbt_ioctl_configure_touch_fd(struct qbt_drvdata *drvdata,
 					unsigned int cmd, void __user *arg)
 {
-	struct qbt_touch_config_v3 cfg = {};
+	struct qbt_touch_config_v3 cfg = {}, up;
+	unsigned long flags;
 	size_t copy_len;
+	int w, h;
 
 	if (copy_from_user(&cfg.version, arg, sizeof(cfg.version)))
 		return -EFAULT;
@@ -300,7 +628,23 @@ static int qbt_ioctl_configure_touch_fd(struct qbt_drvdata *drvdata,
 	if (cfg.version.version == QBT_TOUCH_FD_VERSION_2)
 		cfg.intr2_enable = cfg.touch_fd_enable;
 
-	drvdata->touch_config = cfg;
+	/*
+	 * Grow each side of the AoI by half its width/height to form the
+	 * finger-up hysteresis region (see struct qbt_touch_fd).
+	 */
+	up = cfg;
+	w = cfg.right - cfg.left;
+	h = cfg.bottom - cfg.top;
+	up.left   -= w / 2;
+	up.right  += w / 2;
+	up.top    -= h / 2;
+	up.bottom += h / 2;
+
+	spin_lock_irqsave(&drvdata->touch.lock, flags);
+	drvdata->touch.config = cfg;
+	drvdata->touch.up_config = up;
+	spin_unlock_irqrestore(&drvdata->touch.lock, flags);
+
 	return 0;
 }
 
@@ -326,12 +670,15 @@ static long qbt_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		}
 		break;
 	case QBT_ENABLE_FD:
+		/* Arm touch-derived finger detect (and the GPIO line if wired). */
+		drvdata->fd_enabled = true;
 		if (drvdata->fd_gpio && !drvdata->fd_irq_enabled) {
 			enable_irq(drvdata->fd_irq);
 			drvdata->fd_irq_enabled = true;
 		}
 		break;
 	case QBT_DISABLE_FD:
+		drvdata->fd_enabled = false;
 		if (drvdata->fd_gpio && drvdata->fd_irq_enabled) {
 			disable_irq(drvdata->fd_irq);
 			drvdata->fd_irq_enabled = false;
@@ -621,6 +968,8 @@ static int qbt_probe(struct platform_device *pdev)
 	init_waitqueue_head(&drvdata->fd_wait);
 	atomic_set(&drvdata->ipc_available, 1);
 	atomic_set(&drvdata->fd_available, 1);
+	spin_lock_init(&drvdata->touch.lock);
+	INIT_WORK(&drvdata->touch.work, qbt_touch_work_func);
 
 	rc = qbt_parse_dt(drvdata);
 	if (rc)
@@ -636,6 +985,16 @@ static int qbt_probe(struct platform_device *pdev)
 	rc = qbt_register_input(drvdata);
 	if (rc)
 		return dev_err_probe(dev, rc, "failed to register input\n");
+
+	/* Snoop the touchscreen to derive finger-detect events for the HAL. */
+	qbt_touch_handler.private = drvdata;
+	rc = input_register_handler(&qbt_touch_handler);
+	if (rc)
+		return dev_err_probe(dev, rc,
+				     "failed to register touch handler\n");
+	rc = devm_add_action_or_reset(dev, qbt_touch_handler_unregister, drvdata);
+	if (rc)
+		return rc;
 
 	rc = qbt_setup_irqs(pdev, drvdata);
 	if (rc)
