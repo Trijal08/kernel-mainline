@@ -48,6 +48,23 @@ static bool dsim_pkt_go;
 module_param_named(pkt_go, dsim_pkt_go, bool, 0644);
 MODULE_PARM_DESC(pkt_go, "release commands with the PKT_GO handshake");
 
+/*
+ * Vendor dsim_reg_set_cmd_ctrl() also programs DSIM_UNDERRUN_CTRL
+ * (CM_UNDERRUN_LP_REF) for command mode; this driver never did. Whatever the
+ * bootloader or reset left there is always logged next to what the vendor
+ * formula gives. underrun=-1 writes the computed value, underrun=N writes N,
+ * 0 (default) leaves the register alone.
+ */
+static int dsim_underrun;
+module_param_named(underrun, dsim_underrun, int, 0644);
+MODULE_PARM_DESC(underrun, "DSIM_UNDERRUN_CTRL LP ref: 0 leave, -1 vendor formula, N explicit");
+
+/* TK4C panel values (downstream panel-gs-tk4c underrun_param) */
+static unsigned int dsim_underrun_te_idle_us = 350;
+module_param_named(underrun_te_idle_us, dsim_underrun_te_idle_us, uint, 0644);
+static unsigned int dsim_underrun_te_var = 1;
+module_param_named(underrun_te_var, dsim_underrun_te_var, uint, 0644);
+
 static bool dsim_te_cmd_allow;
 module_param_named(te_cmd_allow, dsim_te_cmd_allow, bool, 0644);
 MODULE_PARM_DESC(te_cmd_allow,
@@ -568,10 +585,10 @@ static int zuma_dsim_dphy_enable_lanes(struct zuma_dsim *dsim)
 	return ret;
 }
 
-static int dsim_comp_align = 8;
+static int dsim_comp_align;
 module_param_named(comp_align, dsim_comp_align, int, 0644);
 MODULE_PARM_DESC(comp_align,
-		 "pixel alignment of the per-slice compressed width (0 = none)");
+		 "0 = vendor DSC line width formula (default); N = round the DECON compressed slice width up to N");
 
 /* Program the command-mode + DSC link config (vendor set_config subset) */
 static void zuma_dsim_set_config(struct zuma_dsim *dsim)
@@ -589,11 +606,22 @@ static void zuma_dsim_set_config(struct zuma_dsim *dsim)
 	u32 comp_w = dsc ? DIV_ROUND_UP(slice_px, 6) * 2 : 0;
 	/*
 	 * Not the DECON's OUTFIFO width: the DSIM carries the compressed bytes
-	 * as RGB24 pixels and needs the per-slice count rounded up to 8, which
-	 * is what the bootloader programs (216/slice where the DECON has 214).
+	 * as RGB24 pixels. Vendor get_comp_dsc_width() (cal_9865):
+	 * ALIGN(DIV_ROUND_UP(slice_width, 3), 4) per slice. That reproduces the
+	 * 216/slice the bootloader programs where the DECON has 214, and gives
+	 * 180/slice (360 per line) on a 1080 wide TK4C, where rounding the DECON's
+	 * width up to 8 gave 184 (368). comp_align=N restores rounding to N.
 	 */
-	u32 width = dsc ? roundup(comp_w, dsim_comp_align ?: 1) * slice_cnt :
+	u32 width = dsc ? (dsim_comp_align ?
+			   roundup(comp_w, dsim_comp_align) :
+			   ALIGN(DIV_ROUND_UP(slice_w, 3), 4)) * slice_cnt :
 			  dsim->hactive;
+
+	if (dsc)
+		dev_info(dsim->dev,
+			 "DSC line width: %u px (comp_align %d); vendor ALIGN(DIV_ROUND_UP(%u, 3), 4) * %u = %u px\n",
+			 width, dsim_comp_align, slice_w, slice_cnt,
+			 ALIGN(DIV_ROUND_UP(slice_w, 3), 4) * slice_cnt);
 
 	dsim_rmw(dsim, DSIM_SFR_CTRL, DSIM_SFR_CTRL_SHADOW_REG_READ_EN,
 		 DSIM_SFR_CTRL_SHADOW_REG_READ_EN);
@@ -701,6 +729,40 @@ static bool zuma_dsim_pll_is_stable(struct zuma_dsim *dsim)
 	       DSIM_PHY_PLL_STAT0_PLL_LOCK;
 }
 
+/*
+ * Port of vendor dsim_calc_underrun(): longest time the DSIM may sit in LP
+ * between frames, in units of 100 wclk (wclk = HS bit clock / 16). The
+ * vendor's bpp is bpc * 3 = 24 for RGB888; w_threshold is the DSC-compressed
+ * line width in 3-byte units.
+ */
+static u32 zuma_dsim_calc_underrun(struct zuma_dsim *dsim, u32 hs_mbps,
+				   u32 vrefresh)
+{
+	u64 wclk = div_u64((u64)hs_mbps * 1000000, 16);
+	u32 w_threshold = dsim->hactive;
+	u64 max_frame_ns, frame_data, hdr, min_frame_ns, lp_ns;
+
+	if (!wclk || !dsim->lanes || !vrefresh)
+		return 0;
+
+	if (dsim->dsc)
+		w_threshold /= 3;
+
+	max_frame_ns = div_u64(NSEC_PER_SEC * 100ULL,
+			       vrefresh * (100 + dsim_underrun_te_var)) -
+		       (u64)NSEC_PER_USEC * dsim_underrun_te_idle_us;
+	frame_data = (u64)dsim->vactive * w_threshold * 24 / 8;
+	hdr = (u64)dsim->vactive * 7;
+	min_frame_ns = div64_u64((frame_data + hdr) * NSEC_PER_SEC,
+				 2ULL * dsim->lanes * wclk);
+	if (max_frame_ns < min_frame_ns)
+		return 0;
+
+	lp_ns = max_frame_ns - min_frame_ns;
+	return min_t(u64, DIV_ROUND_UP_ULL(div64_u64(lp_ns * wclk, NSEC_PER_SEC), 100),
+		     0xffff);
+}
+
 static void zuma_dsim_configure(struct zuma_dsim *dsim)
 {
 	u32 stable_vfp, te_protect, te_tout, hs_ready;
@@ -709,6 +771,13 @@ static void zuma_dsim_configure(struct zuma_dsim *dsim)
 
 	if (!dsim->regs || !hs_mbps || !dsim->hactive)
 		return;
+
+	if (!dsim->link_owned)
+		dev_info(dsim->dev,
+			 "bootloader left RESOL 0x%08x THRESHOLD 0x%08x NUM_OF_TRANSFER 0x%08x\n",
+			 readl(dsim->regs + DSIM_RESOL),
+			 readl(dsim->regs + DSIM_THRESHOLD),
+			 readl(dsim->regs + DSIM_NUM_OF_TRANSFER));
 
 	/*
 	 * Reprogramming the link registers over a running link, and leaving the
@@ -757,6 +826,24 @@ static void zuma_dsim_configure(struct zuma_dsim *dsim)
 	writel(DSIM_CMD_TE_CTRL1_TIME_TE_PROTECT_ON(te_protect) |
 	       DSIM_CMD_TE_CTRL1_TIME_TE_TOUT(te_tout),
 	       dsim->regs + DSIM_CMD_TE_CTRL1);
+
+	{
+		u32 cur = readl(dsim->regs + DSIM_UNDERRUN_CTRL);
+		u32 calc = zuma_dsim_calc_underrun(dsim, hs_mbps, vrefresh);
+
+		dev_info(dsim->dev,
+			 "UNDERRUN_CTRL now 0x%x, vendor formula %u (0x%x) for %u Mbps x%u lanes %u Hz\n",
+			 cur, calc, calc, hs_mbps, dsim->lanes, vrefresh);
+
+		if (dsim_underrun) {
+			u32 ref = dsim_underrun > 0 ? (u32)dsim_underrun : calc;
+
+			ref = min_t(u32, ref, 0xffff);
+			writel(DSIM_UNDERRUN_CTRL_CM_UNDERRUN_LP_REF(ref),
+			       dsim->regs + DSIM_UNDERRUN_CTRL);
+			dev_info(dsim->dev, "UNDERRUN_CTRL programmed to 0x%x\n", ref);
+		}
+	}
 
 	/*
 	 * Vendor handover path (DSIM_STATE_HANDOVER): skip dsim_reg_init() but
