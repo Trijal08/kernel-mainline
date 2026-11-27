@@ -182,6 +182,11 @@ struct tipc_shared_handle {
 	 */
 	struct dma_buf_attachment *attach;
 	struct sg_table *sgt;
+	/* /proc/trustydump: a kept vmap so the TA's reply can be snapshotted. */
+	struct list_head	dump_node;	/* on trusty_dump.shm_bufs */
+	struct iosys_map	dump_map;
+	size_t			dump_sz;
+	bool			dump_mapped;
 };
 
 static struct class *tipc_class;
@@ -467,6 +472,14 @@ static struct tipc_msg_buf *vds_get_txbuf(struct tipc_virtio_dev *vds,
 #define TRUSTY_DUMP_REC_HDR	12
 #define TRUSTY_DUMP_TX		0	/* AP -> Trusty */
 #define TRUSTY_DUMP_RX		1	/* Trusty -> AP */
+#define TRUSTY_DUMP_SHM		2	/* shared-buffer contents AT SEND time */
+#define TRUSTY_DUMP_SHM_RX	3	/* shared-buffer contents AT RX time (TA reply) */
+/*
+ * Shared buffers handed to a message are kept vmapped (via struct
+ * tipc_shared_handle.dump_node) on trusty_dump.shm_bufs so their contents can be
+ * re-snapshotted as TRUSTY_DUMP_SHM_RX from the atomic rx callback -- the reply
+ * the TA wrote back, which the send-time SHM record (empty buffer) cannot see.
+ */
 
 static struct trusty_dump {
 	u8		*buf;
@@ -478,8 +491,10 @@ static struct trusty_dump {
 	u64		dropped;	/* records not recorded at all */
 	u64		evicted;	/* records overwritten by a lap */
 	unsigned int	readers;	/* dumps open; freezes the ring */
+	struct list_head shm_bufs;	/* kept-vmapped buffers, re-captured at rx */
 	spinlock_t	lock;		/* also taken from the rx callback */
 } trusty_dump = {
+	.shm_bufs = LIST_HEAD_INIT(trusty_dump.shm_bufs),
 	.lock = __SPIN_LOCK_UNLOCKED(trusty_dump.lock),
 };
 
@@ -515,22 +530,18 @@ static bool trusty_dump_room(struct trusty_dump *d, size_t need)
 	}
 }
 
-/* One framed tipc message @msg of @len bytes, direction @dir. */
-static void trusty_dump_record(const void *msg, u32 len, u16 dir)
+/* One framed tipc message @msg of @len bytes, direction @dir.  Lock held. */
+static void __trusty_dump_record(struct trusty_dump *d, const void *msg,
+				 u32 len, u16 dir)
 {
-	struct trusty_dump *d = &trusty_dump;
 	size_t need = TRUSTY_DUMP_REC_HDR + len;
-	unsigned long flags;
 	u8 *p;
 
 	if (!len || len > U16_MAX)
 		return;
-
-	spin_lock_irqsave(&d->lock, flags);
 	if (!d->buf || !trusty_dump_room(d, need)) {
 		if (d->buf)
 			d->dropped++;
-		spin_unlock_irqrestore(&d->lock, flags);
 		return;
 	}
 	p = d->buf + d->head;
@@ -539,6 +550,36 @@ static void trusty_dump_record(const void *msg, u32 len, u16 dir)
 	put_unaligned_le16(dir, p + 10);
 	memcpy(p + TRUSTY_DUMP_REC_HDR, msg, len);
 	d->head += need;
+}
+
+static void trusty_dump_record(const void *msg, u32 len, u16 dir)
+{
+	struct trusty_dump *d = &trusty_dump;
+	unsigned long flags;
+
+	spin_lock_irqsave(&d->lock, flags);
+	__trusty_dump_record(d, msg, len, dir);
+	spin_unlock_irqrestore(&d->lock, flags);
+}
+
+/*
+ * Snapshot every kept-vmapped shared buffer as TRUSTY_DUMP_SHM_RX.  Called from
+ * the rx virtqueue callback (atomic) right after a Trusty->AP message: by then
+ * the TA has written its reply into the shared buffer it was handed, so this
+ * captures the response half that the send-time SHM record (all zeros) misses.
+ * Reads the kept vaddr under d->lock; the release path removes the entry under
+ * the same lock before it vunmaps, so the vaddr is valid for the whole copy.
+ */
+static void trusty_dump_shm_capture_rx(void)
+{
+	struct trusty_dump *d = &trusty_dump;
+	struct tipc_shared_handle *h;
+	unsigned long flags;
+
+	spin_lock_irqsave(&d->lock, flags);
+	list_for_each_entry(h, &d->shm_bufs, dump_node)
+		__trusty_dump_record(d, h->dump_map.vaddr, h->dump_sz,
+				     TRUSTY_DUMP_SHM_RX);
 	spin_unlock_irqrestore(&d->lock, flags);
 }
 
@@ -823,6 +864,17 @@ static int tipc_shared_handle_drop(struct tipc_shared_handle *shared_handle)
 			dev_warn(dev, "Failed to drop handle, leaking...\n");
 			return ret;
 		}
+	}
+
+	if (shared_handle->dump_mapped) {
+		unsigned long dflags;
+
+		/* Take it off the rx-capture list before unmapping its vaddr. */
+		spin_lock_irqsave(&trusty_dump.lock, dflags);
+		list_del(&shared_handle->dump_node);
+		spin_unlock_irqrestore(&trusty_dump.lock, dflags);
+		dma_buf_vunmap_unlocked(shared_handle->dma_buf, &shared_handle->dump_map);
+		shared_handle->dump_mapped = false;
 	}
 
 	if (shared_handle->sgt)
@@ -1338,6 +1390,38 @@ static int dn_share_fd(struct tipc_dn_chan *dn, int fd,
 		shared_handle->dma_buf = NULL;
 		dev_dbg(dev, "Unable to get dma buf from fd (%d)\n", ret);
 		goto cleanup_handle;
+	}
+
+	/*
+	 * Capture the shared-buffer contents into /proc/trustydump alongside the
+	 * tipc message. A lot of a service's real payload rides shared memory and
+	 * never appears in the message stream -- the fingerprint TA, for instance,
+	 * hands its QFSM command ring and capture buffer over as dma-bufs. The AP
+	 * has already filled the buffer by the time it asks us to send it, so a
+	 * vmap here sees the command. Cap the record so a large image/data buffer
+	 * cannot flood the ring.
+	 */
+	{
+		struct iosys_map map;
+
+		if (!dma_buf_vmap_unlocked(shared_handle->dma_buf, &map) && map.vaddr) {
+			size_t n = min_t(size_t, shared_handle->dma_buf->size, SZ_8K);
+			unsigned long dflags;
+
+			trusty_dump_record(map.vaddr, n, TRUSTY_DUMP_SHM);
+			/*
+			 * Keep the mapping so trusty_dump_shm_capture_rx() can
+			 * re-read the buffer (the TA's reply) from the atomic rx
+			 * callback.  Released in tipc_shared_handle_drop().
+			 */
+			shared_handle->dump_map = map;
+			shared_handle->dump_sz = n;
+			shared_handle->dump_mapped = true;
+			spin_lock_irqsave(&trusty_dump.lock, dflags);
+			list_add_tail(&shared_handle->dump_node,
+				      &trusty_dump.shm_bufs);
+			spin_unlock_irqrestore(&trusty_dump.lock, dflags);
+		}
 	}
 
 	tag = trusty_dma_buf_get_ffa_tag(shared_handle->dma_buf);
@@ -2180,6 +2264,12 @@ static int _handle_rxbuf(struct tipc_virtio_dev *vds,
 
 	/* Capture the framed message as it arrives (Trusty -> AP). */
 	trusty_dump_record(rxbuf->buf_va, rxlen, TRUSTY_DUMP_RX);
+	/*
+	 * The TA has written its reply into the shared buffer(s) it was handed
+	 * by now, so snapshot them too -- this is the response half the send-time
+	 * SHM capture (empty buffer) cannot see.
+	 */
+	trusty_dump_shm_capture_rx();
 
 	/* get message header */
 	msg = mb_get_data(rxbuf, sizeof(*msg));
