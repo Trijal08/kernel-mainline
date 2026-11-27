@@ -11,6 +11,7 @@
 #include <linux/backlight.h>
 #include <linux/delay.h>
 #include <linux/gpio/consumer.h>
+#include <linux/ktime.h>
 #include <linux/module.h>
 #include <linux/of.h>
 
@@ -24,6 +25,16 @@
 #include <drm/drm_modes.h>
 #include <drm/drm_panel.h>
 
+/*
+ * Mirror gs_panel: if the bootloader left the panel running (reset line high at
+ * probe) and the DDIC still answers, leave it alone on the first enable instead
+ * of resetting and re-initialising it. panel_google_tokay.handoff=0 forces the
+ * full reset + init for A/B testing.
+ */
+static bool handoff = true;
+module_param(handoff, bool, 0444);
+MODULE_PARM_DESC(handoff, "Keep the bootloader's panel state on first enable (default on)");
+
 struct tokay_panel {
 	struct drm_panel panel;
 	struct mipi_dsi_device *dsi;
@@ -34,6 +45,8 @@ struct tokay_panel {
 	 * that state latches: only ENTER_NORMAL_MODE or a panel reset leaves it.
 	 */
 	bool pixel_off;
+	/* Reset line was already high at probe: panel running at boot. */
+	bool boot_enabled;
 };
 
 /* Production TK4C PPS configuration (DSC 1.2a, two 540-pixel slices). */
@@ -88,6 +101,62 @@ static inline struct tokay_panel *to_tokay_panel(struct drm_panel *panel)
 	return container_of(panel, struct tokay_panel, panel);
 }
 
+/*
+ * Tracing: every action this driver takes (DSI command, GPIO edge, sleep, DRM
+ * callback, mode, backlight write, probe step) logs one line prefixed "tk4c:".
+ * Read it back with:  dmesg | grep tk4c:
+ */
+#define TK4C_LOG(dev, fmt, ...)	dev_info((dev), "tk4c: " fmt, ##__VA_ARGS__)
+#define TK4C_ERR(dev, fmt, ...)	dev_err((dev), "tk4c: " fmt, ##__VA_ARGS__)
+
+static const char *tk4c_opname(u8 op)
+{
+	switch (op) {
+	case MIPI_DCS_ENTER_NORMAL_MODE:	return "ENTER_NORMAL_MODE";
+	case 0x22:				return "ALL_PIXELS_OFF";
+	case MIPI_DCS_SET_COLUMN_ADDRESS:	return "SET_COLUMN_ADDRESS";
+	case MIPI_DCS_SET_PAGE_ADDRESS:		return "SET_PAGE_ADDRESS";
+	case MIPI_DCS_SET_TEAR_ON:		return "SET_TEAR_ON";
+	case MIPI_DCS_SET_DISPLAY_BRIGHTNESS:	return "SET_DISPLAY_BRIGHTNESS";
+	case MIPI_DCS_WRITE_CONTROL_DISPLAY:	return "WRITE_CONTROL_DISPLAY";
+	default:				return "vendor/other";
+	}
+}
+
+/* One DCS/generic buffer write, with its opcode, bytes and result. */
+static ssize_t tk4c_write(struct mipi_dsi_device *dsi, const u8 *buf, size_t len)
+{
+	ssize_t ret = mipi_dsi_dcs_write_buffer(dsi, buf, len);
+
+	if (ret < 0)
+		TK4C_ERR(&dsi->dev, "DCS write 0x%02x (%s) len %zu [%*ph] FAILED: %zd (HS/LP %s)\n",
+			 buf[0], tk4c_opname(buf[0]), len, (int)len, buf, ret,
+			 (dsi->mode_flags & MIPI_DSI_MODE_LPM) ? "LP" : "HS");
+	else
+		TK4C_LOG(&dsi->dev, "DCS write 0x%02x (%s) len %zu [%*ph] -> %zd (%s)\n",
+			 buf[0], tk4c_opname(buf[0]), len, (int)len, buf, ret,
+			 (dsi->mode_flags & MIPI_DSI_MODE_LPM) ? "LP" : "HS");
+
+	return ret;
+}
+
+/* Log the result of one of the mipi_dsi_* helpers and pass it through. */
+static int tk4c_log_ret(struct mipi_dsi_device *dsi, const char *what, int ret)
+{
+	if (ret < 0)
+		TK4C_ERR(&dsi->dev, "%s FAILED: %d\n", what, ret);
+	else
+		TK4C_LOG(&dsi->dev, "%s -> %d\n", what, ret);
+
+	return ret;
+}
+
+static void tk4c_msleep(struct mipi_dsi_device *dsi, unsigned int ms)
+{
+	TK4C_LOG(&dsi->dev, "sleep %u ms\n", ms);
+	msleep(ms);
+}
+
 #define TOKAY_MODE(hz, flags)						\
 	{								\
 		.clock = (1080 + 32 + 12 + 16) *			\
@@ -122,36 +191,69 @@ static const struct drm_display_mode tokay_modes[] = {
 	TOKAY_MODE(120, 0),
 };
 
+static int tokay_report_power_mode(struct tokay_panel *ctx, const char *when);
+
 static int tokay_panel_unprepare(struct drm_panel *panel)
 {
+	struct tokay_panel *ctx = to_tokay_panel(panel);
+
+	TK4C_LOG(&ctx->dsi->dev, "unprepare: nothing to do (reset line and rails left as they are)\n");
 	return 0;
 }
 
-static int tokay_panel_prepare(struct drm_panel *panel)
+static void tokay_reset_set(struct tokay_panel *ctx, int val, const char *what)
 {
-	struct tokay_panel *ctx = to_tokay_panel(panel);
+	gpiod_set_value_cansleep(ctx->reset_gpio, val);
+	TK4C_LOG(&ctx->dsi->dev, "reset line %s: drove %d, raw readback %d\n",
+		 what, val, gpiod_get_raw_value_cansleep(ctx->reset_gpio));
+}
 
-	dev_info(&ctx->dsi->dev, "prepare: reset-gpio %s\n",
-		 ctx->reset_gpio ? "yes" : "none");
+/* Downstream TK4C reset timing: skip initial high, low 1 ms, high 1 ms. */
+static void tokay_reset(struct tokay_panel *ctx)
+{
+	struct device *dev = &ctx->dsi->dev;
 
-	/* Downstream TK4C reset timing: low 1 ms, high 1 ms. */
-	if (ctx->reset_gpio) {
-		gpiod_set_value_cansleep(ctx->reset_gpio, 0);
-		usleep_range(1000, 1100);
-		gpiod_set_value_cansleep(ctx->reset_gpio, 1);
-		usleep_range(1000, 1100);
+	if (!ctx->reset_gpio) {
+		TK4C_LOG(dev, "reset: no reset gpio, skipping\n");
+		return;
 	}
 
-	return 0;
+	TK4C_LOG(dev, "reset: pulse start (low 1 ms, high 1 ms)\n");
+	tokay_reset_set(ctx, 0, "assert");
+	TK4C_LOG(dev, "sleep 1 ms (reset low)\n");
+	usleep_range(1000, 1100);
+	tokay_reset_set(ctx, 1, "release");
+	TK4C_LOG(dev, "sleep 1 ms (reset high)\n");
+	usleep_range(1000, 1100);
+	TK4C_LOG(dev, "reset: pulse done\n");
 }
 
-static int tokay_panel_disable(struct drm_panel *panel)
+static int __tokay_panel_prepare(struct drm_panel *panel)
 {
 	struct tokay_panel *ctx = to_tokay_panel(panel);
 
-	mipi_dsi_dcs_set_display_off(ctx->dsi);
-	msleep(120);
-	mipi_dsi_dcs_enter_sleep_mode(ctx->dsi);
+	TK4C_LOG(&ctx->dsi->dev, "prepare: reset-gpio %s, boot_enabled %d, handoff %d\n",
+		 ctx->reset_gpio ? "yes" : "none", ctx->boot_enabled, handoff);
+
+	if (ctx->boot_enabled && handoff) {
+		/* Baseline: what the bootloader-initialised DDIC reports. */
+		tokay_report_power_mode(ctx, "prepare (bootloader state)");
+		return 0;
+	}
+
+	tokay_reset(ctx);
+
+	return 0;
+}
+
+static int __tokay_panel_disable(struct drm_panel *panel)
+{
+	struct tokay_panel *ctx = to_tokay_panel(panel);
+	struct mipi_dsi_device *dsi = ctx->dsi;
+
+	tk4c_log_ret(dsi, "set_display_off", mipi_dsi_dcs_set_display_off(dsi));
+	tk4c_msleep(dsi, 120);
+	tk4c_log_ret(dsi, "enter_sleep_mode", mipi_dsi_dcs_enter_sleep_mode(dsi));
 
 	return 0;
 }
@@ -164,8 +266,7 @@ static int tokay_panel_disable(struct drm_panel *panel)
 #define TK4C_DCS_ALL_PIXELS_OFF		0x22
 
 #define tk4c_cmd(dsi, seq...)						\
-	mipi_dsi_dcs_write_buffer((dsi), (const u8[]){ seq },		\
-				  sizeof((const u8[]){ seq }))
+	tk4c_write((dsi), (const u8[]){ seq }, sizeof((const u8[]){ seq }))
 
 static int tokay_cur_vrefresh(struct tokay_panel *ctx)
 {
@@ -175,6 +276,7 @@ static int tokay_cur_vrefresh(struct tokay_panel *ctx)
 	    conn->state->crtc->state)
 		return drm_mode_vrefresh(&conn->state->crtc->state->adjusted_mode);
 
+	dev_warn(&ctx->dsi->dev, "tk4c: no connector/crtc state yet, assuming 60 Hz\n");
 	return 60;
 }
 
@@ -187,7 +289,7 @@ static int tokay_cur_vrefresh(struct tokay_panel *ctx)
  * Diagnostic only: a controller without a read path returns an error, which is
  * logged and otherwise ignored.
  */
-static void tokay_report_power_mode(struct tokay_panel *ctx, const char *when)
+static int tokay_report_power_mode(struct tokay_panel *ctx, const char *when)
 {
 	struct device *dev = &ctx->dsi->dev;
 	u8 mode = 0;
@@ -195,8 +297,8 @@ static void tokay_report_power_mode(struct tokay_panel *ctx, const char *when)
 
 	ret = mipi_dsi_dcs_get_power_mode(ctx->dsi, &mode);
 	if (ret < 0) {
-		dev_info(dev, "power mode unreadable (%d)\n", ret);
-		return;
+		dev_info(dev, "%s: power mode unreadable (%d)\n", when, ret);
+		return ret;
 	}
 
 	/*
@@ -207,6 +309,7 @@ static void tokay_report_power_mode(struct tokay_panel *ctx, const char *when)
 	dev_info(dev, "%s: power mode 0x%02x: booster %d idle %d partial %d sleep-out %d normal %d display %d\n",
 		 when, mode, !!(mode & BIT(7)), !!(mode & BIT(6)), !!(mode & BIT(5)),
 		 !!(mode & BIT(4)), !!(mode & BIT(3)), !!(mode & BIT(2)));
+	return 0;
 }
 
 /*
@@ -262,22 +365,45 @@ static void tokay_report_ddic_id(struct tokay_panel *ctx)
 	tk4c_cmd(dsi, 0xF0, 0xA5, 0xA5);
 }
 
-static int tokay_panel_enable(struct drm_panel *panel)
+static int __tokay_panel_enable(struct drm_panel *panel)
 {
 	struct tokay_panel *ctx = to_tokay_panel(panel);
 	struct mipi_dsi_device *dsi = ctx->dsi;
 	struct drm_dsc_picture_parameter_set pps;
-	int ret;
+	int ret, hz;
 
-	dev_info(&dsi->dev, "enable: %d Hz\n", tokay_cur_vrefresh(ctx));
+	hz = tokay_cur_vrefresh(ctx);
+	TK4C_LOG(&dsi->dev, "enable: %d Hz, handoff %d, boot_enabled %d, pixel_off %d\n",
+		 hz, handoff, ctx->boot_enabled, ctx->pixel_off);
+
+	if (ctx->boot_enabled && handoff) {
+		ctx->boot_enabled = false;	/* first enable only */
+
+		if (!tokay_report_power_mode(ctx, "enable (handoff check)")) {
+			/*
+			 * DDIC answered: keep the bootloader's state, as
+			 * gs_panel does. Only undo a latched ALL_PIXELS_OFF.
+			 */
+			tokay_report_ddic_id(ctx);
+			tk4c_cmd(dsi, MIPI_DCS_ENTER_NORMAL_MODE);
+			ctx->pixel_off = false;
+			TK4C_LOG(&dsi->dev, "handoff: kept bootloader panel state, skipped reset and init\n");
+			return 0;
+		}
+
+		dev_warn(&dsi->dev, "tk4c: handoff: DDIC not answering, falling back to reset + full init\n");
+		tokay_reset(ctx);
+	}
+
+	TK4C_LOG(&dsi->dev, "enable: full init start\n");
 
 	/* bring-up: sleep-out sent in HS is ignored; try LP */
 	dsi->mode_flags |= MIPI_DSI_MODE_LPM;
-	ret = mipi_dsi_dcs_exit_sleep_mode(dsi);
+	ret = tk4c_log_ret(dsi, "exit_sleep_mode (LP)", mipi_dsi_dcs_exit_sleep_mode(dsi));
 	dsi->mode_flags &= ~MIPI_DSI_MODE_LPM;
 	if (ret < 0)
 		return ret;
-	msleep(120);
+	tk4c_msleep(dsi, 120);
 
 	/*
 	 * Identify the panel before any tk4c-specific register goes out, so a
@@ -285,6 +411,7 @@ static int tokay_panel_enable(struct drm_panel *panel)
 	 * sleep-out: a read as the first command after the reset pulse gets no
 	 * answer and the DSIM never recovers from that BTA.
 	 */
+	TK4C_LOG(&dsi->dev, "enable: step DDIC id read\n");
 	tokay_report_ddic_id(ctx);
 
 	/*
@@ -296,8 +423,10 @@ static int tokay_panel_enable(struct drm_panel *panel)
 	 */
 	tk4c_cmd(dsi, MIPI_DCS_ENTER_NORMAL_MODE);
 	ctx->pixel_off = false;
+	TK4C_LOG(&dsi->dev, "enable: pixel_off cleared\n");
 
 	/* TK4C normal-mode init, retaining MTP-programmed TE/FGZ values. */
+	TK4C_LOG(&dsi->dev, "enable: step TE on + address window\n");
 	tk4c_cmd(dsi, MIPI_DCS_SET_TEAR_ON);
 	tk4c_cmd(dsi, MIPI_DCS_SET_COLUMN_ADDRESS,
 		 0x00, 0x00, 0x04, 0x37);
@@ -305,6 +434,7 @@ static int tokay_panel_enable(struct drm_panel *panel)
 		 0x00, 0x00, 0x09, 0x77);
 
 	/* FFC-off setup for the 756 Mbps link. */
+	TK4C_LOG(&dsi->dev, "enable: step FFC setup\n");
 	tk4c_cmd(dsi, 0xF0, 0x5A, 0x5A);
 	tk4c_cmd(dsi, 0xFC, 0x5A, 0x5A);
 	tk4c_cmd(dsi, 0xB0, 0x00, 0x3A, 0xC5);
@@ -315,28 +445,33 @@ static int tokay_panel_enable(struct drm_panel *panel)
 	tk4c_cmd(dsi, 0xFC, 0xA5, 0xA5);
 
 	/* Select 60 or 120 Hz and latch the LTPS update. */
+	TK4C_LOG(&dsi->dev, "enable: step frequency select (%d Hz -> 0x83 = 0x%02x)\n",
+		 hz, hz == 60 ? 0x08 : 0x00);
 	tk4c_cmd(dsi, 0xF0, 0x5A, 0x5A);
-	tk4c_cmd(dsi, 0x83, tokay_cur_vrefresh(ctx) == 60 ? 0x08 : 0x00);
+	tk4c_cmd(dsi, 0x83, hz == 60 ? 0x08 : 0x00);
 	tk4c_cmd(dsi, 0xF7, 0x2F);
 	tk4c_cmd(dsi, 0xF0, 0xA5, 0xA5);
 
-	ret = mipi_dsi_compression_mode(dsi, true);
-	if (ret < 0)
-		dev_err(&dsi->dev, "failed to enable DSC: %d\n", ret);
+	TK4C_LOG(&dsi->dev, "enable: step DSC (%ux%u, %u slices, bpp %u)\n",
+		 tokay_tk4c_dsc.pic_width, tokay_tk4c_dsc.pic_height,
+		 tokay_tk4c_dsc.slice_count, tokay_tk4c_dsc.bits_per_pixel >> 4);
+	ret = tk4c_log_ret(dsi, "compression_mode(DSC on)", mipi_dsi_compression_mode(dsi, true));
 
 	drm_dsc_pps_payload_pack(&pps, &tokay_tk4c_dsc);
-	ret = mipi_dsi_picture_parameter_set(dsi, &pps);
-	if (ret < 0)
-		dev_err(&dsi->dev, "failed to send DSC PPS: %d\n", ret);
+	print_hex_dump(KERN_INFO, "tk4c: PPS payload: ", DUMP_PREFIX_OFFSET, 16, 1,
+		       &pps, sizeof(pps), false);
+	ret = tk4c_log_ret(dsi, "picture_parameter_set(PPS)", mipi_dsi_picture_parameter_set(dsi, &pps));
 
+	TK4C_LOG(&dsi->dev, "enable: step DSC enable, wrctrld, display on\n");
 	tk4c_cmd(dsi, 0x9D, 0x01);
 	tk4c_cmd(dsi, MIPI_DCS_WRITE_CONTROL_DISPLAY, 0x20);
 
-	ret = mipi_dsi_dcs_set_display_on(dsi);
+	ret = tk4c_log_ret(dsi, "set_display_on", mipi_dsi_dcs_set_display_on(dsi));
 	if (ret < 0)
 		return ret;
 
 	tokay_report_power_mode(ctx, "after display-on");
+	TK4C_LOG(&dsi->dev, "enable: full init done\n");
 
 	return 0;
 }
@@ -361,14 +496,40 @@ static int tokay_panel_get_modes(struct drm_panel *panel,
 
 		drm_mode_set_name(mode);
 		drm_mode_probed_add(connector, mode);
+		TK4C_LOG(&ctx->dsi->dev, "get_modes: added %s (%d Hz, clock %d kHz)%s\n",
+			 mode->name, drm_mode_vrefresh(mode), mode->clock,
+			 (mode->type & DRM_MODE_TYPE_PREFERRED) ? " [preferred]" : "");
 	}
 
 	connector->display_info.bpc = 8;
 	connector->display_info.width_mm = tokay_modes[0].width_mm;
 	connector->display_info.height_mm = tokay_modes[0].height_mm;
 
+	TK4C_LOG(&ctx->dsi->dev, "get_modes: %zu modes, bpc 8, %ux%u mm, preferred_hz %d\n",
+		 ARRAY_SIZE(tokay_modes), connector->display_info.width_mm,
+		 connector->display_info.height_mm, tokay_preferred_hz);
+
 	return ARRAY_SIZE(tokay_modes);
 }
+
+/* Entry/exit trace with return code and elapsed time for each DRM callback. */
+#define TOKAY_TRACED(name)							\
+static int name(struct drm_panel *panel)					\
+{										\
+	struct tokay_panel *ctx = to_tokay_panel(panel);			\
+	ktime_t t0 = ktime_get();						\
+	int ret;								\
+										\
+	TK4C_LOG(&ctx->dsi->dev, #name ": begin\n");				\
+	ret = __##name(panel);							\
+	TK4C_LOG(&ctx->dsi->dev, #name ": end ret %d (%lld us)\n", ret,		\
+		 ktime_us_delta(ktime_get(), t0));				\
+	return ret;								\
+}
+
+TOKAY_TRACED(tokay_panel_prepare)
+TOKAY_TRACED(tokay_panel_enable)
+TOKAY_TRACED(tokay_panel_disable)
 
 static const struct drm_panel_funcs tokay_panel_funcs = {
 	.prepare = tokay_panel_prepare,
@@ -381,7 +542,7 @@ static const struct drm_panel_funcs tokay_panel_funcs = {
 #define TOKAY_BRIGHTNESS_MAX		4095
 #define TOKAY_BRIGHTNESS_DEFAULT	1290
 
-static int tokay_bl_update_status(struct backlight_device *bl)
+static int __tokay_bl_update_status(struct backlight_device *bl)
 {
 	struct tokay_panel *ctx = bl_get_data(bl);
 	u16 brightness = backlight_get_brightness(bl);
@@ -394,6 +555,7 @@ static int tokay_bl_update_status(struct backlight_device *bl)
 	 */
 	if (!brightness) {
 		if (!ctx->pixel_off) {
+			TK4C_LOG(&ctx->dsi->dev, "backlight: brightness 0 -> blank with ALL_PIXELS_OFF\n");
 			tk4c_cmd(ctx->dsi, TK4C_DCS_ALL_PIXELS_OFF);
 			ctx->pixel_off = true;
 		}
@@ -401,11 +563,27 @@ static int tokay_bl_update_status(struct backlight_device *bl)
 	}
 
 	if (ctx->pixel_off) {
+		TK4C_LOG(&ctx->dsi->dev, "backlight: leaving ALL_PIXELS_OFF with ENTER_NORMAL_MODE\n");
 		tk4c_cmd(ctx->dsi, MIPI_DCS_ENTER_NORMAL_MODE);
 		ctx->pixel_off = false;
 	}
 
-	return mipi_dsi_dcs_set_display_brightness_large(ctx->dsi, brightness);
+	return tk4c_log_ret(ctx->dsi, "set_display_brightness_large",
+			    mipi_dsi_dcs_set_display_brightness_large(ctx->dsi, brightness));
+}
+
+static int tokay_bl_update_status(struct backlight_device *bl)
+{
+	struct tokay_panel *ctx = bl_get_data(bl);
+	int ret;
+
+	TK4C_LOG(&ctx->dsi->dev, "backlight: update_status brightness %u pixel_off %d\n",
+		 backlight_get_brightness(bl), ctx->pixel_off);
+	ret = __tokay_bl_update_status(bl);
+	TK4C_LOG(&ctx->dsi->dev, "backlight: update_status ret %d pixel_off %d\n",
+		 ret, ctx->pixel_off);
+
+	return ret;
 }
 
 static const struct backlight_ops tokay_bl_ops = {
@@ -424,10 +602,14 @@ static int tokay_panel_backlight_init(struct tokay_panel *ctx)
 
 	bl = devm_backlight_device_register(dev, dev_name(dev), dev, ctx,
 					    &tokay_bl_ops, &props);
-	if (IS_ERR(bl))
+	if (IS_ERR(bl)) {
+		TK4C_ERR(dev, "backlight register FAILED: %ld\n", PTR_ERR(bl));
 		return PTR_ERR(bl);
+	}
 
 	ctx->panel.backlight = bl;
+	TK4C_LOG(dev, "backlight registered (max %d, default %d)\n",
+		 TOKAY_BRIGHTNESS_MAX, TOKAY_BRIGHTNESS_DEFAULT);
 	return 0;
 }
 
@@ -436,6 +618,9 @@ static int tokay_panel_probe(struct mipi_dsi_device *dsi)
 	struct device *dev = &dsi->dev;
 	struct tokay_panel *ctx;
 	int ret;
+
+	TK4C_LOG(dev, "probe: begin (preferred_hz %d, handoff %d)\n",
+		 tokay_preferred_hz, handoff);
 
 	ctx = devm_drm_panel_alloc(dev, struct tokay_panel, panel,
 				   &tokay_panel_funcs,
@@ -446,16 +631,30 @@ static int tokay_panel_probe(struct mipi_dsi_device *dsi)
 	ctx->dsi = dsi;
 	mipi_dsi_set_drvdata(dsi, ctx);
 
-	ctx->reset_gpio = devm_gpiod_get_optional(dev, "reset", GPIOD_OUT_HIGH);
+	TK4C_LOG(dev, "probe: drm_panel allocated\n");
+
+	/* GPIOD_ASIS: sample what the bootloader left before we drive anything. */
+	ctx->reset_gpio = devm_gpiod_get_optional(dev, "reset", GPIOD_ASIS);
 	if (IS_ERR(ctx->reset_gpio))
 		return dev_err_probe(dev, PTR_ERR(ctx->reset_gpio),
 				     "failed to get reset gpio\n");
+	if (ctx->reset_gpio) {
+		ctx->boot_enabled =
+			gpiod_get_raw_value_cansleep(ctx->reset_gpio) > 0;
+		gpiod_direction_output_raw(ctx->reset_gpio, ctx->boot_enabled);
+		TK4C_LOG(dev, "reset line %s at probe (panel %s at boot)\n",
+			 ctx->boot_enabled ? "high" : "low",
+			 ctx->boot_enabled ? "enabled" : "not enabled");
+	}
 
 	dsi->lanes = 4;
 	dsi->format = MIPI_DSI_FMT_RGB888;
 	dsi->hs_rate = 756000000;
 	dsi->dsc = (struct drm_dsc_config *)&tokay_tk4c_dsc;
 	dsi->mode_flags = MIPI_DSI_CLOCK_NON_CONTINUOUS;
+	TK4C_LOG(dev, "probe: dsi lanes %u, format %d, hs_rate %lu Hz, mode_flags 0x%lx, dsc %s\n",
+		 dsi->lanes, dsi->format, dsi->hs_rate, dsi->mode_flags,
+		 dsi->dsc ? "set" : "none");
 
 	ctx->panel.prepare_prev_first = true;
 
@@ -464,12 +663,14 @@ static int tokay_panel_probe(struct mipi_dsi_device *dsi)
 		return dev_err_probe(dev, ret, "failed to register backlight\n");
 
 	drm_panel_add(&ctx->panel);
+	TK4C_LOG(dev, "probe: drm_panel_add done\n");
 
 	ret = mipi_dsi_attach(dsi);
 	if (ret < 0) {
 		drm_panel_remove(&ctx->panel);
 		return dev_err_probe(dev, ret, "failed to attach to DSI host\n");
 	}
+	TK4C_LOG(dev, "probe: attached to DSI host, done\n");
 
 	return 0;
 }
@@ -478,6 +679,7 @@ static void tokay_panel_remove(struct mipi_dsi_device *dsi)
 {
 	struct tokay_panel *ctx = mipi_dsi_get_drvdata(dsi);
 
+	TK4C_LOG(&dsi->dev, "remove: detach and drm_panel_remove\n");
 	mipi_dsi_detach(dsi);
 	drm_panel_remove(&ctx->panel);
 }
